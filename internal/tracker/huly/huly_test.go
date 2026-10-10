@@ -118,6 +118,9 @@ func TestFetchIssueByID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("FetchIssueByID(%q) error = %v", id, err)
 		}
+		if issue.ID != "issue1" || issue.Identifier != "HULY-1" || issue.URL != "http://huly.test/workbench/ws/tracker/HULY-1" {
+			t.Errorf("FetchIssueByID(%q) id=%q identifier=%q url=%q", id, issue.ID, issue.Identifier, issue.URL)
+		}
 		if issue.Description != "Fix **it**" {
 			t.Errorf("description = %q, want %q", issue.Description, "Fix **it**")
 		}

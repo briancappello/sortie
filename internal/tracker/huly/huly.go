@@ -131,7 +131,7 @@ func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 // assembles the adapter. It is the seam shared by the production
 // constructor and offline tests.
 func newAdapter(ctx context.Context, rpc rpcClient, projectIdentifier, socialID, issueURLBase string, active, configured []string, log *slog.Logger) (*HulyAdapter, error) {
-	raws, err := rpc.FindAll(ctx, classProject, map[string]any{"identifier": projectIdentifier}, map[string]any{"limit": 1})
+	raws, err := rpc.FindAll(ctx, classProject, map[string]any{"identifier": idIn([]string{projectIdentifier})}, map[string]any{"limit": 1})
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func newAdapter(ctx context.Context, rpc rpcClient, projectIdentifier, socialID,
 
 // loadProjectStatuses reads the statuses of the project's workflow.
 func (a *HulyAdapter) loadProjectStatuses(ctx context.Context) error {
-	raws, err := a.rpc.FindAll(ctx, classProjectType, map[string]any{"_id": a.project.Type}, map[string]any{"limit": 1})
+	raws, err := a.rpc.FindAll(ctx, classProjectType, map[string]any{"_id": idIn([]string{a.project.Type})}, map[string]any{"limit": 1})
 	if err != nil {
 		return err
 	}

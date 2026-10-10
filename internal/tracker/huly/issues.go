@@ -43,7 +43,7 @@ func (a *HulyAdapter) fetchByStates(ctx context.Context, states []string) ([]dom
 	}
 
 	raws, err := a.rpc.FindAll(ctx, classIssue, map[string]any{
-		"space":  a.project.ID,
+		"space":  idIn([]string{a.project.ID}),
 		"status": idIn(ids),
 	}, map[string]any{"sort": map[string]any{"createdOn": 1}})
 	if err != nil {
@@ -169,7 +169,9 @@ func (a *HulyAdapter) findIssue(ctx context.Context, issueID string) (hulyIssue,
 		field = "identifier"
 	}
 
-	raws, err := a.rpc.FindAll(ctx, classIssue, map[string]any{field: issueID}, map[string]any{"limit": 1})
+	// Huly omits a field matched by equality from the documents it
+	// returns, so match by $in to keep the identifier and id in the result.
+	raws, err := a.rpc.FindAll(ctx, classIssue, map[string]any{field: idIn([]string{issueID})}, map[string]any{"limit": 1})
 	if err != nil {
 		return hulyIssue{}, err
 	}

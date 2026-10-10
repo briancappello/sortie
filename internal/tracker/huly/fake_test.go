@@ -9,7 +9,8 @@ import (
 )
 
 // fakeRPC is an in-memory [rpcClient]. FindAll matches equality and $in
-// conditions; Tx applies create, update and remove transactions to the
+// conditions and, as Huly does, omits equality-matched fields from the
+// documents it returns; Tx applies create, update and remove transactions to the
 // store and records them.
 type fakeRPC struct {
 	mu      sync.Mutex
@@ -48,7 +49,14 @@ func (f *fakeRPC) FindAll(_ context.Context, class string, query map[string]any,
 		if !matches(doc, query) {
 			continue
 		}
-		raw, err := json.Marshal(doc)
+		// Like Huly, omit the fields the query matched by equality.
+		result := maps.Clone(doc)
+		for field, cond := range query {
+			if _, isOperator := cond.(map[string]any); !isOperator {
+				delete(result, field)
+			}
+		}
+		raw, err := json.Marshal(result)
 		if err != nil {
 			return nil, err
 		}
