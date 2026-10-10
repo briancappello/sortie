@@ -36,7 +36,7 @@ func fakeHulyServer(t *testing.T) *httptest.Server {
 			Method string         `json:"method"`
 			Params map[string]any `json:"params"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Method != "selectWorkspace" || req.Params["workspaceUrl"] != "acme" {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Method != "selectWorkspace" {
 			t.Errorf("account request = %+v (%v)", req, err)
 		}
 		writeJSON(t, w, map[string]any{"result": map[string]any{
@@ -126,6 +126,18 @@ func TestConnectAndRPC(t *testing.T) {
 
 	if err := conn.rpc.Tx(ctx, map[string]any{}); trackerKind(err) != domain.ErrTrackerPayload {
 		t.Errorf("Tx() error = %v, want payload error for HTTP 400", err)
+	}
+}
+
+func TestConnectRejectsFallbackWorkspace(t *testing.T) {
+	t.Parallel()
+
+	// The fake account service answers every name with workspace "acme",
+	// as Huly does for a name that matches no workspace.
+	srv := fakeHulyServer(t)
+	_, err := connect(context.Background(), srv.URL, "account-token", "other", "sortie/test")
+	if trackerKind(err) != domain.ErrTrackerNotFound {
+		t.Fatalf("connect() error = %v, want not found", err)
 	}
 }
 

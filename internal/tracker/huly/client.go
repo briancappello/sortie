@@ -112,6 +112,14 @@ func connect(ctx context.Context, frontURL, token, workspace, userAgent string) 
 	if login.Token == "" || login.Workspace == "" || login.Endpoint == "" {
 		return nil, &domain.TrackerError{Kind: domain.ErrTrackerPayload, Message: "huly: selectWorkspace returned an incomplete login"}
 	}
+	// selectWorkspace falls back to some workspace of the account when the
+	// requested name matches none, so confirm the one it picked.
+	if workspace != "" && !strings.EqualFold(login.WorkspaceURL, workspace) {
+		return nil, &domain.TrackerError{
+			Kind:    domain.ErrTrackerNotFound,
+			Message: fmt.Sprintf("huly: workspace %q not found; the token selected %q", workspace, login.WorkspaceURL),
+		}
+	}
 
 	rpc := &httpRPC{
 		transactor:   newHTTPClient(httpURL(resolveURL(frontURL, login.Endpoint)), login.Token, userAgent),
