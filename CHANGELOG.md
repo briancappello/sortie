@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Every agent process now receives the identity of the session it serves in its environment: `SORTIE_ISSUE_ID`, `SORTIE_ISSUE_IDENTIFIER`, `SORTIE_DISPATCH_ID`, `SORTIE_ATTEMPT`, `SORTIE_RULE`, `SORTIE_CHAIN_ID`, `SORTIE_WORKSPACE`, `SORTIE_API_URL`, and `SORTIE_SESSION_PURPOSE` (`credential-check` or `work`). A wrapper in `agent.command` can now tell which issue and stage it runs for, and skip the short credential check. On SSH workers the variables arrive on standard input like other carried variables. Each one overrides a variable of the same name in Sortie's own environment.
 
+- `server.control_token` protects the HTTP endpoints that change Sortie's state, starting with `POST /api/v1/refresh`: once it is set, callers send `Authorization: Bearer <token>`. It supports `$VAR` indirection, is masked in logs, and is removed from the environment agents and hooks inherit. Each working session also receives `SORTIE_SESSION_TOKEN`, a token that only works for its own issue's control routes and expires with the run, so a wrapper in `agent.command` can call Sortie without operator setup. Read-only endpoints, the dashboard, and `/metrics` need no token.
+
 - A dispatch rule can now carry a `stage` label in place of a `match` block: an issue that carries the label runs on that rule wherever it sits in the list, so one label puts an issue on a stage, and an issue with several stage labels runs on the first such rule and logs a warning. `sortie validate` rejects a stage label that two rules share, that names a tracker state, or that is a label Sortie adds itself, such as `needs-human`. ([#1256](https://github.com/sortie-ai/sortie/issues/1256))
 
 - A dispatch rule can now name the rule that follows it with `next`: after a successful run Sortie moves the issue to that rule's stage label instead of writing `tracker.handoff_state`, so a chain such as specify then implement runs without a person moving the issue between stages, and the last stage still ends on the handoff state. Prompt templates see the current and the previous stage in `stage`, and `dispatch.max_consecutive_hops` limits how many times in a row Sortie moves one issue. ([#1257](https://github.com/sortie-ai/sortie/issues/1257))
@@ -33,6 +35,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `sortie validate` now warns when `tracker.active_states` is empty, because no issue is dispatched. ([#1278](https://github.com/sortie-ai/sortie/issues/1278))
 
 ### Changed
+
+- **Breaking:** Sortie now refuses to start when its HTTP server binds to a non-loopback address, such as `--host 0.0.0.0` in a container, and `server.control_token` is not set; the error names `server.control_token`. Before upgrading such a deployment, set `server.control_token` (for example `control_token: $SORTIE_CONTROL_TOKEN` with the variable supplied by your secret store), and send `Authorization: Bearer <token>` from any caller of `POST /api/v1/refresh`. Deployments bound to `127.0.0.1` need no change.
 
 - A template that calls a block nothing defines now stops the workflow from loading, instead of failing the run that reaches the call, so correct such a call before upgrading. ([#1219](https://github.com/sortie-ai/sortie/issues/1219))
 

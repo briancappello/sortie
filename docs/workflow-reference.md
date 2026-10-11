@@ -33,7 +33,7 @@
   - [3.6 Fields Not Overridable via Env](#36-fields-not-overridable-via-env)
   - [3.7 Dynamic Reload](#37-dynamic-reload)
 - [4. Extensions](#4-extensions)
-  - [4.1 HTTP Server (`server.port`, `server.host`)](#41-http-server-serverport-serverhost)
+  - [4.1 HTTP Server (`server.port`, `server.host`, `server.control_token`)](#41-http-server-serverport-serverhost-servercontrol_token)
   - [4.2 `logging.level` — Log Verbosity](#42-logginglevel--log-verbosity)
   - [4.3 `worker` — SSH Worker Extension](#43-worker--ssh-worker-extension)
   - [4.4 `token_rates` — Cost Estimation](#44-token_rates--cost-estimation)
@@ -213,7 +213,7 @@ tracker:
 - Where the run's rule carries `next`, the exit adds the next rule's stage label instead of writing this state, and the issue stays in its active state. The handoff transition is the fallback when the hop is not made. See [Stage chains](#stage-chains).
 - The orchestrator resolves the freshest tracker observation available at worker exit, in order: reconciliation's observation, then the worker's own per-turn state refresh, then the dispatch-time snapshot. A terminal result suppresses the handoff transition, the continuation retry, and every pending reaction enqueue for that exit.
 - When the resolved observation is not terminal, one verification read runs immediately before the handoff write or the hop, so a state change that landed after the last observation is still caught. The verification read is skipped when `terminal_states` is empty, because no value can classify as terminal there. A failed verification read is logged and the handoff or the hop proceeds.
-- A transition suppressed by a terminal state, or by the issue not being in an active state at worker exit, increments `sortie_handoff_transitions_total` with `result="skipped"`. A run withheld by the evidence verdict increments the same counter with `result="withheld"` instead, but only when its own verification read below does not find the issue terminal; when that read does find the issue terminal, the run increments `result="skipped"` instead (see [Section 4.1](#41-http-server-serverport-serverhost)). A made hop writes no handoff transition and increments the counter with no result.
+- A transition suppressed by a terminal state, or by the issue not being in an active state at worker exit, increments `sortie_handoff_transitions_total` with `result="skipped"`. A run withheld by the evidence verdict increments the same counter with `result="withheld"` instead, but only when its own verification read below does not find the issue terminal; when that read does find the issue terminal, the run increments `result="skipped"` instead (see [Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token)). A made hop writes no handoff transition and increments the counter with no result.
 
 **`handoff_evidence` runtime behavior:**
 
@@ -553,6 +553,7 @@ agent:
 | `SORTIE_WORKSPACE`        | Absolute path to the per-issue workspace directory.                                                      |
 | `SORTIE_API_URL`          | Base URL of Sortie's HTTP server (for example `http://127.0.0.1:7678`), or empty when the server is off. A server bound to `0.0.0.0` or `::` is named by its loopback address. |
 | `SORTIE_SESSION_PURPOSE`  | `credential-check` for the credential verification, `work` for the working session.                       |
+| `SORTIE_SESSION_TOKEN`    | Working session only. A random token that authorizes the per-issue control routes of this issue only, and stops working when the run ends. See [Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token). |
 
 ---
 
@@ -1868,20 +1869,28 @@ For configuration values that need to change without restarting, use the `.env` 
 
 The front matter is extensible. Unknown top-level keys are collected into an `Extensions` map and are not validated by the core schema. Extensions should document their own field schemas, defaults, and reload behavior.
 
-### 4.1 HTTP Server (`server.port`, `server.host`)
+### 4.1 HTTP Server (`server.port`, `server.host`, `server.control_token`)
 
 ```yaml
 server:
   port: 9090
   host: "0.0.0.0"
+  control_token: $SORTIE_CONTROL_TOKEN
 ```
 
-| Field         | Type        | Required | Default     | Dynamic Reload            | Description                                                                     |
-| ------------- | ----------- | -------- | ----------- | ------------------------- | ------------------------------------------------------------------------------- |
-| `server.port` | integer     | No       | `7678`      | **No** — requires restart | TCP port for the embedded HTTP observability server. `0` disables the server.    |
-| `server.host` | string (IP) | No       | `127.0.0.1` | **No** — requires restart | Bind address for the HTTP server. Must be a parseable IP address.               |
+| Field                  | Type        | Required                                   | Default     | Dynamic Reload            | Description                                                                     |
+| ---------------------- | ----------- | ------------------------------------------ | ----------- | ------------------------- | ------------------------------------------------------------------------------- |
+| `server.port`          | integer     | No                                         | `7678`      | **No** — requires restart | TCP port for the embedded HTTP observability server. `0` disables the server.    |
+| `server.host`          | string (IP) | No                                         | `127.0.0.1` | **No** — requires restart | Bind address for the HTTP server. Must be a parseable IP address.               |
+| `server.control_token` | string      | When the bind address is not loopback      | _(unset)_   | **No** — requires restart | Bearer token every state-changing endpoint requires. Supports `$VAR` indirection and is masked in logs. |
 
 Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observability and operational control. `server.port` overrides the default port; `server.host` overrides the default bind address. CLI `--port` and `--host` flags take precedence over their extension counterparts. Port `0` disables the server entirely (no TCP listener, no Prometheus metrics).
+
+**Control authentication.** The endpoints that change Sortie's runtime state, `POST /api/v1/refresh` and the per-issue control routes below, require `Authorization: Bearer <token>` once `server.control_token` is set. A missing or unknown token receives `401` and Sortie takes no action. Without a control token, those endpoints accept requests with no token, and Sortie refuses to start when the bind address (`server.host` or `--host`) is not a loopback address, with a configuration error that names `server.control_token`. Read-only endpoints, the dashboard, `/api/v1/state`, the per-issue detail, `/livez`, `/readyz`, and `/metrics`, never require a token. Sortie removes every variable of its own environment that holds the control token's value at startup, so agents, hooks, and the tool server never inherit it.
+
+**Session tokens.** Each working session receives its own token in `SORTIE_SESSION_TOKEN` (see [Section 2.6](#26-agent--coding-agent-configuration)); the credential verification receives none. A session token is accepted only on the per-issue control routes of its own issue, so a wrapper such as an ACP broker in `agent.command` can call them with no operator setup. It receives `403` on any other route, refresh included, or for another issue, and `401` once its run has ended. Session tokens live only in memory, are masked in logs, and are never stored.
+
+> **Migration (breaking):** a deployment that binds the server to a non-loopback address, such as a container started with `--host 0.0.0.0`, must set `server.control_token` before upgrading, for example `control_token: $SORTIE_CONTROL_TOKEN` with the variable supplied by your secret store. Without it Sortie exits at startup. A caller of `POST /api/v1/refresh` on such a deployment then sends `Authorization: Bearer <token>`.
 
 #### API Endpoints
 
@@ -1892,7 +1901,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, aggregate token/runtime totals, rate limits). |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier. Returns 404 for unknown issues. |
-| POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. |
+| POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Requires the control token when one is set; a session token receives 403. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
 All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints). Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
@@ -2149,6 +2158,13 @@ HTTP/1.1 409 Conflict
 ```
 
 Callers should check the `queued` field or HTTP status to determine whether the refresh will be processed. A `409` response indicates the server is draining and the caller should retry against another instance or wait for the restart.
+
+**Authentication rejection** — a control token is set and the request carries no token or a wrong one (`401`), or carries a session token (`403`):
+
+```http
+HTTP/1.1 401 Unauthorized
+{"error": {"code": "unauthorized", "message": "a bearer token is required"}}
+```
 
 **Kubernetes probe configuration.** Sortie's graceful shutdown cancels running agents before closing the HTTP listener. Configure `terminationGracePeriodSeconds` and liveness probe tolerance to exceed the expected drain duration (default: 30 seconds):
 

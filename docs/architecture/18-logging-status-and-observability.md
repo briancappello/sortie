@@ -190,13 +190,23 @@ Enablement and configuration:
 
 - The HTTP server starts by default on `127.0.0.1:7678` with no flags required.
 - `--port N` overrides the listening port. Port `0` disables the server entirely.
-- `--host ADDR` overrides the bind address. `ADDR` must be a parseable IP address. Default: `127.0.0.1`. Container deployments use `0.0.0.0`.
+- `--host ADDR` overrides the bind address. `ADDR` must be a parseable IP address. Default: `127.0.0.1`. Container deployments use `0.0.0.0`, which requires `server.control_token`.
 - `server.port` and `server.host` extension keys provide the same overrides via workflow front matter. CLI flags take precedence over extension keys.
 - `server.port` must be an integer in the range 1–65535, or `0` to disable.
 - `server.host` must be a parseable IP address string. DNS hostnames are not accepted.
 - When the default port (7678) is occupied and the operator did not explicitly request a port (`--port` absent, `server.port` extension absent), Sortie logs a warning and starts without the HTTP server; the orchestrator continues normally. When the operator explicitly requested a port (via `--port` or `server.port`) and it is already in use, Sortie exits with code 1 and a descriptive error. No automatic port selection occurs.
 - The `--dry-run` flag suppresses server startup regardless of port or host settings.
 - Changes to HTTP listener settings require restart (hot-rebind is not supported).
+- `server.control_token` is the bearer token every state-changing endpoint requires (see Control authentication below). It supports `$VAR` indirection and is registered for masking. Sortie refuses to start, with a configuration error naming `server.control_token`, when the resolved bind address is not a loopback address and no control token is set; port `0` does not lift the check. Every variable of Sortie's own environment whose value is the control token is removed at startup, so no agent, hook, or tool server inherits it. Read once at startup.
+
+Control authentication:
+
+- State-changing endpoints are `POST /api/v1/refresh` and the per-issue control routes later sections add. Every other route, the dashboard, `GET /api/v1/state`, the per-issue detail, the health probes, and `/metrics`, keeps its access: no token is required.
+- A state-changing request carries `Authorization: Bearer <token>`. The control token is accepted on every state-changing route; tokens are compared in constant time.
+- For each work session, Sortie mints a session token of 32 random bytes, base64url without padding, and gives it to the agent process as `SORTIE_SESSION_TOKEN` (§10.7). A credential-verification session receives none. The token lives in memory only, on the running entry and in an index the server reads by the token's SHA-256 digest; it is registered for masking when minted, and withdrawn from both the index and the mask set when the running entry is removed, so it stops working when its run ends. It is never written to run history or logs.
+- A session token is accepted only on a per-issue control route whose path names the issue it was minted for. On any other state-changing route, refresh included, or for another issue, it receives `403`.
+- A presented token that is neither the control token nor a live session token receives `401`, a non-bearer `Authorization` header included. A request without an `Authorization` header receives `401` when a control token is set, and is accepted when none is, which startup permits only on a loopback bind.
+- A rejected request takes no action, and is logged at INFO as `control request rejected` with its method, path, and status, never its token.
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
@@ -359,6 +369,7 @@ Minimum endpoints:
 
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations may coalesce repeated requests).
+  - Requires the control token when one is set; a session token receives `403` (see Control authentication).
   - Suggested request body: empty body or `{}`.
   - Suggested response (`202 Accepted`) shape:
 

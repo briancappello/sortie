@@ -17,11 +17,22 @@ docker build -f examples/docker/kiro.Dockerfile -t sortie-kiro .
 docker build -f examples/docker/opencode.Dockerfile -t sortie-opencode .
 ```
 
+The images bind the HTTP server to `0.0.0.0`, so Sortie refuses to start
+unless the workflow sets `server.control_token`. Add it to your
+`WORKFLOW.md`:
+
+```yaml
+server:
+  control_token: $SORTIE_CONTROL_TOKEN
+```
+
 Run it:
 
 ```sh
+export SORTIE_CONTROL_TOKEN="$(openssl rand -base64 32)"
 docker run --rm --init \
     -e ANTHROPIC_API_KEY \
+    -e SORTIE_CONTROL_TOKEN \
     -v "$(pwd)/workspaces:/home/sortie/workspaces" \
     -v "$(pwd)/WORKFLOW.md:/home/sortie/WORKFLOW.md:ro" \
     -p 7678:7678 \
