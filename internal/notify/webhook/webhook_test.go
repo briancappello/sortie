@@ -539,3 +539,29 @@ func TestWebhook_Send_AgentText(t *testing.T) {
 		})
 	}
 }
+
+func TestWebhook_Send_Escalation(t *testing.T) {
+	t.Parallel()
+
+	recorded := string(loadFixture(t, "agent_message_payload.json"))
+	srv, getBody := captureServer(t, http.StatusOK)
+	n, err := newNotifier(map[string]any{"url": srv.URL})
+	if err != nil {
+		t.Fatalf("newNotifier: %v", err)
+	}
+	notification := makeNotification()
+	notification.Envelope.EventType = domain.EventSessionEscalated
+	notification.Envelope.Escalation = domain.SessionEscalation{Kind: "question", Rule: "implement", URL: "https://viewer.example/s/1"}
+	notification.Message.AgentText = "Which database should I target?"
+
+	if err := n.Send(context.Background(), notification); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	want := eventPayload(recorded, domain.EventSessionEscalated,
+		`,"agent_text":"Which database should I target?"`)
+	want = strings.TrimSuffix(want, "}") + `,"escalation":{"kind":"question","rule":"implement","url":"https://viewer.example/s/1"}}`
+	if got := string(getBody()); got != want {
+		t.Errorf("Send(session.escalated) body = %s, want %s", got, want)
+	}
+}
