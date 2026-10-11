@@ -850,6 +850,11 @@ type State struct {
 	// for the HTTP server's authentication. Nil holds no token.
 	SessionTokens *SessionTokenIndex
 
+	// LastEscalation maps issue ID to when its last session escalation was
+	// accepted, bounding escalations to one per issue per window. Written
+	// only by the event loop; nil until the first escalation.
+	LastEscalation map[string]time.Time
+
 	// TriageWg tracks in-flight reaction triage goroutines so shutdown can
 	// drain them.
 	TriageWg sync.WaitGroup

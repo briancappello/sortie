@@ -643,7 +643,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			o.handleTick(ctx)
 
 		case req := <-o.controlCh:
-			req.ReplyCh <- o.handleControl(req)
+			req.ReplyCh <- o.handleControl(ctx, req)
 		}
 	}
 }
@@ -1782,7 +1782,7 @@ func (o *Orchestrator) SessionTokenFunc() func(token string) (string, bool) {
 }
 
 // handleControl applies one control request on the event loop.
-func (o *Orchestrator) handleControl(req controlRequest) ControlReply {
+func (o *Orchestrator) handleControl(ctx context.Context, req controlRequest) ControlReply {
 	now := time.Now().UTC()
 	var reply ControlReply
 	switch req.Kind {
@@ -1790,6 +1790,13 @@ func (o *Orchestrator) handleControl(req controlRequest) ControlReply {
 		reply = applyHold(o.state, req.Identifier, req.Reason, req.Holder, now, o.logger)
 	case controlRelease:
 		reply = applyRelease(o.state, req.Identifier, now, o.metrics, o.logger)
+	case controlEscalate:
+		reply = applyEscalate(o.state, req.Identifier, req.Escalation, now, escalationParams{
+			Router: o.router,
+			Wg:     &o.state.TrackerOpsWg,
+			Ctx:    ctx,
+			Logger: o.logger,
+		})
 	default:
 		reply = ControlReply{Outcome: ControlInvalid, Message: "unknown control request"}
 	}
@@ -1823,6 +1830,15 @@ func (o *Orchestrator) sendControl(req controlRequest) ControlReply {
 func (o *Orchestrator) HoldFunc() func(identifier, reason, holder string) ControlReply {
 	return func(identifier, reason, holder string) ControlReply {
 		return o.sendControl(controlRequest{Kind: controlHold, Identifier: identifier, Reason: reason, Holder: holder})
+	}
+}
+
+// EscalateFunc returns the function the HTTP server calls to escalate the
+// running issue named by identifier to people. Safe to call from any
+// goroutine.
+func (o *Orchestrator) EscalateFunc() func(identifier string, req EscalationRequest) ControlReply {
+	return func(identifier string, req EscalationRequest) ControlReply {
+		return o.sendControl(controlRequest{Kind: controlEscalate, Identifier: identifier, Escalation: req})
 	}
 }
 
