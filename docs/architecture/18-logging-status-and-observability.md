@@ -201,7 +201,7 @@ Enablement and configuration:
 
 Control authentication:
 
-- State-changing endpoints are `POST /api/v1/refresh` and the per-issue control routes `POST /api/v1/<issue_identifier>/hold` and `/release`. Every other route, the dashboard, `GET /api/v1/state`, the per-issue detail, the health probes, and `/metrics`, keeps its access: no token is required.
+- State-changing endpoints are `POST /api/v1/refresh` and the per-issue control routes `POST /api/v1/<issue_identifier>/hold`, `/release`, and `/escalate`. Every other route, the dashboard, `GET /api/v1/state`, the per-issue detail, the health probes, and `/metrics`, keeps its access: no token is required.
 - A state-changing request carries `Authorization: Bearer <token>`. The control token is accepted on every state-changing route; tokens are compared in constant time.
 - For each work session, Sortie mints a session token, `_` followed by 32 random bytes in base64url without padding, and gives it to the agent process as `SORTIE_SESSION_TOKEN` (§10.7). A credential-verification session receives none. The token lives in memory only, on the running entry and in an index the server reads by the token's SHA-256 digest; it is registered for masking when minted, and withdrawn from both the index and the mask set when the running entry is removed, so it stops working when its run ends. It is never written to run history or logs.
 - A session token is accepted only on a per-issue control route whose path names the issue it was minted for. On any other state-changing route, refresh included, or for another issue, it receives `403`.
@@ -393,6 +393,10 @@ Minimum endpoints:
   - Both answer `200` with `issue_identifier`, `issue_id`, and the hold fields of a running row (`held`, `hold_reason`, `holder`, `held_since`, `held_total_ms`); `409` (`issue_not_running`) when the issue is known but has no running worker; `404` (`issue_not_found`) when the identifier names no issue in the runtime state; `400` for a malformed body; `503` during shutdown.
   - Holding a held run keeps the original start, reason, and holder. Releasing a run that is not held changes nothing.
   - Each request reaches the event loop as a control message and waits, bounded, for its reply; the event loop alone changes hold state.
+
+- `POST /api/v1/<issue_identifier>/escalate`
+  - Body `{"message": "...", "kind": "question|permission|other", "url": "..."}`; `kind` defaults to `other`.
+  - The event loop checks the message (`400` when empty or when the kind is unknown), the running worker (`409`, or `404` for an unknown identifier), and the issue's 60-second escalation window (`429`), then masks registered secrets in the message and URL and routes one `session.escalated` event (§10.4.7) through the notification router, delivered detached like the other orchestrator events. It answers `202` whether or not a destination lists the event; with none, it logs one `session escalation had no destination` record. The window is kept per issue in memory, starts at each accepted escalation, and does not survive a restart.
 
 Held runs:
 

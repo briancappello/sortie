@@ -1564,6 +1564,7 @@ The catalog is closed. Validation accepts exactly these names and rejects any ot
 | `budget.held` | An issue is held out of dispatch by `agent.max_sessions` or `agent.max_tokens`. | `warning` |
 | `stage.advanced` | A stage hop is made: the issue moves to the next stage, even when removing an old stage label failed ([Stage chains](#stage-chains)). | `info` |
 | `stage.not_advanced` | A stage hop is due and not made, because the label add failed or the hop ceiling is reached. The event carries the reason, `failed` or `ceiling`. | `warning` |
+| `session.escalated` | A caller acting for a running session, normally an ACP broker relaying an agent's question or permission request, posts to `POST /api/v1/{identifier}/escalate` ([Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token)). At most one per issue per 60 seconds. The caller's text arrives masked of registered secrets as `agent_text`, and the event carries the kind, the run's rule, and the session link. A destination receives it only when its `events` lists it; nothing subscribes to it implicitly. | `warning` |
 | `agent.message` | The agent calls `notify_operator`. | Set by the agent. |
 
 A run cancelled by Sortie produces no session event. Sortie never counts its own events against `max_per_session`, and an agent that has used its cap never suppresses one.
@@ -1676,8 +1677,9 @@ The `webhook` backend posts a JSON object whose keys use the generic notifier vo
 | `body` | string | Notification detail: the agent's own for `agent.message`, and the text Sortie posts as the comment for an event it produces. |
 | `category` | string | Optional: `decision_needed`, `progress`, `blocked`, `completed`, or `other`. Absent when the agent did not set it. |
 | `event_type` | string | The event type from the catalog above. Present only on an event Sortie produces. An `agent.message` payload carries exactly the keys above and no `event_type`, so an endpoint configured before this key existed receives the same JSON as before. |
-| `agent_text` | string | The agent's reason for stopping, after the cleanup described in [The agent's reason on a stop](#the-agents-reason-on-a-stop). Present only on a `session.stopped` event whose agent wrote a reason, and never inside `body`. |
+| `agent_text` | string | On `session.stopped`, the agent's reason for stopping, after the cleanup described in [The agent's reason on a stop](#the-agents-reason-on-a-stop), present only when the agent wrote one. On `session.escalated`, the escalation's message, masked of registered secrets. Never inside `body`. |
 | `stage` | object | The hop decision, with the keys `source_rule`, `target_rule`, `chain_id`, `hop_count`, and, on `stage.not_advanced` only, `reason`. Present only on a `stage.advanced` or `stage.not_advanced` event. |
+| `escalation` | object | On `session.escalated` only: `kind` (`question`, `permission`, or `other`), `rule` (the run's dispatch rule, `""` when none), and `url` when the caller gave one. |
 
 **`SORTIE_`-prefixed secret rule:**
 
@@ -1904,6 +1906,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Requires the control token when one is set; a session token receives 403. |
 | POST   | `/api/v1/{identifier}/hold`    | Hold the issue's running worker: pause its stall and turn clocks while a person works in its session. Optional body `{"reason": "...", "holder": "..."}`. 200 with the held state, 409 when the issue has no running worker, 404 when the identifier is unknown. Holding a held run keeps its original start. Control token or the issue's own session token. |
 | POST   | `/api/v1/{identifier}/release` | End the issue's hold. 200 with the hold state, also when the run was not held (nothing changes); 409 and 404 as for hold. Control token or the issue's own session token. |
+| POST   | `/api/v1/{identifier}/escalate` | Escalate the running issue to people through the `session.escalated` notification event. Body `{"message": "...", "kind": "question|permission|other", "url": "..."}`. 202 accepted (also when no destination lists the event), 400 for an empty message or an unknown kind, 409 when the issue has no running worker, 404 when the identifier is unknown, 429 within 60 seconds of the issue's last escalation. Control token or the issue's own session token. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
 All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints). Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
@@ -2198,7 +2201,23 @@ HTTP/1.1 200 OK
 {"issue_identifier": "LIVE-1", "issue_id": "10001", "held": true, "hold_reason": "human takeover", "holder": "acp-broker", "held_since": "2026-10-11T10:00:00Z", "held_total_ms": 0}
 ```
 
-`release` takes no body and answers with the same shape, `held` false and `held_since` null. Error responses use the standard envelope with codes `issue_not_found` (404), `issue_not_running` (409), `invalid_request` (400, a malformed body), and `orchestrator_unavailable` (503, during shutdown).
+`release` takes no body and answers with the same shape, `held` false and `held_since` null.
+
+#### `POST /api/v1/{identifier}/escalate` — Operator Escalation
+
+Calls people about a running issue, through the destinations whose `notifications` entry lists `session.escalated` (Slack, webhook, a tracker comment). The ACP broker uses it when an agent's question or permission request waits without a viewer to answer it.
+
+```http
+POST /api/v1/LIVE-1/escalate
+Authorization: Bearer <token>
+
+{"message": "Which database should I target?", "kind": "question", "url": "https://viewer.example/LIVE-1"}
+
+HTTP/1.1 202 Accepted
+{"issue_identifier": "LIVE-1", "event_type": "session.escalated", "accepted": true}
+```
+
+`message` is required; `kind` defaults to `other`; `url` is optional. Sortie masks registered secrets in the message and the URL before routing. It delivers at most one escalation per issue per 60 seconds and answers later requests in that window with `429` (`rate_limited`), delivering nothing for them. An escalation no destination subscribes to is accepted and delivered nowhere, and Sortie logs one `session escalation had no destination` record for it. Error responses use the standard envelope with codes `issue_not_found` (404), `issue_not_running` (409), `invalid_request` (400, a malformed body), and `orchestrator_unavailable` (503, during shutdown).
 
 **Kubernetes probe configuration.** Sortie's graceful shutdown cancels running agents before closing the HTTP listener. Configure `terminationGracePeriodSeconds` and liveness probe tolerance to exceed the expected drain duration (default: 30 seconds):
 
