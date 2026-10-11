@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"path/filepath"
+	"strconv"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/logging"
@@ -160,6 +161,25 @@ func resolveServerHost(hostFlag string, hostFlagSet bool, serverSection map[stri
 		return "", fmt.Errorf("invalid server.host value %q: not a valid IP address", hostStr)
 	}
 	return hostStr, nil
+}
+
+// serverBaseURL returns the base URL a local client uses to reach the
+// HTTP server listening on addr. An unspecified bind address, which
+// accepts connections on every interface, is reached through the
+// loopback address of its family.
+func serverBaseURL(addr net.Addr) string {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return "http://" + addr.String()
+	}
+	ip := tcp.IP
+	switch {
+	case ip == nil || (ip.IsUnspecified() && ip.To4() != nil):
+		ip = net.IPv4(127, 0, 0, 1)
+	case ip.IsUnspecified():
+		ip = net.IPv6loopback
+	}
+	return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(tcp.Port))
 }
 
 // hasServerPortExtension reports whether the server extension section

@@ -822,8 +822,14 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return sessionTools.Registry, nil
 	}
 
+	var sessionAPIURL string
+	if serverEnabled {
+		sessionAPIURL = serverBaseURL(ln.Addr())
+	}
+
 	o := orchestrator.NewOrchestrator(orchestrator.OrchestratorParams{
 		State:                             state,
+		SessionAPIURL:                     sessionAPIURL,
 		Logger:                            br.logger,
 		TrackerAdapter:                    br.trackerAdapter,
 		Router:                            route.NewRouter(br.trackerAdapter, registry.Notifiers.Get),

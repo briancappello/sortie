@@ -1,0 +1,164 @@
+package orchestrator
+
+import (
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/persistence"
+)
+
+func envMap(t *testing.T, vars []domain.EnvVar) map[string]string {
+	t.Helper()
+	m := make(map[string]string, len(vars))
+	for _, v := range vars {
+		if _, dup := m[v.Name]; dup {
+			t.Errorf("session env names %s twice", v.Name)
+		}
+		m[v.Name] = v.Value
+	}
+	return m
+}
+
+func (h *runHarness) waitForRunHistory(issueID string) persistence.RunHistory {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.store.mu.Lock()
+		for _, row := range h.store.runHistories {
+			if row.IssueID == issueID {
+				h.store.mu.Unlock()
+				return row
+			}
+		}
+		h.store.mu.Unlock()
+		if time.Now().After(deadline) {
+			h.t.Fatalf("no run history row for %s after 5s; log: %s", issueID, h.logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRun_SessionEnvMatchesRunHistory runs whole dispatches through the
+// event loop and asserts that every session identity variable the agent
+// launches receive equals the value recorded in the run's history row.
+func TestRun_SessionEnvMatchesRunHistory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		issueID  string
+		seed     func(h *runHarness)
+		wantRule string
+	}{
+		{
+			name:    "fresh dispatch on a named rule",
+			issueID: "id-1",
+			seed: func(h *runHarness) {
+				h.tracker.candidates = []domain.Issue{candidate("id-1", "S-1", "stage-implement")}
+				h.build()
+			},
+			wantRule: "implement",
+		},
+		{
+			name:    "retry carries its attempt",
+			issueID: "id-retry",
+			seed: func(h *runHarness) {
+				h.tracker.issues["id-retry"] = candidate("id-retry", "R-1", "Stage-Plan")
+				seedRetry(h, "scheduled", RetryEntry{Attempt: 2, AgentKind: "kind-b", RuleName: "plan"})
+			},
+			wantRule: "plan",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newRunHarness(t, runConfig(t, stagedRulesRaw()), "kind-a", "kind-b", "kind-c")
+			h.apiURL = "http://127.0.0.1:7678"
+			tt.seed(h)
+			h.run()
+			row := h.waitForRunHistory(tt.issueID)
+			h.stop()
+
+			var work, check []domain.StartSessionParams
+			for _, r := range h.recorders {
+				work = append(work, r.started()...)
+				check = append(check, r.verified()...)
+			}
+			if len(work) == 0 || len(check) == 0 {
+				t.Fatalf("work launches = %d, credential checks = %d, want at least one of each", len(work), len(check))
+			}
+			got := envMap(t, work[0].SessionEnv)
+
+			wantAttempt := ""
+			if row.Attempt > 1 {
+				wantAttempt = strconv.Itoa(row.Attempt - 1)
+			}
+			want := map[string]string{
+				envSessionIssueID:         row.IssueID,
+				envSessionIssueIdentifier: row.Identifier,
+				envSessionAttempt:         wantAttempt,
+				envSessionRule:            row.RuleName,
+				envSessionChainID:         row.ChainID,
+				envSessionWorkspace:       row.Workspace,
+				envSessionAPIURL:          "http://127.0.0.1:7678",
+				envSessionPurpose:         sessionPurposeWork,
+			}
+			for name, value := range want {
+				if got[name] != value {
+					t.Errorf("work launch %s = %q, want %q (run history row %+v)", name, got[name], value, row)
+				}
+			}
+			if row.RuleName != tt.wantRule || row.ChainID == "" {
+				t.Errorf("run history rule/chain = %q/%q, want rule %q and a chain", row.RuleName, row.ChainID, tt.wantRule)
+			}
+			if got[envSessionDispatchID] == "" {
+				t.Errorf("work launch %s is empty", envSessionDispatchID)
+			}
+
+			gotCheck := envMap(t, check[0].SessionEnv)
+			if gotCheck[envSessionPurpose] != sessionPurposeCredentialCheck {
+				t.Errorf("credential check %s = %q, want %q", envSessionPurpose, gotCheck[envSessionPurpose], sessionPurposeCredentialCheck)
+			}
+			for name, value := range got {
+				if name == envSessionPurpose {
+					continue
+				}
+				if gotCheck[name] != value {
+					t.Errorf("credential check %s = %q, want the work launch's %q", name, gotCheck[name], value)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildSessionEnv_Attempt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		attempt *int
+		want    string
+	}{
+		{nil, ""},
+		{new(1), "1"},
+		{new(3), "3"},
+	}
+	for _, tt := range tests {
+		got := envMap(t, buildSessionEnv(sessionEnvParams{Attempt: tt.attempt, Purpose: sessionPurposeWork}))
+		if v, ok := got[envSessionAttempt]; !ok || v != tt.want {
+			t.Errorf("buildSessionEnv(attempt %v) %s = %q (present %v), want %q", tt.attempt, envSessionAttempt, v, ok, tt.want)
+		}
+	}
+}
+
+func TestBuildSessionEnv_EmptyAPIURLStaysSet(t *testing.T) {
+	t.Parallel()
+
+	got := envMap(t, buildSessionEnv(sessionEnvParams{Purpose: sessionPurposeWork}))
+	if v, ok := got[envSessionAPIURL]; !ok || v != "" {
+		t.Errorf("buildSessionEnv(no server) %s = %q (present %v), want present and empty", envSessionAPIURL, v, ok)
+	}
+}

@@ -329,6 +329,10 @@ type WorkerDeps struct {
 	// DispatchID fences session identity to this worker attempt.
 	DispatchID string
 
+	// SessionAPIURL is the base URL of the HTTP server, passed to the
+	// agent process as SORTIE_API_URL. Empty when the server is off.
+	SessionAPIURL string
+
 	// ToolRegistry holds the tools available to agent sessions. May be nil.
 	// Read-only after construction.
 	ToolRegistry *domain.ToolRegistry
@@ -998,6 +1002,15 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		sshEnvNames = deps.SSHEnvNamesFunc(agentKind)
 	}
 
+	sessionEnv := sessionEnvParams{
+		Issue:         issue,
+		DispatchID:    deps.DispatchID,
+		Attempt:       attempt,
+		Identity:      sessionIdentityFrom(ctx),
+		WorkspacePath: wsResult.Path,
+		APIURL:        deps.SessionAPIURL,
+		Purpose:       sessionPurposeWork,
+	}
 	params := domain.StartSessionParams{
 		WorkspacePath:            wsResult.Path,
 		AgentConfig:              toDomainAgentConfig(cfg, agentKind, remote),
@@ -1007,7 +1020,11 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		SSHEnvNames:              sshEnvNames,
 		MCPConfigPath:            mcpConfigPath,
 		Settings:                 deps.AgentSettings.Passthrough,
+		SessionEnv:               buildSessionEnv(sessionEnv),
 	}
+	verificationParams := params
+	sessionEnv.Purpose = sessionPurposeCredentialCheck
+	verificationParams.SessionEnv = buildSessionEnv(sessionEnv)
 
 	deps.OnEvent(issue.ID, domain.AgentEvent{
 		Type:      domain.EventNotification,
@@ -1045,7 +1062,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	verificationStarted := time.Now()
 	verificationResult, verificationErr := agentcore.VerifyCredential(ctx, deps.AgentAdapter, agentcore.CredentialVerification{
-		Session:   params,
+		Session:   verificationParams,
 		Issue:     issue,
 		TurnBound: time.Duration(effectiveTurnTimeoutMS(cfg.Agent.TurnTimeoutMS)) * time.Millisecond,
 		StopBound: stopSessionDeadline(cfg),

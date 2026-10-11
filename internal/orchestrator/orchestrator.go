@@ -141,6 +141,10 @@ type OrchestratorParams struct {
 	// must supply the real binary.
 	MCPServerBinary string
 
+	// SessionAPIURL is the base URL of the HTTP server, given to every
+	// agent process as SORTIE_API_URL. Empty when the server is off.
+	SessionAPIURL string
+
 	// CIProvider is the CI status provider for CI failure detection. Nil
 	// when CI feedback is not configured.
 	CIProvider domain.CIStatusProvider
@@ -254,6 +258,7 @@ type Orchestrator struct {
 	workflowFileFunc                  func() string
 	dbPath                            string
 	mcpServerBinary                   string
+	sessionAPIURL                     string
 	ciProvider                        domain.CIStatusProvider
 	scmAdapter                        domain.SCMAdapter
 	reviewConfig                      ReviewReactionConfig
@@ -400,6 +405,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		workflowFileFunc:                  params.WorkflowFileFunc,
 		dbPath:                            params.DBPath,
 		mcpServerBinary:                   params.MCPServerBinary,
+		sessionAPIURL:                     params.SessionAPIURL,
 		ciProvider:                        params.CIProvider,
 		scmAdapter:                        params.SCMAdapter,
 		reviewConfig:                      params.ReviewConfig,
@@ -904,6 +910,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			Previous:        lineage.PreviousRule,
 			PreviousOutcome: lineage.PreviousOutcome,
 		})
+		dispatchCtx = withSessionIdentity(dispatchCtx, sessionIdentity{RuleName: resolution.RuleName, ChainID: lineage.ChainID})
 		DispatchIssue(dispatchCtx, o.state, issue, nil, host, o.makeWorkerFn("", host, resolution.AgentKind, resolution.TemplateID, "", adapter, attemptSettings))
 		if entry := o.state.Running[issue.ID]; entry != nil {
 			entry.ContinuationContext = seed
@@ -1092,6 +1099,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			WorkflowPath:    o.workflowManager.WorkflowAbsPath(),
 			DBPath:          o.dbPath,
 			MCPServerBinary: o.mcpServerBinary,
+			SessionAPIURL:   o.sessionAPIURL,
 			ReactionKind:    reactionKind,
 			Posture:         posture,
 		}

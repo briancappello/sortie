@@ -9796,6 +9796,7 @@ type runHarness struct {
 	store     *stubStore
 	metrics   domain.Metrics
 	meta      map[string]registry.AgentMeta
+	apiURL    string
 
 	mu          sync.Mutex
 	unavailable map[string]bool
@@ -9877,6 +9878,7 @@ func (h *runHarness) build() {
 		WorkflowManager: h.wm,
 		Store:           h.store,
 		Metrics:         h.metrics,
+		SessionAPIURL:   h.apiURL,
 		PreflightParams: PreflightParams{
 			ReloadWorkflow:  func() error { return nil },
 			ConfigFunc:      h.wm.Config,

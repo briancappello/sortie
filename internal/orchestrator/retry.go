@@ -718,6 +718,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		Previous:        lineage.PreviousRule,
 		PreviousOutcome: lineage.PreviousOutcome,
 	})
+	dispatchCtx = withSessionIdentity(dispatchCtx, sessionIdentity{RuleName: ruleName, ChainID: lineage.ChainID})
 	DispatchIssue(dispatchCtx, state, issue, &attempt, host, params.MakeWorkerFn(resumeSessionID, host, agentKind, templateID, popped.ReactionKind, adapter, attemptSettings))
 	if entry := state.Running[issue.ID]; entry != nil {
 		entry.WorkflowFile = params.WorkflowFile
