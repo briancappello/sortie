@@ -883,6 +883,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
 			TokenRates:       tokenRates,
 			ControlToken:     br.controlToken,
+			SessionTokenFn:   o.SessionTokenFunc(),
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
 				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
 				if err != nil {
