@@ -540,6 +540,20 @@ agent:
 
 **Credential verification:** Before the working session's first turn, every worker run proves the runtime completes one model request with its credential, on every agent kind and every remote host. There is nothing to configure. The step costs one model request at the configured model's rate and one short runtime start each time Sortie starts work on an issue. A failure stops the run before any work and is retried with exponential backoff, `credential_unverified` in the log and the run history. An agent that exits before it responds, on a switch in `agent.command` it does not accept or on a credential it rejects only by printing a message and exiting, is reported as `port_exit` with its exit status and the end of what it wrote to standard error, not as `credential_unverified`. A working turn whose agent exits before it responds is reported the same way. A protocol runtime that offers no way to delete its own session keeps one small leftover conversation per worker run; every other kind leaves none.
 
+**Agent process environment:** Every process Sortie starts for an agent session, the credential verification, each turn, and each one-shot command an adapter runs for the session, receives the variables below, so the agent or a wrapper in `agent.command` knows which issue, stage, and run it serves. Each value overrides a variable of the same name in Sortie's own environment, and an empty value is still set. On an SSH worker the variables reach the remote agent the same way as other carried variables, on the SSH session's standard input, never in the command line. Sortie changes no other variable for this purpose, and never places `server.control_token` in an agent's environment.
+
+| Variable                  | Value                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `SORTIE_ISSUE_ID`         | Stable tracker-internal issue ID.                                                                       |
+| `SORTIE_ISSUE_IDENTIFIER` | Human-readable ticket key (e.g., `PROJ-123`).                                                            |
+| `SORTIE_DISPATCH_ID`      | The run's dispatch ID, the same value the tool server receives.                                          |
+| `SORTIE_ATTEMPT`          | Empty for a first dispatch, otherwise the retry number. The run history's `attempt` is this value plus one. |
+| `SORTIE_RULE`             | The dispatch rule the run was dispatched under; empty when no named rule applied.                        |
+| `SORTIE_CHAIN_ID`         | The stage chain the run belongs to, as recorded in run history.                                          |
+| `SORTIE_WORKSPACE`        | Absolute path to the per-issue workspace directory.                                                      |
+| `SORTIE_API_URL`          | Base URL of Sortie's HTTP server (for example `http://127.0.0.1:7678`), or empty when the server is off. A server bound to `0.0.0.0` or `::` is named by its loopback address. |
+| `SORTIE_SESSION_PURPOSE`  | `credential-check` for the credential verification, `work` for the working session.                       |
+
 ---
 
 ### 2.7 `db_path` — SQLite Database Path

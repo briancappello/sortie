@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Every agent process now receives the identity of the session it serves in its environment: `SORTIE_ISSUE_ID`, `SORTIE_ISSUE_IDENTIFIER`, `SORTIE_DISPATCH_ID`, `SORTIE_ATTEMPT`, `SORTIE_RULE`, `SORTIE_CHAIN_ID`, `SORTIE_WORKSPACE`, `SORTIE_API_URL`, and `SORTIE_SESSION_PURPOSE` (`credential-check` or `work`). A wrapper in `agent.command` can now tell which issue and stage it runs for, and skip the short credential check. On SSH workers the variables arrive on standard input like other carried variables. Each one overrides a variable of the same name in Sortie's own environment.
+
 - A dispatch rule can now carry a `stage` label in place of a `match` block: an issue that carries the label runs on that rule wherever it sits in the list, so one label puts an issue on a stage, and an issue with several stage labels runs on the first such rule and logs a warning. `sortie validate` rejects a stage label that two rules share, that names a tracker state, or that is a label Sortie adds itself, such as `needs-human`. ([#1256](https://github.com/sortie-ai/sortie/issues/1256))
 
 - A dispatch rule can now name the rule that follows it with `next`: after a successful run Sortie moves the issue to that rule's stage label instead of writing `tracker.handoff_state`, so a chain such as specify then implement runs without a person moving the issue between stages, and the last stage still ends on the handoff state. Prompt templates see the current and the previous stage in `stage`, and `dispatch.max_consecutive_hops` limits how many times in a row Sortie moves one issue. ([#1257](https://github.com/sortie-ai/sortie/issues/1257))
