@@ -18,6 +18,7 @@ const (
 	envSessionWorkspace       = "SORTIE_WORKSPACE"
 	envSessionAPIURL          = "SORTIE_API_URL"
 	envSessionPurpose         = "SORTIE_SESSION_PURPOSE"
+	envSessionToken           = "SORTIE_SESSION_TOKEN" //nolint:gosec // a variable name, not a credential
 )
 
 // Values of [envSessionPurpose].
@@ -32,6 +33,7 @@ const (
 type sessionIdentity struct {
 	RuleName string
 	ChainID  string
+	Token    string
 }
 
 type sessionIdentityCtxKey struct{}
@@ -62,7 +64,8 @@ type sessionEnvParams struct {
 
 // buildSessionEnv returns the session identity variables for one
 // launch. The attempt is empty for a first dispatch and the retry
-// number otherwise, matching the tool server's SORTIE_ATTEMPT.
+// number otherwise, matching the tool server's SORTIE_ATTEMPT. The
+// session token is set on a work launch only.
 func buildSessionEnv(p sessionEnvParams) []domain.EnvVar {
 	attempt := ""
 	if p.Attempt != nil {
@@ -78,6 +81,9 @@ func buildSessionEnv(p sessionEnvParams) []domain.EnvVar {
 		{Name: envSessionWorkspace, Value: p.WorkspacePath},
 		{Name: envSessionAPIURL, Value: p.APIURL},
 		{Name: envSessionPurpose, Value: p.Purpose},
+	}
+	if p.Purpose == sessionPurposeWork && p.Identity.Token != "" {
+		env = append(env, domain.EnvVar{Name: envSessionToken, Value: p.Identity.Token})
 	}
 	return env
 }

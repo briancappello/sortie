@@ -1,12 +1,17 @@
 package orchestrator
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/redact"
 )
 
 func envMap(t *testing.T, vars []domain.EnvVar) map[string]string {
@@ -124,7 +129,7 @@ func TestRun_SessionEnvMatchesRunHistory(t *testing.T) {
 				t.Errorf("credential check %s = %q, want %q", envSessionPurpose, gotCheck[envSessionPurpose], sessionPurposeCredentialCheck)
 			}
 			for name, value := range got {
-				if name == envSessionPurpose {
+				if name == envSessionPurpose || name == envSessionToken {
 					continue
 				}
 				if gotCheck[name] != value {
@@ -160,5 +165,76 @@ func TestBuildSessionEnv_EmptyAPIURLStaysSet(t *testing.T) {
 	got := envMap(t, buildSessionEnv(sessionEnvParams{Purpose: sessionPurposeWork}))
 	if v, ok := got[envSessionAPIURL]; !ok || v != "" {
 		t.Errorf("buildSessionEnv(no server) %s = %q (present %v), want present and empty", envSessionAPIURL, v, ok)
+	}
+}
+
+// TestRun_SessionTokenPerWorkSession dispatches one issue twice and
+// asserts that each work session gets its own session token, that the
+// credential checks get none, and that a token stops resolving once its
+// run has ended.
+func TestRun_SessionTokenPerWorkSession(t *testing.T) {
+	t.Parallel()
+
+	h := newRunHarness(t, runConfig(t, stagedRulesRaw()), "kind-a", "kind-b", "kind-c")
+	h.tracker.candidates = []domain.Issue{candidate("id-1", "S-1")}
+	h.tracker.issues["id-1"] = candidate("id-1", "S-1")
+	h.run()
+	h.waitForRunHistory("id-1")
+	h.o.RefreshFunc()()
+	h.waitForSessions(2)
+	h.stop()
+
+	var tokens []string
+	for _, r := range h.recorders {
+		for _, p := range r.started() {
+			tokens = append(tokens, envMap(t, p.SessionEnv)[envSessionToken])
+		}
+		for _, p := range r.verified() {
+			if v, ok := envMap(t, p.SessionEnv)[envSessionToken]; ok {
+				t.Errorf("credential check carries %s = %q, want none", envSessionToken, v)
+			}
+		}
+	}
+	if len(tokens) < 2 {
+		t.Fatalf("work sessions = %d, want 2", len(tokens))
+	}
+	if tokens[0] == "" || tokens[1] == "" || tokens[0] == tokens[1] {
+		t.Fatalf("work session tokens = %q, want two different non-empty tokens", tokens[:2])
+	}
+	if len(tokens[0]) < 22 {
+		t.Errorf("session token %q is shorter than 128 bits of base64url", tokens[0])
+	}
+	if identifier, ok := h.state.SessionTokens.Lookup(tokens[0]); ok {
+		t.Errorf("Lookup(first run's token) = %q, true after its run ended, want false", identifier)
+	}
+}
+
+func TestDispatchIssue_SessionTokenIsIndexedAndMasked(t *testing.T) {
+	t.Parallel()
+
+	state := NewState(60000, 1, 0, nil, AgentTotals{})
+	issue := domain.Issue{ID: "id-mask", Identifier: "MASK-1", State: "To Do"}
+	got := make(chan sessionIdentity, 1)
+	DispatchIssue(context.Background(), state, issue, nil, "", func(ctx context.Context, _ domain.Issue, _ *int) {
+		got <- sessionIdentityFrom(ctx)
+	})
+	state.WorkerWg.Wait()
+
+	token := state.Running[issue.ID].SessionToken
+	if token == "" {
+		t.Fatal("RunningEntry.SessionToken is empty after DispatchIssue")
+	}
+	if id := <-got; id.Token != token {
+		t.Errorf("worker identity token = %q, want the running entry's %q", id.Token, token)
+	}
+	if identifier, ok := state.SessionTokens.Lookup(token); !ok || identifier != "MASK-1" {
+		t.Errorf("Lookup(token) = %q, %v, want %q, true", identifier, ok, "MASK-1")
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{ReplaceAttr: redact.ReplaceAttr}))
+	logger.Info("agent status", slog.String("message", "my token is "+token))
+	if strings.Contains(buf.String(), token) {
+		t.Errorf("logged status statement carries the session token: %s", buf.String())
 	}
 }

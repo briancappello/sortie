@@ -196,6 +196,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		return
 	}
 	delete(state.Running, workerResult.IssueID)
+	state.SessionTokens.revoke(entry.SessionToken)
 	if entry.CancelFunc != nil {
 		entry.CancelFunc()
 	}

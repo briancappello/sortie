@@ -717,12 +717,19 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 	workerCtx = withRunContext(workerCtx, runCtx)
 	workerCtx = withDispatchID(workerCtx, dispatchID)
 
+	sessionToken := mintSessionToken()
+	state.SessionTokens.register(sessionToken, issue.ID, issue.Identifier)
+	identity := sessionIdentityFrom(workerCtx)
+	identity.Token = sessionToken
+	workerCtx = withSessionIdentity(workerCtx, identity)
+
 	state.Claimed[issue.ID] = struct{}{}
 
 	state.Running[issue.ID] = &RunningEntry{
 		Identifier:             issue.Identifier,
 		Issue:                  issue,
 		DispatchID:             dispatchID,
+		SessionToken:           sessionToken,
 		RetryAttempt:           attemptCopy,
 		StartedAt:              time.Now().UTC(),
 		CancelFunc:             cancelFn,

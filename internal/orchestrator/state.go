@@ -102,6 +102,11 @@ type RunningEntry struct {
 	// the lifetime of the entry.
 	DispatchID string
 
+	// SessionToken is the run's scoped session token, minted by
+	// [DispatchIssue] and given to the working session only. It lives in
+	// memory alone and stops working when the entry is removed.
+	SessionToken string
+
 	ThreadID string
 
 	TurnID string
@@ -823,6 +828,10 @@ type State struct {
 	// the wait.
 	TrackerOpsWg sync.WaitGroup
 
+	// SessionTokens indexes the session token of every running entry,
+	// for the HTTP server's authentication. Nil holds no token.
+	SessionTokens *SessionTokenIndex
+
 	// TriageWg tracks in-flight reaction triage goroutines so shutdown can
 	// drain them.
 	TriageWg sync.WaitGroup
@@ -1016,6 +1025,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		maxConcurrentByState = make(map[string]int)
 	}
 	return &State{
+		SessionTokens:             NewSessionTokenIndex(),
 		PollIntervalMS:            pollIntervalMS,
 		MaxConcurrentAgents:       maxConcurrentAgents,
 		MaxTokens:                 maxTokens,

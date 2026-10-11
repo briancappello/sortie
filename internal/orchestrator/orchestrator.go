@@ -1764,3 +1764,10 @@ func (o *Orchestrator) RefreshFunc() func() bool {
 		}
 	}
 }
+
+// SessionTokenFunc returns the lookup the HTTP server uses to resolve a
+// session token to the issue identifier of the running session it was
+// minted for. Safe to call from any goroutine.
+func (o *Orchestrator) SessionTokenFunc() func(token string) (string, bool) {
+	return o.state.SessionTokens.Lookup
+}
