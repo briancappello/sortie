@@ -44,6 +44,10 @@ func newAuthHarness(t *testing.T, controlToken string, sessions map[string]strin
 			h.controls.Add(1)
 			return orchestrator.ControlReply{Outcome: orchestrator.ControlDone, Hold: orchestrator.HoldState{Identifier: identifier}}
 		},
+		EscalateFn: func(string, orchestrator.EscalationRequest) orchestrator.ControlReply {
+			h.controls.Add(1)
+			return orchestrator.ControlReply{Outcome: orchestrator.ControlDone}
+		},
 	})
 	h.ts = httptest.NewServer(h.srv.Mux())
 	t.Cleanup(h.ts.Close)
@@ -121,7 +125,7 @@ const (
 
 // sessionScopedRoutes lists the routes a session token may call for its
 // own issue, as a path format taking the issue identifier.
-var sessionScopedRoutes = []string{"/api/v1/%s/hold", "/api/v1/%s/release"}
+var sessionScopedRoutes = []string{"/api/v1/%s/hold", "/api/v1/%s/release", "/api/v1/%s/escalate"}
 
 func TestSessionToken_Scope(t *testing.T) {
 	t.Parallel()

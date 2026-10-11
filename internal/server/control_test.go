@@ -158,3 +158,58 @@ func TestStateAndDetail_ShowHeldRuns(t *testing.T) {
 		t.Errorf("detail running = %v, want the hold fields", detail["running"])
 	}
 }
+
+func TestEscalate_StatusCodes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       string
+		reply      orchestrator.ControlReply
+		wantStatus int
+		wantCode   string
+	}{
+		{"accepted", `{"message":"Which database should I target?","kind":"question","url":"https://v.example/s"}`, orchestrator.ControlReply{Outcome: orchestrator.ControlAccepted}, http.StatusAccepted, ""},
+		{"empty message", `{"message":""}`, orchestrator.ControlReply{Outcome: orchestrator.ControlInvalid, Message: "message must not be empty"}, http.StatusBadRequest, "invalid_request"},
+		{"not running", `{"message":"x"}`, orchestrator.ControlReply{Outcome: orchestrator.ControlNotRunning}, http.StatusConflict, "issue_not_running"},
+		{"unknown issue", `{"message":"x"}`, orchestrator.ControlReply{Outcome: orchestrator.ControlUnknownIssue}, http.StatusNotFound, "issue_not_found"},
+		{"rate limited", `{"message":"x"}`, orchestrator.ControlReply{Outcome: orchestrator.ControlRateLimited}, http.StatusTooManyRequests, "rate_limited"},
+		{"malformed body", `{"message":`, orchestrator.ControlReply{Outcome: orchestrator.ControlAccepted}, http.StatusBadRequest, "invalid_request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []orchestrator.EscalationRequest
+			srv := New(Params{
+				SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+				RefreshFn:  acceptingRefresh(),
+				Logger:     slog.New(slog.DiscardHandler),
+				EscalateFn: func(identifier string, req orchestrator.EscalationRequest) orchestrator.ControlReply {
+					if identifier == "LIVE-1" {
+						got = append(got, req)
+					}
+					return tt.reply
+				},
+			})
+			ts := httptest.NewServer(srv.Mux())
+			t.Cleanup(ts.Close)
+
+			status, body := postControl(t, ts, http.MethodPost, "/api/v1/LIVE-1/escalate", tt.body)
+			if status != tt.wantStatus {
+				t.Fatalf("POST escalate status = %d, want %d (body %v)", status, tt.wantStatus, body)
+			}
+			if tt.wantCode != "" {
+				if errObj, _ := body["error"].(map[string]any); errObj["code"] != tt.wantCode {
+					t.Errorf("error body = %v, want code %q", body, tt.wantCode)
+				}
+				return
+			}
+			if body["event_type"] != "session.escalated" || body["issue_identifier"] != "LIVE-1" {
+				t.Errorf("body = %v, want the accepted session.escalated for LIVE-1", body)
+			}
+			if len(got) != 1 || got[0] != (orchestrator.EscalationRequest{Message: "Which database should I target?", Kind: "question", URL: "https://v.example/s"}) {
+				t.Errorf("EscalateFn calls = %+v, want the decoded request", got)
+			}
+		})
+	}
+}

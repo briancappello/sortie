@@ -131,3 +131,35 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	reply := s.releaseFn(r.PathValue("identifier"))
 	s.writeControlReply(w, r, start, reply, 0, toHoldResponse(reply.Hold))
 }
+
+// EscalateFunc escalates the running issue named by identifier to people.
+// It must be safe to call from any goroutine.
+type EscalateFunc func(identifier string, req orchestrator.EscalationRequest) orchestrator.ControlReply
+
+type escalateRequest struct {
+	Message string `json:"message"`
+	Kind    string `json:"kind"`
+	URL     string `json:"url"`
+}
+
+type escalateResponse struct {
+	IssueIdentifier string `json:"issue_identifier"`
+	EventType       string `json:"event_type"`
+	Accepted        bool   `json:"accepted"`
+}
+
+func (s *Server) handleEscalate(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if s.escalateFn == nil {
+		writeErrorJSON(w, s.logger, http.StatusServiceUnavailable, "orchestrator_unavailable", "escalation is not available")
+		return
+	}
+	var req escalateRequest
+	if err := decodeControlBody(r, &req); err != nil {
+		writeErrorJSON(w, s.logger, http.StatusBadRequest, "invalid_request", "request body must be a JSON object with message, and optional kind and url")
+		return
+	}
+	identifier := r.PathValue("identifier")
+	reply := s.escalateFn(identifier, orchestrator.EscalationRequest{Message: req.Message, Kind: req.Kind, URL: req.URL})
+	s.writeControlReply(w, r, start, reply, 0, escalateResponse{IssueIdentifier: identifier, EventType: "session.escalated", Accepted: true})
+}

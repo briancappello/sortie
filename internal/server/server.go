@@ -155,6 +155,11 @@ type Params struct {
 	// routes answer 503.
 	HoldFn    HoldFunc
 	ReleaseFn ReleaseFunc
+
+	// EscalateFn escalates a running issue to people. Called on
+	// POST /api/v1/{identifier}/escalate. When nil, that route answers
+	// 503.
+	EscalateFn EscalateFunc
 }
 
 // Server is the embedded HTTP server for JSON API, dashboard, and
@@ -181,6 +186,7 @@ type Server struct {
 	sessionTokenFn   SessionTokenFunc
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
+	escalateFn       EscalateFunc
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -230,6 +236,7 @@ func New(params Params) *Server {
 		sessionTokenFn:   params.SessionTokenFn,
 		holdFn:           params.HoldFn,
 		releaseFn:        params.ReleaseFn,
+		escalateFn:       params.EscalateFn,
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -250,6 +257,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
 	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
+	mux.HandleFunc("/api/v1/{identifier}/escalate", s.controlRoute(scopeSession, s.handleEscalate))
 
 	if params.MetricsRegistry != nil {
 		mux.Handle("GET /metrics", promhttp.InstrumentMetricHandler(
