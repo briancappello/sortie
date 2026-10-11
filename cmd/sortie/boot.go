@@ -74,6 +74,7 @@ type bootResult struct {
 	blockerResolver orchestrator.BlockerResolver
 	serverPort      int
 	serverHost      string
+	controlToken    string
 	serverEnabled   bool
 	portIsImplicit  bool
 	dryRun          bool
@@ -255,6 +256,15 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		logger.Error("server host configuration error", slog.Any("error", hostErr))
 		return bootResult{}, 1
 	}
+	controlToken, tokenErr := resolveControlToken(cfg.ExtensionSection("server"))
+	if tokenErr == nil {
+		tokenErr = checkControlBinding(serverHost, controlToken)
+	}
+	if tokenErr != nil {
+		logger.Error("server control token configuration error", slog.Any("error", tokenErr))
+		return bootResult{}, 1
+	}
+	redact.Add(controlTokenSetting, controlToken)
 
 	trackerCtor, err := registry.Trackers.Get(cfg.Tracker.Kind)
 	if err != nil {
@@ -304,6 +314,7 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		blockerResolver: blockerResolver,
 		serverPort:      serverPort,
 		serverHost:      serverHost,
+		controlToken:    controlToken,
 		serverEnabled:   serverEnabled,
 		portIsImplicit:  !portFlagSet && !hasServerPortExtension(cfg.ExtensionSection("server")),
 		dryRun:          *dryRun,

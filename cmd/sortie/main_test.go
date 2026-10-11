@@ -909,7 +909,13 @@ func TestRunPortZeroDisablesServer(t *testing.T) {
 
 func TestRunCustomHost(t *testing.T) {
 	// No t.Parallel: setupRunDir calls t.Chdir.
-	wfPath := setupRunDir(t)
+	setupRunDir(t)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A non-loopback bind address requires a control token.
+	wfPath := writeWorkflowWithServer(t, dir, "  control_token: custom-host-token\n")
 	port := freePort(t)
 
 	var stdout, stderr bytes.Buffer

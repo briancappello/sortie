@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/logging"
@@ -161,6 +162,39 @@ func resolveServerHost(hostFlag string, hostFlagSet bool, serverSection map[stri
 		return "", fmt.Errorf("invalid server.host value %q: not a valid IP address", hostStr)
 	}
 	return hostStr, nil
+}
+
+// controlTokenSetting names the server setting that holds the token
+// every state-changing HTTP endpoint requires.
+const controlTokenSetting = "server.control_token"
+
+// resolveControlToken returns server.control_token from the server
+// extension section, whose $VAR references the configuration load has
+// already resolved and whose value it has already registered for
+// masking. An absent or blank value returns the empty string.
+func resolveControlToken(serverSection map[string]any) (string, error) {
+	raw, exists := serverSection["control_token"]
+	if !exists || raw == nil {
+		return "", nil
+	}
+	token, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("invalid %s value: unsupported type %T, must be a string", controlTokenSetting, raw)
+	}
+	return strings.TrimSpace(token), nil
+}
+
+// checkControlBinding refuses a non-loopback bind address without a
+// control token, because every state-changing endpoint would then be
+// open to the network.
+func checkControlBinding(host, controlToken string) error {
+	if controlToken != "" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("server.host %q is not a loopback address and %s is not set; set %s or bind to 127.0.0.1", host, controlTokenSetting, controlTokenSetting)
 }
 
 // serverBaseURL returns the base URL a local client uses to reach the
