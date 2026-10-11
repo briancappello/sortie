@@ -140,6 +140,15 @@ type Params struct {
 	// rates for cost estimation on the dashboard. When nil or empty,
 	// the dashboard shows raw token counts without cost estimates.
 	TokenRates TokenRates
+
+	// ControlToken is the bearer token every state-changing endpoint
+	// requires. When empty, those endpoints accept a request that
+	// presents no token; startup permits that only on a loopback bind.
+	ControlToken string
+
+	// SessionTokenFn resolves a session token to the issue its running
+	// session serves. When nil, no session token is accepted.
+	SessionTokenFn SessionTokenFunc
 }
 
 // Server is the embedded HTTP server for JSON API, dashboard, and
@@ -162,6 +171,8 @@ type Server struct {
 	workflowLoadedFn func() bool
 	runHistoryFn     RunHistoryFunc
 	tokenRates       TokenRates
+	controlToken     string
+	sessionTokenFn   SessionTokenFunc
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -207,6 +218,8 @@ func New(params Params) *Server {
 		workflowLoadedFn: params.WorkflowLoadedFn,
 		runHistoryFn:     params.RunHistoryFn,
 		tokenRates:       params.TokenRates,
+		controlToken:     params.ControlToken,
+		sessionTokenFn:   params.SessionTokenFn,
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -223,7 +236,7 @@ func New(params Params) *Server {
 	// 405 responses use JSON error envelopes instead of the default
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
-	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
+	mux.HandleFunc("/api/v1/refresh", s.requireControl(scopeOperator, s.routeRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 
 	if params.MetricsRegistry != nil {
