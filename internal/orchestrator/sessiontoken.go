@@ -12,12 +12,18 @@ import (
 // sessionTokenBytes is the entropy of a session token.
 const sessionTokenBytes = 32
 
-// mintSessionToken returns a fresh random session token, base64url
-// encoded without padding.
+// sessionTokenPrefix starts every session token. Masking a cut text
+// drops a trailing fragment that begins a registered value, so a fixed
+// first byte that text rarely ends with keeps live tokens from trimming
+// unrelated truncated text.
+const sessionTokenPrefix = "_"
+
+// mintSessionToken returns a fresh random session token: the prefix
+// followed by 32 random bytes, base64url encoded without padding.
 func mintSessionToken() string {
 	buf := make([]byte, sessionTokenBytes)
 	_, _ = rand.Read(buf) // crypto/rand.Read never returns an error
-	return base64.RawURLEncoding.EncodeToString(buf)
+	return sessionTokenPrefix + base64.RawURLEncoding.EncodeToString(buf)
 }
 
 // SessionTokenIndex maps each live session token to the issue whose

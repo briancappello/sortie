@@ -238,3 +238,25 @@ func TestDispatchIssue_SessionTokenIsIndexedAndMasked(t *testing.T) {
 		t.Errorf("logged status statement carries the session token: %s", buf.String())
 	}
 }
+
+// TestSessionToken_DoesNotTrimTruncatedText guards against a live token
+// trimming unrelated truncated text: masking a cut text drops a trailing
+// fragment that begins a registered value, so a token must not begin
+// with a byte such text commonly ends with.
+func TestSessionToken_DoesNotTrimTruncatedText(t *testing.T) {
+	t.Parallel()
+
+	index := NewSessionTokenIndex()
+	token := mintSessionToken()
+	index.register(token, "id-trim", "TRIM-1")
+	defer index.revoke(token)
+
+	if !strings.HasPrefix(token, sessionTokenPrefix) || len(token) < 1+43 {
+		t.Fatalf("token %q, want the prefix and 32 base64url-encoded bytes", token)
+	}
+	first := len(sessionTokenPrefix)
+	text := "cut text ending in the token's first random character " + token[first:first+1]
+	if got := redact.MaskTruncated(text); got != text {
+		t.Errorf("MaskTruncated(%q) = %q with a live session token, want it unchanged", text, got)
+	}
+}
