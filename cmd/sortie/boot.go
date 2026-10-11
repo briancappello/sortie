@@ -265,6 +265,9 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		return bootResult{}, 1
 	}
 	redact.Add(controlTokenSetting, controlToken)
+	if removed := unsetControlTokenEnv(controlToken); len(removed) > 0 {
+		logger.Info("control token removed from the environment agents inherit", slog.Any("names", removed))
+	}
 
 	trackerCtor, err := registry.Trackers.Get(cfg.Tracker.Kind)
 	if err != nil {

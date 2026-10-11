@@ -144,3 +144,25 @@ func TestRunNonLoopbackHostWithControlTokenStarts(t *testing.T) {
 		t.Errorf("stderr carries the control token unmasked: %s", stderr.String())
 	}
 }
+
+func TestUnsetControlTokenEnv(t *testing.T) {
+	// Not parallel: t.Setenv.
+	const token = "control-token-in-env-0a9c"
+	t.Setenv("SORTIE_TEST_CONTROL_TOKEN_A", token)
+	t.Setenv("SORTIE_TEST_UNRELATED", "unrelated-value")
+
+	removed := unsetControlTokenEnv(token)
+
+	if _, ok := os.LookupEnv("SORTIE_TEST_CONTROL_TOKEN_A"); ok {
+		t.Error("variable holding the control token is still set")
+	}
+	if os.Getenv("SORTIE_TEST_UNRELATED") != "unrelated-value" {
+		t.Error("unrelated variable was changed")
+	}
+	if len(removed) != 1 || removed[0] != "SORTIE_TEST_CONTROL_TOKEN_A" {
+		t.Errorf("removed = %v, want [SORTIE_TEST_CONTROL_TOKEN_A]", removed)
+	}
+	if got := unsetControlTokenEnv(""); got != nil {
+		t.Errorf("unsetControlTokenEnv(\"\") = %v, want nil", got)
+	}
+}

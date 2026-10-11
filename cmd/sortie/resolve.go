@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -195,6 +196,27 @@ func checkControlBinding(host, controlToken string) error {
 		return nil
 	}
 	return fmt.Errorf("server.host %q is not a loopback address and %s is not set; set %s or bind to 127.0.0.1", host, controlTokenSetting, controlTokenSetting)
+}
+
+// unsetControlTokenEnv removes from the process environment every
+// variable whose value is the control token, so no agent, hook, or tool
+// server Sortie starts inherits it, and returns the names it removed.
+// The token itself was read when the configuration loaded.
+func unsetControlTokenEnv(controlToken string) []string {
+	if controlToken == "" {
+		return nil
+	}
+	var removed []string
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || name == "" || strings.TrimSpace(value) != controlToken {
+			continue
+		}
+		if err := os.Unsetenv(name); err == nil {
+			removed = append(removed, name)
+		}
+	}
+	return removed
 }
 
 // serverBaseURL returns the base URL a local client uses to reach the
