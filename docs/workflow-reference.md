@@ -1902,6 +1902,8 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, aggregate token/runtime totals, rate limits). |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier. Returns 404 for unknown issues. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Requires the control token when one is set; a session token receives 403. |
+| POST   | `/api/v1/{identifier}/hold`    | Hold the issue's running worker: pause its stall and turn clocks while a person works in its session. Optional body `{"reason": "...", "holder": "..."}`. 200 with the held state, 409 when the issue has no running worker, 404 when the identifier is unknown. Holding a held run keeps its original start. Control token or the issue's own session token. |
+| POST   | `/api/v1/{identifier}/release` | End the issue's hold. 200 with the hold state, also when the run was not held (nothing changes); 409 and 404 as for hold. Control token or the issue's own session token. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
 All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints). Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
@@ -1997,7 +1999,12 @@ Returns the system-wide runtime state including running sessions, retry queue, a
       "usage_arrival": "incremental",
       "usage_attribution": "per_model",
       "tokens_pending": false,
-      "api_requests_measured": true
+      "api_requests_measured": true,
+      "held": false,
+      "hold_reason": "",
+      "holder": "",
+      "held_since": null,
+      "held_total_ms": 0
     }
   ],
   "retrying": [
@@ -2057,6 +2064,11 @@ Returns the system-wide runtime state including running sessions, retry queue, a
 | `usage_attribution`  | string            | The session's kind's declared usage-reporting attribution, frozen at dispatch: `per_model`, `session_total`, `none`, or `""` when undeclared. |
 | `tokens_pending`     | boolean           | True only when `usage_arrival` is `turn_end`, the session is measured, and the turn that figure would settle for is still in flight.      |
 | `api_requests_measured` | boolean        | True when `api_request_count` is a measurement of model API requests: `usage_arrival` is `incremental` and either a figure has arrived or no turn has begun. False for every other arrival, and for an `incremental` session past its first turn that has reported nothing. |
+| `held`               | boolean           | True while a caller holds the run through `POST /api/v1/{identifier}/hold`. |
+| `hold_reason`        | string            | The reason the current hold was given; empty when not held. |
+| `holder`             | string            | Who holds the run, as the hold request named it (for example `acp-broker`); empty when not held. |
+| `held_since`         | string or `null`  | When the current hold began (RFC 3339, UTC); `null` when not held. |
+| `held_total_ms`      | integer           | Time the run has spent held so far, in milliseconds, the current hold included. Recorded in run history as `held_ms` when the run ends. |
 
 **Aggregate totals:**
 
@@ -2166,6 +2178,28 @@ HTTP/1.1 401 Unauthorized
 {"error": {"code": "unauthorized", "message": "a bearer token is required"}}
 ```
 
+#### `POST /api/v1/{identifier}/hold` and `/release` — Held Runs
+
+A hold tells Sortie that a person is working in an issue's running session, typically through an ACP broker that took the session over. While a run is held:
+
+- Stall detection skips it, however long its agent stays silent. When the hold ends, the stall clock restarts from the release, so the run counts as stalled no earlier than the release plus `agent.stall_timeout_ms`.
+- Its current turn is not ended for `agent.turn_timeout_ms`. The turn's deadline moves out by the time the turn spent held, so a 30-minute turn held for 10 minutes ends for timeout no earlier than 40 minutes after it began.
+- Tracker reconciliation and the `agent.max_tokens` ceiling still apply. An issue that turns terminal or leaves the active states is stopped as an unheld one is, and its hold ends.
+
+A hold ends on release, when reconciliation stops the run, or when its worker exits for any reason; the run's total held time is stored in run history as `held_ms`. Holds live in memory and do not survive a restart, as running workers do not. There is no time limit on a hold: watch `sortie_runs_held` and `held_since` to alert on a forgotten one.
+
+```http
+POST /api/v1/LIVE-1/hold
+Authorization: Bearer <token>
+
+{"reason": "human takeover", "holder": "acp-broker"}
+
+HTTP/1.1 200 OK
+{"issue_identifier": "LIVE-1", "issue_id": "10001", "held": true, "hold_reason": "human takeover", "holder": "acp-broker", "held_since": "2026-10-11T10:00:00Z", "held_total_ms": 0}
+```
+
+`release` takes no body and answers with the same shape, `held` false and `held_since` null. Error responses use the standard envelope with codes `issue_not_found` (404), `issue_not_running` (409), `invalid_request` (400, a malformed body), and `orchestrator_unavailable` (503, during shutdown).
+
 **Kubernetes probe configuration.** Sortie's graceful shutdown cancels running agents before closing the HTTP listener. Configure `terminationGracePeriodSeconds` and liveness probe tolerance to exceed the expected drain duration (default: 30 seconds):
 
 ```yaml
@@ -2215,6 +2249,8 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_ssh_host_usage`                         | Gauge     | `host`                      | Current session count per SSH host.                            |
 | `sortie_budget_exhaustions_total`               | Counter   | `reason`                    | Issue entries into the per-issue budget-exhausted set (`token_budget`, `session_budget`). |
 | `sortie_budget_exhausted_issues`                | Gauge     | `reason`                    | Issues currently held out of dispatch by a per-issue budget ceiling.                     |
+| `sortie_runs_held`                              | Gauge     | —                           | Running issues currently held through the hold endpoint.                                  |
+| `sortie_hold_seconds_total`                     | Counter   | `rule`                      | Seconds runs spent held, by dispatch rule (`<none>` when no rule), added as each hold ends. |
 
 Example scrape:
 
