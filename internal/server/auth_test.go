@@ -20,6 +20,7 @@ type authHarness struct {
 	ts        *httptest.Server
 	srv       *Server
 	refreshes atomic.Int64
+	controls  atomic.Int64
 }
 
 func newAuthHarness(t *testing.T, controlToken string, sessions map[string]string) *authHarness {
@@ -34,6 +35,14 @@ func newAuthHarness(t *testing.T, controlToken string, sessions map[string]strin
 		SessionTokenFn: func(token string) (string, bool) {
 			identifier, ok := sessions[token]
 			return identifier, ok
+		},
+		HoldFn: func(identifier, _, _ string) orchestrator.ControlReply {
+			h.controls.Add(1)
+			return orchestrator.ControlReply{Outcome: orchestrator.ControlDone, Hold: orchestrator.HoldState{Identifier: identifier, Held: true}}
+		},
+		ReleaseFn: func(identifier string) orchestrator.ControlReply {
+			h.controls.Add(1)
+			return orchestrator.ControlReply{Outcome: orchestrator.ControlDone, Hold: orchestrator.HoldState{Identifier: identifier}}
 		},
 	})
 	h.ts = httptest.NewServer(h.srv.Mux())
@@ -105,33 +114,14 @@ func TestReadOnlyRoutes_NeedNoToken(t *testing.T) {
 }
 
 const (
-	tokenLive1  = "session-token-for-live-1-aaaa"
-	tokenLive2  = "session-token-for-live-2-bbbb"
-	tokenEnded  = "session-token-of-an-ended-run"
-	stubSuccess = http.StatusTeapot
+	tokenLive1 = "session-token-for-live-1-aaaa"
+	tokenLive2 = "session-token-for-live-2-bbbb"
+	tokenEnded = "session-token-of-an-ended-run"
 )
 
 // sessionScopedRoutes lists the routes a session token may call for its
 // own issue, as a path format taking the issue identifier.
-var sessionScopedRoutes = []string{"/api/v1/%s/stub-session-route"}
-
-// registerSessionStubs mounts a stub handler behind the session scope
-// for every route in sessionScopedRoutes that the server does not serve
-// itself, and returns a counter of the requests that reached a handler.
-func registerSessionStubs(h *authHarness) *atomic.Int64 {
-	var reached atomic.Int64
-	for _, route := range sessionScopedRoutes {
-		if !strings.Contains(route, "stub-") {
-			continue
-		}
-		pattern := "POST " + strings.Replace(route, "%s", "{identifier}", 1)
-		h.srv.Mux().HandleFunc(pattern, h.srv.requireControl(scopeSession, func(w http.ResponseWriter, _ *http.Request) {
-			reached.Add(1)
-			w.WriteHeader(stubSuccess)
-		}))
-	}
-	return &reached
-}
+var sessionScopedRoutes = []string{"/api/v1/%s/hold", "/api/v1/%s/release"}
 
 func TestSessionToken_Scope(t *testing.T) {
 	t.Parallel()
@@ -145,7 +135,7 @@ func TestSessionToken_Scope(t *testing.T) {
 				token      string
 				wantStatus int
 			}{
-				{"own issue", "LIVE-1", tokenLive1, stubSuccess},
+				{"own issue", "LIVE-1", tokenLive1, http.StatusOK},
 				{"another issue", "LIVE-2", tokenLive1, http.StatusForbidden},
 				{"unknown token", "LIVE-1", "not-a-session-token", http.StatusUnauthorized},
 				{"token of an ended run", "LIVE-1", tokenEnded, http.StatusUnauthorized},
@@ -155,13 +145,12 @@ func TestSessionToken_Scope(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
 					h := newAuthHarness(t, controlToken, sessions)
-					reached := registerSessionStubs(h)
 					status := h.do(t, http.MethodPost, fmt.Sprintf(route, tt.issue), "Bearer "+tt.token)
 					if status != tt.wantStatus {
 						t.Fatalf("POST %s status = %d, want %d", fmt.Sprintf(route, tt.issue), status, tt.wantStatus)
 					}
-					if tt.wantStatus != stubSuccess && reached.Load() != 0 {
-						t.Errorf("a rejected request reached the handler")
+					if tt.wantStatus != http.StatusOK && h.controls.Load() != 0 {
+						t.Errorf("a rejected request reached the orchestrator")
 					}
 				})
 			}
@@ -187,7 +176,6 @@ func TestSessionToken_ControlTokenAcceptedOnSessionRoutes(t *testing.T) {
 	t.Parallel()
 
 	h := newAuthHarness(t, testControlToken, nil)
-	registerSessionStubs(h)
 	for _, route := range sessionScopedRoutes {
 		if status := h.do(t, http.MethodPost, fmt.Sprintf(route, "ANY-1"), "Bearer "+testControlToken); status == http.StatusUnauthorized || status == http.StatusForbidden {
 			t.Errorf("POST %s with the control token status = %d, want it accepted", route, status)

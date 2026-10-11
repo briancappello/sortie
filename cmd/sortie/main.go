@@ -884,6 +884,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			TokenRates:       tokenRates,
 			ControlToken:     br.controlToken,
 			SessionTokenFn:   o.SessionTokenFunc(),
+			HoldFn:           server.HoldFunc(o.HoldFunc()),
+			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
 				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
 				if err != nil {

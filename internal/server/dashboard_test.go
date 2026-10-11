@@ -3023,3 +3023,25 @@ func TestHandleDashboard_RunningPanelShowsRuleAndConfiguredSettings(t *testing.T
 		})
 	}
 }
+
+func TestDashboard_MarksHeldRuns(t *testing.T) {
+	t.Parallel()
+
+	since := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
+	snap := orchestrator.RuntimeSnapshotResult{
+		GeneratedAt: since.Add(90 * time.Second),
+		Running: []orchestrator.SnapshotRunningEntry{
+			{IssueID: "id-1", Identifier: "LIVE-1", StartedAt: since, Held: true, HoldReason: "human takeover", Holder: "acp-broker", HeldSince: since},
+			{IssueID: "id-2", Identifier: "LIVE-2", StartedAt: since},
+		},
+	}
+	ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
+	body := getDashboard(t, ts, "/").Body
+
+	if strings.Count(body, `class="held-badge"`) != 1 {
+		t.Errorf("dashboard held badges = %d, want exactly one for LIVE-1", strings.Count(body, `class="held-badge"`))
+	}
+	if !strings.Contains(body, "by acp-broker: human takeover") {
+		t.Error("dashboard does not describe the hold's holder and reason")
+	}
+}

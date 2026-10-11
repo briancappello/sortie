@@ -149,6 +149,12 @@ type Params struct {
 	// SessionTokenFn resolves a session token to the issue its running
 	// session serves. When nil, no session token is accepted.
 	SessionTokenFn SessionTokenFunc
+
+	// HoldFn and ReleaseFn hold and release a running issue. Called on
+	// POST /api/v1/{identifier}/hold and /release. When nil, those
+	// routes answer 503.
+	HoldFn    HoldFunc
+	ReleaseFn ReleaseFunc
 }
 
 // Server is the embedded HTTP server for JSON API, dashboard, and
@@ -173,6 +179,8 @@ type Server struct {
 	tokenRates       TokenRates
 	controlToken     string
 	sessionTokenFn   SessionTokenFunc
+	holdFn           HoldFunc
+	releaseFn        ReleaseFunc
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -220,6 +228,8 @@ func New(params Params) *Server {
 		tokenRates:       params.TokenRates,
 		controlToken:     params.ControlToken,
 		sessionTokenFn:   params.SessionTokenFn,
+		holdFn:           params.HoldFn,
+		releaseFn:        params.ReleaseFn,
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -236,8 +246,10 @@ func New(params Params) *Server {
 	// 405 responses use JSON error envelopes instead of the default
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
-	mux.HandleFunc("/api/v1/refresh", s.requireControl(scopeOperator, s.routeRefresh))
+	mux.HandleFunc("/api/v1/refresh", s.controlRoute(scopeOperator, s.handleRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
+	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
+	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
 
 	if params.MetricsRegistry != nil {
 		mux.Handle("GET /metrics", promhttp.InstrumentMetricHandler(
