@@ -222,6 +222,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"chain_id", "TEXT", true, 0},
 				{"stage_target", "TEXT", true, 0},
 				{"stage_result", "TEXT", true, 0},
+				{"held_ms", "INTEGER", true, 0},
 			},
 		},
 		{
@@ -894,5 +895,38 @@ func TestMigrate_Migration018_NoAgentTotalsRow(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("aggregate_metrics row count for key 'agent_totals' = %d, want 0 (no row existed to backfill)", count)
+	}
+}
+
+func TestMigrate_Migration025_HeldMSDefaultsToZero(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateToVersion(t, s, 24)
+	insertBareRun(t, s, "rh-pre025")
+
+	migrateOrFatal(t, s)
+
+	var held int64
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT held_ms FROM run_history WHERE issue_id = 'rh-pre025'`,
+	).Scan(&held); err != nil || held != 0 {
+		t.Errorf("held_ms for a pre-migration-025 row = %d, %v, want 0, nil", held, err)
+	}
+
+	run, err := s.AppendRunHistory(context.Background(), RunHistory{
+		IssueID: "rh-held", Identifier: "MT-2", Attempt: 1, AgentAdapter: "mock", Workspace: "/tmp",
+		StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:01:00Z", Status: "succeeded", HeldMS: 90000,
+	})
+	if err != nil {
+		t.Fatalf("AppendRunHistory: %v", err)
+	}
+	rows, err := s.QueryRunHistoryByIssue(context.Background(), run.IssueID)
+	if err != nil || len(rows) != 1 || rows[0].HeldMS != 90000 {
+		t.Errorf("QueryRunHistoryByIssue(rh-held) = %+v, %v, want one row with HeldMS 90000", rows, err)
+	}
+	recent, err := s.QueryRecentRunHistory(context.Background(), 1, 0)
+	if err != nil || len(recent) != 1 || recent[0].HeldMS != 90000 {
+		t.Errorf("QueryRecentRunHistory(1) = %+v, %v, want HeldMS 90000", recent, err)
 	}
 }
