@@ -31,9 +31,10 @@ const (
 // knows before the worker starts and the worker cannot read from the
 // running entry without racing the event loop.
 type sessionIdentity struct {
-	RuleName string
-	ChainID  string
-	Token    string
+	RuleName  string
+	ChainID   string
+	Token     string
+	TurnClock *turnClock
 }
 
 type sessionIdentityCtxKey struct{}

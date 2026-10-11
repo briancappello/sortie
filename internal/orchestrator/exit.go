@@ -197,6 +197,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	}
 	delete(state.Running, workerResult.IssueID)
 	state.SessionTokens.revoke(entry.SessionToken)
+	endHoldRecorded(entry, time.Now().UTC(), metrics)
 	if entry.CancelFunc != nil {
 		entry.CancelFunc()
 	}
@@ -421,6 +422,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		StagePrevious:        entry.StageLineage.PreviousRule,
 		StagePreviousOutcome: entry.StageLineage.PreviousOutcome,
 		ChainID:              entry.StageLineage.ChainID,
+
+		HeldMS: entry.HeldTotal.Milliseconds(),
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker

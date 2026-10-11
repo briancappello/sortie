@@ -719,8 +719,10 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 
 	sessionToken := mintSessionToken()
 	state.SessionTokens.register(sessionToken, issue.ID, issue.Identifier)
+	clock := newTurnClock()
 	identity := sessionIdentityFrom(workerCtx)
 	identity.Token = sessionToken
+	identity.TurnClock = clock
 	workerCtx = withSessionIdentity(workerCtx, identity)
 
 	state.Claimed[issue.ID] = struct{}{}
@@ -730,6 +732,7 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 		Issue:                  issue,
 		DispatchID:             dispatchID,
 		SessionToken:           sessionToken,
+		TurnClock:              clock,
 		RetryAttempt:           attemptCopy,
 		StartedAt:              time.Now().UTC(),
 		CancelFunc:             cancelFn,

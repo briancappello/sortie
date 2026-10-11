@@ -370,11 +370,19 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 	stallThreshold := int64(params.StallTimeoutMS)
 
 	for issueID, entry := range state.Running {
+		// A held run is silent because a person is working in it.
+		if !entry.HeldSince.IsZero() {
+			continue
+		}
+
 		entryLog := logging.WithIssue(log, issueID, entry.Identifier)
 
 		refTime := entry.StartedAt
 		if !entry.LastAgentTimestamp.IsZero() {
 			refTime = entry.LastAgentTimestamp
+		}
+		if entry.HoldReleasedAt.After(refTime) {
+			refTime = entry.HoldReleasedAt
 		}
 
 		elapsedMS := now.Sub(refTime).Milliseconds()
@@ -643,6 +651,7 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 				if entry.CancelFunc != nil {
 					entry.CancelFunc()
 				}
+				endHoldRecorded(entry, time.Now().UTC(), metrics)
 				counts = releaseIssueRuntimeState(ctx, state, params.Store, issueID, entryLog)
 				entry.PendingCleanup = true
 				entry.ObservedTerminalState = stateName
@@ -702,6 +711,7 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 		if entry.CancelFunc != nil {
 			entry.CancelFunc()
 		}
+		endHoldRecorded(entry, time.Now().UTC(), metrics)
 		if incumbent := retrySlotIncumbent(state, issueID); incumbent != nil {
 			// Skipping only one of CancelRetry or DeleteRetryEntry would
 			// leave the in-memory entry and the persisted row disagreeing,

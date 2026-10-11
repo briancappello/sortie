@@ -242,6 +242,7 @@ type Orchestrator struct {
 	turnStartedCh chan turnStartedMsg
 	snapshotCh    chan snapshotRequest
 	refreshCh     chan struct{}
+	controlCh     chan controlRequest
 
 	preflightParams PreflightParams
 	observers       []Observer
@@ -397,6 +398,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		turnStartedCh:                     make(chan turnStartedMsg, eventBuf),
 		snapshotCh:                        make(chan snapshotRequest, 4),
 		refreshCh:                         make(chan struct{}, 1),
+		controlCh:                         make(chan controlRequest, 4),
 		preflightParams:                   params.PreflightParams,
 		observers:                         observers,
 		toolRegistry:                      params.ToolRegistry,
@@ -639,6 +641,9 @@ func (o *Orchestrator) Run(ctx context.Context) {
 
 		case <-o.refreshCh:
 			o.handleTick(ctx)
+
+		case req := <-o.controlCh:
+			req.ReplyCh <- o.handleControl(req)
 		}
 	}
 }
@@ -651,6 +656,7 @@ func (o *Orchestrator) updateGauges(now time.Time) {
 	o.metrics.SetRetryingSessions(len(o.state.RetryAttempts))
 	o.metrics.SetAvailableSlots(GlobalAvailableSlots(o.state.MaxConcurrentAgents, len(o.state.Running)))
 	o.metrics.SetActiveSessionsElapsed(ActiveElapsedSeconds(o.state, now))
+	o.metrics.SetHeldRuns(heldRuns(o.state))
 
 	// Emit from the full usage map so hosts removed by reload but still
 	// holding in-flight workers decrement to zero on exit rather than
@@ -1635,6 +1641,9 @@ func (o *Orchestrator) drainRunningWorkers() {
 			// Discard refresh signals during drain; the event loop is no
 			// longer accepting new work.
 
+		case req := <-o.controlCh:
+			req.ReplyCh <- ControlReply{Outcome: ControlUnavailable, Message: "shutting down"}
+
 		case <-deadline.C:
 			o.logger.Warn("drain timeout exceeded, abandoning workers",
 				slog.Int("remaining", len(o.state.Running)),
@@ -1770,4 +1779,58 @@ func (o *Orchestrator) RefreshFunc() func() bool {
 // minted for. Safe to call from any goroutine.
 func (o *Orchestrator) SessionTokenFunc() func(token string) (string, bool) {
 	return o.state.SessionTokens.Lookup
+}
+
+// handleControl applies one control request on the event loop.
+func (o *Orchestrator) handleControl(req controlRequest) ControlReply {
+	now := time.Now().UTC()
+	var reply ControlReply
+	switch req.Kind {
+	case controlHold:
+		reply = applyHold(o.state, req.Identifier, req.Reason, req.Holder, now, o.logger)
+	case controlRelease:
+		reply = applyRelease(o.state, req.Identifier, now, o.metrics, o.logger)
+	default:
+		reply = ControlReply{Outcome: ControlInvalid, Message: "unknown control request"}
+	}
+	o.updateGauges(now)
+	o.notifyObservers()
+	return reply
+}
+
+// sendControl delivers req to the event loop and waits for its reply,
+// each step bounded by controlReplyBound.
+func (o *Orchestrator) sendControl(req controlRequest) ControlReply {
+	if o.draining.Load() {
+		return ControlReply{Outcome: ControlUnavailable, Message: "shutting down"}
+	}
+	req.ReplyCh = make(chan ControlReply, 1)
+	select {
+	case o.controlCh <- req:
+	case <-time.After(controlReplyBound):
+		return ControlReply{Outcome: ControlUnavailable, Message: "the orchestrator did not accept the request in time"}
+	}
+	select {
+	case reply := <-req.ReplyCh:
+		return reply
+	case <-time.After(controlReplyBound):
+		return ControlReply{Outcome: ControlUnavailable, Message: "the orchestrator did not answer in time"}
+	}
+}
+
+// HoldFunc returns the function the HTTP server calls to hold the
+// running issue named by identifier. Safe to call from any goroutine.
+func (o *Orchestrator) HoldFunc() func(identifier, reason, holder string) ControlReply {
+	return func(identifier, reason, holder string) ControlReply {
+		return o.sendControl(controlRequest{Kind: controlHold, Identifier: identifier, Reason: reason, Holder: holder})
+	}
+}
+
+// ReleaseFunc returns the function the HTTP server calls to release the
+// hold on the running issue named by identifier. Safe to call from any
+// goroutine.
+func (o *Orchestrator) ReleaseFunc() func(identifier string) ControlReply {
+	return func(identifier string) ControlReply {
+		return o.sendControl(controlRequest{Kind: controlRelease, Identifier: identifier})
+	}
 }

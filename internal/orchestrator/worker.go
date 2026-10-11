@@ -507,7 +507,8 @@ func effectiveTurnTimeoutMS(turnTimeoutMS int) int {
 }
 
 // runBoundedTurn calls adapter.RunTurn under a deadline derived from
-// turnTimeoutMS. A parent ctx already done takes priority over the deadline,
+// turnTimeoutMS, kept by the run's turn clock so time the run spends held
+// extends it and a held run never reaches it. A parent ctx already done takes priority over the deadline,
 // so stall detection, reconciliation, and shutdown keep reporting their own
 // cancellation; only an outcome the adapter reports as cancelled, from a
 // turn context that expired while ctx stayed live, is reported as
@@ -529,8 +530,12 @@ func runBoundedTurn(
 		logger.LogAttrs(ctx, slog.LevelWarn, "non-positive turn timeout, applying default", attrs...)
 	}
 
-	turnCtx, cancel := context.WithTimeout(ctx, time.Duration(effectiveMS)*time.Millisecond)
-	defer cancel()
+	clock := sessionIdentityFrom(ctx).TurnClock
+	if clock == nil {
+		clock = newTurnClock()
+	}
+	turnCtx, endTurn := newTurnContext(ctx, clock, time.Duration(effectiveMS)*time.Millisecond)
+	defer endTurn()
 
 	result, err := adapter.RunTurn(turnCtx, session, params)
 

@@ -107,6 +107,24 @@ type RunningEntry struct {
 	// memory alone and stops working when the entry is removed.
 	SessionToken string
 
+	// HeldSince is when the current hold began; zero when the run is not
+	// held. HoldReason and Holder describe that hold. Mutated only by the
+	// event loop.
+	HeldSince  time.Time
+	HoldReason string
+	Holder     string
+
+	// HeldTotal is the time this run has spent held in holds that ended.
+	HeldTotal time.Duration
+
+	// HoldReleasedAt is when the last hold ended; stall detection measures
+	// silence from no earlier than this instant.
+	HoldReleasedAt time.Time
+
+	// TurnClock bounds the run's turns; a hold pauses it. Shared with the
+	// worker goroutine, and safe for concurrent use.
+	TurnClock *turnClock
+
 	ThreadID string
 
 	TurnID string
@@ -1103,6 +1121,15 @@ type SnapshotRunningEntry struct {
 	UsageAttribution    registry.UsageAttribution `json:"usage_attribution"`
 	TokensPending       bool                      `json:"tokens_pending"`
 	TokensAwaited       bool                      `json:"tokens_awaited"`
+
+	// Held reports a hold in effect; HoldReason, Holder, and HeldSince
+	// describe it and are empty otherwise. HeldTotal counts every hold of
+	// the run, the current one up to the snapshot included.
+	Held       bool          `json:"held"`
+	HoldReason string        `json:"hold_reason,omitempty"`
+	Holder     string        `json:"holder,omitempty"`
+	HeldSince  time.Time     `json:"held_since"`
+	HeldTotal  time.Duration `json:"held_total"`
 }
 
 // SnapshotRetryEntry is a read-only view of a pending retry, produced by
@@ -1302,6 +1329,11 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			TokensPending: entry.UsageArrival == registry.UsageArrivalTurnEnd &&
 				entry.UsageMeasured && !isTurnTerminalEvent(entry.LastAgentEvent),
 			TokensAwaited: tokensAwaited,
+			Held:          !entry.HeldSince.IsZero(),
+			HoldReason:    entry.HoldReason,
+			Holder:        entry.Holder,
+			HeldSince:     entry.HeldSince,
+			HeldTotal:     holdStateOf(entry.Issue.ID, entry, now).HeldTotal,
 		})
 
 		if !entry.StartedAt.IsZero() {

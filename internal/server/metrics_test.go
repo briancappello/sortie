@@ -137,6 +137,8 @@ func TestNewPromMetrics(t *testing.T) {
 	m.IncBudgetExhaustions("session_budget")
 	m.IncRunsStoppedByBudget("token_budget")
 	m.SetBudgetExhaustedIssues("session_budget", 1)
+	m.SetHeldRuns(0)
+	m.AddHoldSeconds("implement", 1)
 	m.IncSelfReviewIterations("pass")
 	m.IncSelfReviewSessions("pass")
 	m.ObserveSelfReviewVerificationDuration("go test ./...", 1.5)
@@ -989,4 +991,25 @@ func TestPromMetrics_MergeConflictCounters(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPromMetrics_HeldRuns(t *testing.T) {
+	t.Parallel()
+
+	m := NewPromMetrics("1.0.0", "go1.26.1")
+	m.SetHeldRuns(1)
+	m.AddHoldSeconds("implement", 60)
+	m.AddHoldSeconds("implement", 120)
+	m.AddHoldSeconds("", 5)
+
+	families := gatherFamilies(t, m)
+	if got := gaugeValue(t, families, "sortie_runs_held"); got != 1 {
+		t.Errorf("sortie_runs_held = %v, want 1", got)
+	}
+	if got := counterValue(t, families, "sortie_hold_seconds_total", map[string]string{"rule": "implement"}); got != 180 {
+		t.Errorf("sortie_hold_seconds_total{rule=implement} = %v, want 180", got)
+	}
+	if got := counterValue(t, families, "sortie_hold_seconds_total", map[string]string{"rule": "<none>"}); got != 5 {
+		t.Errorf("sortie_hold_seconds_total{rule=<none>} = %v, want 5", got)
+	}
 }
