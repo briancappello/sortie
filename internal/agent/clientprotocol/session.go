@@ -297,17 +297,11 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		}
 		state.inbox = jsonrpc.NewInbox[pumpItem]()
 
-		var cmd *exec.Cmd
-		var launch agentcore.HostLaunch
-		if target.Remote() {
-			launch, agentErr = target.RemoteLaunch(nil)
-			if agentErr != nil {
-				return domain.Session{}, agentErr
-			}
-			cmd = exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
-		} else {
-			cmd = exec.CommandContext(ctx, target.Command, target.Args...) //nolint:gosec // args are constructed programmatically
+		launch, agentErr := target.SessionLaunch(nil)
+		if agentErr != nil {
+			return domain.Session{}, agentErr
 		}
+		cmd := exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 		cmd.Env = append(os.Environ(), readerEnv...)
 		// An SSH launch carries the session variables itself; every other
 		// launch binds them, and the workspace, to the host process.

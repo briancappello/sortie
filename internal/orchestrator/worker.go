@@ -1087,6 +1087,10 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		// An environment that runs the workspace elsewhere carries the
 		// session there; the credential check below shares it.
 		Carrier: wsTarget.LaunchCarrier(),
+		// The host prefix wraps the session launch and the credential
+		// check on this host; hooks, verification, triage, and git
+		// inspection run without it.
+		HostPrefix: slices.Clone(cfg.Environment.HostPrefix),
 	}
 	verificationParams := params
 	sessionEnv.Purpose = sessionPurposeCredentialCheck

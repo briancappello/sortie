@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -224,21 +224,17 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 	cmdArgs := buildRunArgs(state, state.passthrough)
 	logger := state.loggerLocked()
 
-	var cmd *exec.Cmd
-	var launch agentcore.HostLaunch
+	var carried []sshutil.EnvVar
 	if state.target.Remote() {
 		managedEnv["OPENCODE_CONFIG_CONTENT"] = state.turnConfigContent
-		var launchErr *domain.AgentError
-		launch, launchErr = state.target.RemoteLaunch(cmdArgs, sortedEnvVars(managedEnv)...)
-		if launchErr != nil {
-			state.mu.Unlock()
-			return domain.TurnResult{}, launchErr
-		}
-		cmd = exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
-	} else {
-		allArgs := append(slices.Clone(state.target.Args), cmdArgs...)
-		cmd = exec.CommandContext(ctx, state.target.Command, allArgs...) //nolint:gosec // args are constructed programmatically
+		carried = sortedEnvVars(managedEnv)
 	}
+	launch, launchErr := state.target.SessionLaunch(cmdArgs, carried...)
+	if launchErr != nil {
+		state.mu.Unlock()
+		return domain.TurnResult{}, launchErr
+	}
+	cmd := exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	procutil.SetGroupCancel(cmd, procutil.StopGrace(state.agentConfig.StopGraceMS))
 	cmd.Env = env
 	if bindErr := state.target.BindWorkspace(cmd); bindErr != nil {

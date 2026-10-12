@@ -280,7 +280,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 		canaryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(canaryCtx, target.Command, "--version") //nolint:gosec // target.Command from LookPath
+		cmd := exec.CommandContext(canaryCtx, target.Command, "--version") //nolint:gosec // target.Command is the configured agent command
 		var combined bytes.Buffer
 		result, startErr := procutil.RunCapture(canaryCtx, cmd, stopGrace, procutil.CaptureParams{Stdout: &combined, Stderr: &combined})
 		if startErr != nil || result.WaitErr != nil {

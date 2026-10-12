@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -33,11 +34,16 @@ import (
 //
 // SSH and carrier mode are both remote ([LaunchTarget.Remote]): the agent
 // binary is not on this host. Every remote launch is built through
-// [LaunchTarget.RemoteLaunch].
+// [LaunchTarget.RemoteLaunch], and every launch of the session itself
+// through [LaunchTarget.SessionLaunch], which puts HostPrefix in front of
+// it in any mode.
 type LaunchTarget struct {
 	// Command is the resolved path to the local binary to exec.
 	// In SSH mode this is the path to the ssh binary.
-	// In local mode this is the path to the agent binary.
+	// In local mode this is the path to the agent binary, except with a
+	// HostPrefix, where it is the agent command's first word unresolved,
+	// as it would be had the prefix been written in front of the agent
+	// command.
 	// In carrier mode this is the agent command's first word, resolved
 	// inside the environment.
 	Command string
@@ -88,6 +94,12 @@ type LaunchTarget struct {
 	// environment it stands for, passed through from StartSessionParams.
 	// Nil in local and SSH mode.
 	Carrier domain.LaunchCarrier
+
+	// HostPrefix, when non-empty, is the argv [LaunchTarget.SessionLaunch]
+	// runs on this host in front of every launch of the session, passed
+	// through from StartSessionParams with element zero resolved on this
+	// host. No auxiliary command runs behind it.
+	HostPrefix []string
 }
 
 // Remote reports whether the agent binary is not on this host, so no
@@ -129,6 +141,12 @@ func (t LaunchTarget) GuestPath(hostPath string) string {
 // of CommandArgv. In carrier mode the command splits as it does locally, but
 // nothing is resolved on this host: the environment resolves it.
 //
+// A non-empty params.HostPrefix has its element zero resolved on this host
+// and becomes the target's HostPrefix. In local mode the agent command then
+// splits as it does in carrier mode and stays unresolved, so the session
+// launch is exactly the one a prefix written in front of the agent command
+// would yield: only the prefix's program is looked up.
+//
 // Adapter-specific post-resolution steps (canary version checks, auth
 // preflights) are the caller's responsibility and must run after
 // ResolveLaunchTarget returns successfully.
@@ -138,10 +156,41 @@ func ResolveLaunchTarget(params domain.StartSessionParams, defaultCommand string
 		return LaunchTarget{}, agentErr
 	}
 
+	hostPrefix, agentErr := resolveHostPrefix(params.HostPrefix)
+	if agentErr != nil {
+		return LaunchTarget{}, agentErr
+	}
+
+	target, agentErr := resolveLaunchTarget(params, absPath, defaultCommand)
+	if agentErr != nil {
+		return LaunchTarget{}, agentErr
+	}
+	target.HostPrefix = hostPrefix
+	return target, nil
+}
+
+// resolveHostPrefix returns prefix with element zero resolved on this
+// host, or nil when prefix is empty.
+func resolveHostPrefix(prefix []string) ([]string, *domain.AgentError) {
+	if len(prefix) == 0 {
+		return nil, nil
+	}
+	resolved, err := exec.LookPath(prefix[0])
+	if err != nil {
+		return nil, &domain.AgentError{
+			Kind:    domain.ErrAgentNotFound,
+			Message: fmt.Sprintf("host prefix command %q not found", prefix[0]),
+			Err:     err,
+		}
+	}
+	return append([]string{resolved}, prefix[1:]...), nil
+}
+
+func resolveLaunchTarget(params domain.StartSessionParams, absPath, defaultCommand string) (LaunchTarget, *domain.AgentError) {
 	sshHost := strings.TrimSpace(params.SSHHost)
 
-	if params.Carrier != nil {
-		return resolveCarrierLaunch(params, absPath, sshHost, defaultCommand)
+	if params.Carrier != nil || (sshHost == "" && len(params.HostPrefix) > 0) {
+		return resolveUnresolvedLaunch(params, absPath, sshHost, defaultCommand)
 	}
 
 	if argv := params.AgentConfig.CommandArgv; len(argv) > 0 {
@@ -203,10 +252,10 @@ func resolveSSHLaunch(params domain.StartSessionParams, absPath, sshHost, remote
 	}, nil
 }
 
-// resolveCarrierLaunch resolves a carrier-mode target: the agent command
-// split as a local launch splits it, with no binary resolved on this
-// host.
-func resolveCarrierLaunch(params domain.StartSessionParams, absPath, sshHost, defaultCommand string) (LaunchTarget, *domain.AgentError) {
+// resolveUnresolvedLaunch resolves a carrier-mode target, or a local one
+// behind a host prefix: the agent command split as a local launch splits
+// it, with no binary resolved on this host.
+func resolveUnresolvedLaunch(params domain.StartSessionParams, absPath, sshHost, defaultCommand string) (LaunchTarget, *domain.AgentError) {
 	if sshHost != "" {
 		return LaunchTarget{}, &domain.AgentError{
 			Kind:    domain.ErrAgentNotFound,
@@ -449,6 +498,41 @@ func (t LaunchTarget) RemoteLaunch(args []string, settings ...sshutil.EnvVar) (H
 	return HostLaunch{Path: hostArgv[0], Args: hostArgv[1:]}, nil
 }
 
+// SessionLaunch builds the host process of one launch of the agent
+// session itself, with args appended: in local mode Command with Args and
+// args, and in SSH and carrier mode what [LaunchTarget.RemoteLaunch]
+// builds from args and settings. settings applies to a remote launch
+// only, under the same contract. With a HostPrefix, the prefix runs in
+// front: Path is HostPrefix[0], and Args are the rest of the prefix
+// followed by the launch's own Path and Args, so the prefix process is
+// the one started on this host and inherits the environment the caller
+// binds to it. Every adapter launches its session, the credential check
+// included, through SessionLaunch; an auxiliary command never does.
+//
+// It fails only where [LaunchTarget.RemoteLaunch] does.
+func (t LaunchTarget) SessionLaunch(args []string, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
+	var launch HostLaunch
+	if t.Remote() {
+		var agentErr *domain.AgentError
+		launch, agentErr = t.RemoteLaunch(args, settings...)
+		if agentErr != nil {
+			return HostLaunch{}, agentErr
+		}
+	} else {
+		launch = HostLaunch{Path: t.Command, Args: append(slices.Clone(t.Args), args...)}
+	}
+	if len(t.HostPrefix) == 0 {
+		return launch, nil
+	}
+	prefixed := make([]string, 0, len(t.HostPrefix)+len(launch.Args))
+	prefixed = append(prefixed, t.HostPrefix[1:]...)
+	prefixed = append(prefixed, launch.Path)
+	prefixed = append(prefixed, launch.Args...)
+	launch.Path = t.HostPrefix[0]
+	launch.Args = prefixed
+	return launch, nil
+}
+
 // ConnectionFailed reports whether a remote launch's host process that
 // exited with exitCode failed to reach the agent rather than the agent
 // failing: OpenSSH's connection-failure status in SSH mode, and the
@@ -591,7 +675,7 @@ func isEnvEntryNamed(entry, name string) bool {
 
 // AuxiliaryCommand builds a one-shot runtime subcommand run in the
 // workspace, locally, over ssh, or through the carrier like the session
-// itself. A nil env means [BindWorkspace] supplies os.Environ() with PWD
+// itself, but never behind HostPrefix. A nil env means [BindWorkspace] supplies os.Environ() with PWD
 // replaced; stdin may be nil. Returns a non-nil [*domain.AgentError] and
 // a nil *[exec.Cmd] when the workspace path fails re-verification
 // immediately before launch, or when the carrier cannot build the

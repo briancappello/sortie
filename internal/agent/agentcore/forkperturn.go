@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -260,23 +259,17 @@ func (s *ForkPerTurnSession) RunTurn(
 	prospectiveTurn := s.turns + 1
 	cmdArgs := s.hooks.BuildArgs(prospectiveTurn, prompt)
 
-	var cmd *exec.Cmd
-	if s.target.Remote() {
-		launch, launchErr := s.target.RemoteLaunch(cmdArgs)
-		if launchErr != nil {
-			usage, measured := s.hooks.GetUsage()
-			return domain.TurnResult{
-				SessionID:     s.hooks.GetSessionID(),
-				Usage:         usage,
-				UsageMeasured: measured,
-			}, launchErr
-		}
-		cmd = exec.CommandContext(cmdCtx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
-		cmd.Stdin = launch.StdinReader()
-	} else {
-		allArgs := append(slices.Clip(s.target.Args), cmdArgs...)       //nolint:gocritic // intentional: target.Args has cap==len so append always allocates
-		cmd = exec.CommandContext(cmdCtx, s.target.Command, allArgs...) //nolint:gosec // args are constructed programmatically
+	launch, launchErr := s.target.SessionLaunch(cmdArgs)
+	if launchErr != nil {
+		usage, measured := s.hooks.GetUsage()
+		return domain.TurnResult{
+			SessionID:     s.hooks.GetSessionID(),
+			Usage:         usage,
+			UsageMeasured: measured,
+		}, launchErr
 	}
+	cmd := exec.CommandContext(cmdCtx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
+	cmd.Stdin = launch.StdinReader()
 	procutil.SetGroupCancel(cmd, s.stopGrace)
 	cmd.Env = os.Environ()
 

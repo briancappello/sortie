@@ -252,6 +252,15 @@ type StartSessionParams struct {
 	// combines with SSHHost. Nil launches the agent on this host or,
 	// with SSHHost set, over SSH.
 	Carrier LaunchCarrier
+
+	// HostPrefix, when non-empty, is the argv that runs on this host in
+	// front of every launch of the session's agent: the host process
+	// becomes HostPrefix followed by the launch it would otherwise be,
+	// whether local, over SSH, or through Carrier. HostPrefix[0] is
+	// resolved on this host. The prefix process inherits the session's
+	// full host environment, SessionEnv included. Auxiliary runtime
+	// commands, such as a version query, never run behind it.
+	HostPrefix []string
 }
 
 // LaunchCarrier carries an agent launch into an execution environment
