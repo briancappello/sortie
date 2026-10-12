@@ -178,6 +178,13 @@ func authenticateIfNeeded(ctx context.Context, state *sessionState, logger *slog
 	}
 }
 
+// runtimeWorkspace returns the workspace path as the runtime resolves it:
+// the guest workspace inside an execution environment, where the host
+// path does not exist, and the host path otherwise.
+func runtimeWorkspace(state *sessionState) string {
+	return state.target.GuestPath(state.target.WorkspacePath)
+}
+
 // startThread sends thread/start and waits for the thread/started
 // notification. Returns the thread ID and the effective model the
 // response reported, empty when the response omitted it. An empty
@@ -199,7 +206,7 @@ func startThread(ctx context.Context, state *sessionState, pt passthroughConfig,
 	}
 
 	params := map[string]any{
-		"cwd":            state.target.WorkspacePath,
+		"cwd":            runtimeWorkspace(state),
 		"approvalPolicy": approvalPolicy,
 		"sandbox":        sandbox,
 	}
@@ -308,7 +315,7 @@ func buildSandboxPolicy(state *sessionState, pt passthroughConfig) map[string]an
 
 	policy := map[string]any{
 		"type":          sandboxType,
-		"writableRoots": []string{state.target.WorkspacePath},
+		"writableRoots": []string{runtimeWorkspace(state)},
 		"networkAccess": false,
 	}
 

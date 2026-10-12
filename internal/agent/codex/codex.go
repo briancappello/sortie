@@ -736,7 +736,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 	turnParams := map[string]any{
 		"threadId": state.threadID,
 		"input":    []map[string]any{{"type": "text", "text": params.Prompt}},
-		"cwd":      state.target.WorkspacePath,
+		"cwd":      runtimeWorkspace(state),
 	}
 
 	if state.turnCount == 1 || state.passthrough.TurnSandboxPolicy != nil {
