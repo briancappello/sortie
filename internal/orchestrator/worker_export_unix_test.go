@@ -401,3 +401,50 @@ func TestRunWorkerAttempt_FailedSCMRecordFailsTheExport(t *testing.T) {
 		t.Errorf("link target holds %d entries, want it untouched", len(entries))
 	}
 }
+
+func TestRunWorkerAttempt_UpstreamBranchRepairsAMissingSCMRecord(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	env := recordingEnvironment(t)
+	target := t.TempDir()
+	linking := hostDirLinkingRepository{
+		fakeRepository: &fakeRepository{env: env, result: gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa", Pushed: true}},
+		target:         target,
+	}
+	ec := newExitCapture()
+	RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+		TrackerAdapter:         &mockTrackerAdapter{},
+		AgentAdapter:           &mockAgentAdapter{},
+		ConfigFunc:             func() config.ServiceConfig { return cfg },
+		PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+		OnEvent:                func(_ string, _ domain.AgentEvent) {},
+		OnExit:                 ec.onExit,
+		Logger:                 discardLogger(),
+		EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+			return env, nil
+		},
+		RepositoryFunc: func(config.EnvironmentConfig, string, *slog.Logger) (Repository, error) {
+			return linking, nil
+		},
+	})
+	first := ec.waitResult(t)
+	if _, ok := errors.AsType[*ExportError](first.Error); !ok {
+		t.Fatalf("first run error = %v, want the failed record write", first.Error)
+	}
+	if err := os.Remove(filepath.Join(first.WorkspacePath, workspacekit.HostDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The retry finds the pushed branch upstream with nothing to push,
+	// and records it.
+	repo := &fakeRepository{env: env, result: gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa", UpToDate: true}}
+	start := time.Now().Add(-time.Second).Truncate(time.Second)
+	result, _ := runExportWorker(t, context.Background(), cfg, env, repo, nil, PostureNormal)
+	if result.ExitKind != WorkerExitNormal || result.ExportedCommit != "" {
+		t.Fatalf("result = %v, %v, exported %q; want a normal exit without a push", result.ExitKind, result.Error, result.ExportedCommit)
+	}
+	got := workspace.ReadHostSCMRecord(result.WorkspacePath, nil)
+	pushedAt, err := time.Parse(time.RFC3339, got.PushedAt)
+	if got.Branch != "sortie/TEST-1" || got.SHA != "aaa" || err != nil || pushedAt.Before(start) {
+		t.Errorf("record = %+v, want sortie/TEST-1 at aaa with a push time", got)
+	}
+}

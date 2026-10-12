@@ -33,6 +33,13 @@ type ExportResult struct {
 
 	// PushedAt is when the push completed; zero unless Pushed.
 	PushedAt time.Time
+
+	// UpToDate is true when nothing was pushed because Commit already
+	// is the tip of the upstream's issue branch, as the mirror last saw
+	// it: the work is upstream, as after an earlier push. It is false
+	// when the upstream has no issue branch, even if Commit equals the
+	// base branch.
+	UpToDate bool
 }
 
 // IncomingRef returns the mirror ref the issue branch of the workspace
@@ -58,8 +65,8 @@ func PushedRef(key string) string { return "refs/sortie/pushed/" + key }
 // upstream into the mirror. When the branch's commit equals the
 // upstream's issue branch, or the base branch while the upstream has no
 // issue branch, there is nothing to push and Export succeeds without
-// importing anything; with the upstream unreachable the mirror's last
-// state decides that. Otherwise it imports the branch into
+// importing anything, setting UpToDate in the first case; with the
+// upstream unreachable the mirror's last state decides that. Otherwise it imports the branch into
 // [IncomingRef], which must then hold a commit, and a failed upstream
 // fetch fails the export.
 //
@@ -101,8 +108,9 @@ func (s *Syncer) Export(ctx context.Context, env environment.Environment, ws env
 		return res, fmt.Errorf("lock the repository mirror: %w", err)
 	}
 	defer l.Unlock()
-	commit, needPush, err := s.importBundle(ctx, l, ws.Key, branch, bundle)
+	commit, needPush, upToDate, err := s.importBundle(ctx, l, ws.Key, branch, bundle)
 	res.Commit = commit
+	res.UpToDate = upToDate
 	if err != nil || !needPush {
 		return res, err
 	}
@@ -252,25 +260,25 @@ func (c *cappedFile) Write(p []byte) (int, error) {
 
 // importBundle checks the bundle at bundlePath, fetches the upstream,
 // and imports the bundle's branch into the incoming ref of key unless
-// there is nothing to push. It returns the branch's commit and whether
-// it must be pushed.
-func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundlePath string) (string, bool, error) {
+// there is nothing to push. It returns the branch's commit, whether it
+// must be pushed, and whether it is the upstream's issue branch tip.
+func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundlePath string) (commit string, needPush, upToDate bool, err error) {
 	heads, err := l.ListHeads(ctx, bundlePath)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	want := "refs/heads/" + branch
 	for _, h := range heads {
 		if h.Ref != want {
-			return "", false, fmt.Errorf("the exported bundle names unexpected ref %q; only %s is accepted", h.Ref, want)
+			return "", false, false, fmt.Errorf("the exported bundle names unexpected ref %q; only %s is accepted", h.Ref, want)
 		}
 	}
 	if len(heads) != 1 {
-		return "", false, fmt.Errorf("the exported bundle names %s %d times, want once", want, len(heads))
+		return "", false, false, fmt.Errorf("the exported bundle names %s %d times, want once", want, len(heads))
 	}
-	commit := heads[0].Object
+	commit = heads[0].Object
 	if !isObjectID(commit) {
-		return "", false, fmt.Errorf("the exported bundle gives %s the invalid object id %q", want, commit)
+		return "", false, false, fmt.Errorf("the exported bundle gives %s the invalid object id %q", want, commit)
 	}
 
 	fetchErr := l.FetchUpstream(ctx)
@@ -278,24 +286,24 @@ func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundl
 		s.logger.WarnContext(ctx, "upstream fetch failed; comparing the export with the mirror's last state",
 			slog.String("repository", s.mirror.displayURL()), slog.Any("error", fetchErr))
 	}
-	unchanged, err := s.matchesUpstream(ctx, l, branch, commit)
+	unchanged, upToDate, err := s.matchesUpstream(ctx, l, branch, commit)
 	if err != nil {
-		return commit, false, err
+		return commit, false, false, err
 	}
 	if unchanged {
-		return commit, false, nil
+		return commit, false, upToDate, nil
 	}
 	if fetchErr != nil {
-		return commit, false, fetchErr
+		return commit, false, false, fetchErr
 	}
 
 	incoming := IncomingRef(key)
 	previous, _, err := l.RefValue(ctx, incoming)
 	if err != nil {
-		return commit, false, err
+		return commit, false, false, err
 	}
 	if err := l.FetchBundle(ctx, bundlePath, "+"+want+":"+incoming); err != nil {
-		return commit, false, err
+		return commit, false, false, err
 	}
 	got, ok, err := l.RefValue(ctx, incoming)
 	if err == nil && (!ok || got != commit) {
@@ -309,26 +317,27 @@ func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundl
 	}
 	if err != nil {
 		if restoreErr := l.SetRef(ctx, incoming, previous); restoreErr != nil {
-			return commit, false, errors.Join(err, restoreErr)
+			return commit, false, false, errors.Join(err, restoreErr)
 		}
-		return commit, false, err
+		return commit, false, false, err
 	}
-	return commit, true, nil
+	return commit, true, false, nil
 }
 
 // matchesUpstream reports whether commit equals the mirror's issue
-// branch, or its base branch when the mirror has no issue branch.
-func (s *Syncer) matchesUpstream(ctx context.Context, l *Locked, branch, commit string) (bool, error) {
+// branch, or its base branch when the mirror has no issue branch, and
+// whether it equals the issue branch.
+func (s *Syncer) matchesUpstream(ctx context.Context, l *Locked, branch, commit string) (unchanged, branchTip bool, err error) {
 	tip, ok, err := l.Ref(ctx, branch)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if ok {
-		return tip == commit, nil
+		return tip == commit, tip == commit, nil
 	}
 	base, ok, err := l.Ref(ctx, s.repo.Base)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return ok && base == commit, nil
+	return ok && base == commit, false, nil
 }

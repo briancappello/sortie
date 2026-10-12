@@ -465,6 +465,61 @@ func TestUpdateSCMRecord(t *testing.T) {
 		}
 	})
 
+	t.Run("a branch already upstream repairs the record", func(t *testing.T) {
+		t.Parallel()
+		upToDate := func(branch, commit string) *gitsync.ExportResult {
+			return &gitsync.ExportResult{Branch: branch, Commit: commit, UpToDate: true}
+		}
+		parse := func(t *testing.T, at string) time.Time {
+			t.Helper()
+			got, err := time.Parse(time.RFC3339, at)
+			if err != nil {
+				t.Fatalf("pushed_at %q: %v", at, err)
+			}
+			return got
+		}
+
+		// No record, as after a push whose record write failed.
+		ws := t.TempDir()
+		start := time.Now().Add(-time.Second)
+		if err := updateSCMRecord(ws, scmRecordUpdate{Push: upToDate("sortie/P-1", "aaa")}, discardLogger()); err != nil {
+			t.Fatal(err)
+		}
+		got := workspace.ReadHostSCMRecord(ws, nil)
+		if got.Branch != "sortie/P-1" || got.SHA != "aaa" || got.PRNumber != 0 || parse(t, got.PushedAt).Before(start.Truncate(time.Second)) {
+			t.Errorf("record = %+v, want sortie/P-1 at aaa pushed now", got)
+		}
+
+		// A record naming that commit keeps its push time and pull request.
+		want := domain.SCMMetadata{Branch: "sortie/P-1", SHA: "aaa", PushedAt: "2026-10-12T10:00:00Z", PRNumber: 7, Owner: "org", Repo: "app"}
+		writeTrustedSCM(t, ws, want)
+		if err := updateSCMRecord(ws, scmRecordUpdate{Push: upToDate("sortie/P-1", "aaa")}, discardLogger()); err != nil {
+			t.Fatal(err)
+		}
+		if got := workspace.ReadHostSCMRecord(ws, nil); got != want {
+			t.Errorf("record = %+v, want it unchanged: %+v", got, want)
+		}
+
+		// A record naming an older commit takes the new one.
+		if err := updateSCMRecord(ws, scmRecordUpdate{Push: upToDate("sortie/P-1", "bbb")}, discardLogger()); err != nil {
+			t.Fatal(err)
+		}
+		got = workspace.ReadHostSCMRecord(ws, nil)
+		if got.SHA != "bbb" || got.PRNumber != 7 || got.PushedAt == want.PushedAt {
+			t.Errorf("record = %+v, want bbb with a new push time and the pull request kept", got)
+		}
+
+		// An export that neither pushed nor found the branch upstream
+		// changes nothing.
+		before := got
+		if err := updateSCMRecord(ws, scmRecordUpdate{Push: &gitsync.ExportResult{Branch: "sortie/P-1", Commit: "ccc"}}, discardLogger()); err != nil {
+			t.Fatal(err)
+		}
+		if got := workspace.ReadHostSCMRecord(ws, nil); got != before {
+			t.Errorf("record = %+v, want it unchanged: %+v", got, before)
+		}
+	})
+
 	t.Run("a project that is no owner/repo path fails", func(t *testing.T) {
 		t.Parallel()
 		for _, project := range []string{"", "app", "/app", "org/"} {

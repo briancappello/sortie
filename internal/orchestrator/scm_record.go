@@ -47,7 +47,8 @@ func SCMMetadataSource(cfg config.EnvironmentConfig) SCMMetadataReader {
 // scmRecordUpdate is a change to the SCM record Sortie keeps for a
 // workspace.
 type scmRecordUpdate struct {
-	// Push, when non-nil, is an export that pushed the issue branch.
+	// Push, when non-nil, is an export that pushed the issue branch or
+	// found it already upstream. Any other export changes nothing.
 	Push *gitsync.ExportResult
 
 	// PRNumber, when positive, is the pull request open for the issue
@@ -60,22 +61,34 @@ type scmRecordUpdate struct {
 }
 
 // updateSCMRecord applies u to the SCM record of the workspace at
-// workspacePath, keeping every field u does not change. A push of
-// another branch than the record names drops the record's pull request,
-// whose head is that other branch.
+// workspacePath, keeping every field u does not change, and writes it
+// unless nothing changed. A push of another branch than the record
+// names drops the record's pull request, whose head is that other
+// branch.
+//
+// An export that found the branch already upstream records its branch
+// and commit, which repairs a record a failed write left behind after
+// the push itself succeeded. Its push time is the record's own when the
+// record already names that commit, and the current time otherwise: the
+// mirror keeps no time of the earlier push, which happened at most one
+// run before.
 func updateSCMRecord(workspacePath string, u scmRecordUpdate, logger *slog.Logger) error {
-	rec := workspace.ReadHostSCMRecord(workspacePath, logger)
-	if p := u.Push; p != nil && p.Pushed {
+	before := workspace.ReadHostSCMRecord(workspacePath, logger)
+	rec := before
+	if p := u.Push; p != nil && (p.Pushed || p.UpToDate) {
 		if rec.Branch != p.Branch {
 			rec.PRNumber, rec.Owner, rec.Repo = 0, "", ""
 		}
+		keepTime := !p.Pushed && rec.Branch == p.Branch && rec.SHA == p.Commit && rec.PushedAt != ""
 		rec.Branch = p.Branch
 		rec.SHA = p.Commit
-		pushedAt := p.PushedAt
-		if pushedAt.IsZero() {
-			pushedAt = time.Now()
+		if !keepTime {
+			pushedAt := p.PushedAt
+			if pushedAt.IsZero() {
+				pushedAt = time.Now()
+			}
+			rec.PushedAt = pushedAt.UTC().Format(time.RFC3339)
 		}
-		rec.PushedAt = pushedAt.UTC().Format(time.RFC3339)
 	}
 	if u.PRNumber > 0 {
 		owner, repo, ok := splitProject(u.Project)
@@ -83,6 +96,9 @@ func updateSCMRecord(workspacePath string, u scmRecordUpdate, logger *slog.Logge
 			return fmt.Errorf("record pull request %d: repository project %q is not an owner/repo path", u.PRNumber, u.Project)
 		}
 		rec.PRNumber, rec.Owner, rec.Repo = u.PRNumber, owner, repo
+	}
+	if rec == before {
+		return nil
 	}
 	return workspace.WriteHostSCMRecord(workspacePath, rec)
 }

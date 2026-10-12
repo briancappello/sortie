@@ -67,7 +67,7 @@ func TestExport_FirstPush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Export() error = %v", err)
 	}
-	if !res.Pushed || res.Commit != head || res.PushedAt.Before(start.Add(-time.Second)) {
+	if !res.Pushed || res.Commit != head || res.PushedAt.Before(start.Add(-time.Second)) || res.UpToDate {
 		t.Errorf("Export() = %+v, want %s pushed now", res, head)
 	}
 	if got := f.upstreamBranch("sortie/ENG-70"); got != head {
@@ -82,8 +82,8 @@ func TestExport_FirstPush(t *testing.T) {
 
 	// Exporting again with nothing new pushes nothing.
 	res, err = f.export()
-	if err != nil || res.Pushed || res.Commit != head {
-		t.Errorf("second Export() = %+v, %v; want %s without a push", res, err, head)
+	if err != nil || res.Pushed || res.Commit != head || !res.UpToDate {
+		t.Errorf("second Export() = %+v, %v; want %s up to date without a push", res, err, head)
 	}
 }
 

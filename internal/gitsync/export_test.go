@@ -148,8 +148,8 @@ func TestExport_UnchangedBranchImportsNothing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Export() error = %v", err)
 		}
-		if res.Commit != f.up.git("rev-parse", "main") || res.NothingToExport || res.Pushed {
-			t.Errorf("Export() = %+v, want the base commit and no push", res)
+		if res.Commit != f.up.git("rev-parse", "main") || res.NothingToExport || res.Pushed || res.UpToDate {
+			t.Errorf("Export() = %+v, want the base commit, no push, and no upstream issue branch", res)
 		}
 		if got := f.refs(); got != refs {
 			t.Errorf("mirror refs =\n%s\nwant them unchanged:\n%s", got, refs)
@@ -169,8 +169,8 @@ func TestExport_UnchangedBranchImportsNothing(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Export() error = %v", err)
 		}
-		if res.Commit != tip || res.Pushed {
-			t.Errorf("Export() = %+v, want the upstream tip %s and no push", res, tip)
+		if res.Commit != tip || res.Pushed || !res.UpToDate {
+			t.Errorf("Export() = %+v, want the upstream tip %s up to date and no push", res, tip)
 		}
 		if got := f.refs(); got != refs {
 			t.Errorf("mirror refs =\n%s\nwant them unchanged:\n%s", got, refs)
