@@ -7,9 +7,11 @@
 // codes. The kind's host check, [CheckHost], refuses a smolvm release
 // outside [SupportedVersion].
 //
-// [Environment.Prepare] creates and starts the workspace's VM, and
-// [Environment.Command] and [Environment.LaunchArgv] run hooks, Sortie's
-// own commands, and the agent in it. Stopping, removing, and sweeping
+// [Environment.Prepare] creates and starts the workspace's VM,
+// [Environment.AfterCreate] links the guest workspace's .sortie to the
+// control directory it shares with the host, and [Environment.Command]
+// and [Environment.LaunchArgv] run hooks, Sortie's own commands, and the
+// agent in it. Stopping, removing, and sweeping
 // VMs are not implemented in this build: they fail with
 // [ErrNotImplemented], so no host workspace directory is removed while
 // its VM may still exist.
@@ -119,6 +121,8 @@ var (
 	_ environment.Environment = (*Environment)(nil)
 	_ environment.Carrier     = (*Environment)(nil)
 	_ environment.Namer       = (*Environment)(nil)
+
+	_ environment.AfterCreateFinisher = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a

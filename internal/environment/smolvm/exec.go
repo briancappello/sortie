@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
+	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
 // Command returns the host process that runs spec.Argv in the
@@ -215,4 +216,52 @@ func (e *Environment) passEnv(env []string) []string {
 		refs = append(refs, name+"="+name)
 	}
 	return refs
+}
+
+// guestControlLink returns the guest workspace entry that resolves to
+// the shared control directory once after_create has run. It is a path
+// inside the VM, never opened on the host.
+func guestControlLink() string {
+	return path.Join(GuestWorkspace, workspacekit.SortieDir)
+}
+
+// linkExistsStatus is the exit status of the link script when the entry
+// already exists.
+const linkExistsStatus = 17
+
+// linkScript returns the guest script that links link to the control
+// directory unless an entry of any type, a dangling link included,
+// already exists there, in which case it changes nothing and exits with
+// linkExistsStatus.
+func linkScript(link string) string {
+	return fmt.Sprintf(`if [ -e '%[1]s' ] || [ -L '%[1]s' ]; then exit %[3]d; fi
+exec ln -s '%[2]s' '%[1]s'`, link, GuestControlDir, linkExistsStatus)
+}
+
+// AfterCreate links /workspace/.sortie to the shared control directory
+// in the workspace's VM, once after_create has succeeded in a VM
+// created for the workspace, so the agent's control files reach the
+// host workspace's .sortie directory and Sortie's reach the agent.
+//
+// When /workspace/.sortie already exists, for example because the
+// repository after_create cloned commits one, it fails with an error
+// naming the path and leaves the entry as it is. The link lives on the
+// VM's disk, so a VM that is started again keeps it; it is not checked
+// again then, since an agent that replaces it only hides Sortie's files
+// from itself: Sortie reads and writes the host directory either way.
+func (e *Environment) AfterCreate(ctx context.Context, ws environment.Workspace) error {
+	name, err := execVMName(ws)
+	if err != nil {
+		return err
+	}
+	link := guestControlLink()
+	_, err = e.cli.Exec(ctx, name, ExecOptions{Workdir: "/"}, []string{"sh", "-c", linkScript(link)})
+	if cliErr, ok := errors.AsType[*CLIError](err); ok && cliErr.ExitCode == linkExistsStatus {
+		return fmt.Errorf("guest workspace entry %s already exists, as after_create left it (a repository may commit one); "+
+			"Sortie needs that path for its control directory and does not replace it", link)
+	}
+	if err != nil {
+		return fmt.Errorf("link %s to %s in the VM: %w", link, GuestControlDir, err)
+	}
+	return nil
 }

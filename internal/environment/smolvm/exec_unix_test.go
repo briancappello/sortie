@@ -5,6 +5,7 @@ package smolvm
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"slices"
 	"strings"
@@ -304,5 +305,43 @@ func TestRunHook_ReachesTheGuestWithTheEnvironmentKind(t *testing.T) {
 	}
 	if strings.Contains(execLine, f.ws.HostPath) {
 		t.Errorf("hook exec %q names the host workspace", execLine)
+	}
+}
+
+func TestAfterCreate_LinksTheControlDirectory(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(StateRunning)}}, nil)
+	if err := f.env.AfterCreate(context.Background(), f.ws); err != nil {
+		t.Fatalf("AfterCreate() error = %v", err)
+	}
+	want := [][]string{{"machine", "exec", "--name", "sortie-VM-1", "-w", "/", "--", "sh", "-c",
+		"if [ -e '/workspace/.sortie' ] || [ -L '/workspace/.sortie' ]; then exit 17; fi\n" +
+			"exec ln -s '/run/sortie/control' '/workspace/.sortie'"}}
+	if got := f.fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
+		t.Errorf("calls:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestAfterCreate_ExistingEntryFailsNamingIt(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{
+		Machines: []fakeMachine{managedVM1(StateRunning)},
+		Fail:     map[string]fakeFailure{"machine exec": {Exit: linkExistsStatus}},
+	}, nil)
+	err := f.env.AfterCreate(context.Background(), f.ws)
+	if err == nil || !strings.Contains(err.Error(), "/workspace/.sortie") || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("AfterCreate() error = %v, want one naming /workspace/.sortie as existing", err)
+	}
+}
+
+func TestAfterCreate_SmolvmFailureFails(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(StateStopped)}}, nil)
+	err := f.env.AfterCreate(context.Background(), f.ws)
+	if _, ok := errors.AsType[*CLIError](err); !ok || !strings.Contains(err.Error(), "/workspace/.sortie") {
+		t.Errorf("AfterCreate() error = %v, want smolvm's *CLIError naming the link", err)
 	}
 }

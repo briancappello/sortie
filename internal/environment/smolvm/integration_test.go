@@ -6,8 +6,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,6 +24,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspace"
+	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
 // integrationPack returns the pack the gated tests create VMs from:
@@ -322,4 +325,111 @@ func TestIntegration_ConnectionFailedOnRealExits(t *testing.T) {
 		t.Fatalf("Stop() error = %v", err)
 	}
 	check("stopped VM", ws, true, "true")
+}
+
+func TestIntegration_ControlDirectoryIsShared(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	key := ie.newKey("SMOLCTL")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	prepare := func() workspace.PrepareResult {
+		t.Helper()
+		res, err := workspace.Prepare(ctx, workspace.PrepareParams{
+			Root:          ie.root,
+			Identifier:    key,
+			IssueID:       "10001",
+			AfterCreate:   "test ! -e .sortie && git init -q .",
+			HookTimeoutMS: 120_000,
+			Environment:   ie.env,
+		})
+		if err != nil {
+			t.Fatalf("workspace.Prepare() error = %v", err)
+		}
+		return res
+	}
+	res := prepare()
+	if !res.CreatedNow {
+		t.Error("workspace.Prepare().CreatedNow = false, want true")
+	}
+	if target, err := ie.guest(ctx, key, "readlink /workspace/.sortie"); err != nil || strings.TrimSpace(target) != GuestControlDir {
+		t.Errorf("guest readlink /workspace/.sortie = %q, %v, want %s", target, err, GuestControlDir)
+	}
+
+	// The agent's status write reaches Sortie's host reader.
+	if _, err := ie.guest(ctx, key, "cd /workspace && printf 'blocked\\nwaiting on a credential\\n' > .sortie/status"); err != nil {
+		t.Fatalf("guest status write: %v", err)
+	}
+	status := workspace.ReadStatusFile(res.Path, slog.New(slog.DiscardHandler))
+	if status.Signal != workspace.StatusBlocked || status.Statement.Text != "waiting on a credential\n" {
+		t.Errorf("host ReadStatusFile() = %+v, want blocked with the agent's statement", status)
+	}
+
+	// A link the agent plants is refused on the host.
+	if _, err := ie.guest(ctx, key, "cd /workspace && rm .sortie/status && ln -s /etc/passwd .sortie/status"); err != nil {
+		t.Fatalf("guest link plant: %v", err)
+	}
+	if info, err := os.Lstat(filepath.Join(res.Path, ".sortie", "status")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("host .sortie/status = %v, %v, want the planted link", info, err)
+	}
+	if status := workspace.ReadStatusFile(res.Path, slog.New(slog.DiscardHandler)); status != (workspace.StatusFile{}) {
+		t.Errorf("host ReadStatusFile() through a planted link = %+v, want nothing read", status)
+	}
+	if f, err := workspacekit.OpenSortieFile(res.Path, "status"); err == nil {
+		_ = f.Close()
+		t.Error("workspacekit.OpenSortieFile() through a planted link succeeded, want a refusal")
+	} else if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("workspacekit.OpenSortieFile() error = %v, want a refusal, not absence", err)
+	}
+
+	// A later preparation reuses the VM and its link.
+	if res := prepare(); res.CreatedNow {
+		t.Error("second workspace.Prepare().CreatedNow = true, want the VM reused")
+	}
+	if target, err := ie.guest(ctx, key, "readlink /workspace/.sortie"); err != nil || strings.TrimSpace(target) != GuestControlDir {
+		t.Errorf("guest readlink /workspace/.sortie after reuse = %q, %v, want %s", target, err, GuestControlDir)
+	}
+}
+
+func TestIntegration_ExistingSortieEntryFailsPreparation(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	tests := []struct {
+		name        string
+		afterCreate string
+		check       string // a guest check that the entry is unchanged
+	}{
+		{
+			name:        "repository directory",
+			afterCreate: "mkdir .sortie && echo x > .sortie/f",
+			check:       `test -d /workspace/.sortie && test ! -L /workspace/.sortie && test "$(cat /workspace/.sortie/f)" = x && test "$(ls -A /workspace/.sortie)" = f`,
+		},
+		{
+			name:        "dangling link",
+			afterCreate: "ln -s /nonexistent .sortie",
+			check:       `test -L /workspace/.sortie && test "$(readlink /workspace/.sortie)" = /nonexistent`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := ie.newKey("SMOLDOT")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			_, err := workspace.Prepare(ctx, workspace.PrepareParams{
+				Root:          ie.root,
+				Identifier:    key,
+				IssueID:       "10001",
+				AfterCreate:   tt.afterCreate,
+				HookTimeoutMS: 120_000,
+				Environment:   ie.env,
+			})
+			if err == nil || !strings.Contains(err.Error(), "/workspace/.sortie") {
+				t.Fatalf("workspace.Prepare() error = %v, want a failure naming /workspace/.sortie", err)
+			}
+			if _, err := ie.guest(ctx, key, tt.check); err != nil {
+				t.Errorf("guest .sortie entry after the failure: %v, want it unchanged", err)
+			}
+			if _, err := os.Stat(filepath.Join(ie.root, key)); !os.IsNotExist(err) {
+				t.Errorf("host workspace after the failure: Stat error = %v, want it rolled back", err)
+			}
+		})
+	}
 }
