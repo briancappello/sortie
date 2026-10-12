@@ -87,8 +87,10 @@ func writeRecord(t *testing.T, hostPath, kind, name string) {
 	}
 }
 
-// managedVM1 is the VM Sortie created for the fixture's workspace key,
-// VM-1, in state.
+// managedVM1 is a VM labeled as managed for the fixture's workspace
+// key, VM-1, in state, without a workflow label: a machine for tests
+// that never look at its owner. [prepareFixture.ownedVM] is the
+// fixture's own VM.
 func managedVM1(state string) fakeMachine {
 	return fakeMachine{
 		Name:   "sortie-VM-1",
@@ -243,7 +245,8 @@ func TestPrepare_StartSeesSortiesEnvironment(t *testing.T) {
 func TestPrepare_RunningVMIsLeftAlone(t *testing.T) {
 	t.Parallel()
 
-	f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(StateRunning)}}, nil)
+	f := newPrepareFixture(t, fakeState{}, nil)
+	f.fake.setState(fakeState{Machines: []fakeMachine{f.ownedVM("VM-1", StateRunning)}})
 	writeRecord(t, f.ws.HostPath, "smolvm", "sortie-VM-1")
 
 	res, err := f.env.Prepare(context.Background(), f.ws)
@@ -259,7 +262,8 @@ func TestPrepare_StoppedVMIsStarted(t *testing.T) {
 	t.Parallel()
 
 	for _, state := range []string{StateStopped, StateCreated} {
-		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(state)}}, nil)
+		f := newPrepareFixture(t, fakeState{}, nil)
+		f.fake.setState(fakeState{Machines: []fakeMachine{f.ownedVM("VM-1", state)}})
 		writeRecord(t, f.ws.HostPath, "smolvm", "sortie-VM-1")
 
 		res, err := f.env.Prepare(context.Background(), f.ws)
@@ -290,7 +294,8 @@ func TestPrepare_VMPredatingTheWorkspaceIsRecreated(t *testing.T) {
 		if strings.HasSuffix(name, "running") {
 			state = StateRunning
 		}
-		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(state)}}, nil)
+		f := newPrepareFixture(t, fakeState{}, nil)
+		f.fake.setState(fakeState{Machines: []fakeMachine{f.ownedVM("VM-1", state)}})
 		record(t, f.ws.HostPath)
 
 		res, err := f.env.Prepare(context.Background(), f.ws)
@@ -322,18 +327,41 @@ func mustSymlinkRecord(t *testing.T, host string) {
 func TestPrepare_ForeignVMIsNotTouched(t *testing.T) {
 	t.Parallel()
 
-	for name, labels := range map[string]map[string]string{
-		"unlabeled":       {"owner": "someone"},
-		"other workspace": {LabelManaged: "1", LabelWorkspace: "VM-2"},
+	for name, labels := range map[string]func(f prepareFixture) map[string]string{
+		"unlabeled": func(prepareFixture) map[string]string { return map[string]string{"owner": "someone"} },
+		"other workspace": func(f prepareFixture) map[string]string {
+			return map[string]string{LabelManaged: "1", LabelWorkspace: "VM-2", LabelWorkflow: shortHash(f.workflow)}
+		},
+		"another workflow": func(prepareFixture) map[string]string {
+			return map[string]string{LabelManaged: "1", LabelWorkspace: "VM-1", LabelWorkflow: "0123456789ab"}
+		},
+		"no workflow label": func(prepareFixture) map[string]string {
+			return map[string]string{LabelManaged: "1", LabelWorkspace: "VM-1"}
+		},
+		"not managed": func(f prepareFixture) map[string]string {
+			return map[string]string{LabelWorkspace: "VM-1", LabelWorkflow: shortHash(f.workflow)}
+		},
 	} {
-		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{{Name: "sortie-VM-1", State: StateRunning, Labels: labels}}}, nil)
+		// The record names the VM or nothing: neither lets Prepare
+		// start, reuse, or replace a machine it does not own.
+		for _, withRecord := range []bool{false, true} {
+			f := newPrepareFixture(t, fakeState{}, nil)
+			f.fake.setState(fakeState{Machines: []fakeMachine{{Name: "sortie-VM-1", State: StateStopped, Labels: labels(f)}}})
+			if withRecord {
+				writeRecord(t, f.ws.HostPath, "smolvm", "sortie-VM-1")
+			}
 
-		res, err := f.env.Prepare(context.Background(), f.ws)
-		if err == nil || res.CreatedNow || !strings.Contains(err.Error(), "sortie-VM-1") {
-			t.Errorf("%s: Prepare() = %+v, %v, want an error naming the VM", name, res, err)
-		}
-		if got := f.fake.argvs(); !slices.EqualFunc(got, [][]string{listArgv}, slices.Equal[[]string]) {
-			t.Errorf("%s: calls = %q, want only the listing", name, got)
+			res, err := f.env.Prepare(context.Background(), f.ws)
+			if err == nil || res.CreatedNow || !strings.Contains(err.Error(), "sortie-VM-1") ||
+				!strings.Contains(err.Error(), "another workflow") {
+				t.Errorf("%s (record %v): Prepare() = %+v, %v, want an error naming the VM and its owner", name, withRecord, res, err)
+			}
+			if got := f.fake.argvs(); !slices.EqualFunc(got, [][]string{listArgv}, slices.Equal[[]string]) {
+				t.Errorf("%s (record %v): calls = %q, want only the listing", name, withRecord, got)
+			}
+			if m := f.fake.state().Machines; len(m) != 1 || m[0].State != StateStopped {
+				t.Errorf("%s (record %v): machines = %+v, want the machine untouched", name, withRecord, m)
+			}
 		}
 	}
 }

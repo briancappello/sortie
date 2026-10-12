@@ -214,8 +214,9 @@ func shortHash(s string) string {
 // stopped VM is started; a running one is left as it is. A VM is reused
 // only when the workspace's environment record names it: a VM that
 // predates a fresh host workspace directory is deleted and created
-// again. A VM with the workspace's name that Sortie did not label for
-// the workspace is never touched, and fails preparation. A smolvm
+// again. A VM with the workspace's name that Sortie did not label as
+// managed, for the workspace key, and for this workflow is never
+// touched, and fails preparation. A smolvm
 // failure fails preparation with a [*CLIError].
 func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (environment.PrepareResult, error) {
 	paths, err := e.preparePaths(ws)
@@ -237,9 +238,13 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 	}
 
 	if existing != nil {
-		if existing.Labels[LabelManaged] != "1" || existing.Labels[LabelWorkspace] != ws.Key {
+		// Workspace keys repeat across workflows, so a VM of the same
+		// name may be another workflow's: only this workflow's own VM is
+		// started, reused, or replaced.
+		if !e.owns(*existing, ws.Key) {
 			return environment.PrepareResult{}, fmt.Errorf(
-				"smolvm machine %q exists but is not labeled as Sortie's VM for workspace %q; remove or rename it", name, ws.Key)
+				"smolvm machine %q exists but is not this workflow's VM for workspace %q "+
+					"(it belongs to another workflow or is not managed by Sortie); remove or rename it", name, ws.Key)
 		}
 		if recordNames(ws.HostPath, name) {
 			if existing.Running() {
