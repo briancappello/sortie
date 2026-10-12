@@ -126,6 +126,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Add `chain_id`, `stage_target`, and `stage_result` to `run_history`, and `chain_id` to `retry_entries` and `stage_hops`. A run recorded before the upgrade reads back with no chain and is left out of the grouping by stage chain. ([#1258](https://github.com/sortie-ai/sortie/issues/1258))
 
+- Add `environment_image_sha256` and `exported_commit` to `run_history`, recording the pack a run's VM was created from and the commit the run pushed. A run recorded before the upgrade, and every run on the host, reads back with both empty.
+
 ## [1.26.0] - 2026-10-01
 
 ### Added
