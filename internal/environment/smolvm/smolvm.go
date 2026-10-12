@@ -11,10 +11,14 @@
 // [Environment.AfterCreate] links the guest workspace's .sortie to the
 // control directory it shares with the host, and [Environment.Command]
 // and [Environment.LaunchArgv] run hooks, Sortie's own commands, and the
-// agent in it. Stopping, removing, and sweeping
-// VMs are not implemented in this build: they fail with
-// [ErrNotImplemented], so no host workspace directory is removed while
-// its VM may still exist.
+// agent in it. [Environment.Release] stops the VM when the worker exits,
+// [Environment.Resume] starts it again for the before_remove hook,
+// [Environment.Remove] deletes it with its workspace, and
+// [Environment.Sweep] deletes the VMs whose workspace directory is gone.
+//
+// The package touches only a VM it labeled as managed, for the
+// workspace key the VM's name derives from, and for this workflow; any
+// other machine is left alone.
 package smolvm
 
 import (
@@ -38,10 +42,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
-
-// ErrNotImplemented reports an operation the smolvm kind does not
-// implement in this build.
-var ErrNotImplemented = errors.New("smolvm environment: this operation is not implemented in this build")
 
 // Paths inside the VM.
 const (
@@ -93,7 +93,10 @@ const (
 var plainVMNameKey = regexp.MustCompile(`^[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*$`)
 
 func init() {
-	environment.Registry.RegisterWithMeta(config.EnvironmentKindSmolvm, New, environment.Meta{CheckHost: CheckHost})
+	environment.Registry.RegisterWithMeta(config.EnvironmentKindSmolvm, New, environment.Meta{
+		CheckHost:       CheckHost,
+		SweepUnselected: SweepUnselected,
+	})
 }
 
 // Environment is the smolvm kind. It is safe for concurrent use across
@@ -123,6 +126,7 @@ var (
 	_ environment.Namer       = (*Environment)(nil)
 
 	_ environment.AfterCreateFinisher = (*Environment)(nil)
+	_ environment.Resumer             = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a
@@ -422,13 +426,3 @@ func (e *Environment) warnUnsetCredentials(ctx context.Context, name string) {
 		}
 	}
 }
-
-// Release fails with [ErrNotImplemented].
-func (*Environment) Release(context.Context, environment.Workspace) error { return ErrNotImplemented }
-
-// Remove fails with [ErrNotImplemented], which keeps the host workspace
-// directory, and so the record of the VM, until the VM can be removed.
-func (*Environment) Remove(context.Context, environment.Workspace) error { return ErrNotImplemented }
-
-// Sweep fails with [ErrNotImplemented].
-func (*Environment) Sweep(context.Context, environment.SweepParams) error { return ErrNotImplemented }

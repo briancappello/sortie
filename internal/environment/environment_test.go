@@ -1,7 +1,9 @@
 package environment_test
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/config"
@@ -99,6 +101,52 @@ func TestCheckHost(t *testing.T) {
 	}
 	if err := environment.CheckHost(config.EnvironmentConfig{Kind: "no-such-kind"}); err == nil {
 		t.Error("CheckHost(unregistered kind) = nil, want an error")
+	}
+}
+
+var errUnselectedSweep = errors.New("sweep failed")
+
+func TestSweepUnselected(t *testing.T) {
+	t.Parallel()
+
+	const kind = "environment-test-sweep-unselected"
+	const root = "/srv/environment-test-sweep-unselected"
+	var (
+		mu    sync.Mutex
+		calls []environment.Params
+	)
+	if !environment.Registry.Has(kind) {
+		environment.Registry.RegisterWithMeta(kind, func(environment.Params) (environment.Environment, error) {
+			return &environmenttest.Recorder{KindName: kind}, nil
+		}, environment.Meta{SweepUnselected: func(_ context.Context, params environment.Params, p environment.SweepParams) error {
+			if p.WorkspaceRoot != root {
+				return nil // another test's sweep
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, params)
+			return errUnselectedSweep
+		}})
+	}
+	p := environment.SweepParams{WorkspaceRoot: root}
+
+	params := environment.Params{Config: config.EnvironmentConfig{HostPrefix: []string{"x"}}, StateDir: "/state", WorkflowPath: "/wf/WORKFLOW.md"}
+	if err := environment.SweepUnselected(context.Background(), params, p); !errors.Is(err, errUnselectedSweep) {
+		t.Errorf("SweepUnselected(local) error = %v, want the kind's sweep error", err)
+	}
+	params.Config.Kind = kind
+	if err := environment.SweepUnselected(context.Background(), params, p); err != nil {
+		t.Errorf("SweepUnselected(%q) error = %v, want nil: the selected kind is not swept as unselected", kind, err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("sweep calls = %d, want 1: only while another kind is selected", len(calls))
+	}
+	got := calls[0]
+	if got.Config.Kind != kind || got.StateDir != "/state" || got.WorkflowPath != "/wf/WORKFLOW.md" || len(got.Config.HostPrefix) != 1 {
+		t.Errorf("sweep params = %+v, want the selected configuration with the kind changed", got)
 	}
 }
 

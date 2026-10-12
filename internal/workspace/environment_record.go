@@ -186,6 +186,32 @@ func environmentForKind(params PrepareParams, kind string) (environment.Environm
 	return nil, fmt.Errorf("no way to build environment %q", kind)
 }
 
+// removalTarget returns the target that removes the workspace at path,
+// whose before_remove hook runs in it.
+//
+// A workspace whose record names a kind other than local and other
+// than the configured one was created by that kind: forKind builds it,
+// and it removes the workspace, so switching the configured kind does
+// not orphan the instance. Every other workspace is removed by the
+// configured environment. A record naming local, or no record, never
+// moves removal to the host: the agent of a kind that runs elsewhere
+// can write or delete the record through the shared control directory.
+// A nil forKind always selects the configured environment.
+func removalTarget(configured environment.Environment, forKind func(kind string) (environment.Environment, error), key, path, issueID, identifier string) (Target, error) {
+	env := configured
+	if forKind != nil {
+		rec, state, _ := readEnvironmentRecord(path)
+		if state == recordValid && rec.Kind != config.EnvironmentKindLocal && rec.Kind != environmentKind(configured) {
+			built, err := forKind(rec.Kind)
+			if err != nil {
+				return Target{}, fmt.Errorf("remove workspace created by environment %q: %w", rec.Kind, err)
+			}
+			env = built
+		}
+	}
+	return NewTarget(env, key, path, issueID, identifier), nil
+}
+
 // ensureEnvironmentRecord writes want as the record of the workspace at
 // path unless the record already holds it.
 func ensureEnvironmentRecord(path string, want EnvironmentRecord) error {

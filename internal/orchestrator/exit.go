@@ -89,6 +89,11 @@ type HandleWorkerExitParams struct {
 	// evidence comparison run in it. Nil runs them on the host.
 	Environment environment.Environment
 
+	// EnvironmentForKind builds the environment of another kind, which
+	// removes a workspace its record names that kind as the creator of.
+	// Nil removes every workspace with Environment.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
+
 	// TrackerAdapter performs handoff transitions. Required when
 	// HandoffState is non-empty; nil is safe when it is empty.
 	TrackerAdapter domain.TrackerAdapter
@@ -255,14 +260,15 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	// worker has fully exited. Guarded on WorkspacePath being non-empty.
 	if entry.PendingCleanup && entry.WorkspacePath != "" {
 		if err := workspace.CleanupByPath(ctx, workspace.CleanupByPathParams{
-			Path:          entry.WorkspacePath,
-			Identifier:    entry.Identifier,
-			IssueID:       workerResult.IssueID,
-			Attempt:       normalizeAttempt(entry.RetryAttempt),
-			BeforeRemove:  params.BeforeRemoveHook,
-			HookTimeoutMS: params.HookTimeoutMS,
-			Logger:        log,
-			Environment:   params.Environment,
+			Path:               entry.WorkspacePath,
+			Identifier:         entry.Identifier,
+			IssueID:            workerResult.IssueID,
+			Attempt:            normalizeAttempt(entry.RetryAttempt),
+			BeforeRemove:       params.BeforeRemoveHook,
+			HookTimeoutMS:      params.HookTimeoutMS,
+			Logger:             log,
+			Environment:        params.Environment,
+			EnvironmentForKind: params.EnvironmentForKind,
 		}); err != nil {
 			log.Warn("workspace cleanup failed",
 				slog.Any("error", err),

@@ -538,6 +538,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			BeforeRemoveHook:                  cfg.Hooks.BeforeRemove,
 			HookTimeoutMS:                     cfg.Hooks.TimeoutMS,
 			Environment:                       o.environmentOrUnavailable(cfg.Environment),
+			EnvironmentForKind:                o.environments.forKind(cfg.Environment),
 			TrackerAdapter:                    o.trackerAdapter,
 			HandoffState:                      cfg.Tracker.HandoffState,
 			NoChangeState:                     cfg.Tracker.NoChangeState,
@@ -782,18 +783,28 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.SweepTickCounter++
 	if o.state.SweepTickCounter >= sweepEveryNTicks {
 		o.state.SweepTickCounter = 0
+		env := o.environmentOrUnavailable(cfg.Environment)
 		SweepWorkspaces(o.state, SweepWorkspacesParams{
-			WorkspaceRoot:    cfg.Workspace.Root,
-			TrackerAdapter:   o.trackerAdapter,
-			TerminalStates:   cfg.Tracker.TerminalStates,
-			BeforeRemoveHook: cfg.Hooks.BeforeRemove,
-			HookTimeoutMS:    cfg.Hooks.TimeoutMS,
-			Environment:      o.environmentOrUnavailable(cfg.Environment),
-			RetentionDays:    cfg.Workspace.RetentionDays,
-			Store:            o.store,
-			Ctx:              ctx,
-			Logger:           o.logger,
-			Metrics:          o.metrics,
+			WorkspaceRoot:      cfg.Workspace.Root,
+			TrackerAdapter:     o.trackerAdapter,
+			TerminalStates:     cfg.Tracker.TerminalStates,
+			BeforeRemoveHook:   cfg.Hooks.BeforeRemove,
+			HookTimeoutMS:      cfg.Hooks.TimeoutMS,
+			Environment:        env,
+			EnvironmentForKind: o.environments.forKind(cfg.Environment),
+			RetentionDays:      cfg.Workspace.RetentionDays,
+			Store:              o.store,
+			Ctx:                ctx,
+			Logger:             o.logger,
+			Metrics:            o.metrics,
+		})
+		SweepEnvironments(SweepEnvironmentsParams{
+			WorkspaceRoot:   cfg.Workspace.Root,
+			Environment:     env,
+			SweepUnselected: o.environments.sweepUnselected(cfg.Environment),
+			Running:         RunningWorkspaceKeys(o.state, o.logger),
+			Ctx:             ctx,
+			Logger:          o.logger,
 		})
 	}
 
@@ -1617,6 +1628,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				BeforeRemoveHook:                  cfg.Hooks.BeforeRemove,
 				HookTimeoutMS:                     cfg.Hooks.TimeoutMS,
 				Environment:                       o.environmentOrUnavailable(cfg.Environment),
+				EnvironmentForKind:                o.environments.forKind(cfg.Environment),
 				TrackerAdapter:                    o.trackerAdapter,
 				HandoffState:                      cfg.Tracker.HandoffState,
 				NoChangeState:                     cfg.Tracker.NoChangeState,

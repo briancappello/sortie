@@ -2,20 +2,23 @@ package smolvm
 
 import (
 	"context"
-	"errors"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/environment"
 )
 
-func TestUnimplementedOperationsFail(t *testing.T) {
+// TestWithoutWorkflowOwnsNoVM checks that an environment built without
+// a workflow path, which labels no VM as its own, stops, removes, and
+// sweeps nothing, and never runs smolvm to find out.
+func TestWithoutWorkflowOwnsNoVM(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	ws := environment.Workspace{Key: "VM-1", HostPath: t.TempDir()}
-	env, err := New(environment.Params{})
+	env, err := New(environment.Params{Config: config.EnvironmentConfig{Smolvm: config.SmolvmConfig{Binary: "/nonexistent/smolvm"}}})
 	if err != nil {
 		t.Fatalf("New() error = %v, want nil", err)
 	}
@@ -26,11 +29,14 @@ func TestUnimplementedOperationsFail(t *testing.T) {
 	for name, op := range map[string]func() error{
 		"Release": func() error { return env.Release(ctx, ws) },
 		"Remove":  func() error { return env.Remove(ctx, ws) },
-		"Sweep":   func() error { return env.Sweep(ctx, environment.SweepParams{}) },
+		"Sweep":   func() error { return env.Sweep(ctx, environment.SweepParams{WorkspaceRoot: "/srv/workspaces"}) },
 	} {
-		if err := op(); !errors.Is(err, ErrNotImplemented) {
-			t.Errorf("%s() = %v, want ErrNotImplemented: a VM may exist", name, err)
+		if err := op(); err != nil {
+			t.Errorf("%s() = %v, want nil without running smolvm", name, err)
 		}
+	}
+	if ready, err := env.(environment.Resumer).Resume(ctx, ws); ready || err != nil {
+		t.Errorf("Resume() = %v, %v, want false, nil", ready, err)
 	}
 }
 

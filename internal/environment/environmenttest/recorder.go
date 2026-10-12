@@ -5,6 +5,7 @@ package environmenttest
 import (
 	"context"
 	"errors"
+	"maps"
 	"os/exec"
 	"slices"
 	"sync"
@@ -24,6 +25,7 @@ const (
 	OpRemove      Operation = "Remove"
 	OpSweep       Operation = "Sweep"
 	OpAfterCreate Operation = "AfterCreate"
+	OpResume      Operation = "Resume"
 )
 
 // Call is one recorded operation.
@@ -33,6 +35,9 @@ type Call struct {
 
 	// Spec is the command specification of an [OpCommand] call.
 	Spec environment.CommandSpec
+
+	// Sweep holds the parameters of an [OpSweep] call.
+	Sweep environment.SweepParams
 }
 
 // Recorder is an [environment.Environment] and
@@ -148,9 +153,10 @@ func (r *Recorder) Remove(_ context.Context, ws environment.Workspace) error {
 	return r.RemoveErr
 }
 
-// Sweep records the call.
-func (r *Recorder) Sweep(context.Context, environment.SweepParams) error {
-	r.record(Call{Op: OpSweep})
+// Sweep records the call with a copy of its parameters.
+func (r *Recorder) Sweep(_ context.Context, p environment.SweepParams) error {
+	p.Running = maps.Clone(p.Running)
+	r.record(Call{Op: OpSweep, Sweep: p})
 	return nil
 }
 
@@ -158,4 +164,23 @@ func (r *Recorder) Sweep(context.Context, environment.SweepParams) error {
 func (r *Recorder) AfterCreate(_ context.Context, ws environment.Workspace) error {
 	r.record(Call{Op: OpAfterCreate, Workspace: ws})
 	return r.AfterCreateErr
+}
+
+// ResumingRecorder is a [Recorder] that is also an
+// [environment.Resumer], standing in for a kind whose instances stop
+// between worker runs.
+type ResumingRecorder struct {
+	*Recorder
+
+	// Ready is what Resume reports, and ResumeErr fails it.
+	Ready     bool
+	ResumeErr error
+}
+
+var _ environment.Resumer = (*ResumingRecorder)(nil)
+
+// Resume records the call and returns Ready and ResumeErr.
+func (r *ResumingRecorder) Resume(_ context.Context, ws environment.Workspace) (bool, error) {
+	r.record(Call{Op: OpResume, Workspace: ws})
+	return r.Ready, r.ResumeErr
 }

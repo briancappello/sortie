@@ -706,10 +706,19 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// cancelledAtEnding is read right after the call that last ended a run attempt.
 	var cancelledAtEnding bool
 
+	// releaseTarget is the workspace whose execution environment the
+	// worker releases as its last step, set once the environment is
+	// resolved. Nil releases nothing.
+	var releaseTarget *workspace.Target
+
 	report := func(result WorkerResult) {
 		result.StoppedByTokenCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errTokenCeilingStop)
 		result.SessionID = acceptedSessionID
 		reported = true
+		// The release follows every other step of the worker, the
+		// session's end and after_run included, and precedes the exit
+		// report, so no cleanup the exit triggers races it.
+		releaseEnvironment(ctx, releaseTarget, logger)
 		deps.OnExit(issue.ID, result)
 	}
 
@@ -855,6 +864,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			APIRequestCount:  localRequestCount,
 		})
 		return
+	}
+	// The workspace's environment is released on every exit from here
+	// on, a failed preparation included: it may have started an
+	// instance before failing.
+	if pathResult, pathErr := workspace.ComputePath(cfg.Workspace.Root, issue.Identifier); pathErr == nil {
+		target := workspace.NewTarget(resolvedEnv, pathResult.Key, pathResult.Path, issue.ID, issue.Identifier)
+		releaseTarget = &target
 	}
 
 	// A dispatch with no setup hooks gets a scratch directory via

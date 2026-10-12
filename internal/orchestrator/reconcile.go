@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -945,13 +946,14 @@ func runAgePass(params SweepWorkspacesParams, summary *sweepSummary, ageKeys []s
 		}
 
 		cleanupErr := workspace.Cleanup(params.Ctx, workspace.CleanupParams{
-			Root:          params.WorkspaceRoot,
-			Identifier:    key,
-			IssueID:       key,
-			BeforeRemove:  params.BeforeRemoveHook,
-			HookTimeoutMS: params.HookTimeoutMS,
-			Logger:        log,
-			Environment:   params.Environment,
+			Root:               params.WorkspaceRoot,
+			Identifier:         key,
+			IssueID:            key,
+			BeforeRemove:       params.BeforeRemoveHook,
+			HookTimeoutMS:      params.HookTimeoutMS,
+			Logger:             log,
+			Environment:        params.Environment,
+			EnvironmentForKind: params.EnvironmentForKind,
 		})
 		if cleanupErr != nil {
 			log.Warn("sweep: failed to remove expired workspace",
@@ -987,6 +989,11 @@ type SweepWorkspacesParams struct {
 	// it, and its environment is removed with it. Nil runs the hooks on
 	// the host.
 	Environment environment.Environment
+
+	// EnvironmentForKind builds the environment of another kind, which
+	// removes a workspace its record names that kind as the creator of.
+	// Nil removes every workspace with Environment.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
 
 	// RetentionDays is the configured workspace.retention_days window.
 	// A value below [config.WorkspaceRetentionMinDays] disables the age
@@ -1097,12 +1104,13 @@ func SweepWorkspaces(state *State, params SweepWorkspacesParams) {
 		)
 
 		result := workspace.CleanupTerminal(params.Ctx, workspace.CleanupTerminalParams{
-			Root:          params.WorkspaceRoot,
-			Identifiers:   terminalKeys,
-			BeforeRemove:  params.BeforeRemoveHook,
-			HookTimeoutMS: params.HookTimeoutMS,
-			Logger:        log,
-			Environment:   params.Environment,
+			Root:               params.WorkspaceRoot,
+			Identifiers:        terminalKeys,
+			BeforeRemove:       params.BeforeRemoveHook,
+			HookTimeoutMS:      params.HookTimeoutMS,
+			Logger:             log,
+			Environment:        params.Environment,
+			EnvironmentForKind: params.EnvironmentForKind,
 		})
 		summary.removedTerminal += len(result.Removed)
 		summary.failed += len(result.Errors)
@@ -1113,4 +1121,73 @@ func SweepWorkspaces(state *State, params SweepWorkspacesParams) {
 
 	runAgePass(params, &summary, ageKeys, now, log, metrics)
 	emitSweepSummary(log, summary)
+}
+
+// SweepEnvironmentsParams holds the inputs for [SweepEnvironments].
+type SweepEnvironmentsParams struct {
+	// WorkspaceRoot is the workspace root directory. A relative root
+	// resolves against the working directory, as workspace paths do.
+	WorkspaceRoot string
+
+	// Environment is the execution environment of the current
+	// configuration. Nil sweeps nothing of the selected kind.
+	Environment environment.Environment
+
+	// SweepUnselected sweeps the kinds the configuration does not
+	// select, so instances left from when it selected another kind are
+	// deleted too. Nil skips them.
+	SweepUnselected func(ctx context.Context, p environment.SweepParams) error
+
+	// Running holds the workspace keys that have a running worker.
+	// Their instances are never deleted.
+	Running map[string]bool
+
+	Ctx    context.Context
+	Logger *slog.Logger
+}
+
+// SweepEnvironments deletes leftover execution environment instances:
+// those whose workspace directory under the workspace root no longer
+// exists and whose workspace has no running worker. It runs at startup,
+// before dispatch, and on each periodic workspace sweep. A failure is
+// logged, never fatal.
+func SweepEnvironments(params SweepEnvironmentsParams) {
+	log := params.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+	root, err := filepath.Abs(params.WorkspaceRoot)
+	if err != nil || params.WorkspaceRoot == "" {
+		log.Warn("environment sweep: workspace root cannot be resolved, skipping",
+			slog.String("workspace_root", params.WorkspaceRoot), slog.Any("error", err))
+		return
+	}
+	p := environment.SweepParams{WorkspaceRoot: root, Running: params.Running}
+	if params.Environment != nil {
+		if err := params.Environment.Sweep(params.Ctx, p); err != nil {
+			log.Warn("environment sweep failed",
+				slog.String("environment", params.Environment.Kind()), slog.Any("error", err))
+		}
+	}
+	if params.SweepUnselected != nil {
+		if err := params.SweepUnselected(params.Ctx, p); err != nil {
+			log.Warn("environment sweep of unselected kinds failed", slog.Any("error", err))
+		}
+	}
+}
+
+// RunningWorkspaceKeys returns the workspace keys of the issues with a
+// running worker.
+func RunningWorkspaceKeys(state *State, log *slog.Logger) map[string]bool {
+	keys := make(map[string]bool, len(state.Running))
+	for _, entry := range state.Running {
+		key, err := workspace.SanitizeKey(entry.Identifier)
+		if err != nil {
+			log.Warn("environment sweep: failed to sanitize running identifier",
+				slog.String("identifier", entry.Identifier), slog.Any("error", err))
+			continue
+		}
+		keys[key] = true
+	}
+	return keys
 }

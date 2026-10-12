@@ -422,15 +422,26 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	// execution environment, as every later cleanup's do; an environment
 	// that cannot be built stops startup rather than running them on the
 	// host.
-	startupEnv, envErr := environment.New(environment.Params{
+	startupEnvParams := environment.Params{
 		Config:       br.cfg.Environment,
 		StateDir:     filepath.Dir(dbPath),
 		WorkflowPath: br.mgr.WorkflowAbsPath(),
 		Logger:       br.logger,
-	})
+	}
+	startupEnv, envErr := environment.New(startupEnvParams)
 	if envErr != nil {
 		br.logger.Error("failed to build the execution environment", slog.Any("error", envErr))
 		return 1
+	}
+	// A workspace another kind created is removed by that kind, built
+	// from the same block with only the kind changed.
+	startupEnvForKind := func(kind string) (environment.Environment, error) {
+		if kind == startupEnv.Kind() {
+			return startupEnv, nil
+		}
+		params := startupEnvParams
+		params.Config.Kind = kind
+		return environment.New(params)
 	}
 
 	keys, err := workspace.ListWorkspaceKeys(br.cfg.Workspace.Root)
@@ -455,16 +466,29 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			}
 			if len(toClean) > 0 {
 				workspace.CleanupTerminal(ctx, workspace.CleanupTerminalParams{
-					Root:          br.cfg.Workspace.Root,
-					Identifiers:   toClean,
-					BeforeRemove:  br.cfg.Hooks.BeforeRemove,
-					HookTimeoutMS: br.cfg.Hooks.TimeoutMS,
-					Logger:        br.logger,
-					Environment:   startupEnv,
+					Root:               br.cfg.Workspace.Root,
+					Identifiers:        toClean,
+					BeforeRemove:       br.cfg.Hooks.BeforeRemove,
+					HookTimeoutMS:      br.cfg.Hooks.TimeoutMS,
+					Logger:             br.logger,
+					Environment:        startupEnv,
+					EnvironmentForKind: startupEnvForKind,
 				})
 			}
 		}
 	}
+
+	// Leftover environment instances, whose workspace directory is
+	// gone, are deleted before dispatch starts; no worker runs yet.
+	orchestrator.SweepEnvironments(orchestrator.SweepEnvironmentsParams{
+		WorkspaceRoot: br.cfg.Workspace.Root,
+		Environment:   startupEnv,
+		SweepUnselected: func(ctx context.Context, p environment.SweepParams) error {
+			return environment.SweepUnselected(ctx, startupEnvParams, p)
+		},
+		Ctx:    ctx,
+		Logger: br.logger,
+	})
 
 	br.logger.Info("sortie started")
 

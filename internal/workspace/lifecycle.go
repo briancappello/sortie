@@ -400,21 +400,32 @@ type CleanupParams struct {
 	// with the workspace. Nil runs the hook as a host process and removes
 	// only the directory.
 	Environment environment.Environment
+
+	// EnvironmentForKind builds the environment of a kind other than
+	// Environment's, to remove a workspace that kind created, as its
+	// environment record names it. Nil removes every workspace with
+	// Environment.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
 }
 
 // Cleanup removes a workspace directory for the given issue, running
 // the before_remove hook first if configured, then removing the
-// workspace's execution environment. The before_remove hook failure is
-// logged and ignored; removal still proceeds. An environment removal
-// failure is returned and keeps the directory.
+// workspace's execution environment. Both run in the environment of the
+// kind that created the workspace when its record names one other than
+// local and EnvironmentForKind is set, and in Environment otherwise. An
+// environment whose instance stops between runs ([environment.Resumer])
+// is resumed for the hook; without an instance the hook is skipped. The
+// before_remove hook failure is logged and ignored; removal still
+// proceeds. An environment removal failure is returned and keeps the
+// directory.
 //
 // The parent context is detached via [context.WithoutCancel] so that
 // the before_remove hook runs even when the caller's context has been
 // cancelled. Hook execution time is still bounded by HookTimeoutMS.
 //
 // Returns nil if the workspace directory does not exist (idempotent).
-// Returns an error if path computation, environment removal, or
-// directory removal fails.
+// Returns an error if path computation, building the creating kind's
+// environment, environment removal, or directory removal fails.
 func Cleanup(ctx context.Context, params CleanupParams) error {
 	pathResult, err := ComputePath(params.Root, params.Identifier)
 	if err != nil {
@@ -431,34 +442,56 @@ func Cleanup(ctx context.Context, params CleanupParams) error {
 		logger = slog.Default()
 	}
 
-	detachedCtx := context.WithoutCancel(ctx)
-	env := HookEnv(params.IssueID, params.Identifier, pathResult.Path, params.Attempt, params.SSHHost)
-	target := NewTarget(params.Environment, pathResult.Key, pathResult.Path, params.IssueID, params.Identifier)
+	target, err := removalTarget(params.Environment, params.EnvironmentForKind, pathResult.Key, pathResult.Path, params.IssueID, params.Identifier)
+	if err != nil {
+		return err
+	}
+	return removeWorkspace(ctx, logger, target, beforeRemove{
+		script:    params.BeforeRemove,
+		env:       HookEnv(params.IssueID, params.Identifier, pathResult.Path, params.Attempt, params.SSHHost),
+		timeoutMS: params.HookTimeoutMS,
+	})
+}
 
-	if params.BeforeRemove != "" {
-		logger.InfoContext(ctx, "running hook", slog.String("hook", "before_remove"), slog.String("workspace", pathResult.Path))
+// beforeRemove is the before_remove hook of one workspace removal.
+type beforeRemove struct {
+	script    string
+	env       map[string]string
+	timeoutMS int
+}
+
+// removeWorkspace runs the before_remove hook in target's environment,
+// best-effort, then removes the environment, then the host directory.
+// The hook and the removal run under a context detached from ctx's
+// cancellation.
+func removeWorkspace(ctx context.Context, logger *slog.Logger, target Target, hook beforeRemove) error {
+	detachedCtx := context.WithoutCancel(ctx)
+	path := target.Workspace.HostPath
+
+	if hook.script != "" && resumeForHook(ctx, logger, target) {
+		logger.InfoContext(ctx, "running hook", slog.String("hook", "before_remove"), slog.String("workspace", path))
 		res, hookErr := RunHook(detachedCtx, HookParams{
-			Script:    params.BeforeRemove,
-			Dir:       pathResult.Path,
-			Env:       env,
-			TimeoutMS: params.HookTimeoutMS,
+			Script:    hook.script,
+			Dir:       path,
+			Env:       hook.env,
+			TimeoutMS: hook.timeoutMS,
 			Target:    target,
 		})
 		if hookErr != nil {
 			var he *HookError
 			errors.As(hookErr, &he)
-			attrs := []slog.Attr{slog.String("hook", "before_remove"), slog.String("workspace", pathResult.Path), slog.Any("error", hookErr)}
+			attrs := []slog.Attr{slog.String("hook", "before_remove"), slog.String("workspace", path), slog.Any("error", hookErr)}
 			if he != nil && he.Output != "" {
 				attrs = append(attrs, slog.String("hook_output", he.Output))
 			}
 			logger.LogAttrs(ctx, slog.LevelWarn, "before_remove hook failed", attrs...)
 			if he != nil {
-				logHookLeftovers(ctx, logger, "before_remove", pathResult.Path, he.TerminatedLeftovers)
+				logHookLeftovers(ctx, logger, "before_remove", path, he.TerminatedLeftovers)
 			}
 		} else {
-			logHookLeftovers(ctx, logger, "before_remove", pathResult.Path, res.TerminatedLeftovers)
+			logHookLeftovers(ctx, logger, "before_remove", path, res.TerminatedLeftovers)
 			if res.Output != "" {
-				logger.DebugContext(ctx, "hook completed", slog.String("hook", "before_remove"), slog.String("workspace", pathResult.Path), slog.String("hook_output", res.Output))
+				logger.DebugContext(ctx, "hook completed", slog.String("hook", "before_remove"), slog.String("workspace", path), slog.String("hook_output", res.Output))
 			}
 		}
 	}
@@ -466,7 +499,32 @@ func Cleanup(ctx context.Context, params CleanupParams) error {
 	if err := removeEnvironment(detachedCtx, logger, target); err != nil {
 		return err
 	}
-	return os.RemoveAll(pathResult.Path)
+	return os.RemoveAll(path)
+}
+
+// resumeForHook makes the target's environment instance ready for the
+// before_remove hook when the environment is an [environment.Resumer],
+// and reports whether the hook can run. Without an instance, or when
+// resuming fails, the hook is skipped and removal proceeds, as after a
+// failed hook.
+func resumeForHook(ctx context.Context, logger *slog.Logger, target Target) bool {
+	resumer, ok := target.Environment.(environment.Resumer)
+	if !ok {
+		return true
+	}
+	ready, err := resumer.Resume(context.WithoutCancel(ctx), target.Workspace)
+	if err != nil {
+		logger.WarnContext(ctx, "before_remove hook skipped: resuming the execution environment failed",
+			slog.String("environment", target.Environment.Kind()),
+			slog.String("workspace", target.Workspace.HostPath), slog.Any("error", err))
+		return false
+	}
+	if !ready {
+		logger.InfoContext(ctx, "before_remove hook skipped: the workspace has no execution environment instance",
+			slog.String("environment", target.Environment.Kind()),
+			slog.String("workspace", target.Workspace.HostPath))
+	}
+	return ready
 }
 
 // CleanupByPathParams holds the inputs for workspace directory removal
@@ -502,12 +560,17 @@ type CleanupByPathParams struct {
 	// with the workspace. Nil runs the hook as a host process and removes
 	// only the directory.
 	Environment environment.Environment
+
+	// EnvironmentForKind builds the environment of a kind other than
+	// Environment's, as [CleanupParams.EnvironmentForKind] describes.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
 }
 
 // CleanupByPath removes a workspace directory at the given absolute path,
 // running the before_remove hook first if configured, then removing the
-// workspace's execution environment; an environment removal failure is
-// returned and keeps the directory. Unlike [Cleanup],
+// workspace's execution environment, both in the environment [Cleanup]
+// selects; an environment removal failure is returned and keeps the
+// directory. Unlike [Cleanup],
 // this function uses the provided path directly instead of reconstructing
 // it from workspace root and identifier via [ComputePath].
 //
@@ -549,42 +612,15 @@ func CleanupByPath(ctx context.Context, params CleanupByPathParams) error {
 		logger = slog.Default()
 	}
 
-	detachedCtx := context.WithoutCancel(ctx)
-	env := HookEnv(params.IssueID, params.Identifier, params.Path, params.Attempt, params.SSHHost)
-	target := NewTarget(params.Environment, filepath.Base(params.Path), params.Path, params.IssueID, params.Identifier)
-
-	if params.BeforeRemove != "" {
-		logger.InfoContext(ctx, "running hook", slog.String("hook", "before_remove"), slog.String("workspace", params.Path))
-		res, hookErr := RunHook(detachedCtx, HookParams{
-			Script:    params.BeforeRemove,
-			Dir:       params.Path,
-			Env:       env,
-			TimeoutMS: params.HookTimeoutMS,
-			Target:    target,
-		})
-		if hookErr != nil {
-			var he *HookError
-			errors.As(hookErr, &he)
-			attrs := []slog.Attr{slog.String("hook", "before_remove"), slog.String("workspace", params.Path), slog.Any("error", hookErr)}
-			if he != nil && he.Output != "" {
-				attrs = append(attrs, slog.String("hook_output", he.Output))
-			}
-			logger.LogAttrs(ctx, slog.LevelWarn, "before_remove hook failed", attrs...)
-			if he != nil {
-				logHookLeftovers(ctx, logger, "before_remove", params.Path, he.TerminatedLeftovers)
-			}
-		} else {
-			logHookLeftovers(ctx, logger, "before_remove", params.Path, res.TerminatedLeftovers)
-			if res.Output != "" {
-				logger.DebugContext(ctx, "hook completed", slog.String("hook", "before_remove"), slog.String("workspace", params.Path), slog.String("hook_output", res.Output))
-			}
-		}
-	}
-
-	if err := removeEnvironment(detachedCtx, logger, target); err != nil {
+	target, err := removalTarget(params.Environment, params.EnvironmentForKind, filepath.Base(params.Path), params.Path, params.IssueID, params.Identifier)
+	if err != nil {
 		return err
 	}
-	return os.RemoveAll(params.Path)
+	return removeWorkspace(ctx, logger, target, beforeRemove{
+		script:    params.BeforeRemove,
+		env:       HookEnv(params.IssueID, params.Identifier, params.Path, params.Attempt, params.SSHHost),
+		timeoutMS: params.HookTimeoutMS,
+	})
 }
 
 // removeEnvironment removes the target's execution environment, after
@@ -636,6 +672,10 @@ type CleanupTerminalParams struct {
 	// runs in, removed with the workspace. Nil runs the hooks as host
 	// processes and removes only the directories.
 	Environment environment.Environment
+
+	// EnvironmentForKind builds the environment of a kind other than
+	// Environment's, as [CleanupParams.EnvironmentForKind] describes.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
 }
 
 // CleanupTerminalResult holds the outcome of a batch workspace
@@ -680,13 +720,14 @@ func CleanupTerminal(ctx context.Context, params CleanupTerminalParams) CleanupT
 		}
 
 		err := Cleanup(ctx, CleanupParams{
-			Root:          params.Root,
-			Identifier:    identifier,
-			IssueID:       issueID,
-			BeforeRemove:  params.BeforeRemove,
-			HookTimeoutMS: params.HookTimeoutMS,
-			Logger:        logger,
-			Environment:   params.Environment,
+			Root:               params.Root,
+			Identifier:         identifier,
+			IssueID:            issueID,
+			BeforeRemove:       params.BeforeRemove,
+			HookTimeoutMS:      params.HookTimeoutMS,
+			Logger:             logger,
+			Environment:        params.Environment,
+			EnvironmentForKind: params.EnvironmentForKind,
 		})
 		if err != nil {
 			logger.WarnContext(ctx, "workspace cleanup failed",

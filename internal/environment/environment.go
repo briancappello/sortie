@@ -7,6 +7,7 @@ package environment
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -94,11 +95,15 @@ type Environment interface {
 	// environment. The caller starts and waits for it.
 	Command(ctx context.Context, ws Workspace, spec CommandSpec) (*exec.Cmd, error)
 
-	// Release is called when the issue's worker has exited.
+	// Release is called as the last step of the issue's worker, on
+	// every exit. A workspace with no environment instance releases
+	// successfully.
 	Release(ctx context.Context, ws Workspace) error
 
 	// Remove deletes the workspace's environment. It is called wherever
-	// the workspace itself is removed.
+	// the workspace itself is removed, after the before_remove hook and
+	// before the host directory goes. A workspace with no environment
+	// instance is removed successfully.
 	Remove(ctx context.Context, ws Workspace) error
 
 	// Sweep deletes environments of this kind that no known workspace
@@ -110,6 +115,17 @@ type Environment interface {
 // step after the after_create hook succeeded.
 type AfterCreateFinisher interface {
 	AfterCreate(ctx context.Context, ws Workspace) error
+}
+
+// Resumer is implemented by an environment whose instances stop when a
+// worker releases them. A command that runs in a workspace outside a
+// worker run, such as the before_remove hook, resumes the instance
+// first.
+type Resumer interface {
+	// Resume makes the existing instance of ws ready to run commands.
+	// It reports false when ws has no instance, so a command has
+	// nowhere to run.
+	Resume(ctx context.Context, ws Workspace) (bool, error)
 }
 
 // Namer is implemented by an environment whose workspaces run in a
@@ -258,6 +274,15 @@ type Meta struct {
 	// the kind, to check that the host can run it. Nil means there is
 	// nothing to check.
 	CheckHost func(cfg config.EnvironmentConfig) error
+
+	// SweepUnselected deletes the kind's leftover instances, as
+	// [Environment.Sweep] does, while the configuration selects another
+	// kind, so instances left from when a workflow selected the kind
+	// are still swept after it stops selecting it. params describes the
+	// kind's environment as [New] receives it. It must return without
+	// running anything when the host holds no sign of an instance. Nil
+	// means the kind leaves nothing to sweep once unselected.
+	SweepUnselected func(ctx context.Context, params Params, p SweepParams) error
 }
 
 // Registry is the environment kind registry. Kind packages register
@@ -281,6 +306,33 @@ func CheckHost(cfg config.EnvironmentConfig) error {
 		return nil
 	}
 	return meta.CheckHost(cfg)
+}
+
+// SweepUnselected runs [Meta.SweepUnselected] of every registered kind
+// other than the one params.Config selects, with params.Config's kind
+// changed to that kind, and joins their errors. An empty kind selects
+// [config.EnvironmentKindLocal].
+func SweepUnselected(ctx context.Context, params Params, p SweepParams) error {
+	selected := params.Config.Kind
+	if selected == "" {
+		selected = config.EnvironmentKindLocal
+	}
+	var errs []error
+	for _, kind := range Registry.Kinds() {
+		if kind == selected {
+			continue
+		}
+		meta, _ := Registry.Meta(kind)
+		if meta.SweepUnselected == nil {
+			continue
+		}
+		kindParams := params
+		kindParams.Config.Kind = kind
+		if err := meta.SweepUnselected(ctx, kindParams, p); err != nil {
+			errs = append(errs, fmt.Errorf("sweep environment %q: %w", kind, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // New builds the environment params.Config selects by resolving its kind

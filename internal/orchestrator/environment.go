@@ -11,6 +11,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/environment"
+	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
 // EnvironmentFunc returns the execution environment for an environment
@@ -41,30 +42,65 @@ func newEnvironmentResolver(dbPath, workflowPath string, logger *slog.Logger) *e
 	return &environmentResolver{stateDir: stateDir, workflowPath: workflowPath, logger: logger}
 }
 
+// params returns the construction parameters of the environment cfg
+// selects. A nil resolver supplies no state directory or workflow path.
+func (r *environmentResolver) params(cfg config.EnvironmentConfig) environment.Params {
+	if r == nil {
+		return environment.Params{Config: cfg, Logger: slog.Default()}
+	}
+	return environment.Params{Config: cfg, StateDir: r.stateDir, WorkflowPath: r.workflowPath, Logger: r.logger}
+}
+
 // resolve returns the environment cfg selects. A failure is not cached,
 // so a later call retries the construction. A nil resolver builds a new
 // environment on every call, with no state directory or workflow path.
 func (r *environmentResolver) resolve(cfg config.EnvironmentConfig) (environment.Environment, error) {
 	if r == nil {
-		return environment.New(environment.Params{Config: cfg, Logger: slog.Default()})
+		return environment.New(r.params(cfg))
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.env != nil && reflect.DeepEqual(r.cfg, cfg) {
 		return r.env, nil
 	}
-	env, err := environment.New(environment.Params{
-		Config:       cfg,
-		StateDir:     r.stateDir,
-		WorkflowPath: r.workflowPath,
-		Logger:       r.logger,
-	})
+	env, err := environment.New(r.params(cfg))
 	if err != nil {
 		return nil, err
 	}
 	r.cfg = cfg
 	r.env = env
 	return env, nil
+}
+
+// forKind returns a builder of the environment of a given kind under
+// cfg, for removing a workspace that kind created: cfg's own kind
+// resolves to the shared instance, and any other kind is built apart
+// from it, from cfg's block with only the kind changed.
+func (r *environmentResolver) forKind(cfg config.EnvironmentConfig) func(kind string) (environment.Environment, error) {
+	return func(kind string) (environment.Environment, error) {
+		if normalizeEnvironmentKind(kind) == normalizeEnvironmentKind(cfg.Kind) {
+			return r.resolve(cfg)
+		}
+		other := cfg
+		other.Kind = kind
+		return environment.New(r.params(other))
+	}
+}
+
+// sweepUnselected returns the sweep of every kind cfg does not select,
+// as [environment.SweepUnselected] runs it.
+func (r *environmentResolver) sweepUnselected(cfg config.EnvironmentConfig) func(ctx context.Context, p environment.SweepParams) error {
+	return func(ctx context.Context, p environment.SweepParams) error {
+		return environment.SweepUnselected(ctx, r.params(cfg), p)
+	}
+}
+
+// normalizeEnvironmentKind returns kind, or the local kind for "".
+func normalizeEnvironmentKind(kind string) string {
+	if kind == "" {
+		return config.EnvironmentKindLocal
+	}
+	return kind
 }
 
 // environmentOrUnavailable returns the environment cfg selects, or, when
@@ -79,6 +115,22 @@ func (o *Orchestrator) environmentOrUnavailable(cfg config.EnvironmentConfig) en
 	o.logger.Warn("execution environment unavailable",
 		slog.String("environment", cfg.Kind), slog.Any("error", err))
 	return unavailableEnvironment{kind: cfg.Kind, err: err}
+}
+
+// releaseEnvironment releases the execution environment of target, the
+// last step of a worker. It runs under a context detached from ctx's
+// cancellation, since a cancelled worker releases too. A failure is
+// logged and leaves the instance as it was until the next release or
+// its removal.
+func releaseEnvironment(ctx context.Context, target *workspace.Target, logger *slog.Logger) {
+	if target == nil || target.Environment == nil {
+		return
+	}
+	if err := target.Environment.Release(context.WithoutCancel(ctx), target.Workspace); err != nil {
+		logger.Warn("execution environment release failed",
+			slog.String("environment", target.Environment.Kind()),
+			slog.String("workspace", target.Workspace.HostPath), slog.Any("error", err))
+	}
 }
 
 // unavailableEnvironment stands in for an environment that could not be

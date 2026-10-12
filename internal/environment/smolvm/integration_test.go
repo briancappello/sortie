@@ -433,3 +433,131 @@ func TestIntegration_ExistingSortieEntryFailsPreparation(t *testing.T) {
 		})
 	}
 }
+
+// listed returns the machine named name, and whether smolvm lists it.
+func (ie *integrationEnv) listed(ctx context.Context, t *testing.T, name string) (Machine, bool) {
+	t.Helper()
+	machines, err := ie.env.cli.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	i := slices.IndexFunc(machines, func(m Machine) bool { return m.Name == name })
+	if i < 0 {
+		return Machine{}, false
+	}
+	return machines[i], true
+}
+
+// removalObserver reads the before_remove hook's marker from the shared
+// control directory when the VM is removed, before the host workspace
+// directory goes.
+type removalObserver struct {
+	*Environment
+	marker string
+	seen   *string
+}
+
+func (o removalObserver) Remove(ctx context.Context, ws environment.Workspace) error {
+	data, _ := os.ReadFile(filepath.Join(ws.HostPath, ".sortie", o.marker))
+	*o.seen = string(data)
+	return o.Environment.Remove(ctx, ws)
+}
+
+func TestIntegration_ReleaseRemove(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	key := ie.newKey("SMOLREL")
+	name := VMName(key)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
+		Root: ie.root, Identifier: key, IssueID: "10001", HookTimeoutMS: 120_000, Environment: ie.env,
+	})
+	if err != nil {
+		t.Fatalf("workspace.Prepare() error = %v", err)
+	}
+	ws := environment.Workspace{Key: key, HostPath: res.Path, GuestPath: GuestWorkspace}
+	if _, err := ie.guest(ctx, key, "touch /workspace/kept"); err != nil {
+		t.Fatalf("guest write: %v", err)
+	}
+
+	if err := ie.env.Release(ctx, ws); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if m, ok := ie.listed(ctx, t, name); !ok || m.Running() {
+		t.Fatalf("VM after Release() = %+v (listed %v), want it stopped and still present", m, ok)
+	}
+	if err := ie.env.Release(ctx, ws); err != nil {
+		t.Errorf("second Release() error = %v, want nil for a stopped VM", err)
+	}
+
+	var seen string
+	err = workspace.CleanupByPath(ctx, workspace.CleanupByPathParams{
+		Path: res.Path, Identifier: key, IssueID: "10001", HookTimeoutMS: 120_000,
+		BeforeRemove: `test -e /workspace/kept && uname -n > /run/sortie/control/removed-on`,
+		Environment:  removalObserver{Environment: ie.env, marker: "removed-on", seen: &seen},
+	})
+	if err != nil {
+		t.Fatalf("workspace.CleanupByPath() error = %v", err)
+	}
+	if host, _ := os.Hostname(); strings.TrimSpace(seen) == "" || strings.TrimSpace(seen) == host {
+		t.Errorf("before_remove ran on %q, want the VM, with its guest workspace", seen)
+	}
+	if _, ok := ie.listed(ctx, t, name); ok {
+		t.Error("VM still listed after the workspace removal")
+	}
+	if _, err := os.Stat(res.Path); !os.IsNotExist(err) {
+		t.Errorf("host workspace Stat error = %v, want it removed", err)
+	}
+	if _, err := os.Stat(filepath.Join(ie.env.stateDir, stateEnvDir, key)); !os.IsNotExist(err) {
+		t.Errorf("state directory Stat error = %v, want it removed", err)
+	}
+}
+
+func TestIntegration_Sweep(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	key := ie.newKey("SMOLSWEEP")
+	name := VMName(key)
+	unlabeled := VMName(ie.newKey("SMOLUNL"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	host := filepath.Join(ie.root, key)
+	if err := os.Mkdir(host, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ie.env.Prepare(ctx, environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := ie.env.cli.Create(ctx, CreateSpec{Name: unlabeled, Pack: integrationPack(t), Labels: []Label{{"sortie.test", "1"}}}); err != nil {
+		t.Fatalf("create the unlabeled VM: %v", err)
+	}
+	if err := ie.env.cli.Start(ctx, unlabeled); err != nil {
+		t.Fatalf("start the unlabeled VM: %v", err)
+	}
+
+	// A sweep while the workspace exists, or while its worker runs,
+	// deletes nothing.
+	if err := ie.env.Sweep(ctx, environment.SweepParams{WorkspaceRoot: ie.root}); err != nil {
+		t.Fatalf("Sweep() error = %v", err)
+	}
+	if err := os.RemoveAll(host); err != nil {
+		t.Fatal(err)
+	}
+	if err := ie.env.Sweep(ctx, environment.SweepParams{WorkspaceRoot: ie.root, Running: map[string]bool{key: true}}); err != nil {
+		t.Fatalf("Sweep() error = %v", err)
+	}
+	if _, ok := ie.listed(ctx, t, name); !ok {
+		t.Fatal("managed VM deleted while its workspace existed or its worker ran")
+	}
+
+	if err := ie.env.Sweep(ctx, environment.SweepParams{WorkspaceRoot: ie.root}); err != nil {
+		t.Fatalf("Sweep() error = %v", err)
+	}
+	if _, ok := ie.listed(ctx, t, name); ok {
+		t.Error("managed VM whose workspace directory is gone is still listed after the sweep")
+	}
+	if m, ok := ie.listed(ctx, t, unlabeled); !ok || !m.Running() {
+		t.Errorf("unlabeled VM after the sweep = %+v (listed %v), want it left running", m, ok)
+	}
+}
