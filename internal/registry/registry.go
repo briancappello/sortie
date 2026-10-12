@@ -5,6 +5,7 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,7 +24,17 @@ type TrackerConstructor func(config map[string]any) (domain.TrackerAdapter, erro
 // Trackers is the default tracker adapter registry. Adapter packages
 // register themselves via [Registry.Register] in their init functions;
 // the orchestrator resolves adapters via [Registry.Get] at runtime.
-var Trackers = NewRegistry[TrackerConstructor, TrackerMeta]("tracker")
+//
+// Registering a kind whose [TrackerMeta] declares a write capability
+// its implementation lacks panics, so an adapter cannot claim a
+// capability it does not have.
+var Trackers = newTrackerRegistry()
+
+func newTrackerRegistry() *Registry[TrackerConstructor, TrackerMeta] {
+	r := NewRegistry[TrackerConstructor, TrackerMeta]("tracker")
+	r.checkMeta = CheckTrackerMeta
+	return r
+}
 
 // AgentConstructor creates a [domain.AgentAdapter] that holds no
 // settings: each session reads [domain.StartSessionParams.Settings].
@@ -144,6 +155,111 @@ type TrackerMeta struct {
 	// BlockerSource declares where this adapter's blocker data comes
 	// from. The empty value is read as BlockersFromCandidates.
 	BlockerSource BlockerSource
+
+	// WriteCapabilities declares which optional write capabilities the
+	// adapter implements. Empty means none: the adapter only reads,
+	// transitions, comments, and labels. Read-only after registration.
+	WriteCapabilities []WriteCapability
+
+	// PlanKeyStorage declares how the adapter records a plan key on an
+	// issue. Required when WriteCapabilities is non-empty.
+	PlanKeyStorage PlanKeyStorage
+
+	// Implementation is a value of the adapter's concrete type, usually
+	// a typed nil pointer, that registration checks against the
+	// capability interfaces. Required when WriteCapabilities is
+	// non-empty; never called.
+	Implementation domain.TrackerAdapter
+}
+
+// HasWriteCapability reports whether the adapter declares c.
+func (m TrackerMeta) HasWriteCapability(c WriteCapability) bool {
+	return slices.Contains(m.WriteCapabilities, c)
+}
+
+// WriteCapability names one optional tracker write capability.
+type WriteCapability string
+
+const (
+	// CapCreateIssue is [domain.IssueCreator].
+	CapCreateIssue WriteCapability = "create_issue"
+
+	// CapUpdateIssue is [domain.IssueUpdater].
+	CapUpdateIssue WriteCapability = "update_issue"
+
+	// CapSetParent is [domain.IssueParenter].
+	CapSetParent WriteCapability = "set_parent"
+
+	// CapLinkDependency is [domain.DependencyLinker].
+	CapLinkDependency WriteCapability = "link_dependency"
+)
+
+// AllWriteCapabilities lists every write capability in a stable order.
+func AllWriteCapabilities() []WriteCapability {
+	return []WriteCapability{CapCreateIssue, CapUpdateIssue, CapSetParent, CapLinkDependency}
+}
+
+// PlanKeyStorage declares how an adapter records a plan key on an
+// issue. The empty value means the adapter stores none.
+type PlanKeyStorage string
+
+const (
+	// PlanKeyCustomField stores the key in a tracker custom field or
+	// attribute and finds issues by querying it.
+	PlanKeyCustomField PlanKeyStorage = "custom_field"
+
+	// PlanKeyBodyMarker stores the key as a one-line marker at the end
+	// of the issue body and finds issues through the tracker's search.
+	PlanKeyBodyMarker PlanKeyStorage = "body_marker"
+)
+
+// CheckTrackerMeta reports an error when meta declares a write
+// capability or plan-key storage that its Implementation does not back.
+func CheckTrackerMeta(meta TrackerMeta) error {
+	if len(meta.WriteCapabilities) == 0 {
+		return nil
+	}
+	seen := make(map[WriteCapability]bool, len(meta.WriteCapabilities))
+	for _, c := range meta.WriteCapabilities {
+		if !slices.Contains(AllWriteCapabilities(), c) {
+			return fmt.Errorf("unknown write capability %q", c)
+		}
+		if seen[c] {
+			return fmt.Errorf("write capability %q declared twice", c)
+		}
+		seen[c] = true
+	}
+	if meta.Implementation == nil {
+		return errors.New("declares write capabilities without an Implementation to check them against")
+	}
+	switch meta.PlanKeyStorage {
+	case PlanKeyCustomField, PlanKeyBodyMarker:
+	case "":
+		return errors.New("declares write capabilities without a PlanKeyStorage")
+	default:
+		return fmt.Errorf("unknown plan key storage %q", meta.PlanKeyStorage)
+	}
+	impl := meta.Implementation
+	if _, ok := impl.(domain.PlanKeyFinder); !ok {
+		return fmt.Errorf("%T declares write capabilities and does not implement domain.PlanKeyFinder", impl)
+	}
+	for _, c := range meta.WriteCapabilities {
+		var ok bool
+		switch c {
+		case CapCreateIssue:
+			_, ok = impl.(domain.IssueCreator)
+		case CapUpdateIssue:
+			_, ok = impl.(domain.IssueUpdater)
+		case CapSetParent:
+			_, ok = impl.(domain.IssueParenter)
+		case CapLinkDependency:
+			_, ok = impl.(domain.DependencyLinker)
+		}
+		if !ok {
+			return fmt.Errorf("%T declares write capability %q and does not implement it", impl, c)
+		}
+	}
+	return nil
 }
 
 // BlockerSource declares where a tracker adapter's blocker data comes
@@ -459,6 +575,9 @@ type Registry[T any, M any] struct {
 	mu       sync.RWMutex
 	adapters map[string]T
 	meta     map[string]M
+
+	// checkMeta, when set, vets declared metadata at registration.
+	checkMeta func(meta M) error
 }
 
 // NewRegistry creates an empty [Registry] with the given dimension
@@ -511,6 +630,11 @@ func (r *Registry[T, M]) RegisterWithMeta(kind string, constructor T, meta M) {
 	}
 	if _, exists := r.adapters[kind]; exists {
 		panic(fmt.Sprintf("registry: duplicate registration for kind %q", kind))
+	}
+	if r.checkMeta != nil {
+		if err := r.checkMeta(meta); err != nil {
+			panic(fmt.Sprintf("registry: %s kind %q: %v", r.name, kind, err))
+		}
 	}
 	r.adapters[kind] = constructor
 	r.meta[kind] = meta
