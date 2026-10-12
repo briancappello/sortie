@@ -128,6 +128,31 @@ var knownFieldsRegistry = map[string]SectionSchema{
 			}},
 		},
 	},
+	"environment": {
+		Fields: []FieldDef{
+			{Name: "kind", Type: FieldString},
+			{Name: "host_prefix", Type: FieldStringList},
+			{Name: "smolvm", Type: FieldMap, Nested: []FieldDef{
+				{Name: "binary", Type: FieldString},
+				{Name: "pack", Type: FieldString},
+				{Name: "cpus", Type: FieldInt},
+				{Name: "memory_mib", Type: FieldInt},
+				{Name: "storage_gib", Type: FieldInt},
+				{Name: "allow_hosts", Type: FieldStringList},
+				{Name: "credentials", Type: FieldSequence},
+				{Name: "repository", Type: FieldMap, Nested: []FieldDef{
+					{Name: "url", Type: FieldString},
+					{Name: "base", Type: FieldString},
+					{Name: "branch_prefix", Type: FieldString},
+					{Name: "provider", Type: FieldString},
+					{Name: "project", Type: FieldString},
+					{Name: "max_bundle_mib", Type: FieldInt},
+				}},
+				{Name: "pass_env", Type: FieldStringList},
+				{Name: "ssh_agent", Type: FieldBool},
+			}},
+		},
+	},
 }
 
 // staticKnownExtensionKeys lists extension top-level keys defined by
@@ -322,6 +347,25 @@ func ValidateFrontMatter(raw map[string]any, cfg ServiceConfig) []FrontMatterWar
 						}
 					}
 				}
+			}
+		}
+
+		// Descend into maps nested two or more levels deep (e.g.
+		// environment.smolvm.repository).
+		for _, field := range schema.Fields {
+			nestedMap := extractSubMap(sectionMap, field.Name)
+			if nestedMap == nil {
+				continue
+			}
+			for _, nested := range field.Nested {
+				if nested.Nested == nil {
+					continue
+				}
+				deepMap := extractSubMap(nestedMap, nested.Name)
+				if deepMap == nil {
+					continue
+				}
+				warnings = checkMapFields(warnings, sectionName+"."+field.Name+"."+nested.Name, nested.Nested, deepMap)
 			}
 		}
 	}
@@ -579,6 +623,46 @@ func splitPathIndices(segment string) (string, []int) {
 		rest = rest[closeIdx+1:]
 	}
 	return name, indices
+}
+
+// checkMapFields appends unknown_sub_key and type_mismatch warnings
+// for the keys of m, a map found at path whose known keys are fields,
+// and descends into every known map field that has nested fields.
+func checkMapFields(warnings []FrontMatterWarning, path string, fields []FieldDef, m map[string]any) []FrontMatterWarning {
+	known := make(map[string]FieldDef, len(fields))
+	for _, f := range fields {
+		known[f.Name] = f
+	}
+	for _, key := range maputil.SortedKeys(m) {
+		if _, ok := known[key]; !ok {
+			warnings = append(warnings, FrontMatterWarning{
+				Check:   "unknown_sub_key",
+				Field:   path + "." + key,
+				Message: fmt.Sprintf("unknown key %q in section %q", key, path),
+			})
+		}
+	}
+	for _, f := range fields {
+		v, exists := m[f.Name]
+		if !exists || v == nil {
+			continue
+		}
+		if !typeMatches(v, f.Type) {
+			warnings = append(warnings, FrontMatterWarning{
+				Check:   "type_mismatch",
+				Field:   path + "." + f.Name,
+				Message: fmt.Sprintf("expected %s, got %T", typeName(f.Type), v),
+			})
+			continue
+		}
+		if f.Type == FieldStringList {
+			warnings = checkStringListElements(warnings, path+"."+f.Name, v)
+		}
+		if sub, ok := v.(map[string]any); ok && f.Nested != nil {
+			warnings = checkMapFields(warnings, path+"."+f.Name, f.Nested, sub)
+		}
+	}
+	return warnings
 }
 
 // checkStringListElements appends type_mismatch warnings for non-string

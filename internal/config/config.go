@@ -94,6 +94,11 @@ type ServiceConfig struct {
 	// Backends) means no notifier backend is configured.
 	Notifications NotificationsConfig
 
+	// Environment selects where the workspace code of every issue runs.
+	// Its Kind is [EnvironmentKindLocal] when the workflow has no
+	// environment block.
+	Environment EnvironmentConfig
+
 	// advisories holds the advisories recorded while this configuration
 	// was built or loaded. Read and written only through
 	// [ServiceConfig.Advisories] and [ServiceConfig.AddAdvisories].
@@ -554,6 +559,7 @@ var knownTopLevelKeys = map[string]bool{
 	"reactions":     true,
 	"dispatch":      true,
 	"notifications": true,
+	"environment":   true,
 }
 
 // NewServiceConfig converts a raw front matter map into a validated
@@ -730,6 +736,11 @@ func NewServiceConfig(raw map[string]any, opts ...ServiceConfigOption) (ServiceC
 		return ServiceConfig{}, err
 	}
 
+	environment, err := buildEnvironmentConfig(raw, extractSubMap(extensions, "worker"))
+	if err != nil {
+		return ServiceConfig{}, err
+	}
+
 	registerConfigSecrets(tracker, reactions, notifications, extensions, raw)
 
 	cfg := ServiceConfig{
@@ -746,6 +757,7 @@ func NewServiceConfig(raw map[string]any, opts ...ServiceConfigOption) (ServiceC
 		extensions:              extensions,
 		extensionsPreResolution: preResolution,
 		Notifications:           notifications,
+		Environment:             environment,
 		conversions:             conversions,
 	}
 	cfg.AddAdvisories(advisories...)
