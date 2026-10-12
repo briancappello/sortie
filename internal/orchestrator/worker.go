@@ -873,86 +873,58 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		releaseTarget = &target
 	}
 
-	// A dispatch with no setup hooks gets a scratch directory via
-	// workspace.Ensure (no clone, no build); a hook-running dispatch runs
-	// the full lifecycle.
-	var wsResult workspace.PrepareResult
-	var err error
+	// A dispatch with no setup hooks gets a scratch directory: no clone,
+	// no build. It is prepared like any other, so its execution
+	// environment is ready for the session, with the operator's setup
+	// hooks left out. A hook-running dispatch runs the full lifecycle.
+	afterCreate, beforeRun := cfg.Hooks.AfterCreate, cfg.Hooks.BeforeRun
 	if !deps.Posture.RunsSetupHooks() {
-		// workspace.Ensure does not inspect the context, so honor an
-		// already-cancelled dispatch here, matching the normal path's early
-		// return.
-		var ensureResult workspace.EnsureResult
-		prepErr := ctx.Err()
-		if prepErr == nil {
-			ensureResult, prepErr = workspace.Ensure(cfg.Workspace.Root, issue.Identifier)
-		}
-		cancelledAtEnding = ctx.Err() != nil
-		if prepErr != nil {
-			report(WorkerResult{
-				IssueID:          issue.ID,
-				Identifier:       issue.Identifier,
-				ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
-				Error:            fmt.Errorf("workspace preparation: %w", prepErr),
-				AgentAdapter:     agentKind,
-				Attempt:          attempt,
-				SSHHost:          deps.SSHHost,
-				Usage:            localUsage,
-				UsageMeasured:    localMeasured,
-				UnaccountedTurns: localUnaccounted,
-				ModelName:        localModelName,
-				APIRequestCount:  localRequestCount,
-			})
-			return
-		}
-		// The read-only path reuses the per-issue directory, which may hold
-		// a stale .sortie/status; clear it so a stale recognized status does
-		// not end the review on turn one.
-		workspace.CleanupStatusFile(ensureResult.Path, logger)
-		wsResult = workspace.PrepareResult(ensureResult)
-	} else {
-		wsResult, err = workspace.Prepare(ctx, workspace.PrepareParams{
-			Root:          cfg.Workspace.Root,
-			Identifier:    issue.Identifier,
-			IssueID:       issue.ID,
-			Attempt:       attemptInt,
-			AfterCreate:   cfg.Hooks.AfterCreate,
-			BeforeRun:     cfg.Hooks.BeforeRun,
-			HookTimeoutMS: cfg.Hooks.TimeoutMS,
-			Logger:        logger,
-			SSHHost:       deps.SSHHost,
-			Environment:   resolvedEnv,
-			// A workspace another kind created is removed by that kind,
-			// built from the attempt's environment block with only the
-			// kind changed. It is built apart from the shared instance,
-			// which keeps serving the configured kind.
-			EnvironmentForKind: func(kind string) (environment.Environment, error) {
-				envCfg := cfg.Environment
-				envCfg.Kind = kind
-				return buildEnvironment(envCfg)
-			},
-			PreRunFunc: func(wsPath string) {
-				workspace.CleanupStatusFile(wsPath, logger)
-			},
+		afterCreate, beforeRun = "", ""
+	}
+	wsResult, err := workspace.Prepare(ctx, workspace.PrepareParams{
+		Root:          cfg.Workspace.Root,
+		Identifier:    issue.Identifier,
+		IssueID:       issue.ID,
+		Attempt:       attemptInt,
+		AfterCreate:   afterCreate,
+		BeforeRun:     beforeRun,
+		HookTimeoutMS: cfg.Hooks.TimeoutMS,
+		Logger:        logger,
+		SSHHost:       deps.SSHHost,
+		Environment:   resolvedEnv,
+		// A workspace another kind created is removed by that kind,
+		// built from the attempt's environment block with only the
+		// kind changed. It is built apart from the shared instance,
+		// which keeps serving the configured kind.
+		EnvironmentForKind: func(kind string) (environment.Environment, error) {
+			envCfg := cfg.Environment
+			envCfg.Kind = kind
+			return buildEnvironment(envCfg)
+		},
+		// A reused per-issue directory may hold a stale
+		// .sortie/status; clearing it keeps a stale recognized status
+		// from ending the run on turn one.
+		PreRunFunc: func(wsPath string) {
+			workspace.CleanupStatusFile(wsPath, logger)
+		},
+	})
+	cancelledAtEnding = ctx.Err() != nil
+	if err != nil {
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: %w", err),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
 		})
-		cancelledAtEnding = ctx.Err() != nil
-		if err != nil {
-			report(WorkerResult{
-				IssueID:          issue.ID,
-				Identifier:       issue.Identifier,
-				ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
-				Error:            fmt.Errorf("workspace preparation: %w", err),
-				AgentAdapter:     agentKind,
-				Attempt:          attempt,
-				SSHHost:          deps.SSHHost,
-				Usage:            localUsage,
-				UsageMeasured:    localMeasured,
-				UnaccountedTurns: localUnaccounted,
-				ModelName:        localModelName,
-				APIRequestCount:  localRequestCount,
-			})
-			return
-		}
+		return
 	}
 
 	workspacePath = wsResult.Path

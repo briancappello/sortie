@@ -401,3 +401,85 @@ func TestHandleTick_SweepsEnvironmentsWithRunningKeys(t *testing.T) {
 	}
 	assertSweepParams(t, "unselected kind", unselected[0], want)
 }
+
+// TestRunWorkerAttempt_ReviewPosturePreparesTheEnvironment pins that a
+// dispatch that runs no setup hook still prepares its workspace's
+// execution environment, and finishes a newly created one, so its
+// session never launches into an environment nothing started. The
+// operator's hooks stay out of it.
+func TestRunWorkerAttempt_ReviewPosturePreparesTheEnvironment(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		existing        bool
+		wantAfterCreate bool
+	}{
+		{name: "new workspace", wantAfterCreate: true},
+		{name: "existing workspace", existing: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+			cfg := defaultWorkerConfig(root)
+			cfg.Agent.MaxTurns = 1
+			cfg.Hooks.AfterCreate = "echo after-create"
+			cfg.Hooks.BeforeRun = "echo before-run"
+			cfg.Hooks.AfterRun = "echo after-run"
+			wsPath := filepath.Join(root, "TEST-1")
+			statusPath := filepath.Join(wsPath, workspacekit.SortieDir, "status")
+			if tt.existing {
+				if err := os.MkdirAll(filepath.Dir(statusPath), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(statusPath, []byte("done\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				// The workspace an earlier run prepared in this kind.
+				writeKindRecord(t, wsPath, "recorder")
+			}
+			env := recordingEnvironment(t)
+
+			var opsAtExit []environmenttest.Operation
+			ec := newExitCapture()
+			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+				TrackerAdapter:         &mockTrackerAdapter{},
+				AgentAdapter:           &mockAgentAdapter{},
+				ConfigFunc:             func() config.ServiceConfig { return cfg },
+				PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+				OnEvent:                func(_ string, _ domain.AgentEvent) {},
+				OnExit: func(issueID string, result WorkerResult) {
+					opsAtExit = env.Ops()
+					ec.onExit(issueID, result)
+				},
+				Logger:  discardLogger(),
+				Posture: PostureReview,
+				EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+					return env, nil
+				},
+			})
+			result := ec.waitResult(t)
+
+			if result.ExitKind != WorkerExitNormal || result.WorkspacePath != wsPath {
+				t.Fatalf("result = kind %v, workspace %q, error %v; want a normal exit in %s", result.ExitKind, result.WorkspacePath, result.Error, wsPath)
+			}
+			if len(opsAtExit) == 0 || opsAtExit[0] != environmenttest.OpPrepare {
+				t.Errorf("environment ops = %q, want Prepare first: the session needs a prepared environment", opsAtExit)
+			}
+			if got := slices.Contains(opsAtExit, environmenttest.OpAfterCreate); got != tt.wantAfterCreate {
+				t.Errorf("environment ops = %q, AfterCreate called = %v, want %v", opsAtExit, got, tt.wantAfterCreate)
+			}
+			if got := shellScripts(env.Commands()); len(got) != 0 {
+				t.Errorf("hooks run = %q, want none: the posture runs no operator hook", got)
+			}
+			if opsAtExit[len(opsAtExit)-1] != environmenttest.OpRelease {
+				t.Errorf("environment ops = %q, want the release last", opsAtExit)
+			}
+			if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
+				t.Errorf("stale status Stat error = %v, want it cleared before the session", err)
+			}
+		})
+	}
+}
