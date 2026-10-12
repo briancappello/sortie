@@ -68,6 +68,17 @@ The adapter finds an issue by key with `find-all` on the attribute, matched by `
 
 To remove the attributes, delete them in Settings, **Classes**, **Issue**, or send a `TxRemoveDoc` for each `core:class:Attribute` document named `sortiePlanKey` or `sortiePlanBodyDigest`. Issues keep the stored values in their data, and Huly no longer shows them.
 
+## Creating issues
+
+`CreateIssue` follows Huly's importer, because Huly computes issue numbers and order on the client:
+
+1. It sends a `TxUpdateDoc` with `$inc: {sequence: 1}` on the project, in space `core:space:Space`, with `retrieve: true`. The transactor applies the increment atomically and answers with the updated project, whose `sequence` is the new issue number. The identifier is `<project>-<number>`.
+2. It ranks the issue after the project's highest rank, with a port of `@hcengineering/rank` (`rank.go`, tested against that package's own cases).
+3. It converts the Markdown body to markup and stores it with the collaborator's `createContent` RPC, which returns the blob reference for `description`.
+4. It sends a `TxCreateDoc` of `tracker:class:Issue` in the parent's `subIssues` collection, or under `tracker:ids:NoParent`, with the task type in `kind` and the plan key and body digest in their attributes. The transactor increments the parent's `subIssues` count itself.
+
+A new issue gets the project's default issue status when its task type allows it, and the type's first status otherwise (`Backlog` on a classic project). A live check created an epic and a story under it; Huly showed the story as a sub-issue of the epic, with task types Epic and Story and both descriptions rendered.
+
 ## How it works
 
 - At startup, the adapter reads `/config.json` from the front. It sends the token to the account service's `selectWorkspace` method and gets a workspace token and the transactor URL. It also reads the caller's social id, which it writes as `modifiedBy` on its transactions.

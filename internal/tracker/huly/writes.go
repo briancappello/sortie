@@ -58,7 +58,7 @@ func (a *HulyAdapter) postComment(ctx context.Context, issueID, message string) 
 	}
 
 	tx := a.createTx(classChatMessage, issue.Space, generateID(), map[string]any{"message": message})
-	attach(tx, issue.ID, classIssue, collectionNotes)
+	attach(tx, issue.ID, collectionNotes)
 	return a.rpc.Tx(ctx, tx)
 }
 
@@ -123,13 +123,13 @@ func (a *HulyAdapter) labelOps(issue hulyIssue) issuekit.IssueLabelOps {
 				"title": tag.Title,
 				"color": tag.Color,
 			})
-			attach(tx, issue.ID, classIssue, collectionLabels)
+			attach(tx, issue.ID, collectionLabels)
 			return issuekit.LabelWrite{}, a.rpc.Tx(ctx, tx)
 		},
 		Remove: func(ctx context.Context, labels []issuekit.IssueLabel) (issuekit.LabelWrite, error) {
 			for _, l := range labels {
 				tx := a.removeTx(classTagReference, issue.Space, l.ID)
-				attach(tx, issue.ID, classIssue, collectionLabels)
+				attach(tx, issue.ID, collectionLabels)
 				if err := a.rpc.Tx(ctx, tx); err != nil {
 					return issuekit.LabelWrite{}, err
 				}
@@ -218,9 +218,9 @@ func (a *HulyAdapter) removeTx(class, space, objectID string) map[string]any {
 	return a.txBase(class, classTxRemoveDoc, space, objectID)
 }
 
-// attach makes tx a collection transaction on the parent document.
-func attach(tx map[string]any, parentID, parentClass, collection string) {
+// attach makes tx a collection transaction on the parent issue.
+func attach(tx map[string]any, parentID, collection string) {
 	tx["attachedTo"] = parentID
-	tx["attachedToClass"] = parentClass
+	tx["attachedToClass"] = classIssue
 	tx["collection"] = collection
 }

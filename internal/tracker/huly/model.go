@@ -31,10 +31,11 @@ const (
 )
 
 type hulyProject struct {
-	ID         string `json:"_id"`
-	Identifier string `json:"identifier"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
+	ID                 string `json:"_id"`
+	Identifier         string `json:"identifier"`
+	Name               string `json:"name"`
+	Type               string `json:"type"`
+	DefaultIssueStatus string `json:"defaultIssueStatus"`
 }
 
 type hulyProjectType struct {
@@ -56,8 +57,10 @@ type relatedDoc struct {
 }
 
 type parentInfo struct {
-	ParentID   string `json:"parentId"`
-	Identifier string `json:"identifier"`
+	ParentID    string `json:"parentId"`
+	ParentTitle string `json:"parentTitle"`
+	Space       string `json:"space"`
+	Identifier  string `json:"identifier"`
 }
 
 type hulyIssue struct {

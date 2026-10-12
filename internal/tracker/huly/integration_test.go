@@ -225,3 +225,55 @@ func TestIntegrationPlanKey(t *testing.T) {
 		t.Errorf("ListPlanIssues() = %+v, want it to hold %s", keyed, key)
 	}
 }
+
+// TestIntegrationCreatePlanIssues creates an epic and a story under it,
+// reads them back by plan key, and removes them unless SORTIE_HULY_KEEP
+// is "1", which leaves them for a look in Huly's UI.
+func TestIntegrationCreatePlanIssues(t *testing.T) {
+	skipUnlessIntegration(t)
+
+	a := integrationAdapter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	prefix := fmt.Sprintf("sortie-integration-%d", time.Now().Unix())
+	epic, err := a.CreateIssue(ctx, domain.NewIssue{
+		Title: "Integration epic " + prefix, Kind: domain.IssueKindEpic, PlanKey: prefix,
+		Body: "OpenSpec change `" + prefix + "`.\n\n## Why\n\nChecks plan writes.",
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(epic) error = %v", err)
+	}
+	story, err := a.CreateIssue(ctx, domain.NewIssue{
+		Title: "Integration story", Kind: domain.IssueKindStory, PlanKey: prefix + "/story", ParentID: epic.ID,
+		Body: "## Acceptance criteria\n\n- It nests under the epic.\n- It has the Story type.",
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(story) error = %v", err)
+	}
+	t.Logf("created %s (epic) and %s (story)", epic.Identifier, story.Identifier)
+	if os.Getenv("SORTIE_HULY_KEEP") != "1" {
+		defer func() {
+			for _, id := range []string{story.ID, epic.ID} {
+				_ = a.rpc.Tx(context.Background(), a.removeTx(classIssue, a.project.ID, id))
+			}
+		}()
+	}
+
+	got, err := a.FindIssueByPlanKey(ctx, prefix+"/story")
+	if err != nil || got.ID != story.ID || got.ParentID != epic.ID || got.Kind != domain.IssueKindStory {
+		t.Fatalf("FindIssueByPlanKey(story) = %+v, %v", got, err)
+	}
+	full, err := a.FetchIssueByID(ctx, story.Identifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Parent == nil || full.Parent.ID != epic.ID || !strings.Contains(full.Description, "It nests under the epic.") {
+		t.Errorf("story = parent %+v description %q, want the epic and the body", full.Parent, full.Description)
+	}
+	e, err := a.findIssue(ctx, epic.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("epic kind=%s rank=%s; story parent=%s; description:\n%s", e.Kind, e.Rank, full.Parent.Identifier, full.Description)
+}

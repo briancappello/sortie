@@ -61,6 +61,16 @@ type rpcClient interface {
 	// Tx applies one transaction.
 	Tx(ctx context.Context, tx map[string]any) error
 
+	// TxResult applies one transaction and returns the transactor's
+	// result, which carries the updated document when the transaction
+	// sets "retrieve".
+	TxResult(ctx context.Context, tx map[string]any) (json.RawMessage, error)
+
+	// CreateMarkup stores serialized markup as a new collaborative
+	// document for the attribute and returns the blob reference to store
+	// in it.
+	CreateMarkup(ctx context.Context, objectClass, objectID, objectAttr, markup string) (string, error)
+
 	// GetMarkup returns the serialized markup of a collaborative document
 	// attribute, read from the blob source.
 	GetMarkup(ctx context.Context, objectClass, objectID, objectAttr, source string) (string, error)
@@ -213,20 +223,46 @@ func (c *httpRPC) FindAll(ctx context.Context, class string, query map[string]an
 }
 
 func (c *httpRPC) Tx(ctx context.Context, tx map[string]any) error {
-	raw, err := json.Marshal(tx)
-	if err != nil {
-		return payloadError("encode tx", err)
-	}
-	_, err = c.transactor.Send(ctx, http.MethodPost, "/api/v1/tx/"+url.PathEscape(c.workspace), bytes.NewReader(raw))
+	_, err := c.TxResult(ctx, tx)
 	return err
 }
 
+func (c *httpRPC) TxResult(ctx context.Context, tx map[string]any) (json.RawMessage, error) {
+	raw, err := json.Marshal(tx)
+	if err != nil {
+		return nil, payloadError("encode tx", err)
+	}
+	body, err := c.transactor.Send(ctx, http.MethodPost, "/api/v1/tx/"+url.PathEscape(c.workspace), bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	var status struct {
+		Error *platformStatus `json:"error"`
+	}
+	if json.Unmarshal(body, &status) == nil && status.Error != nil {
+		return nil, status.Error.trackerError("huly tx")
+	}
+	return body, nil
+}
+
 func (c *httpRPC) GetMarkup(ctx context.Context, objectClass, objectID, objectAttr, source string) (string, error) {
+	return c.collaboratorRPC(ctx, objectClass, objectID, objectAttr, "getContent", map[string]any{"source": source})
+}
+
+func (c *httpRPC) CreateMarkup(ctx context.Context, objectClass, objectID, objectAttr, markup string) (string, error) {
+	ref, err := c.collaboratorRPC(ctx, objectClass, objectID, objectAttr, "createContent",
+		map[string]any{"content": map[string]string{objectAttr: markup}})
+	if err == nil && ref == "" {
+		err = &domain.TrackerError{Kind: domain.ErrTrackerPayload, Message: "huly collaborator: createContent returned no blob reference"}
+	}
+	return ref, err
+}
+
+// collaboratorRPC calls one method of the collaborator's document RPC and
+// returns the content it reports for objectAttr.
+func (c *httpRPC) collaboratorRPC(ctx context.Context, objectClass, objectID, objectAttr, method string, payload map[string]any) (string, error) {
 	documentID := strings.Join([]string{c.workspace, objectClass, objectID, objectAttr}, "|")
-	raw, err := json.Marshal(map[string]any{
-		"method":  "getContent",
-		"payload": map[string]any{"source": source},
-	})
+	raw, err := json.Marshal(map[string]any{"method": method, "payload": payload})
 	if err != nil {
 		return "", payloadError("encode collaborator request", err)
 	}

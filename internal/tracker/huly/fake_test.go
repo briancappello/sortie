@@ -1,11 +1,16 @@
 package huly
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
+
+	"github.com/sortie-ai/sortie/internal/domain"
 )
 
 // fakeRPC is an in-memory [rpcClient]. FindAll matches equality and $in
@@ -19,6 +24,11 @@ type fakeRPC struct {
 	txs     []map[string]any
 	txErr   error
 	findErr error
+
+	// failTxAt, when positive, fails the transaction with that 1-based
+	// sequence number with txErr's value or a transport error.
+	failTxAt int
+	blobs    int
 }
 
 func newFakeRPC() *fakeRPC {
@@ -44,8 +54,21 @@ func (f *fakeRPC) FindAll(_ context.Context, class string, query map[string]any,
 		limit = l
 	}
 
+	candidates := slices.Clone(f.docs[class])
+	if order, ok := options["sort"].(map[string]any); ok && len(order) == 1 {
+		for field, dir := range order {
+			slices.SortStableFunc(candidates, func(x, y map[string]any) int {
+				c := compareValues(x[field], y[field])
+				if toInt(dir) < 0 {
+					return -c
+				}
+				return c
+			})
+		}
+	}
+
 	out := []json.RawMessage{}
-	for _, doc := range f.docs[class] {
+	for _, doc := range candidates {
 		if !matches(doc, query) {
 			continue
 		}
@@ -66,6 +89,24 @@ func (f *fakeRPC) FindAll(_ context.Context, class string, query map[string]any,
 		}
 	}
 	return out, nil
+}
+
+func compareValues(x, y any) int {
+	xf, xNum := x.(float64)
+	if xi, ok := x.(int); ok {
+		xf, xNum = float64(xi), true
+	}
+	yf, yNum := y.(float64)
+	if yi, ok := y.(int); ok {
+		yf, yNum = float64(yi), true
+	}
+	if xNum && yNum {
+		return cmp.Compare(xf, yf)
+	}
+	if x == nil || y == nil {
+		return cmp.Compare(fmt.Sprint(x != nil), fmt.Sprint(y != nil))
+	}
+	return strings.Compare(fmt.Sprint(x), fmt.Sprint(y))
 }
 
 func matches(doc, query map[string]any) bool {
@@ -91,12 +132,20 @@ func matches(doc, query map[string]any) bool {
 	return true
 }
 
-func (f *fakeRPC) Tx(_ context.Context, tx map[string]any) error {
+func (f *fakeRPC) Tx(ctx context.Context, tx map[string]any) error {
+	_, err := f.TxResult(ctx, tx)
+	return err
+}
+
+func (f *fakeRPC) TxResult(_ context.Context, tx map[string]any) (json.RawMessage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.txErr != nil {
-		return f.txErr
+		return nil, f.txErr
+	}
+	if f.failTxAt > 0 && len(f.txs)+1 == f.failTxAt {
+		return nil, &domain.TrackerError{Kind: domain.ErrTrackerTransport, Message: "fake: injected failure"}
 	}
 	f.txs = append(f.txs, tx)
 
@@ -119,7 +168,10 @@ func (f *fakeRPC) Tx(_ context.Context, tx map[string]any) error {
 	case classTxUpdateDoc:
 		for _, doc := range f.docs[class] {
 			if doc["_id"] == id {
-				maps.Copy(doc, tx["operations"].(map[string]any))
+				applyOperations(doc, tx["operations"].(map[string]any))
+				if tx["retrieve"] == true {
+					return json.Marshal(map[string]any{"object": doc})
+				}
 			}
 		}
 	case classTxRemoveDoc:
@@ -131,7 +183,92 @@ func (f *fakeRPC) Tx(_ context.Context, tx map[string]any) error {
 		}
 		f.docs[class] = kept
 	}
-	return nil
+	return json.RawMessage(`{}`), nil
+}
+
+// applyOperations applies an update's plain fields and its $inc, $push
+// and $pull operators the way Huly's TxProcessor does.
+func applyOperations(doc, ops map[string]any) {
+	for key, value := range ops {
+		switch key {
+		case "$inc":
+			for field, by := range value.(map[string]any) {
+				doc[field] = toInt(doc[field]) + toInt(by)
+			}
+		case "$push":
+			for field, item := range value.(map[string]any) {
+				doc[field] = append(toSlice(doc[field]), item)
+			}
+		case "$pull":
+			for field, match := range value.(map[string]any) {
+				kept := []any{}
+				for _, item := range toSlice(doc[field]) {
+					if !fieldsMatch(item, match) {
+						kept = append(kept, item)
+					}
+				}
+				doc[field] = kept
+			}
+		default:
+			doc[key] = value
+		}
+	}
+}
+
+func toInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+// toSlice normalizes the array shapes seeds and transactions use.
+func toSlice(v any) []any {
+	switch s := v.(type) {
+	case []any:
+		return s
+	case []map[string]any:
+		out := make([]any, 0, len(s))
+		for _, m := range s {
+			out = append(out, m)
+		}
+		return out
+	default:
+		return []any{}
+	}
+}
+
+func fieldsMatch(item, match any) bool {
+	m, ok := match.(map[string]any)
+	if !ok {
+		return item == match
+	}
+	im, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	for k, v := range m {
+		if im[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *fakeRPC) CreateMarkup(_ context.Context, _, _, _, markup string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.txErr != nil {
+		return "", f.txErr
+	}
+	f.blobs++
+	ref := fmt.Sprintf("blob-new-%d", f.blobs)
+	f.markup[ref] = markup
+	return ref, nil
 }
 
 func (f *fakeRPC) GetMarkup(_ context.Context, _, _, _, source string) (string, error) {
