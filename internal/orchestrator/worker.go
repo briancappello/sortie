@@ -1776,7 +1776,14 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		if ctx.Err() != nil {
 			exportErr = &ExportError{Err: fmt.Errorf("run stopped before the export: %w", context.Cause(ctx))}
 		} else {
-			exportedCommit, exportErr = exportIssueBranch(ctx, repo, workspaceEnv, wsTarget.Workspace, logger)
+			exportedCommit, exportErr = exportIssueBranch(ctx, exportParams{
+				Repo:        repo,
+				Env:         workspaceEnv,
+				Workspace:   wsTarget.Workspace,
+				Issue:       issue,
+				PullRequest: pullRequestTargetFor(cfg, deps.PullRequestOpenerFunc),
+				Logger:      logger,
+			})
 		}
 		if exportErr != nil {
 			cancelledAtEnding = ctx.Err() != nil

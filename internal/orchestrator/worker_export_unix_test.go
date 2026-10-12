@@ -28,7 +28,8 @@ import (
 
 // fakeRepository stands in for gitsync: seeding and refreshing do
 // nothing, and Export returns result and err after recording the
-// environment's operations so far and appending "export" to sequence.
+// environment's operations so far, when it has an environment, and
+// appending "export" to sequence.
 type fakeRepository struct {
 	env      *environmenttest.Recorder
 	sequence *[]string
@@ -54,7 +55,9 @@ func (f *fakeRepository) Export(_ context.Context, _ environment.Environment, ws
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.exports = append(f.exports, ws)
-	f.opsAtCall = f.env.Calls()
+	if f.env != nil {
+		f.opsAtCall = f.env.Calls()
+	}
 	if f.sequence != nil {
 		*f.sequence = append(*f.sequence, "export")
 	}
@@ -446,5 +449,209 @@ func TestRunWorkerAttempt_UpstreamBranchRepairsAMissingSCMRecord(t *testing.T) {
 	pushedAt, err := time.Parse(time.RFC3339, got.PushedAt)
 	if got.Branch != "sortie/TEST-1" || got.SHA != "aaa" || err != nil || pushedAt.Before(start) {
 		t.Errorf("record = %+v, want sortie/TEST-1 at aaa with a push time", got)
+	}
+}
+
+// fakeOpener records EnsurePullRequest calls and answers with pr and err.
+type fakeOpener struct {
+	mu    sync.Mutex
+	pr    domain.PullRequest
+	err   error
+	calls []ensureCall
+}
+
+type ensureCall struct {
+	Owner, Repo, Head, Base, Title, Body string
+}
+
+var _ domain.PullRequestOpener = (*fakeOpener)(nil)
+
+func (f *fakeOpener) EnsurePullRequest(_ context.Context, owner, repo, head, base, title, body string) (domain.PullRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, ensureCall{owner, repo, head, base, title, body})
+	return f.pr, f.err
+}
+
+func (f *fakeOpener) ensureCalls() []ensureCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+// pullRequestExport returns the parameters of an export from a
+// workspace at ws through repo, whose pull request opener is opener.
+func pullRequestExport(t *testing.T, ws string, repo *fakeRepository, opener *fakeOpener) exportParams {
+	t.Helper()
+	return exportParams{
+		Repo:      repo,
+		Workspace: environment.Workspace{Key: "ENG-42", HostPath: ws, GuestPath: ws, Identifier: "ENG-42"},
+		Issue:     calculatorIssue(),
+		PullRequest: &pullRequestTarget{
+			Project: "group/sub/app", Base: "main",
+			Opener: func() (domain.PullRequestOpener, error) { return opener, nil },
+		},
+		Logger: discardLogger(),
+	}
+}
+
+func TestExportIssueBranch_EnsuresThePullRequest(t *testing.T) {
+	t.Parallel()
+
+	pushed := gitsync.ExportResult{Branch: "sortie/ENG-42", Commit: "aaa", Pushed: true, PushedAt: time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)}
+	upToDate := gitsync.ExportResult{Branch: "sortie/ENG-42", Commit: "aaa", UpToDate: true}
+
+	t.Run("a push opens the pull request with the suggested text and records it", func(t *testing.T) {
+		t.Parallel()
+		ws := t.TempDir()
+		writeSuggestion(t, ws, []byte(`{"title": "Fix add()", "body": "Adds a test."}`))
+		opener := &fakeOpener{pr: domain.PullRequest{Number: 9, URL: "https://forge.example/group/sub/app/pull/9", Created: true}}
+
+		commit, err := exportIssueBranch(context.Background(), pullRequestExport(t, ws, &fakeRepository{result: pushed}, opener))
+		if err != nil || commit != "aaa" {
+			t.Fatalf("exportIssueBranch() = %q, %v; want aaa", commit, err)
+		}
+		want := []ensureCall{{Owner: "group/sub", Repo: "app", Head: "sortie/ENG-42", Base: "main", Title: "Fix add()", Body: "Adds a test."}}
+		if got := opener.ensureCalls(); !slices.Equal(got, want) {
+			t.Errorf("EnsurePullRequest calls = %+v, want %+v", got, want)
+		}
+		rec := domain.SCMMetadata{Branch: "sortie/ENG-42", SHA: "aaa", PushedAt: "2026-10-12T10:00:00Z", PRNumber: 9, Owner: "group/sub", Repo: "app"}
+		if got := workspace.ReadHostSCMRecord(ws, nil); got != rec {
+			t.Errorf("record = %+v, want %+v", got, rec)
+		}
+	})
+
+	t.Run("without a suggestion the default title is used", func(t *testing.T) {
+		t.Parallel()
+		opener := &fakeOpener{pr: domain.PullRequest{Number: 9}}
+		if _, err := exportIssueBranch(context.Background(), pullRequestExport(t, t.TempDir(), &fakeRepository{result: pushed}, opener)); err != nil {
+			t.Fatal(err)
+		}
+		calls := opener.ensureCalls()
+		if len(calls) != 1 || calls[0].Title != "ENG-42: Calculator adds wrong" || !strings.Contains(calls[0].Body, "https://tracker.example/ENG-42") {
+			t.Errorf("EnsurePullRequest calls = %+v, want the default title and a body linking the issue", calls)
+		}
+	})
+
+	t.Run("a failed call fails the export and the next export retries it", func(t *testing.T) {
+		t.Parallel()
+		ws := t.TempDir()
+		cause := &domain.SCMError{Kind: domain.ErrSCMAuth, Message: "the token needs the api scope"}
+		opener := &fakeOpener{err: cause}
+
+		commit, err := exportIssueBranch(context.Background(), pullRequestExport(t, ws, &fakeRepository{result: pushed}, opener))
+		exportErr, ok := errors.AsType[*ExportError](err)
+		if !ok || exportErr.Branch != "sortie/ENG-42" || !errors.Is(err, cause) || commit != "" {
+			t.Fatalf("exportIssueBranch() = %q, %v; want an export error wrapping the SCM error", commit, err)
+		}
+		if got := workspace.ReadHostSCMRecord(ws, nil); got.SHA != "aaa" || got.PRNumber != 0 {
+			t.Errorf("record = %+v, want the push without a pull request", got)
+		}
+
+		// The retry finds the branch upstream and the record without a
+		// pull request.
+		opener.err, opener.pr = nil, domain.PullRequest{Number: 9}
+		if _, err := exportIssueBranch(context.Background(), pullRequestExport(t, ws, &fakeRepository{result: upToDate}, opener)); err != nil {
+			t.Fatalf("retried exportIssueBranch() error = %v", err)
+		}
+		if n := len(opener.ensureCalls()); n != 2 {
+			t.Errorf("EnsurePullRequest calls = %d, want 2", n)
+		}
+		if got := workspace.ReadHostSCMRecord(ws, nil); got.PRNumber != 9 || got.Owner != "group/sub" || got.Repo != "app" {
+			t.Errorf("record = %+v, want pull request 9 of group/sub/app", got)
+		}
+
+		// With the pull request recorded, an export that pushes nothing
+		// does not ask again.
+		if _, err := exportIssueBranch(context.Background(), pullRequestExport(t, ws, &fakeRepository{result: upToDate}, opener)); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(opener.ensureCalls()); n != 2 {
+			t.Errorf("EnsurePullRequest calls = %d, want still 2", n)
+		}
+	})
+
+	t.Run("an opener that cannot be built fails the export", func(t *testing.T) {
+		t.Parallel()
+		p := pullRequestExport(t, t.TempDir(), &fakeRepository{result: pushed}, nil)
+		p.PullRequest.Opener = func() (domain.PullRequestOpener, error) { return nil, errors.New("no adapter") }
+		if _, err := exportIssueBranch(context.Background(), p); err == nil || !strings.Contains(err.Error(), "no adapter") {
+			t.Errorf("exportIssueBranch() error = %v, want the opener failure", err)
+		}
+	})
+
+	for _, tt := range []struct {
+		name   string
+		result gitsync.ExportResult
+	}{
+		{"no issue branch", gitsync.ExportResult{Branch: "sortie/ENG-42", NothingToExport: true}},
+		{"a branch at the base with no upstream branch", gitsync.ExportResult{Branch: "sortie/ENG-42", Commit: "base"}},
+	} {
+		t.Run(tt.name+" opens no pull request", func(t *testing.T) {
+			t.Parallel()
+			opener := &fakeOpener{pr: domain.PullRequest{Number: 9}}
+			if _, err := exportIssueBranch(context.Background(), pullRequestExport(t, t.TempDir(), &fakeRepository{result: tt.result}, opener)); err != nil {
+				t.Fatal(err)
+			}
+			if calls := opener.ensureCalls(); len(calls) != 0 {
+				t.Errorf("EnsurePullRequest calls = %+v, want none", calls)
+			}
+		})
+	}
+}
+
+func TestRunWorkerAttempt_OpensThePullRequestAfterThePush(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	cfg.Environment.Smolvm.Repository.Provider = "github"
+	cfg.Environment.Smolvm.Repository.Project = "org/app"
+	env := recordingEnvironment(t)
+	repo := &fakeRepository{env: env, result: gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa", Pushed: true}}
+
+	run := func(opener *fakeOpener) (WorkerResult, []config.ServiceConfig) {
+		var seen []config.ServiceConfig
+		ec := newExitCapture()
+		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+			TrackerAdapter:         &mockTrackerAdapter{},
+			AgentAdapter:           &mockAgentAdapter{},
+			ConfigFunc:             func() config.ServiceConfig { return cfg },
+			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+			OnEvent:                func(_ string, _ domain.AgentEvent) {},
+			OnExit:                 ec.onExit,
+			Logger:                 discardLogger(),
+			EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+				return env, nil
+			},
+			RepositoryFunc: func(config.EnvironmentConfig, string, *slog.Logger) (Repository, error) {
+				return repo, nil
+			},
+			PullRequestOpenerFunc: func(c config.ServiceConfig) (domain.PullRequestOpener, error) {
+				seen = append(seen, c)
+				return opener, nil
+			},
+		})
+		return ec.waitResult(t), seen
+	}
+
+	failing := &fakeOpener{err: &domain.SCMError{Kind: domain.ErrSCMAPI, Message: "unavailable"}}
+	result, _ := run(failing)
+	if _, ok := errors.AsType[*ExportError](result.Error); !ok || result.ExitKind != WorkerExitError {
+		t.Fatalf("result = %v, %v; want the run failed by the pull request call", result.ExitKind, result.Error)
+	}
+
+	opener := &fakeOpener{pr: domain.PullRequest{Number: 3, URL: "https://github.com/org/app/pull/3", Created: true}}
+	repo.result = gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa", UpToDate: true}
+	result, seen := run(opener)
+	if result.ExitKind != WorkerExitNormal || result.Error != nil {
+		t.Fatalf("result = %v, %v; want a normal exit", result.ExitKind, result.Error)
+	}
+	calls := opener.ensureCalls()
+	if len(calls) != 1 || calls[0].Head != "sortie/TEST-1" || calls[0].Base != "main" || calls[0].Title != "TEST-1: Test issue" {
+		t.Errorf("EnsurePullRequest calls = %+v, want one for sortie/TEST-1 into main", calls)
+	}
+	if len(seen) != 1 || seen[0].Environment.Smolvm.Repository.Provider != "github" {
+		t.Errorf("opener built for %d configurations, want the attempt's one", len(seen))
+	}
+	if got := workspace.ReadHostSCMRecord(result.WorkspacePath, nil); got.PRNumber != 3 || got.Owner != "org" || got.Repo != "app" || got.Branch != "sortie/TEST-1" {
+		t.Errorf("record = %+v, want pull request 3 of org/app for sortie/TEST-1", got)
 	}
 }
