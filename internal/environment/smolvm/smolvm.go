@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -127,6 +128,7 @@ var (
 
 	_ environment.AfterCreateFinisher = (*Environment)(nil)
 	_ environment.Resumer             = (*Environment)(nil)
+	_ environment.EnvForwarder        = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a
@@ -163,6 +165,18 @@ func (*Environment) Kind() string { return config.EnvironmentKindSmolvm }
 // [GuestWorkspace]. A path inside a workspace maps through
 // [environment.Workspace.GuestPathOf].
 func (*Environment) GuestPath(string) string { return GuestWorkspace }
+
+// ForwardsEnv reports whether the host variable name reaches the VM: as
+// the placeholder of a credential binding, or in plain text through
+// pass_env.
+func (e *Environment) ForwardsEnv(name string) bool {
+	for _, cred := range e.cfg.Credentials {
+		if cred.Env == name {
+			return true
+		}
+	}
+	return slices.Contains(e.cfg.PassEnv, name)
+}
 
 // InstanceName returns the name of the VM that runs ws.
 func (*Environment) InstanceName(ws environment.Workspace) string { return VMName(ws.Key) }

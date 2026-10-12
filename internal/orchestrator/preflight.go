@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"cmp"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/maputil"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
@@ -21,7 +23,7 @@ type PreflightError struct {
 	// "tracker.in_progress_state", "agent.kind", "agent.command",
 	// "agent_adapter", "workspace.root_writable",
 	// "agent.kind.session_resume", "dispatch.agent.missing_block",
-	// "dispatch.stage.collision".
+	// "dispatch.stage.collision", "environment.agent_credential".
 	Check string
 
 	// Message is an operator-friendly description of the failure.
@@ -92,6 +94,14 @@ type PreflightParams struct {
 		Get(kind string) (registry.AgentConstructor, error)
 		Meta(kind string) (registry.AgentMeta, bool)
 	}
+
+	// EnvironmentFunc returns the execution environment the
+	// configuration selects. Nil builds it with [environment.New] from
+	// the environment block alone.
+	EnvironmentFunc EnvironmentFunc
+
+	// LookupEnv reads Sortie's own environment. Nil is [os.LookupEnv].
+	LookupEnv func(name string) (string, bool)
 }
 
 // ValidateDispatchConfig runs all dispatch preflight checks.
@@ -293,6 +303,7 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 	}
 
 	errs = append(errs, stageCollisions(cfg)...)
+	errs = append(errs, unforwardedAgentCredentials(cfg, params)...)
 
 	// Workspace root must exist and be writable.
 	if cfg.Workspace.Root != "" {
@@ -305,6 +316,57 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 	}
 
 	return PreflightResult{Errors: errs, Warnings: warns}
+}
+
+// unforwardedAgentCredentials returns one error per credential variable
+// an agent kind the configuration reaches declares that is set in
+// Sortie's environment but that the selected execution environment, one
+// that runs elsewhere, does not make available to the agent. Such a
+// variable is neither copied into the environment silently nor dropped
+// silently: dispatch waits until the operator binds, passes, or unsets
+// it. An environment that runs on this host passes; so does one that
+// cannot be built, whose failure is reported where it is used.
+func unforwardedAgentCredentials(cfg config.ServiceConfig, params PreflightParams) []PreflightError {
+	resolve := params.EnvironmentFunc
+	if resolve == nil {
+		resolve = func(envCfg config.EnvironmentConfig) (environment.Environment, error) {
+			return environment.New(environment.Params{Config: envCfg, Logger: slog.Default()})
+		}
+	}
+	env, err := resolve(cfg.Environment)
+	if err != nil || !environment.RunsElsewhere(env) {
+		return nil
+	}
+	forwarder, _ := env.(environment.EnvForwarder)
+	lookup := params.LookupEnv
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+
+	var errs []PreflightError
+	checked := make(map[string]bool)
+	for _, ref := range orderedUniqueAgentKinds(cfg) {
+		meta, registered := params.AgentRegistry.Meta(ref.Kind)
+		if !registered {
+			continue
+		}
+		for _, name := range meta.CredentialEnv.Names() {
+			if checked[name] {
+				continue
+			}
+			checked[name] = true
+			if _, set := lookup(name); !set || (forwarder != nil && forwarder.ForwardsEnv(name)) {
+				continue
+			}
+			errs = append(errs, PreflightError{
+				Check: "environment.agent_credential",
+				Message: "agent kind " + strconv.Quote(ref.Kind) + " reads the credential variable " + name +
+					", which is set in Sortie's environment, but execution environment " + strconv.Quote(env.Kind()) +
+					" neither binds nor passes it to the agent; bind it as a credential or list it in pass_env in the environment block, or unset it",
+			})
+		}
+	}
+	return errs
 }
 
 // agentKindOrigin identifies the front-matter field that first

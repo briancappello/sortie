@@ -98,3 +98,32 @@ func TestVMName(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardsEnv(t *testing.T) {
+	t.Parallel()
+
+	env, err := New(environment.Params{Config: config.EnvironmentConfig{Smolvm: config.SmolvmConfig{
+		Credentials: []config.SmolvmCredential{{Name: "anthropic", Env: "ANTHROPIC_API_KEY", Hosts: []string{"api.anthropic.com"}}},
+		PassEnv:     []string{"GH_TOKEN"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwarder, ok := env.(environment.EnvForwarder)
+	if !ok {
+		t.Fatal("smolvm environment is not an environment.EnvForwarder")
+	}
+	for name, want := range map[string]bool{
+		"ANTHROPIC_API_KEY":    true,  // bound as a credential
+		"GH_TOKEN":             true,  // listed in pass_env
+		"ANTHROPIC_AUTH_TOKEN": false, // neither
+		"anthropic":            false, // a binding's name is not its variable
+	} {
+		if got := forwarder.ForwardsEnv(name); got != want {
+			t.Errorf("ForwardsEnv(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if !environment.RunsElsewhere(env) {
+		t.Error("RunsElsewhere(smolvm) = false, want true")
+	}
+}

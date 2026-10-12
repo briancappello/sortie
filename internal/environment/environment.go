@@ -154,6 +154,16 @@ type Carrier interface {
 	ConnectionFailed(ws Workspace, exitCode int, stderrTail []string) bool
 }
 
+// EnvForwarder is implemented by an environment that runs elsewhere and
+// makes chosen host variables available to the commands it runs. Any
+// other host variable never reaches them.
+type EnvForwarder interface {
+	// ForwardsEnv reports whether the configuration makes the host
+	// variable name available in the environment, by any means: its
+	// value, or a placeholder that stands for it.
+	ForwardsEnv(name string) bool
+}
+
 // RunsElsewhere reports whether env runs workspace code somewhere other
 // than this host, which an environment declares by implementing
 // [Carrier]. A command such an environment builds does not see this
