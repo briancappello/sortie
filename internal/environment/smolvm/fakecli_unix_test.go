@@ -100,6 +100,15 @@ func (f *fakeSmolvm) setState(state fakeState) {
 	}
 }
 
+func (f *fakeSmolvm) state() fakeState {
+	f.t.Helper()
+	state, err := readFakeState(f.dir)
+	if err != nil {
+		f.t.Fatalf("read fake state: %v", err)
+	}
+	return state
+}
+
 func (f *fakeSmolvm) calls() []fakeCall {
 	f.t.Helper()
 	data, err := os.ReadFile(filepath.Join(f.dir, "calls.jsonl"))
