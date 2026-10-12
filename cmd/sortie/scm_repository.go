@@ -14,11 +14,9 @@ import (
 const repositoryProviderField = "environment.smolvm.repository.provider"
 
 // scmReactionProviderSetting returns the setting that names the provider
-// of the active SCM reaction kind name.
+// of the active SCM reaction kind name. Every kind, label_commands
+// included, is a block under reactions.
 func scmReactionProviderSetting(name string) string {
-	if name == scmKindLabelCommands {
-		return "label_commands.provider"
-	}
 	return "reactions." + name + ".provider"
 }
 

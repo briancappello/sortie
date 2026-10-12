@@ -80,7 +80,7 @@ func TestCheckRepositoryProvider(t *testing.T) {
 		{
 			name: "a label command provider mismatch",
 			cfg:  withLabels(repositoryConfig("gitea"), "github"),
-			want: []string{repositoryProviderField, "label_commands.provider"},
+			want: []string{repositoryProviderField, "reactions.label_commands.provider"},
 		},
 		{
 			name: "an inactive reaction is not compared",
