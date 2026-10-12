@@ -155,3 +155,90 @@ func TestSeamDrivenSymlinkSwapChanged(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteHostFile_CreatesAPrivateDirectory(t *testing.T) {
+	t.Parallel()
+	ws := t.TempDir()
+
+	if err := WriteHostFile(ws, "f.json", []byte("one")); err != nil {
+		t.Fatalf("WriteHostFile: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(ws, HostDir))
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", HostDir, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("%s mode = %v, want no group or other access", HostDir, perm)
+	}
+	if _, err := os.Stat(filepath.Join(ws, SortieDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Stat(%s) error = %v, want it not created", SortieDir, err)
+	}
+
+	if err := WriteHostFile(ws, "f.json", []byte("two")); err != nil {
+		t.Fatalf("WriteHostFile(second): %v", err)
+	}
+	got, err := ReadHostFile(ws, "f.json", 16)
+	if err != nil || string(got) != "two" {
+		t.Errorf("ReadHostFile = %q, %v; want %q", got, err, "two")
+	}
+	if names := listNames(t, filepath.Join(ws, HostDir)); len(names) != 1 {
+		t.Errorf("%s entries = %v, want exactly {f.json}, no leftover temp file", HostDir, names)
+	}
+}
+
+func TestReadHostFile_RefusesLinksAndOversizedContent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("linked file", func(t *testing.T) {
+		t.Parallel()
+		ws := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "forged.json")
+		if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(ws, HostDir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mustSymlink(t, outside, filepath.Join(ws, HostDir, "f.json"))
+		if _, err := ReadHostFile(ws, "f.json", 16); !errors.Is(err, ErrLink) {
+			t.Errorf("ReadHostFile(linked file) = %v, want wrapping ErrLink", err)
+		}
+	})
+
+	t.Run("linked directory", func(t *testing.T) {
+		t.Parallel()
+		ws := t.TempDir()
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "f.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mustSymlink(t, outside, filepath.Join(ws, HostDir))
+		if _, err := ReadHostFile(ws, "f.json", 16); !errors.Is(err, ErrLink) {
+			t.Errorf("ReadHostFile(linked directory) = %v, want wrapping ErrLink", err)
+		}
+		if err := WriteHostFile(ws, "f.json", []byte("x")); !errors.Is(err, ErrLink) {
+			t.Errorf("WriteHostFile(linked directory) = %v, want wrapping ErrLink", err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(outside, "f.json")); string(got) != "{}" {
+			t.Errorf("link target content = %q, want it untouched", got)
+		}
+	})
+
+	t.Run("oversized", func(t *testing.T) {
+		t.Parallel()
+		ws := t.TempDir()
+		if err := WriteHostFile(ws, "f.json", []byte("0123456789")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadHostFile(ws, "f.json", 5); !errors.Is(err, ErrTooLarge) {
+			t.Errorf("ReadHostFile(oversized) = %v, want wrapping ErrTooLarge", err)
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		if _, err := ReadHostFile(t.TempDir(), "f.json", 16); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("ReadHostFile(absent) = %v, want wrapping os.ErrNotExist", err)
+		}
+	})
+}

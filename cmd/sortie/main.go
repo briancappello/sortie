@@ -758,6 +758,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 				TerminalStates:                    br.cfg.Tracker.TerminalStates,
 				CIProvider:                        ciProvider,
 				SCMAdapter:                        scmAdapter,
+				SCMMetadata:                       orchestrator.SCMMetadataSource(br.cfg.Environment),
 				AutoMergeReactionConfigured:       autoMergeConfigured,
 				BotReviewReactionConfigured:       botReviewConfigured,
 				MergeConflictReactionConfigured:   mergeConflictConfigured,

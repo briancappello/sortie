@@ -109,6 +109,33 @@ func ReadSortieFile(workspacePath, name string, maxBytes int64) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
+	return readCapped(f, name, maxBytes)
+}
+
+// ReadHostFile reads at most maxBytes from the plain file name inside
+// <workspacePath>/[HostDir], applying the same refusal rules and size
+// limit as [ReadSortieFile].
+func ReadHostFile(workspacePath, name string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("maxBytes must be positive")
+	}
+
+	dir, err := OpenHostDir(workspacePath, false)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close() //nolint:errcheck // the directory handle is not needed once the file is open
+
+	f, err := openPlain(dir, name)
+	if err != nil {
+		return nil, err
+	}
+	return readCapped(f, name, maxBytes)
+}
+
+// readCapped reads at most maxBytes from f and closes it. Content beyond
+// maxBytes yields [ErrTooLarge].
+func readCapped(f *os.File, name string, maxBytes int64) ([]byte, error) {
 	defer f.Close() //nolint:errcheck // read-only file; close error is not actionable after data is read
 
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
@@ -182,6 +209,19 @@ func randomHex(n int) (string, error) {
 // absent .sortie directory is an error; WriteSortieFile does not create it.
 func WriteSortieFile(workspacePath, name string, data []byte) error {
 	dir, err := OpenSortieDir(workspacePath, false)
+	if err != nil {
+		return err
+	}
+	defer dir.Close() //nolint:errcheck // the directory handle is not needed once the write completes
+
+	return ReplaceFile(dir, name, data)
+}
+
+// WriteHostFile replaces <workspacePath>/[HostDir]/name with data,
+// creating the directory with mode 0o700 when it is absent. The
+// workspace directory itself must exist.
+func WriteHostFile(workspacePath, name string, data []byte) error {
+	dir, err := OpenHostDir(workspacePath, true)
 	if err != nil {
 		return err
 	}

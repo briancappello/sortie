@@ -41,9 +41,9 @@ type handoffEvidenceResult struct {
 }
 
 // evaluateHandoffEvidence decides the run's evidence verdict. The
-// workspace comparison runs its git commands in env; nil runs them on
-// the host.
-func evaluateHandoffEvidence(ctx context.Context, result WorkerResult, env environment.Environment, log *slog.Logger) handoffEvidenceResult {
+// workspace's SCM metadata is read through scm. The workspace
+// comparison runs its git commands in env; nil runs them on the host.
+func evaluateHandoffEvidence(ctx context.Context, result WorkerResult, env environment.Environment, scm SCMMetadataReader, log *slog.Logger) handoffEvidenceResult {
 	if result.SoftStop && result.SoftStopReason == string(workspace.StatusNoChangeNeeded) {
 		return handoffEvidenceResult{
 			Verdict: handoffWorkObserved,
@@ -52,8 +52,8 @@ func evaluateHandoffEvidence(ctx context.Context, result WorkerResult, env envir
 	}
 
 	if result.WorkspacePath != "" {
-		scm := workspace.ReadSCMMetadata(result.WorkspacePath, log)
-		if scm.SHA != "" || scm.PRNumber > 0 {
+		meta := scm.Read(result.WorkspacePath, log)
+		if meta.SHA != "" || meta.PRNumber > 0 {
 			return handoffEvidenceResult{
 				Verdict: handoffWorkObserved,
 				Reason:  "workspace SCM metadata names a pushed commit or pull request",

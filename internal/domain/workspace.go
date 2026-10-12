@@ -3,7 +3,9 @@ package domain
 // SCMMetadata represents the workspace SCM metadata written by the
 // agent or hook to .sortie/scm.json. The orchestrator reads this to
 // determine the git ref for CI status queries and other SCM-related
-// operations.
+// operations. When Sortie itself pushes the issue branch from an
+// isolated environment, it keeps the same fields in a record of its own
+// that the agent cannot write, and reads that record instead.
 //
 // The struct grows additively as new SCM features are added.
 type SCMMetadata struct {

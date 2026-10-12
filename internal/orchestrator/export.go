@@ -32,7 +32,9 @@ func (e *ExportError) Unwrap() error { return e.Err }
 
 // exportIssueBranch exports the committed issue branch from ws's
 // environment through repo and returns the commit it pushed, empty when
-// it pushed nothing. A failure is an [*ExportError].
+// it pushed nothing. A push is recorded in the workspace's SCM record,
+// which an export that pushes nothing leaves as it is. A failure,
+// including one to record the push, is an [*ExportError].
 func exportIssueBranch(ctx context.Context, repo Repository, env environment.Environment, ws environment.Workspace, logger *slog.Logger) (string, error) {
 	res, err := repo.Export(ctx, env, ws)
 	if err != nil {
@@ -45,6 +47,9 @@ func exportIssueBranch(ctx context.Context, repo Repository, env environment.Env
 	case res.Pushed:
 		logger.InfoContext(ctx, "issue branch exported and pushed",
 			slog.String("branch", res.Branch), slog.String("commit", res.Commit))
+		if err := updateSCMRecord(ws.HostPath, scmRecordUpdate{Push: &res}, logger); err != nil {
+			return "", &ExportError{Branch: res.Branch, Err: fmt.Errorf("record the push of %s: %w", res.Commit, err)}
+		}
 		return res.Commit, nil
 	default:
 		logger.InfoContext(ctx, "issue branch export found nothing new to push",

@@ -933,7 +933,7 @@ func runAgePass(params SweepWorkspacesParams, summary *sweepSummary, ageKeys []s
 			continue
 		}
 
-		meta := workspace.ReadSCMMetadata(pathResult.Path, log)
+		meta := params.SCMMetadata.Read(pathResult.Path, log)
 		anchor, hasAnchor := activityAnchor(completions[key], meta.PushedAt)
 
 		if !hasAnchor {
@@ -1004,6 +1004,11 @@ type SweepWorkspacesParams struct {
 	// nil Store disables the age pass, reported as agePass
 	// "unavailable".
 	Store SweepStore
+
+	// SCMMetadata reads each age candidate's SCM metadata, whose push
+	// time counts as activity; see [SCMMetadataSource]. Nil reads the
+	// agent's .sortie/scm.json.
+	SCMMetadata SCMMetadataReader
 
 	// NowFunc returns the current time. If nil, time.Now is used.
 	NowFunc func() time.Time

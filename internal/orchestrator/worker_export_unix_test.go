@@ -9,10 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -20,6 +22,8 @@ import (
 	"github.com/sortie-ai/sortie/internal/environment/environmenttest"
 	"github.com/sortie-ai/sortie/internal/gitsync"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/workspace"
+	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
 // fakeRepository stands in for gitsync: seeding and refreshing do
@@ -308,5 +312,92 @@ func TestRunWorkerAttempt_NoExportAfterTheRunWasStopped(t *testing.T) {
 	}
 	if _, ok := errors.AsType[*ExportError](result.Error); !ok || result.ExitKind != WorkerExitCancelled {
 		t.Errorf("result = %v, %v; want a cancelled exit reporting the skipped export", result.ExitKind, result.Error)
+	}
+}
+
+func TestRunWorkerAttempt_ExportKeepsTheSCMRecord(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	env := recordingEnvironment(t)
+	pushedAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	repo := &fakeRepository{env: env, result: gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa", Pushed: true, PushedAt: pushedAt}}
+
+	result, _ := runExportWorker(t, context.Background(), cfg, env, repo, nil, PostureNormal)
+	if result.ExitKind != WorkerExitNormal {
+		t.Fatalf("result = %v, %v; want a normal exit", result.ExitKind, result.Error)
+	}
+	want := domain.SCMMetadata{Branch: "sortie/TEST-1", SHA: "aaa", PushedAt: "2026-10-12T10:00:00Z"}
+	if got := workspace.ReadHostSCMRecord(result.WorkspacePath, nil); got != want {
+		t.Fatalf("record after a push = %+v, want %+v", got, want)
+	}
+	info, err := os.Stat(filepath.Join(result.WorkspacePath, workspacekit.HostDir))
+	if err != nil || info.Mode().Perm()&0o077 != 0 {
+		t.Errorf("%s = %v, %v; want a directory private to its owner", workspacekit.HostDir, info, err)
+	}
+
+	// A pull request recorded since stays through a later export that
+	// pushes nothing.
+	want.PRNumber, want.Owner, want.Repo = 7, "org", "app"
+	writeTrustedSCM(t, result.WorkspacePath, want)
+	repo.result = gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa"}
+	result, _ = runExportWorker(t, context.Background(), cfg, env, repo, nil, PostureNormal)
+	if result.ExitKind != WorkerExitNormal || result.ExportedCommit != "" {
+		t.Fatalf("result = %v, %v, exported %q; want a normal exit without a push", result.ExitKind, result.Error, result.ExportedCommit)
+	}
+	if got := workspace.ReadHostSCMRecord(result.WorkspacePath, nil); got != want {
+		t.Errorf("record after an export without a push = %+v, want %+v", got, want)
+	}
+}
+
+// hostDirLinkingRepository plants a link where the workspace's host
+// directory belongs before exporting.
+type hostDirLinkingRepository struct {
+	*fakeRepository
+	target string
+}
+
+func (r hostDirLinkingRepository) Export(ctx context.Context, env environment.Environment, ws environment.Workspace) (gitsync.ExportResult, error) {
+	if err := os.Symlink(r.target, filepath.Join(ws.HostPath, workspacekit.HostDir)); err != nil {
+		return gitsync.ExportResult{}, err
+	}
+	return r.fakeRepository.Export(ctx, env, ws)
+}
+
+func TestRunWorkerAttempt_FailedSCMRecordFailsTheExport(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	env := recordingEnvironment(t)
+	target := t.TempDir()
+	// A link where the host directory belongs is refused, so the push
+	// cannot be recorded.
+	repo := hostDirLinkingRepository{
+		fakeRepository: &fakeRepository{env: env, result: gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: "aaa", Pushed: true}},
+		target:         target,
+	}
+	ec := newExitCapture()
+	RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+		TrackerAdapter:         &mockTrackerAdapter{},
+		AgentAdapter:           &mockAgentAdapter{},
+		ConfigFunc:             func() config.ServiceConfig { return cfg },
+		PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+		OnEvent:                func(_ string, _ domain.AgentEvent) {},
+		OnExit:                 ec.onExit,
+		Logger:                 discardLogger(),
+		EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+			return env, nil
+		},
+		RepositoryFunc: func(config.EnvironmentConfig, string, *slog.Logger) (Repository, error) {
+			return repo, nil
+		},
+	})
+	result := ec.waitResult(t)
+
+	exportErr, ok := errors.AsType[*ExportError](result.Error)
+	if !ok || !errors.Is(result.Error, workspacekit.ErrLink) || exportErr.Branch != "sortie/TEST-1" {
+		t.Fatalf("result error = %v, want an export error wrapping %v", result.Error, workspacekit.ErrLink)
+	}
+	if result.ExitKind != WorkerExitError || result.ExportedCommit != "" {
+		t.Errorf("result = %v, exported %q; want a failed run", result.ExitKind, result.ExportedCommit)
+	}
+	if entries, _ := os.ReadDir(target); len(entries) != 0 {
+		t.Errorf("link target holds %d entries, want it untouched", len(entries))
 	}
 }
