@@ -28,21 +28,60 @@ func requireEnv(t *testing.T, key string) string {
 	return v
 }
 
-// integrationAdapter builds an adapter from SORTIE_HULY_URL,
-// SORTIE_HULY_TOKEN, SORTIE_HULY_WORKSPACE and SORTIE_HULY_PROJECT.
+// integrationConfig is the adapter configuration from SORTIE_HULY_URL,
+// SORTIE_HULY_TOKEN, SORTIE_HULY_WORKSPACE and SORTIE_HULY_PROJECT, plus
+// the plan task types from SORTIE_HULY_EPIC_TYPE and SORTIE_HULY_STORY_TYPE
+// (default Epic and Story).
+func integrationConfig(t *testing.T) map[string]any {
+	t.Helper()
+
+	return map[string]any{
+		"endpoint":   requireEnv(t, "SORTIE_HULY_URL"),
+		"api_key":    requireEnv(t, "SORTIE_HULY_TOKEN"),
+		"workspace":  requireEnv(t, "SORTIE_HULY_WORKSPACE"),
+		"project":    requireEnv(t, "SORTIE_HULY_PROJECT"),
+		"epic_type":  envOr("SORTIE_HULY_EPIC_TYPE", "Epic"),
+		"story_type": envOr("SORTIE_HULY_STORY_TYPE", "Story"),
+	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// integrationAdapter builds an adapter from integrationConfig.
 func integrationAdapter(t *testing.T) *HulyAdapter {
 	t.Helper()
 
-	adapter, err := NewHulyAdapter(map[string]any{
-		"endpoint":  requireEnv(t, "SORTIE_HULY_URL"),
-		"api_key":   requireEnv(t, "SORTIE_HULY_TOKEN"),
-		"workspace": requireEnv(t, "SORTIE_HULY_WORKSPACE"),
-		"project":   requireEnv(t, "SORTIE_HULY_PROJECT"),
-	})
+	adapter, err := NewHulyAdapter(integrationConfig(t))
 	if err != nil {
 		t.Fatalf("NewHulyAdapter() error = %v", err)
 	}
 	return adapter.(*HulyAdapter)
+}
+
+// TestIntegrationPlanTypes resolves the configured epic and story task
+// types, and checks that an unknown type fails construction with the
+// project's task type names.
+func TestIntegrationPlanTypes(t *testing.T) {
+	skipUnlessIntegration(t)
+
+	a := integrationAdapter(t)
+	if !a.plan.configured() {
+		t.Fatal("plan task types not resolved")
+	}
+	t.Logf("epic=%s (%s) story=%s (%s)", a.plan.epic.Name, a.plan.epic.ID, a.plan.story.Name, a.plan.story.ID)
+
+	cfg := integrationConfig(t)
+	cfg["epic_type"] = "No Such Type"
+	_, err := NewHulyAdapter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "No Such Type") || !strings.Contains(err.Error(), a.plan.story.Name) {
+		t.Fatalf("NewHulyAdapter(unknown epic type) error = %v, want one naming the type and the project's task types", err)
+	}
+	t.Logf("unknown type: %v", err)
 }
 
 // TestIntegrationReadWrite exercises every operation against a live

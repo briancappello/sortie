@@ -53,6 +53,9 @@ type HulyAdapter struct {
 	// workflow to its status ids.
 	projectStatuses map[string][]string
 
+	// plan maps the planning kinds to the project's task types.
+	plan planTypes
+
 	mu       sync.RWMutex
 	statuses map[string]hulyStatus // status id -> status, any project
 	metrics  domain.Metrics
@@ -69,12 +72,15 @@ type HulyAdapter struct {
 // Optional config keys, read from the "huly" extension section:
 //   - "workspace": the workspace URL name. It may be omitted when the
 //     token is already scoped to one workspace.
+//   - "epic_type", "story_type": the project task types that the planning
+//     kinds epic and story map to. Plan writes need both.
 //
-// The constructor logs in, resolves the project and its workflow states,
-// and fails when a configured state name is absent from the project.
+// The constructor logs in, resolves the project, its workflow states and
+// the configured task types, and fails when a configured state or task
+// type is absent from the project.
 func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 	fields := map[string]string{}
-	for _, key := range []string{"endpoint", "api_key", "project", "workspace", "user_agent", "handoff_state", "in_progress_state"} {
+	for _, key := range []string{"endpoint", "api_key", "project", "workspace", "user_agent", "handoff_state", "in_progress_state", "epic_type", "story_type"} {
 		value, fault := typeutil.StringField(config, key)
 		if fault != nil {
 			return nil, &domain.TrackerError{Kind: domain.ErrTrackerPayload, Message: fault.Error()}
@@ -124,7 +130,14 @@ func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 		}
 	}
 
-	return newAdapter(ctx, conn.rpc, fields["project"], conn.socialID, issueURLBase, active, configured, slog.Default())
+	a, err := newAdapter(ctx, conn.rpc, fields["project"], conn.socialID, issueURLBase, active, configured, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+	if err := a.resolvePlanTypes(ctx, fields["epic_type"], fields["story_type"]); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // newAdapter resolves the project and its workflow states through rpc and

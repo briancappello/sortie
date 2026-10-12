@@ -42,11 +42,23 @@ tracker:
 
 huly:
   workspace: sortie                 # the workspace URL name
+  epic_type: Epic                   # task types for plan writes; set both or neither
+  story_type: Story
 ```
 
 `examples/WORKFLOW.huly.md` is a complete workflow. It uses the mock agent.
 
 Each configured state name must be a status in the project's workflow, compared without regard to letter case. If a configured state is missing, the constructor fails and the error lists the project's states. The classic Huly workflow has no review status, and a handoff state must not be terminal. Before you set `handoff_state`, add a status such as `In Review` to the project in Huly.
+
+## Plan task types
+
+Plan writes map the planning kinds `epic` and `story` to two task types of the project's space type, named by `huly.epic_type` and `huly.story_type`. The default classic project type has only the `Issue` task type, so create the two types first:
+
+1. Open Settings, then **Spaces**, and select the project's space type under **Space types** (`Classic project` for a classic project).
+2. In **Task types**, select **+**. Name the type `Epic`, keep the kind **Task & Sub-task**, and create it.
+3. Repeat for `Story`.
+
+A change to the space type applies to every project of that type. The adapter resolves both names when it starts, compared without regard to letter case. If one is missing, the constructor fails and the error lists the project's task types. With neither key set, the adapter still reads and writes as before, and a plan write fails with `tracker_payload_error`. The same task types can be created through the transactor by replaying what the settings page sends: push the type's statuses into the space type's `statuses`, create a mixin class that extends `tracker:class:Issue`, create the `task:class:TaskType` document, and push its id into the space type's `tasks`.
 
 ## How it works
 

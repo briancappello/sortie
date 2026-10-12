@@ -11,6 +11,7 @@ const (
 	classIssueStatus    = "tracker:class:IssueStatus"
 	classProject        = "tracker:class:Project"
 	classProjectType    = "task:class:ProjectType"
+	classTaskType       = "task:class:TaskType"
 	classPerson         = "contact:class:Person"
 	classSocialIdentity = "contact:class:SocialIdentity"
 	classChatMessage    = "chunter:class:ChatMessage"
