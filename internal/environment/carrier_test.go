@@ -116,3 +116,25 @@ func TestLaunchCarrier(t *testing.T) {
 		t.Errorf("ConnectionFailed() did not reach the environment with its workspace, exit code, and stderr tail: got %+v, %d, %q", env.gotFailedWorkspace, env.gotExit, env.gotTail)
 	}
 }
+
+func TestRunsElsewhere(t *testing.T) {
+	t.Parallel()
+
+	local, err := environment.New(environment.Params{Config: config.EnvironmentConfig{Kind: config.EnvironmentKindLocal}})
+	if err != nil {
+		t.Fatalf("New(local) error = %v", err)
+	}
+	for name, tc := range map[string]struct {
+		env  environment.Environment
+		want bool
+	}{
+		"nil":      {nil, false},
+		"local":    {local, false},
+		"recorder": {&environmenttest.Recorder{}, false},
+		"carrier":  {&fakeCarrierEnvironment{}, true},
+	} {
+		if got := environment.RunsElsewhere(tc.env); got != tc.want {
+			t.Errorf("RunsElsewhere(%s) = %v, want %v", name, got, tc.want)
+		}
+	}
+}

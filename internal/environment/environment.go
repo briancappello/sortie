@@ -154,6 +154,16 @@ type Carrier interface {
 	ConnectionFailed(ws Workspace, exitCode int, stderrTail []string) bool
 }
 
+// RunsElsewhere reports whether env runs workspace code somewhere other
+// than this host, which an environment declares by implementing
+// [Carrier]. A command such an environment builds does not see this
+// host's files, and a host variable reaches it only as the environment
+// forwards it. A nil env runs on this host.
+func RunsElsewhere(env Environment) bool {
+	_, ok := env.(Carrier)
+	return ok
+}
+
 // LaunchCarrier returns the agent launch carrier for ws when env
 // implements [Carrier], and nil otherwise, so a nil result launches the
 // agent as Sortie launches it without an environment.

@@ -1,12 +1,18 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -205,8 +211,16 @@ type triageResultDocument struct {
 // the tail lives on the [workspace.HookResult] or [workspace.HookError]
 // and is not carried on the returned outcome.
 //
+// The input and result files live where the command can reach them and
+// outside the workspace: in a fresh host temporary directory, or, for an
+// environment that runs elsewhere ([environment.RunsElsewhere]), in a
+// per-run directory under [triageGuestRoot] inside it, which Sortie
+// writes, reads, and removes through the environment after resuming its
+// instance ([environment.Resumer]).
+//
 // It blocks for at most cfg.TimeoutMS milliseconds plus the process
-// group teardown grace, and MUST be called from a goroutine, never from
+// group teardown grace (and, inside an environment, the bounded file
+// commands), and MUST be called from a goroutine, never from
 // the orchestrator event loop.
 func RunReactionTriage(
 	ctx context.Context,
@@ -239,22 +253,36 @@ func RunReactionTriage(
 		return finish(triageFallbackOutcome(triageFallbackWorkspaceMissing, 0), "")
 	}
 
-	files, filesErr := newHostTriageFiles()
-	if filesErr != nil {
+	target := workspace.NewTarget(req.Environment, pathResult.Key, pathResult.Path, req.IssueID, req.Identifier)
+	workspacePath := pathResult.Path
+	var files triageFiles
+	if environment.RunsElsewhere(req.Environment) {
+		if !resumeForTriage(ctx, log, req, target) {
+			return finish(triageFallbackOutcome(triageFallbackStartFailed, 0), "")
+		}
+		files = newGuestTriageFiles(target, req.Kind, log)
+		workspacePath = target.Workspace.GuestPath
+	} else {
+		hostFiles, filesErr := newHostTriageFiles()
+		if filesErr != nil {
+			return finish(triageFallbackOutcome(triageFallbackStartFailed, 0), "")
+		}
+		files = hostFiles
+	}
+	defer files.remove(ctx, req.Kind, log)
+
+	input, err := encodeTriageInput(req, workspacePath)
+	if err != nil {
 		return finish(triageFallbackOutcome(triageFallbackStartFailed, 0), "")
 	}
-	defer files.remove(req.Kind, log)
-	inputPath := files.inputPath
-	resultPath := files.resultPath
-
-	if writeErr := writeTriageInput(inputPath, req, pathResult.Path); writeErr != nil {
+	if writeErr := files.writeInput(ctx, input); writeErr != nil {
 		return finish(triageFallbackOutcome(triageFallbackStartFailed, 0), "")
 	}
 
 	env := workspace.HookEnv(req.IssueID, req.Identifier, pathResult.Path, req.Attempt, req.SSHHost)
 	env["SORTIE_REACTION_KIND"] = req.Kind
-	env["SORTIE_REACTION_INPUT"] = inputPath
-	env["SORTIE_REACTION_RESULT"] = resultPath
+	env["SORTIE_REACTION_INPUT"] = files.inputPath()
+	env["SORTIE_REACTION_RESULT"] = files.resultPath()
 
 	started := time.Now()
 	hookResult, hookErr := workspace.RunHook(ctx, workspace.HookParams{
@@ -262,7 +290,7 @@ func RunReactionTriage(
 		Dir:       pathResult.Path,
 		Env:       env,
 		TimeoutMS: cfg.TimeoutMS,
-		Target:    workspace.NewTarget(req.Environment, pathResult.Key, pathResult.Path, req.IssueID, req.Identifier),
+		Target:    target,
 	})
 	elapsed := time.Since(started)
 
@@ -284,19 +312,36 @@ func RunReactionTriage(
 	if hookResult.TerminatedLeftovers {
 		log.Info(procutil.LeftoversTerminatedMessage, slog.String("reaction_kind", req.Kind)) //nolint:sloglint // procutil.LeftoversTerminatedMessage is a fixed string constant
 	}
-	return finish(decodeResult(resultPath, elapsed), "")
+	return finish(files.readResult(ctx, elapsed), "")
 }
 
-// hostTriageFiles is the exchange of one triage run with a command that
-// runs on the host: the input and result files in a fresh host temporary
-// directory. The directory sits outside the workspace so a stale result
+// triageFiles is the exchange of one triage run with its command: the
+// input file Sortie writes and the result file the command writes, at
+// paths the command can reach, outside the workspace so a stale result
 // file cannot be read as this run's answer and so externally authored
-// text stays out of the tree the agent reads. An environment that runs
-// the command elsewhere needs the exchange there instead.
+// text stays out of the tree the agent reads.
+type triageFiles interface {
+	// inputPath and resultPath are the paths as the command sees them.
+	inputPath() string
+	resultPath() string
+
+	// writeInput writes the input document.
+	writeInput(ctx context.Context, data []byte) error
+
+	// readResult reads the result file and returns the outcome it
+	// implies.
+	readResult(ctx context.Context, elapsed time.Duration) ReactionTriageOutcome
+
+	// remove deletes the run's files, logging a failure.
+	remove(ctx context.Context, kind string, log *slog.Logger)
+}
+
+// hostTriageFiles is the exchange with a command that runs on this
+// host: the input and result files in a fresh host temporary directory.
 type hostTriageFiles struct {
-	dir        string
-	inputPath  string
-	resultPath string
+	dir    string
+	input  string
+	result string
 }
 
 // newHostTriageFiles creates the run's host temporary directory.
@@ -306,20 +351,203 @@ func newHostTriageFiles() (hostTriageFiles, error) {
 		return hostTriageFiles{}, err
 	}
 	return hostTriageFiles{
-		dir:        dir,
-		inputPath:  filepath.Join(dir, "input.json"),
-		resultPath: filepath.Join(dir, "result.json"),
+		dir:    dir,
+		input:  filepath.Join(dir, "input.json"),
+		result: filepath.Join(dir, "result.json"),
 	}, nil
 }
 
+func (f hostTriageFiles) inputPath() string  { return f.input }
+func (f hostTriageFiles) resultPath() string { return f.result }
+
+// writeInput writes the input document at mode 0600.
+func (f hostTriageFiles) writeInput(_ context.Context, data []byte) error {
+	if err := os.WriteFile(f.input, data, 0o600); err != nil {
+		return fmt.Errorf("write triage input: %w", err)
+	}
+	return nil
+}
+
+func (f hostTriageFiles) readResult(_ context.Context, elapsed time.Duration) ReactionTriageOutcome {
+	return decodeResult(f.result, elapsed)
+}
+
 // remove deletes the run's temporary directory, logging a failure.
-func (f hostTriageFiles) remove(kind string, log *slog.Logger) {
+func (f hostTriageFiles) remove(_ context.Context, kind string, log *slog.Logger) {
 	if rmErr := os.RemoveAll(f.dir); rmErr != nil {
 		log.Warn("failed to remove reaction triage temporary directory",
 			slog.String("reaction_kind", kind),
 			slog.Any("error", rmErr),
 		)
 	}
+}
+
+// triageGuestRoot is the directory, on a tmpfs inside an environment
+// that runs elsewhere, under which each triage run gets its own
+// directory. Whatever a run leaves there goes when the instance stops.
+const triageGuestRoot = "/run/sortie/triage"
+
+// triageGuestFileTimeout bounds each command that writes, reads, or
+// removes a triage run's files inside the environment.
+const triageGuestFileTimeout = 30 * time.Second
+
+// triageGuestNotFoundStatus is the exit status of the read command when
+// the command left no result file.
+const triageGuestNotFoundStatus = 3
+
+// guestTriageFiles is the exchange with a command that runs in an
+// environment that runs elsewhere: the files in the run's own directory
+// under [triageGuestRoot], written, read, and removed by commands the
+// environment runs.
+type guestTriageFiles struct {
+	target workspace.Target
+	dir    string
+	kind   string
+	log    *slog.Logger
+}
+
+// newGuestTriageFiles names the run's directory: the reaction kind and
+// a random suffix, reduced to characters a path segment can hold
+// without interpretation.
+func newGuestTriageFiles(target workspace.Target, kind string, log *slog.Logger) guestTriageFiles {
+	return guestTriageFiles{target: target, dir: path.Join(triageGuestRoot, triageRunID(kind)), kind: kind, log: log}
+}
+
+// triageRunID returns a fresh identifier for one triage run of kind,
+// made only of A-Za-z0-9, '_', and '-'.
+func triageRunID(kind string) string {
+	var suffix [8]byte
+	_, _ = rand.Read(suffix[:])
+	return sanitizeTriagePathSegment(kind) + "-" + hex.EncodeToString(suffix[:])
+}
+
+// sanitizeTriagePathSegment replaces every character of s outside
+// A-Za-z0-9, '_', and '-' with '_'. An empty s yields "run".
+func sanitizeTriagePathSegment(s string) string {
+	if s == "" {
+		return "run"
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		}
+		return '_'
+	}, s)
+}
+
+func (f guestTriageFiles) inputPath() string  { return path.Join(f.dir, "input.json") }
+func (f guestTriageFiles) resultPath() string { return path.Join(f.dir, "result.json") }
+
+// writeInput creates the run's directory, readable only by its owner,
+// and pipes data into the input file. A failure is logged with the
+// environment's error, which a host write never has.
+func (f guestTriageFiles) writeInput(ctx context.Context, data []byte) error {
+	_, err := f.run(ctx, bytes.NewReader(data), 0,
+		`umask 077 && mkdir -p -- "$1" && cat > "$2"`, f.dir, f.inputPath())
+	if err != nil {
+		f.log.Warn("failed to write the reaction triage input in the execution environment",
+			slog.String("reaction_kind", f.kind),
+			slog.String("path", f.inputPath()),
+			slog.Any("error", err),
+		)
+		return fmt.Errorf("write triage input in the environment: %w", err)
+	}
+	return nil
+}
+
+// readResult reads the result file with head, at most one byte more
+// than [triageMaxResultBytes], so a larger file is told apart without
+// reading it whole. The host keeps at most the cap itself, whatever the
+// guest's head does: a result that overflows it is too large.
+func (f guestTriageFiles) readResult(ctx context.Context, elapsed time.Duration) ReactionTriageOutcome {
+	out, err := f.run(ctx, nil, triageMaxResultBytes,
+		fmt.Sprintf(`[ -e "$1" ] || exit %d; exec head -c %d -- "$1"`, triageGuestNotFoundStatus, triageMaxResultBytes+1),
+		f.resultPath())
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == triageGuestNotFoundStatus {
+			return triageFallbackOutcome(triageFallbackNoResult, elapsed)
+		}
+		return triageFallbackOutcome(triageFallbackMalformedResult, elapsed)
+	}
+	if out.Truncated() {
+		return triageFallbackOutcome(triageFallbackResultTooLarge, elapsed)
+	}
+	return parseTriageResult(out.Bytes(), elapsed)
+}
+
+// remove deletes the run's directory. It runs even after ctx is
+// cancelled, within its own timeout.
+func (f guestTriageFiles) remove(ctx context.Context, kind string, log *slog.Logger) {
+	if _, err := f.run(context.WithoutCancel(ctx), nil, 0, `rm -rf -- "$1"`, f.dir); err != nil {
+		log.Warn("failed to remove reaction triage directory in the environment",
+			slog.String("reaction_kind", kind),
+			slog.String("dir", f.dir),
+			slog.Any("error", err),
+		)
+	}
+}
+
+// run runs script with args as its positional parameters through the
+// environment, in the workspace root, feeding it stdin when non-nil, and
+// returns the last keep bytes of its standard output, in a buffer that
+// reports whether it dropped any, so the host never holds more than
+// keep bytes whatever the command writes.
+func (f guestTriageFiles) run(ctx context.Context, stdin io.Reader, keep int, script string, args ...string) (*procutil.TailBuffer, error) {
+	ctx, cancel := context.WithTimeout(ctx, triageGuestFileTimeout)
+	defer cancel()
+	argv := append([]string{"sh", "-c", script, "sh"}, args...)
+	cmd, err := f.target.Command(ctx, environment.CommandSpec{Argv: argv, Stdin: stdin != nil})
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdin = stdin
+	procutil.SetGroupKill(cmd)
+	stdout := procutil.NewTailBuffer(max(keep, 1))
+	stderr := procutil.NewTailBuffer(512)
+	capture, err := procutil.StartCapture(ctx, cmd, procutil.CaptureParams{Stdout: stdout, Stderr: stderr, Logger: f.log})
+	if err != nil {
+		return nil, err
+	}
+	result := capture.Wait()
+	switch {
+	case result.Stopped:
+		return nil, fmt.Errorf("%s: %w", strings.Join(args, " "), context.Cause(ctx))
+	case result.WaitErr != nil:
+		if msg := strings.TrimSpace(string(stderr.Bytes())); msg != "" {
+			return nil, fmt.Errorf("%w: %s", result.WaitErr, msg)
+		}
+		return nil, result.WaitErr
+	}
+	return stdout, nil
+}
+
+// resumeForTriage makes the workspace's environment instance ready to
+// run the triage command when the environment stops its instances
+// between runs, and reports whether the command can run.
+func resumeForTriage(ctx context.Context, log *slog.Logger, req ReactionTriageRequest, target workspace.Target) bool {
+	resumer, ok := target.Environment.(environment.Resumer)
+	if !ok {
+		return true
+	}
+	ready, err := resumer.Resume(ctx, target.Workspace)
+	switch {
+	case err != nil:
+		log.Warn("reaction triage cannot run: resuming the execution environment failed",
+			slog.String("reaction_kind", req.Kind),
+			slog.String("environment", target.Environment.Kind()),
+			slog.Any("error", err),
+		)
+		return false
+	case !ready:
+		log.Warn("reaction triage cannot run: the workspace has no execution environment instance",
+			slog.String("reaction_kind", req.Kind),
+			slog.String("environment", target.Environment.Kind()),
+		)
+		return false
+	}
+	return true
 }
 
 // triageFallbackOutcome builds the defaulted outcome for one fallback
@@ -349,9 +577,9 @@ func fallbackForHookOp(op string) string {
 	}
 }
 
-// writeTriageInput marshals the input document and writes it at mode
-// 0600.
-func writeTriageInput(path string, req ReactionTriageRequest, workspacePath string) error {
+// encodeTriageInput marshals the input document, naming workspacePath
+// as the workspace the command runs in.
+func encodeTriageInput(req ReactionTriageRequest, workspacePath string) ([]byte, error) {
 	doc := triageInputDocument{
 		SchemaVersion: triageInputSchemaVersion,
 		ReactionKind:  req.Kind,
@@ -370,12 +598,9 @@ func writeTriageInput(path string, req ReactionTriageRequest, workspacePath stri
 
 	encoded, err := json.Marshal(doc)
 	if err != nil {
-		return fmt.Errorf("marshal triage input: %w", err)
+		return nil, fmt.Errorf("marshal triage input: %w", err)
 	}
-	if err := os.WriteFile(path, encoded, 0o600); err != nil {
-		return fmt.Errorf("write triage input: %w", err)
-	}
-	return nil
+	return encoded, nil
 }
 
 // decodeResult reads the result file a successful command left behind
@@ -394,7 +619,13 @@ func decodeResult(path string, elapsed time.Duration) ReactionTriageOutcome {
 	if err != nil {
 		return triageFallbackOutcome(triageFallbackMalformedResult, elapsed)
 	}
+	return parseTriageResult(raw, elapsed)
+}
 
+// parseTriageResult returns the outcome the result document raw
+// implies. Every rejection yields [TriageDispatchAgent] with a named
+// fallback reason.
+func parseTriageResult(raw []byte, elapsed time.Duration) ReactionTriageOutcome {
 	var doc triageResultDocument
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return triageFallbackOutcome(triageFallbackMalformedResult, elapsed)
