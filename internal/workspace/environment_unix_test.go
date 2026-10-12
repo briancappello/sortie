@@ -274,6 +274,69 @@ func TestFinish_SummaryPathIsTheGuestPathInAnEnvironmentThatRunsElsewhere(t *tes
 	}
 }
 
+// TestHookEnv_SortieVariablesStayOnTheHostForAnEnvironmentThatRunsElsewhere
+// sets a process variable, so it does not run in parallel.
+func TestHookEnv_SortieVariablesStayOnTheHostForAnEnvironmentThatRunsElsewhere(t *testing.T) {
+	const leak = "SORTIE_TEST_HOOK_SECRET"
+	t.Setenv(leak, "host-only-value")
+
+	for _, tt := range []struct {
+		name      string
+		elsewhere bool
+	}{
+		{name: "host", elsewhere: false},
+		{name: "elsewhere", elsewhere: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			ws, err := Ensure(root, "ENV-7")
+			if err != nil {
+				t.Fatalf("Ensure() error = %v", err)
+			}
+			rec := recordingEnvironment()
+			var env environment.Environment = rec
+			if tt.elsewhere {
+				env = elsewhereRecorder{Recorder: rec}
+			}
+
+			Finish(context.Background(), FinishParams{
+				Path:          ws.Path,
+				Identifier:    "ENV-7",
+				IssueID:       "id-env-7",
+				AfterRun:      "true",
+				HookTimeoutMS: 5000,
+				Environment:   env,
+			})
+
+			cmds := rec.Commands()
+			if len(cmds) != 1 {
+				t.Fatalf("commands = %d (ops %q), want 1", len(cmds), rec.Ops())
+			}
+			got := cmds[0].Spec.Env
+			inherited := slices.Contains(got, leak+"=host-only-value")
+			if inherited != !tt.elsewhere {
+				t.Errorf("hook env carries %s = %v, want %v (env %q)", leak, inherited, !tt.elsewhere, got)
+			}
+			if !slices.Contains(got, "SORTIE_ISSUE_IDENTIFIER=ENV-7") {
+				t.Errorf("hook env = %q, want Sortie's own SORTIE_ISSUE_IDENTIFIER", got)
+			}
+		})
+	}
+}
+
+func TestGitInspectionEnv(t *testing.T) {
+	t.Parallel()
+
+	host := HostTarget(t.TempDir())
+	if got := gitInspectionEnv(host); !slices.Contains(got, "GIT_OPTIONAL_LOCKS=0") || len(got) < 2 {
+		t.Errorf("host target env = %q, want Sortie's environment plus GIT_OPTIONAL_LOCKS=0", got)
+	}
+	elsewhere := Target{Environment: elsewhereRecorder{Recorder: recordingEnvironment()}}
+	if got := gitInspectionEnv(elsewhere); got != nil {
+		t.Errorf("target that runs elsewhere env = %q, want none of Sortie's variables", got)
+	}
+}
+
 // removalCase runs one workspace removal call site against env and
 // returns the workspace path it removed.
 type removalCase struct {

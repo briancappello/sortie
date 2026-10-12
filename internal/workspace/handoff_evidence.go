@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
@@ -288,10 +289,14 @@ func quoteStdinPath(path []byte) string {
 }
 
 // gitInspectionEnv is the environment of the inspection's git commands
-// on a host target. Environments that forward only their own variables
-// drop it, so [inspectionGitArgs] also passes the equivalent global
-// option on the command line.
-func gitInspectionEnv() []string {
+// through target. A host target inherits Sortie's environment. A target
+// that runs elsewhere gets none of Sortie's variables, which could carry
+// secrets into the guest, so [inspectionGitArgs] also passes the
+// equivalent global option on the command line.
+func gitInspectionEnv(target Target) []string {
+	if environment.RunsElsewhere(target.Environment) {
+		return nil
+	}
 	return append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
 }
 
@@ -315,7 +320,7 @@ func runGit(ctx context.Context, target Target, args ...string) ([]byte, error) 
 // returns its standard output. A non-nil stdin is the command's
 // standard input; nil connects none.
 func runGitInput(ctx context.Context, target Target, stdin []byte, args ...string) ([]byte, error) {
-	cmd, err := target.gitCommand(ctx, gitInspectionEnv(), stdin != nil, inspectionGitArgs(args)...)
+	cmd, err := target.gitCommand(ctx, gitInspectionEnv(target), stdin != nil, inspectionGitArgs(args)...)
 	if err != nil {
 		return nil, err
 	}

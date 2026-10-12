@@ -180,7 +180,8 @@ func hookCommand(ctx context.Context, params HookParams, argv ...string) (*exec.
 			return nil, &HookError{Op: "start", Script: truncateScript(params.Script), ExitCode: -1, Err: err}
 		}
 	}
-	cmd, err := target.Command(ctx, environment.CommandSpec{Argv: argv, Dir: rel, Env: hookEnv(params.Env)})
+	inherit := !environment.RunsElsewhere(target.Environment)
+	cmd, err := target.Command(ctx, environment.CommandSpec{Argv: argv, Dir: rel, Env: hookEnv(params.Env, inherit)})
 	if err != nil {
 		return nil, &HookError{Op: "start", Script: truncateScript(params.Script), ExitCode: -1, Err: err}
 	}
@@ -188,11 +189,17 @@ func hookCommand(ctx context.Context, params HookParams, argv ...string) (*exec.
 }
 
 // hookEnv builds a restricted environment for the hook subprocess.
-// Only variables in allowedEnvKeys and variables whose name starts
-// with "SORTIE_" are inherited from the parent process. Variables in
-// override take precedence over same-named parent variables.
-func hookEnv(override map[string]string) []string {
-	parent := os.Environ()
+// When inherit holds, variables in allowedEnvKeys and variables whose
+// name starts with "SORTIE_" are inherited from the parent process, and
+// variables in override take precedence over same-named parent
+// variables. Without inherit, as for a hook that runs elsewhere, nothing
+// is inherited: Sortie's own SORTIE_* variables can hold secrets, and
+// the hook sees only override.
+func hookEnv(override map[string]string, inherit bool) []string {
+	var parent []string
+	if inherit {
+		parent = os.Environ()
+	}
 	env := make([]string, 0, len(allowedEnvKeys)+len(override))
 	overrideNorm := make(map[string]bool, len(override))
 	for k := range override {
