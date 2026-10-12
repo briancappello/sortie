@@ -455,7 +455,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 
 	toolRegistry := domain.NewToolRegistry()
 	if br.cfg.Tracker.Project != "" {
-		toolRegistry.Register(trackerapi.New(br.trackerAdapter, br.cfg.Tracker.Project))
+		toolRegistry.Register(trackerapi.New(br.trackerAdapter, br.cfg.Tracker.Project,
+			trackerapi.WithWriteCapabilities(trackerWrites(br.cfg.Tracker.Kind))))
 	}
 
 	var ciProvider domain.CIStatusProvider

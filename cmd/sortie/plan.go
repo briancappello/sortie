@@ -128,6 +128,12 @@ func runPlanSync(ctx context.Context, args []string, stdout io.Writer, stderr io
 	return 0
 }
 
+// trackerWrites returns the write capabilities a tracker kind declared.
+func trackerWrites(kind string) []registry.WriteCapability {
+	meta, _ := registry.Trackers.Meta(kind)
+	return meta.WriteCapabilities
+}
+
 // newPlanSyncer returns the syncer behind the HTTP plan endpoints, for the
 // tracker adapter the orchestrator already built.
 func newPlanSyncer(adapter domain.TrackerAdapter, kind string) *plan.Syncer {
