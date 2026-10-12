@@ -103,6 +103,11 @@ type RepositorySync interface {
 	// Seed places the repository in ws's environment, created by this
 	// preparation, before the after_create hook runs in it.
 	Seed(ctx context.Context, env environment.Environment, ws environment.Workspace) error
+
+	// Refresh brings the upstream's state into the repository in ws's
+	// existing environment, before the before_run hook runs in it,
+	// without changing the work there.
+	Refresh(ctx context.Context, env environment.Environment, ws environment.Workspace) error
 }
 
 // PrepareResult holds the outcome of successful workspace preparation.
@@ -139,7 +144,8 @@ type PrepareResult struct {
 // once its environment is prepared.
 //
 // With Repository set, the repository is seeded into a newly created
-// environment before after_create runs; see [RepositorySync].
+// environment before after_create runs, and refreshed in an existing one
+// before before_run runs; see [RepositorySync].
 //
 // Failure semantics:
 //   - a stale workspace whose recorded kind cannot be built, or whose
@@ -148,7 +154,8 @@ type PrepareResult struct {
 //     directory created by this call is removed, and no hook runs, on
 //     the host or anywhere else.
 //   - a repository seed failure is fatal and removes the workspace
-//     directory, as an after_create failure does.
+//     directory, as an after_create failure does; a repository refresh
+//     failure is fatal and keeps it, as a before_run failure does.
 //   - after_create failure is fatal: the workspace directory is removed
 //     (transactional rollback) so the next retry starts with a clean
 //     slate. A failure of the environment's own step after after_create
@@ -302,12 +309,18 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 }
 
 // syncRepository seeds the repository into the target's environment when
-// this preparation created it. A failed seed removes the workspace
-// directory, as a failed after_create does, so the next attempt creates
-// the environment and seeds it again.
+// this preparation created it, and refreshes it otherwise. A failed seed
+// removes the workspace directory, as a failed after_create does, so the
+// next attempt creates the environment and seeds it again. A failed
+// refresh keeps the workspace, which holds the work of earlier runs.
 func syncRepository(ctx context.Context, logger *slog.Logger, params PrepareParams, target Target, createdNow bool) error {
 	path := target.Workspace.HostPath
 	if !createdNow {
+		if err := params.Repository.Refresh(ctx, params.Environment, target.Workspace); err != nil {
+			logger.WarnContext(ctx, "repository refresh failed",
+				slog.String("workspace", path), slog.Any("error", err))
+			return fmt.Errorf("refresh repository: %w", err)
+		}
 		return nil
 	}
 	logger.InfoContext(ctx, "seeding repository", slog.String("workspace", path))

@@ -116,7 +116,7 @@ func GuestRemoteURL(raw string) string {
 // anything is fetched, with an error naming the branch.
 func (s *Syncer) Seed(ctx context.Context, env environment.Environment, ws environment.Workspace) error {
 	branch := s.IssueBranch(ws.Key)
-	hasBranch, err := s.sendBundle(ctx, env, ws, branch)
+	hasBranch, err := s.sendBundle(ctx, env, ws, branch, true)
 	if err != nil {
 		return err
 	}
@@ -138,11 +138,35 @@ func (s *Syncer) Seed(ctx context.Context, env environment.Environment, ws envir
 	return nil
 }
 
+// Refresh brings the upstream's base branch and issue branch into ws's
+// existing environment as origin/<base> and origin/<issue branch>,
+// leaving its local branches, index, and work tree as they are. It
+// fetches the upstream into the mirror first; when that fails it logs a
+// warning and sends the mirror's last state instead. In the environment
+// it fetches the bundle into refs/remotes/origin/* with pruning, so
+// origin/* holds exactly the upstream's two branches: a remote-tracking
+// ref of a branch the upstream deleted, or that the bundle does not
+// carry, is removed.
+func (s *Syncer) Refresh(ctx context.Context, env environment.Environment, ws environment.Workspace) error {
+	branch := s.IssueBranch(ws.Key)
+	if _, err := s.sendBundle(ctx, env, ws, branch, false); err != nil {
+		return err
+	}
+	defer s.removeGuestBundle(ctx, env, ws)
+
+	if err := s.guest(ctx, env, ws, nil, "git", "fetch", "--quiet", "--prune", "--no-tags", "--", s.guestBundle(), "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return fmt.Errorf("refresh origin in the environment: %w", err)
+	}
+	return nil
+}
+
 // sendBundle builds the bundle of the base branch and, when the mirror
 // has it, branch, and writes it to the guest bundle path in ws's
-// environment. It reports whether the bundle holds branch.
-func (s *Syncer) sendBundle(ctx context.Context, env environment.Environment, ws environment.Workspace, branch string) (bool, error) {
-	bundle, hasBranch, err := s.buildBundle(ctx, branch)
+// environment. It reports whether the bundle holds branch. A failed
+// upstream fetch fails when strict is set; otherwise it is logged and
+// the bundle is built from the mirror's last state.
+func (s *Syncer) sendBundle(ctx context.Context, env environment.Environment, ws environment.Workspace, branch string, strict bool) (bool, error) {
+	bundle, hasBranch, err := s.buildBundle(ctx, branch, strict)
 	if err != nil {
 		return false, err
 	}
@@ -163,8 +187,9 @@ func (s *Syncer) sendBundle(ctx context.Context, env environment.Environment, ws
 // buildBundle locks the mirror, checks branch's name, fetches the
 // upstream, and writes the bundle of the base branch, plus branch when
 // the mirror has it, to a new temporary directory under the state
-// directory. The caller removes that directory.
-func (s *Syncer) buildBundle(ctx context.Context, branch string) (string, bool, error) {
+// directory. The caller removes that directory. A failed upstream fetch
+// is handled as [Syncer.sendBundle] describes for strict.
+func (s *Syncer) buildBundle(ctx context.Context, branch string, strict bool) (string, bool, error) {
 	l, err := s.mirror.Lock(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("lock the repository mirror: %w", err)
@@ -175,7 +200,11 @@ func (s *Syncer) buildBundle(ctx context.Context, branch string) (string, bool, 
 		return "", false, err
 	}
 	if err := l.FetchUpstream(ctx); err != nil {
-		return "", false, err
+		if strict {
+			return "", false, err
+		}
+		s.logger.WarnContext(ctx, "upstream fetch failed; refreshing the environment from the mirror's last state",
+			slog.String("repository", s.mirror.displayURL()), slog.Any("error", err))
 	}
 	if _, ok, err := l.Ref(ctx, s.repo.Base); err != nil {
 		return "", false, err

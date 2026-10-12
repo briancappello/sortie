@@ -153,3 +153,55 @@ func TestIntegration_SeedsTheRepositoryBeforeAfterCreate(t *testing.T) {
 		t.Errorf("after_create HEAD and origin/main = %q, want the upstream branch tip %s and main %s", got, tip, main)
 	}
 }
+
+// Not parallel: it sets the git configuration variables in the process
+// environment.
+func TestIntegration_RefreshesOriginBeforeTheNextRun(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	up := newRepoFixture(t)
+	key := ie.newKey("SMOLREFRESH")
+	syncer := newSyncer(t, up.dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	prepare := func(wantCreated bool) {
+		t.Helper()
+		res, err := workspace.Prepare(ctx, workspace.PrepareParams{
+			Root:          ie.root,
+			Identifier:    key,
+			IssueID:       "10001",
+			HookTimeoutMS: 120_000,
+			Environment:   ie.env,
+			Repository:    syncer,
+		})
+		if err != nil {
+			t.Fatalf("workspace.Prepare() error = %v", err)
+		}
+		if res.CreatedNow != wantCreated {
+			t.Fatalf("workspace.Prepare().CreatedNow = %v, want %v", res.CreatedNow, wantCreated)
+		}
+	}
+
+	prepare(true)
+	// The first run commits locally and leaves a file uncommitted.
+	head, err := ie.guest(ctx, key, `cd /workspace && echo work > agent.txt && git add agent.txt &&
+git -c user.name=Agent -c user.email=agent@example.com commit -q -m work &&
+echo draft > draft.txt && git rev-parse HEAD`)
+	if err != nil {
+		t.Fatalf("guest local work: %v", err)
+	}
+	if err := ie.env.cli.Stop(ctx, VMName(key)); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	newMain := up.commit("main.txt", "moved on\n")
+
+	prepare(false)
+	out, err := ie.guest(ctx, key, "cd /workspace && git rev-parse origin/main HEAD && git rev-parse --abbrev-ref HEAD && cat draft.txt && git status --porcelain -- agent.txt draft.txt")
+	if err != nil {
+		t.Fatalf("guest inspection: %v", err)
+	}
+	want := newMain + "\n" + head + "sortie/" + key + "\ndraft\n?? draft.txt\n"
+	if out != want {
+		t.Errorf("guest origin/main, HEAD, branch, draft.txt, and status =\n%s\nwant\n%s", out, want)
+	}
+}

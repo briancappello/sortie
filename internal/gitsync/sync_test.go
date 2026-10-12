@@ -251,3 +251,136 @@ func TestGuestRemoteURL(t *testing.T) {
 		}
 	}
 }
+
+// guestCommandsSince returns the argv of every environment command after
+// the first n.
+func (f *syncFixture) guestCommandsSince(n int) [][]string {
+	return f.argvs()[n:]
+}
+
+// localWork makes a local commit on the guest's issue branch, stages one
+// change, and leaves another file modified and one untracked, and
+// returns the state Refresh must not change.
+func (f *syncFixture) localWork() (head, status, staged string) {
+	f.t.Helper()
+	write := func(name, content string) {
+		f.t.Helper()
+		if err := os.WriteFile(filepath.Join(f.ws.HostPath, name), []byte(content), 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	write("committed.txt", "agent commit\n")
+	f.git("add", "committed.txt")
+	f.git("commit", "--quiet", "-m", "agent work")
+	write("staged.txt", "staged\n")
+	f.git("add", "staged.txt")
+	write("README", "modified, not staged\n")
+	write("untracked.txt", "untracked\n")
+	return f.git("rev-parse", "HEAD"), f.git("status", "--porcelain"), f.git("diff", "--cached")
+}
+
+func TestRefresh_UpdatesOnlyRemoteTrackingRefs(t *testing.T) {
+	f := newSyncFixture(t, "ENG-50", config.SmolvmRepository{})
+	f.up.git("checkout", "--quiet", "-b", "sortie/ENG-50")
+	f.up.commit("work.txt", "an earlier run\n")
+	f.up.git("checkout", "--quiet", "main")
+	ctx := context.Background()
+	if err := f.syncer.Seed(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+	head, status, staged := f.localWork()
+
+	newMain := f.up.commit("main.txt", "moved on\n")
+	f.up.git("checkout", "--quiet", "sortie/ENG-50")
+	newTip := f.up.commit("human.txt", "a human pushed this\n")
+	f.up.git("checkout", "--quiet", "main")
+
+	before := len(f.argvs())
+	if err := f.syncer.Refresh(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	bundle := filepath.Join(f.guestDir, "in.bundle")
+	want := [][]string{
+		{"sh", "-c", `umask 077 && mkdir -p "$1" && cat > "$1/in.bundle"`, "sh", f.guestDir},
+		{"git", "fetch", "--quiet", "--prune", "--no-tags", "--", bundle, "+refs/heads/*:refs/remotes/origin/*"},
+		{"rm", "-f", "--", bundle},
+	}
+	if got := f.guestCommandsSince(before); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("environment commands =\n%q\nwant\n%q", got, want)
+	}
+	if got := f.git("rev-parse", "origin/main"); got != newMain {
+		t.Errorf("origin/main = %s, want the new upstream main %s", got, newMain)
+	}
+	if got := f.git("rev-parse", "origin/sortie/ENG-50"); got != newTip {
+		t.Errorf("origin/sortie/ENG-50 = %s, want the new upstream tip %s", got, newTip)
+	}
+	if got := f.git("rev-parse", "--abbrev-ref", "HEAD"); got != "sortie/ENG-50" {
+		t.Errorf("current branch = %q, want sortie/ENG-50", got)
+	}
+	if got := f.git("rev-parse", "HEAD"); got != head {
+		t.Errorf("HEAD = %s, want the local commit %s unchanged", got, head)
+	}
+	if got := f.git("status", "--porcelain"); got != status {
+		t.Errorf("status =\n%s\nwant it unchanged:\n%s", got, status)
+	}
+	if got := f.git("diff", "--cached"); got != staged {
+		t.Errorf("staged changes =\n%s\nwant them unchanged:\n%s", got, staged)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.ws.HostPath, "README")); err != nil || string(data) != "modified, not staged\n" {
+		t.Errorf("modified file = %q, %v; want its uncommitted content kept", data, err)
+	}
+	f.assertNoBundlesLeft()
+}
+
+func TestRefresh_UpstreamFailureSendsTheMirrorsLastState(t *testing.T) {
+	f := newSyncFixture(t, "ENG-51", config.SmolvmRepository{})
+	ctx := context.Background()
+	if err := f.syncer.Seed(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+
+	// The mirror learns of a new main commit, as another worker's fetch
+	// would bring it, and then the upstream becomes unreachable.
+	newMain := f.up.commit("main.txt", "moved on\n")
+	l := lockMirror(t, f.syncer.mirror)
+	if err := l.FetchUpstream(ctx); err != nil {
+		t.Fatalf("FetchUpstream() error = %v", err)
+	}
+	l.Unlock()
+	if err := os.Rename(f.up.dir, f.up.dir+"-gone"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.syncer.Refresh(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Refresh() with the upstream unreachable error = %v, want nil", err)
+	}
+	if !strings.Contains(f.logs.String(), "level=WARN") || !strings.Contains(f.logs.String(), "upstream fetch failed") {
+		t.Errorf("logs = %q, want a warning about the upstream fetch", f.logs.String())
+	}
+	if got := f.git("rev-parse", "origin/main"); got != newMain {
+		t.Errorf("origin/main = %s, want the mirror's last main %s", got, newMain)
+	}
+}
+
+func TestRefresh_PrunesAnIssueBranchTheUpstreamDeleted(t *testing.T) {
+	f := newSyncFixture(t, "ENG-52", config.SmolvmRepository{})
+	f.up.git("checkout", "--quiet", "-b", "sortie/ENG-52")
+	tip := f.up.commit("work.txt", "an earlier run\n")
+	f.up.git("checkout", "--quiet", "main")
+	ctx := context.Background()
+	if err := f.syncer.Seed(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+	f.up.git("branch", "--quiet", "-D", "sortie/ENG-52")
+
+	if err := f.syncer.Refresh(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if got := f.git("for-each-ref", "--format=%(refname)"); got != "refs/heads/sortie/ENG-52\nrefs/remotes/origin/main" {
+		t.Errorf("guest refs = %q, want the local branch kept and origin/sortie/ENG-52 pruned", got)
+	}
+	if got := f.git("rev-parse", "HEAD"); got != tip {
+		t.Errorf("HEAD = %s, want the local branch at %s unchanged", got, tip)
+	}
+}
