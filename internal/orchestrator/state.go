@@ -14,6 +14,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
@@ -204,6 +205,11 @@ type RunningEntry struct {
 	// this actual directory rather than reconstructing it from config,
 	// which may have changed via reload.
 	WorkspacePath string
+
+	// Environment describes the execution environment instance the
+	// workspace runs in, as [State.DescribeEnvironment] described it at
+	// dispatch. Zero when it names none.
+	Environment environment.Instance
 
 	// WorkflowFile is the base filename of the WORKFLOW.md active at
 	// dispatch, persisted in run_history.
@@ -867,6 +873,13 @@ type State struct {
 
 	PollIntervalMS int
 
+	// DescribeEnvironment describes the execution environment instance
+	// the workspace of the issue with the given identifier runs in under
+	// the current configuration, refreshed on every poll tick. Nil, and
+	// an environment that names no instance, describe none. Written only
+	// on the event-loop goroutine.
+	DescribeEnvironment func(identifier string) environment.Instance
+
 	MaxConcurrentAgents int
 
 	// MaxConcurrentByState holds per-state concurrency caps, keys
@@ -1111,6 +1124,7 @@ type SnapshotRunningEntry struct {
 	RequestsByModel     map[string]int            `json:"requests_by_model,omitempty"`
 	APIRequestsMeasured bool                      `json:"api_requests_measured"`
 	WorkspacePath       string                    `json:"workspace_path"`
+	Environment         *SnapshotEnvironment      `json:"environment,omitempty"`
 	SSHHost             string                    `json:"ssh_host,omitempty"`
 	ToolTimeMs          int64                     `json:"tool_time_ms"`
 	APITimeMs           int64                     `json:"api_time_ms"`
@@ -1140,12 +1154,29 @@ type SnapshotRunningEntry struct {
 // SnapshotRetryEntry is a read-only view of a pending retry, produced by
 // [RuntimeSnapshot].
 type SnapshotRetryEntry struct {
-	IssueID    string `json:"issue_id"`
-	Identifier string `json:"issue_identifier"`
-	DisplayID  string `json:"display_identifier,omitempty"`
-	Attempt    int    `json:"attempt"`
-	DueAtMS    int64  `json:"due_at_ms"`
-	Error      string `json:"error"`
+	IssueID     string               `json:"issue_id"`
+	Identifier  string               `json:"issue_identifier"`
+	DisplayID   string               `json:"display_identifier,omitempty"`
+	Attempt     int                  `json:"attempt"`
+	DueAtMS     int64                `json:"due_at_ms"`
+	Error       string               `json:"error"`
+	Environment *SnapshotEnvironment `json:"environment,omitempty"`
+}
+
+// SnapshotEnvironment names the execution environment instance an
+// issue's workspace runs in, such as a VM.
+type SnapshotEnvironment struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// snapshotEnvironment returns the view of instance, or nil when it names
+// no instance.
+func snapshotEnvironment(instance environment.Instance) *SnapshotEnvironment {
+	if instance.Name == "" {
+		return nil
+	}
+	return &SnapshotEnvironment{Kind: instance.Kind, Name: instance.Name}
 }
 
 // SnapshotBudgetEntry is a read-only, value-copied view of one issue held
@@ -1318,6 +1349,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			RequestsByModel:     modelRequests,
 			APIRequestsMeasured: requestsMeasured,
 			WorkspacePath:       entry.WorkspacePath,
+			Environment:         snapshotEnvironment(entry.Environment),
 			SSHHost:             entry.SSHHost,
 			ToolTimeMs:          entry.ToolTimeMs,
 			APITimeMs:           entry.APITimeMs,
@@ -1351,13 +1383,18 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 	}
 
 	for _, entry := range state.RetryAttempts {
+		var instance environment.Instance
+		if state.DescribeEnvironment != nil {
+			instance = state.DescribeEnvironment(entry.Identifier)
+		}
 		snap.Retrying = append(snap.Retrying, SnapshotRetryEntry{
-			IssueID:    entry.IssueID,
-			Identifier: entry.Identifier,
-			DisplayID:  entry.DisplayID,
-			Attempt:    entry.Attempt,
-			DueAtMS:    entry.DueAtMS,
-			Error:      entry.Error,
+			IssueID:     entry.IssueID,
+			Identifier:  entry.Identifier,
+			DisplayID:   entry.DisplayID,
+			Attempt:     entry.Attempt,
+			DueAtMS:     entry.DueAtMS,
+			Error:       entry.Error,
+			Environment: snapshotEnvironment(instance),
 		})
 	}
 

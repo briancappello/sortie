@@ -95,6 +95,29 @@ func (r *environmentResolver) sweepUnselected(cfg config.EnvironmentConfig) func
 	}
 }
 
+// describeEnvironment returns the description of the execution
+// environment instance an issue's workspace runs in under cfg: the
+// instance of the environment cfg selects for the workspace of the given
+// identifier. An environment that cannot be built, or that names no
+// instance, describes none.
+func (o *Orchestrator) describeEnvironment(cfg config.ServiceConfig) func(identifier string) environment.Instance {
+	envCfg, root := cfg.Environment, cfg.Workspace.Root
+	return func(identifier string) environment.Instance {
+		env, err := o.environments.resolve(envCfg)
+		if err != nil {
+			return environment.Instance{}
+		}
+		key, err := workspace.SanitizeKey(identifier)
+		if err != nil {
+			return environment.Instance{}
+		}
+		hostPath := filepath.Join(root, key)
+		return environment.DescribeInstance(env, environment.Workspace{
+			Key: key, HostPath: hostPath, GuestPath: env.GuestPath(hostPath), Identifier: identifier,
+		})
+	}
+}
+
 // normalizeEnvironmentKind returns kind, or the local kind for "".
 func normalizeEnvironmentKind(kind string) string {
 	if kind == "" {

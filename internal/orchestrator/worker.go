@@ -127,6 +127,12 @@ type WorkerResult struct {
 	// preparation failed.
 	WorkspacePath string
 
+	// EnvironmentInstance describes the execution environment instance
+	// the attempt's workspace was prepared in, with the image digest its
+	// preparation reported. Zero when preparation failed and for an
+	// environment that names no instance.
+	EnvironmentInstance environment.Instance
+
 	// HandoffEvidencePolicy is frozen from the run's initial config
 	// snapshot; reloads during the run cannot change it.
 	HandoffEvidencePolicy config.HandoffEvidencePolicy
@@ -711,9 +717,14 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// resolved. Nil releases nothing.
 	var releaseTarget *workspace.Target
 
+	// workspaceInstance describes the instance the workspace was
+	// prepared in, set once preparation succeeds.
+	var workspaceInstance environment.Instance
+
 	report := func(result WorkerResult) {
 		result.StoppedByTokenCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errTokenCeilingStop)
 		result.SessionID = acceptedSessionID
+		result.EnvironmentInstance = workspaceInstance
 		reported = true
 		// The release follows every other step of the worker, the
 		// session's end and after_run included, and precedes the exit
@@ -929,6 +940,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	workspacePath = wsResult.Path
 	workspaceEnv = resolvedEnv
+	workspaceInstance = wsResult.Instance
 	wsTarget := workspace.NewTarget(workspaceEnv, wsResult.Key, wsResult.Path, issue.ID, issue.Identifier)
 	logger.Info("workspace prepared", slog.String("workspace", wsResult.Path))
 

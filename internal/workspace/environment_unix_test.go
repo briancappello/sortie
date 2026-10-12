@@ -408,3 +408,43 @@ func assertGitThroughEnvironment(t *testing.T, cmds []environmenttest.Call) {
 		}
 	}
 }
+
+// namingRecorder is a recording environment whose instances are named.
+type namingRecorder struct{ *environmenttest.Recorder }
+
+func (namingRecorder) InstanceName(ws environment.Workspace) string { return "vm-" + ws.Key }
+
+func TestPrepare_DescribesTheEnvironmentInstance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  environment.Environment
+		want environment.Instance
+	}{
+		{name: "no environment"},
+		{name: "environment without instances", env: recordingEnvironment()},
+		{
+			name: "named instance with an image",
+			env: namingRecorder{&environmenttest.Recorder{
+				KindName: "vmkind", Inner: local.Environment{},
+				PrepareResult: environment.PrepareResult{ImageDigest: "abc123"},
+			}},
+			want: environment.Instance{Kind: "vmkind", Name: "vm-ENV-I", ImageDigest: "abc123"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res, err := Prepare(context.Background(), PrepareParams{
+				Root: t.TempDir(), Identifier: "ENV-I", IssueID: "id-env-i", HookTimeoutMS: 5000, Environment: tt.env,
+			})
+			if err != nil {
+				t.Fatalf("Prepare() error = %v", err)
+			}
+			if res.Instance != tt.want {
+				t.Errorf("Instance = %+v, want %+v", res.Instance, tt.want)
+			}
+		})
+	}
+}

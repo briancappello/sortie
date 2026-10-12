@@ -731,6 +731,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	// Applied unconditionally, not gated on preflight success.
 	o.state.PollIntervalMS = cfg.Polling.IntervalMS
+	o.state.DescribeEnvironment = o.describeEnvironment(cfg)
 	o.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
 	o.state.MaxTokens = cfg.Agent.MaxTokens
 	o.state.TokenWarningThreshold = cfg.Agent.TokenWarningThreshold()

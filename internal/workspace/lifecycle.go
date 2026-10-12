@@ -104,6 +104,12 @@ type PrepareResult struct {
 	// CreatedNow is true when the workspace directory or its execution
 	// environment was newly created, so the after_create hook ran.
 	CreatedNow bool
+
+	// Instance describes the execution environment instance the
+	// workspace runs in, with the image digest its preparation reported.
+	// It is zero for an environment that names no instance, such as the
+	// local kind.
+	Instance environment.Instance
 }
 
 // Prepare ensures a workspace directory exists for the given issue,
@@ -157,6 +163,7 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 
 	target := NewTarget(params.Environment, wsResult.Key, wsResult.Path, params.IssueID, params.Identifier)
 	createdNow := wsResult.CreatedNow
+	instance := environment.DescribeInstance(params.Environment, target.Workspace)
 	if params.Environment != nil {
 		prep, prepErr := params.Environment.Prepare(ctx, target.Workspace)
 		if prepErr != nil {
@@ -169,6 +176,9 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 			return PrepareResult{}, fmt.Errorf("prepare %s environment: %w", params.Environment.Kind(), prepErr)
 		}
 		createdNow = createdNow || prep.CreatedNow
+		if !instance.IsZero() {
+			instance.ImageDigest = prep.ImageDigest
+		}
 	}
 	if want, ok := wantedEnvironmentRecord(params.Environment, target.Workspace); ok {
 		if err := ensureEnvironmentRecord(wsResult.Path, want); err != nil {
@@ -261,7 +271,7 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 		}
 	}
 
-	return PrepareResult{Key: wsResult.Key, Path: wsResult.Path, CreatedNow: createdNow}, nil
+	return PrepareResult{Key: wsResult.Key, Path: wsResult.Path, CreatedNow: createdNow, Instance: instance}, nil
 }
 
 // rollbackWorkspace removes a workspace directory whose preparation

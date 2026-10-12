@@ -63,6 +63,41 @@ type PrepareResult struct {
 	// CreatedNow reports that this call created the environment, so the
 	// after_create hook must run.
 	CreatedNow bool
+
+	// ImageDigest is the hex SHA-256 of the image the workspace's
+	// instance was created from, as the instance itself records it, so
+	// a later rebuild of the image does not change the value for an
+	// instance created before. Empty for an environment without images.
+	ImageDigest string
+}
+
+// Instance describes the instance a workspace runs in. The zero value
+// describes none, which is how a workspace of an environment that runs
+// on this host is described.
+type Instance struct {
+	// Kind is the environment kind.
+	Kind string
+
+	// Name names the instance, as [Namer] does.
+	Name string
+
+	// ImageDigest is [PrepareResult.ImageDigest].
+	ImageDigest string
+}
+
+// IsZero reports whether i describes no instance.
+func (i Instance) IsZero() bool { return i == Instance{} }
+
+// DescribeInstance returns the instance of env that runs ws: its kind and
+// name when env is a [Namer], and the zero [Instance] otherwise. Only
+// [Environment.Prepare] reports the image digest; the result carries
+// none.
+func DescribeInstance(env Environment, ws Workspace) Instance {
+	namer, ok := env.(Namer)
+	if !ok {
+		return Instance{}
+	}
+	return Instance{Kind: env.Kind(), Name: namer.InstanceName(ws)}
 }
 
 // SweepParams carries what [Environment.Sweep] needs to tell a leftover

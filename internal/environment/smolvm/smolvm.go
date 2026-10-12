@@ -228,7 +228,8 @@ func shortHash(s string) string {
 // stopped VM is started; a running one is left as it is. A VM is reused
 // only when the workspace's environment record names it: a VM that
 // predates a fresh host workspace directory is deleted and created
-// again. A VM with the workspace's name that Sortie did not label as
+// again. The result's image digest is the pack SHA-256 the VM's label
+// records. A VM with the workspace's name that Sortie did not label as
 // managed, for the workspace key, and for this workflow is never
 // touched, and fails preparation. A smolvm
 // failure fails preparation with a [*CLIError].
@@ -261,11 +262,17 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 					"(it belongs to another workflow or is not managed by Sortie); remove or rename it", name, ws.Key)
 		}
 		if recordNames(ws.HostPath, name) {
+			// The label names the pack the VM was created from, which a
+			// rebuild of the pack file since does not change.
+			reused := environment.PrepareResult{ImageDigest: existing.Labels[LabelPack]}
 			if existing.Running() {
-				return environment.PrepareResult{}, nil
+				return reused, nil
 			}
 			e.warnUnsetCredentials(ctx, name)
-			return environment.PrepareResult{}, e.cli.Start(ctx, name)
+			if err := e.cli.Start(ctx, name); err != nil {
+				return environment.PrepareResult{}, err
+			}
+			return reused, nil
 		}
 		e.logger.InfoContext(ctx, "deleting a VM that predates its workspace directory",
 			slog.String("vm", name), slog.String("workspace", ws.HostPath))
@@ -286,7 +293,17 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 		return environment.PrepareResult{}, err
 	}
 	e.logger.InfoContext(ctx, "created VM", slog.String("vm", name), slog.String("workspace", ws.HostPath))
-	return environment.PrepareResult{CreatedNow: true}, nil
+	return environment.PrepareResult{CreatedNow: true, ImageDigest: labelValue(spec.Labels, LabelPack)}, nil
+}
+
+// labelValue returns the value of the label key among labels, or "".
+func labelValue(labels []Label, key string) string {
+	for _, l := range labels {
+		if l.Key == key {
+			return l.Value
+		}
+	}
+	return ""
 }
 
 // hostPaths holds the host side of a VM's mounts.

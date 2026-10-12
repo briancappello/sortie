@@ -16,7 +16,8 @@ import (
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
-// The triage command runs in a stopped VM, which is resumed for it, with
+// A prepared VM reports the pack digest it was created from. The triage
+// command runs in a stopped VM, which is resumed for it, with
 // its input and result files on the guest's tmpfs and none in either
 // workspace. /run being a tmpfs is checked from inside the guest.
 func TestIntegration_ReactionTriageFilesInTheGuest(t *testing.T) {
@@ -30,6 +31,10 @@ func TestIntegration_ReactionTriageFilesInTheGuest(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("workspace.Prepare() error = %v", err)
+	}
+	wantInstance := environment.Instance{Kind: "smolvm", Name: VMName(key), ImageDigest: fileSHA256(t, integrationPack(t))}
+	if res.Instance != wantInstance {
+		t.Errorf("workspace.Prepare().Instance = %+v, want %+v", res.Instance, wantInstance)
 	}
 	if err := ie.env.Release(ctx, environment.Workspace{Key: key, HostPath: res.Path, GuestPath: GuestWorkspace}); err != nil {
 		t.Fatalf("Release() error = %v", err)

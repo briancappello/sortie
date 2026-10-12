@@ -456,3 +456,29 @@ func TestPackSHA256FollowsTheFile(t *testing.T) {
 		t.Errorf("packSHA256() after a rebuild = %q, %v, want the new file's hash", second, err)
 	}
 }
+
+func TestPrepare_ReportsThePackDigestTheVMRecords(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, nil)
+	res, err := f.env.Prepare(context.Background(), f.ws)
+	if err != nil || res.ImageDigest != sha256Hex(testPackContent) {
+		t.Fatalf("Prepare() of a new VM = %+v, %v, want the pack's SHA-256", res, err)
+	}
+
+	// The pack is rebuilt; the existing VM keeps the digest of the pack
+	// it was created from, which its label records.
+	if err := os.WriteFile(f.pack, []byte("a rebuilt pack"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecord(t, f.ws.HostPath, "smolvm", "sortie-VM-1")
+	for _, state := range []string{StateRunning, StateStopped} {
+		vm := f.ownedVM("VM-1", state)
+		vm.Labels[LabelPack] = "0123abcd"
+		f.fake.setState(fakeState{Machines: []fakeMachine{vm}})
+		res, err := f.env.Prepare(context.Background(), f.ws)
+		if err != nil || res.CreatedNow || res.ImageDigest != "0123abcd" {
+			t.Errorf("Prepare() of a %s VM = %+v, %v, want the digest its label records", state, res, err)
+		}
+	}
+}
