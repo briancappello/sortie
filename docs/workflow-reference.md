@@ -1744,7 +1744,7 @@ The kind is not overridable by a `SORTIE_*` environment variable. Unknown keys u
 
 #### Kind `smolvm`
 
-The `smolvm` kind runs each issue workspace in its own smolvm microVM. The VM is created from a stack pack, a `.smolmachine` file. Sortie drives smolvm through its command line only.
+The `smolvm` kind runs each issue workspace in its own smolvm microVM. The VM is created from a stack pack, a `.smolmachine` file. Sortie drives smolvm through its command line only. For installation, pack building, the hosts each agent needs, and operation, see the [smolvm environment guide](smolvm-environment-guide.md).
 
 Requirements and limits:
 
