@@ -18,7 +18,7 @@ func (a *HulyAdapter) FetchCandidateIssues(ctx context.Context) ([]domain.Issue,
 	var issues []domain.Issue
 	err := trackermetrics.Track(a.recorder(), "fetch_candidates", func() error {
 		var err error
-		issues, err = a.fetchByStates(ctx, a.activeStates)
+		issues, err = a.fetchByStates(ctx, a.TrackerStates().Active)
 		return err
 	})
 	return issues, err

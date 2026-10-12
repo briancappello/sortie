@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/issuekit"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/typeutil"
 )
@@ -23,8 +24,6 @@ func init() {
 		RequiresProject:       true,
 		RequiresAPIKey:        true,
 		ValidateTrackerConfig: validateConfig,
-		DefaultActiveStates:   defaultActiveStates,
-		DefaultTerminalStates: defaultTerminalStates,
 		BlockerSource:         registry.BlockersFromCandidates,
 		WriteCapabilities:     registry.AllWriteCapabilities(),
 		PlanKeyStorage:        registry.PlanKeyCustomField,
@@ -42,12 +41,6 @@ var (
 	_ domain.DependencyLinker = (*HulyAdapter)(nil)
 )
 
-// defaultActiveStates is applied when the config omits active_states.
-var defaultActiveStates = []string{"Todo", "In Progress"}
-
-// defaultTerminalStates is applied when the config omits terminal_states.
-var defaultTerminalStates = []string{"Done", "Canceled"}
-
 // HulyAdapter implements [domain.TrackerAdapter] against one Huly project.
 // Every field except the caches and metrics is set at construction and
 // never mutated. Safe for concurrent use.
@@ -56,8 +49,10 @@ type HulyAdapter struct {
 	project      hulyProject
 	socialID     string
 	issueURLBase string
-	activeStates []string
-	log          *slog.Logger
+
+	// StateSource supplies the workflow's current state lists.
+	*issuekit.StateSource
+	log *slog.Logger
 
 	// projectStatuses maps a lowercased status name of the project's
 	// workflow to its status ids.
@@ -120,14 +115,11 @@ func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 		userAgent = "sortie/dev"
 	}
 
-	active := typeutil.ExtractStringSlice(config["active_states"])
-	if len(active) == 0 {
-		active = defaultActiveStates
+	states, err := issuekit.TrackerStatesFromConfig(config)
+	if err != nil {
+		return nil, err
 	}
-	terminal := typeutil.ExtractStringSlice(config["terminal_states"])
-	if len(terminal) == 0 {
-		terminal = defaultTerminalStates
-	}
+	active, terminal := states.Active, states.Terminal
 
 	ctx := context.Background()
 	conn, err := connect(ctx, fields["endpoint"], fields["api_key"], fields["workspace"], userAgent)
@@ -202,7 +194,7 @@ func newAdapter(ctx context.Context, rpc rpcClient, projectIdentifier, socialID,
 		}
 	}
 
-	a.activeStates = active
+	a.StateSource = issuekit.NewStateSource(domain.TrackerStates{Active: active})
 	return a, nil
 }
 

@@ -33,7 +33,7 @@ func requireEnv(t *testing.T, key string) string {
 // integrationConfig is the adapter configuration from SORTIE_HULY_URL,
 // SORTIE_HULY_TOKEN, SORTIE_HULY_WORKSPACE and SORTIE_HULY_PROJECT, plus
 // the plan task types from SORTIE_HULY_EPIC_TYPE and SORTIE_HULY_STORY_TYPE
-// (default Epic and Story).
+// (default Epic and Story), and the classic workflow's state lists.
 func integrationConfig(t *testing.T) map[string]any {
 	t.Helper()
 
@@ -44,6 +44,9 @@ func integrationConfig(t *testing.T) map[string]any {
 		"project":    requireEnv(t, "SORTIE_HULY_PROJECT"),
 		"epic_type":  envOr("SORTIE_HULY_EPIC_TYPE", "Epic"),
 		"story_type": envOr("SORTIE_HULY_STORY_TYPE", "Story"),
+
+		"active_states":   []string{"Todo", "In Progress"},
+		"terminal_states": []string{"Done", "Canceled"},
 	}
 }
 
@@ -324,7 +327,7 @@ func TestIntegrationPlanEdits(t *testing.T) {
 		t.Fatalf("second blockedBy = %v, %v; want exactly the first story", got.BlockedBy, err)
 	}
 
-	if err := a.TransitionIssue(ctx, second.ID, a.activeStates[0]); err != nil {
+	if err := a.TransitionIssue(ctx, second.ID, a.TrackerStates().Active[0]); err != nil {
 		t.Fatal(err)
 	}
 	candidates, err := a.FetchCandidateIssues(ctx)

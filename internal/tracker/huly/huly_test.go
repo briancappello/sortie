@@ -12,11 +12,16 @@ import (
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
+var (
+	testActiveStates   = []string{"Todo", "In Progress"}
+	testTerminalStates = []string{"Done", "Canceled"}
+)
+
 func newTestAdapter(t *testing.T, f *fakeRPC) *HulyAdapter {
 	t.Helper()
 
 	a, err := newAdapter(context.Background(), f, "HULY", "social-bot", "http://huly.test/workbench/ws/tracker/",
-		defaultActiveStates, append(slices.Clone(defaultActiveStates), defaultTerminalStates...),
+		testActiveStates, append(slices.Clone(testActiveStates), testTerminalStates...),
 		slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("newAdapter() error = %v", err)
@@ -282,5 +287,16 @@ func TestLooksLikeIdentifier(t *testing.T) {
 		if got := looksLikeIdentifier(in); got != want {
 			t.Errorf("looksLikeIdentifier(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestCandidatesFollowReloadedStates(t *testing.T) {
+	t.Parallel()
+
+	a := newTestAdapter(t, seedWorkspace())
+	a.SetTrackerStates(func() domain.TrackerStates { return domain.TrackerStates{Active: []string{"Done"}} })
+	issues, err := a.FetchCandidateIssues(context.Background())
+	if err != nil || len(issues) != 1 || issues[0].Identifier != "HULY-2" {
+		t.Fatalf("FetchCandidateIssues() = %+v, %v; want only the Done issue HULY-2", issues, err)
 	}
 }
