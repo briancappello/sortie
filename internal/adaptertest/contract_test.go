@@ -142,9 +142,10 @@ const (
 )
 
 const (
-	contractAgentFamilyPath  = "github.com/sortie-ai/sortie/internal/agent"
-	contractNotifyFamilyPath = "github.com/sortie-ai/sortie/internal/notify"
-	contractInternalPrefix   = "github.com/sortie-ai/sortie/internal/"
+	contractAgentFamilyPath       = "github.com/sortie-ai/sortie/internal/agent"
+	contractNotifyFamilyPath      = "github.com/sortie-ai/sortie/internal/notify"
+	contractEnvironmentFamilyPath = "github.com/sortie-ai/sortie/internal/environment"
+	contractInternalPrefix        = "github.com/sortie-ai/sortie/internal/"
 )
 
 // contractLoggingImportPath is the one package rule HANDLER lets build
@@ -158,6 +159,7 @@ var contractFamilyRoots = []string{
 	contractSCMFamilyPath,
 	contractAgentFamilyPath,
 	contractNotifyFamilyPath,
+	contractEnvironmentFamilyPath,
 }
 
 // contractSharedPackage records why a package under a family root holds no
@@ -188,6 +190,7 @@ var contractSharedFamilyPackages = map[string]contractSharedPackage{
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest":  {reason: "shared credential-verification conformance assertion, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel":       {reason: "shared scripted model endpoint and scripted-model conformance driver; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/notify/route":                    {reason: "shared notification routing for orchestrator events; registers no kind and holds no adapter", coreImportable: true},
+	"github.com/sortie-ai/sortie/internal/environment":                     {reason: "the execution environment interface and kind registry; registers no kind and holds no adapter", coreImportable: true},
 }
 
 // contractPackageBannedImports maps one package's import path to the
@@ -2766,6 +2769,7 @@ var contractWorkdirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "GitCommand", reason: "workspace verified before launch"},
 	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "RunHook", reason: "workspace verified before launch"},
 	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "runSingleVerification", reason: "workspace verified before launch"},
+	{importPath: "github.com/sortie-ai/sortie/internal/environment/local", name: "Environment.Command", reason: "workspace verified before launch"},
 }
 
 // contractAnchorOwner is the package rule ANCHOR directs every .sortie
