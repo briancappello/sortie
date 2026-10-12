@@ -271,8 +271,14 @@ type ExecOptions struct {
 	// the host for this command.
 	SecretEnv []string
 
-	// Interactive keeps standard input open.
+	// Interactive keeps standard input open as a byte-exact pipe; the
+	// guest command's output streams as it is written.
 	Interactive bool
+
+	// Stream, without Interactive, streams the guest command's output
+	// as it is written instead of after the command exits; its
+	// standard input is empty.
+	Stream bool
 }
 
 // ExecArgs returns the arguments, without the program, of an invocation
@@ -281,6 +287,8 @@ func ExecArgs(name string, opts ExecOptions, argv []string) []string {
 	args := []string{"machine", "exec", "--name", name}
 	if opts.Interactive {
 		args = append(args, "-i")
+	} else if opts.Stream {
+		args = append(args, "--stream")
 	}
 	if opts.Workdir != "" {
 		args = append(args, "-w", opts.Workdir)

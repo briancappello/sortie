@@ -133,9 +133,9 @@ type Carrier interface {
 	LaunchArgv(ws Workspace, launch domain.CarrierLaunch) ([]string, error)
 
 	// ConnectionFailed reports whether a process built from LaunchArgv
-	// that exited with exitCode failed before the agent command started,
-	// as [domain.LaunchCarrier.ConnectionFailed] describes.
-	ConnectionFailed(exitCode int, stderrTail []string) bool
+	// for ws that exited with exitCode failed before the agent command
+	// started, as [domain.LaunchCarrier.ConnectionFailed] describes.
+	ConnectionFailed(ws Workspace, exitCode int, stderrTail []string) bool
 }
 
 // LaunchCarrier returns the agent launch carrier for ws when env
@@ -164,7 +164,7 @@ func (b boundCarrier) GuestPath(hostPath string) string {
 }
 
 func (b boundCarrier) ConnectionFailed(exitCode int, stderrTail []string) bool {
-	return b.carrier.ConnectionFailed(exitCode, stderrTail)
+	return b.carrier.ConnectionFailed(b.ws, exitCode, stderrTail)
 }
 
 // GuestPathOf returns the path inside the environment for hostPath, a

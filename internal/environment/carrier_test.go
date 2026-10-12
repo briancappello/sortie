@@ -70,6 +70,8 @@ type fakeCarrierEnvironment struct {
 	gotLaunch    domain.CarrierLaunch
 	gotExit      int
 	gotTail      []string
+
+	gotFailedWorkspace environment.Workspace
 }
 
 func (f *fakeCarrierEnvironment) LaunchArgv(ws environment.Workspace, launch domain.CarrierLaunch) ([]string, error) {
@@ -77,8 +79,8 @@ func (f *fakeCarrierEnvironment) LaunchArgv(ws environment.Workspace, launch dom
 	return append([]string{"vm", "exec", "-w", ws.GuestPath, "--"}, launch.Argv...), nil
 }
 
-func (f *fakeCarrierEnvironment) ConnectionFailed(exitCode int, stderrTail []string) bool {
-	f.gotExit, f.gotTail = exitCode, stderrTail
+func (f *fakeCarrierEnvironment) ConnectionFailed(ws environment.Workspace, exitCode int, stderrTail []string) bool {
+	f.gotFailedWorkspace, f.gotExit, f.gotTail = ws, exitCode, stderrTail
 	return exitCode == 1 && len(stderrTail) > 0
 }
 
@@ -110,7 +112,7 @@ func TestLaunchCarrier(t *testing.T) {
 	if got := c.GuestPath("/root/ENV-1/.sortie/mcp.json"); got != "/workspace/.sortie/mcp.json" {
 		t.Errorf("GuestPath() = %q, want /workspace/.sortie/mcp.json", got)
 	}
-	if !c.ConnectionFailed(1, []string{"Error: vm not found"}) || env.gotExit != 1 || len(env.gotTail) != 1 {
-		t.Errorf("ConnectionFailed() did not reach the environment with its exit code and stderr tail: got %d, %q", env.gotExit, env.gotTail)
+	if !c.ConnectionFailed(1, []string{"Error: vm not found"}) || env.gotExit != 1 || len(env.gotTail) != 1 || env.gotFailedWorkspace != ws {
+		t.Errorf("ConnectionFailed() did not reach the environment with its workspace, exit code, and stderr tail: got %+v, %d, %q", env.gotFailedWorkspace, env.gotExit, env.gotTail)
 	}
 }

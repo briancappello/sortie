@@ -399,7 +399,7 @@ func (carrierEnvironment) LaunchArgv(_ environment.Workspace, launch domain.Carr
 	return append([]string{"carrier", "--"}, launch.Argv...), nil
 }
 
-func (carrierEnvironment) ConnectionFailed(int, []string) bool { return false }
+func (carrierEnvironment) ConnectionFailed(environment.Workspace, int, []string) bool { return false }
 
 // paramsRecordingAdapter records the parameters of every session start,
 // the credential check included, and delegates to the mock adapter.

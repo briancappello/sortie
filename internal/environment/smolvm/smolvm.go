@@ -7,12 +7,12 @@
 // codes. The kind's host check, [CheckHost], refuses a smolvm release
 // outside [SupportedVersion].
 //
-// [Environment.Prepare] creates and starts the workspace's VM. Running a
-// command in it, and stopping, removing, and sweeping VMs, are not
-// implemented in this build: they fail with [ErrNotImplemented], so no
-// hook or agent of a workflow that selects the kind runs on the host
-// instead, and no host workspace directory is removed while its VM may
-// still exist.
+// [Environment.Prepare] creates and starts the workspace's VM, and
+// [Environment.Command] and [Environment.LaunchArgv] run hooks, Sortie's
+// own commands, and the agent in it. Stopping, removing, and sweeping
+// VMs are not implemented in this build: they fail with
+// [ErrNotImplemented], so no host workspace directory is removed while
+// its VM may still exist.
 package smolvm
 
 import (
@@ -25,7 +25,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,7 +32,6 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
-	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
@@ -420,22 +418,6 @@ func (e *Environment) warnUnsetCredentials(ctx context.Context, name string) {
 		}
 	}
 }
-
-// Command fails with [ErrNotImplemented].
-func (*Environment) Command(context.Context, environment.Workspace, environment.CommandSpec) (*exec.Cmd, error) {
-	return nil, ErrNotImplemented
-}
-
-// LaunchArgv fails with [ErrNotImplemented]. The kind implements
-// [environment.Carrier] so that an agent session it is asked to carry
-// fails instead of starting on the host.
-func (*Environment) LaunchArgv(environment.Workspace, domain.CarrierLaunch) ([]string, error) {
-	return nil, ErrNotImplemented
-}
-
-// ConnectionFailed reports false: [Environment.LaunchArgv] never builds
-// a launch in this build.
-func (*Environment) ConnectionFailed(int, []string) bool { return false }
 
 // Release fails with [ErrNotImplemented].
 func (*Environment) Release(context.Context, environment.Workspace) error { return ErrNotImplemented }

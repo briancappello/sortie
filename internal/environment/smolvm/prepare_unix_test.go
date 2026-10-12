@@ -87,11 +87,13 @@ func writeRecord(t *testing.T, hostPath, kind, name string) {
 	}
 }
 
-func managedMachine(name, key, state string) fakeMachine {
+// managedVM1 is the VM Sortie created for the fixture's workspace key,
+// VM-1, in state.
+func managedVM1(state string) fakeMachine {
 	return fakeMachine{
-		Name:   name,
+		Name:   "sortie-VM-1",
 		State:  state,
-		Labels: map[string]string{LabelManaged: "1", LabelWorkspace: key},
+		Labels: map[string]string{LabelManaged: "1", LabelWorkspace: "VM-1"},
 	}
 }
 
@@ -241,7 +243,7 @@ func TestPrepare_StartSeesSortiesEnvironment(t *testing.T) {
 func TestPrepare_RunningVMIsLeftAlone(t *testing.T) {
 	t.Parallel()
 
-	f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedMachine("sortie-VM-1", "VM-1", StateRunning)}}, nil)
+	f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(StateRunning)}}, nil)
 	writeRecord(t, f.ws.HostPath, "smolvm", "sortie-VM-1")
 
 	res, err := f.env.Prepare(context.Background(), f.ws)
@@ -257,7 +259,7 @@ func TestPrepare_StoppedVMIsStarted(t *testing.T) {
 	t.Parallel()
 
 	for _, state := range []string{StateStopped, StateCreated} {
-		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedMachine("sortie-VM-1", "VM-1", state)}}, nil)
+		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(state)}}, nil)
 		writeRecord(t, f.ws.HostPath, "smolvm", "sortie-VM-1")
 
 		res, err := f.env.Prepare(context.Background(), f.ws)
@@ -288,7 +290,7 @@ func TestPrepare_VMPredatingTheWorkspaceIsRecreated(t *testing.T) {
 		if strings.HasSuffix(name, "running") {
 			state = StateRunning
 		}
-		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedMachine("sortie-VM-1", "VM-1", state)}}, nil)
+		f := newPrepareFixture(t, fakeState{Machines: []fakeMachine{managedVM1(state)}}, nil)
 		record(t, f.ws.HostPath)
 
 		res, err := f.env.Prepare(context.Background(), f.ws)
