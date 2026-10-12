@@ -1,0 +1,337 @@
+package plan
+
+import (
+	"cmp"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
+)
+
+// Tracker is the configured tracker as plan sync sees it: the adapter and
+// the metadata its kind registered.
+type Tracker struct {
+	Adapter domain.TrackerAdapter
+	Meta    registry.TrackerMeta
+}
+
+// Has reports whether the adapter declares c and implements it.
+func (t Tracker) Has(c registry.WriteCapability) bool {
+	if !t.Meta.HasWriteCapability(c) {
+		return false
+	}
+	var ok bool
+	switch c {
+	case registry.CapCreateIssue:
+		_, ok = t.Adapter.(domain.IssueCreator)
+	case registry.CapUpdateIssue:
+		_, ok = t.Adapter.(domain.IssueUpdater)
+	case registry.CapSetParent:
+		_, ok = t.Adapter.(domain.IssueParenter)
+	case registry.CapLinkDependency:
+		_, ok = t.Adapter.(domain.DependencyLinker)
+	}
+	return ok
+}
+
+// Capabilities lists the write capabilities the adapter declares and
+// implements, in a stable order. Never nil.
+func (t Tracker) Capabilities() []registry.WriteCapability {
+	out := []registry.WriteCapability{}
+	for _, c := range registry.AllWriteCapabilities() {
+		if t.Has(c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (t Tracker) finder() (domain.PlanKeyFinder, bool) {
+	f, ok := t.Adapter.(domain.PlanKeyFinder)
+	return f, ok && len(t.Meta.WriteCapabilities) > 0
+}
+
+// IssueRef names a tracker issue that carries a plan key.
+type IssueRef struct {
+	PlanKey    string `json:"plan_key"`
+	IssueID    string `json:"issue_id"`
+	Identifier string `json:"identifier"`
+}
+
+// CreateOp creates the issue of one plan node. A story's parent is the
+// issue of ParentKey, created first when it does not exist yet.
+type CreateOp struct {
+	PlanKey   string `json:"plan_key"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	ParentKey string `json:"parent_key,omitempty"`
+}
+
+// UpdateOp changes the listed fields ("title", "body", "kind") of an
+// existing issue.
+type UpdateOp struct {
+	IssueRef
+	Fields []string `json:"fields"`
+}
+
+// ParentOp sets an existing story's parent to the issue of ParentKey.
+type ParentOp struct {
+	IssueRef
+	ParentKey string `json:"parent_key"`
+}
+
+// RelationOp is a blocking relation between two plan nodes.
+type RelationOp struct {
+	Blocker string `json:"blocker"`
+	Blocked string `json:"blocked"`
+}
+
+// Counts summarizes a preview's writes.
+type Counts struct {
+	Creates          int `json:"creates"`
+	Updates          int `json:"updates"`
+	Parents          int `json:"parents"`
+	RelationsAdded   int `json:"relations_added"`
+	RelationsRemoved int `json:"relations_removed"`
+	Orphans          int `json:"orphans"`
+}
+
+// Preview lists the writes that make the tracker match a graph's approved
+// nodes. It writes nothing. Every slice is non-nil.
+type Preview struct {
+	SourceDigest        string                     `json:"source_digest"`
+	TrackerDigest       string                     `json:"tracker_digest"`
+	Counts              Counts                     `json:"counts"`
+	Creates             []CreateOp                 `json:"creates"`
+	Updates             []UpdateOp                 `json:"updates"`
+	Parents             []ParentOp                 `json:"parents"`
+	RelationsAdded      []RelationOp               `json:"relations_added"`
+	RelationsRemoved    []RelationOp               `json:"relations_removed"`
+	Orphans             []IssueRef                 `json:"orphans"`
+	SkippedDrafts       []string                   `json:"skipped_drafts"`
+	UnplannedChanges    []string                   `json:"unplanned_changes"`
+	MissingCapabilities []registry.WriteCapability `json:"missing_capabilities"`
+
+	graph    Graph
+	existing map[string]domain.PlanIssue
+}
+
+// Writes is the number of tracker writes an apply of p makes.
+func (p Preview) Writes() int {
+	return len(p.Creates) + len(p.Updates) + len(p.Parents) + len(p.RelationsAdded) + len(p.RelationsRemoved)
+}
+
+// ComputePreview reads the tracker's plan-keyed issues and compares them
+// with the graph's approved nodes. It fails only when the tracker read
+// fails; a capability the tracker lacks is listed, not raised.
+func ComputePreview(ctx context.Context, g Graph, t Tracker) (Preview, error) {
+	var issues []domain.PlanIssue
+	if f, ok := t.finder(); ok {
+		var err error
+		issues, err = f.ListPlanIssues(ctx, false)
+		if err != nil {
+			return Preview{}, err
+		}
+	}
+	return diff(g, t, issues), nil
+}
+
+func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
+	p := Preview{
+		SourceDigest:        g.SourceDigest,
+		TrackerDigest:       TrackerDigest(issues),
+		Creates:             []CreateOp{},
+		Updates:             []UpdateOp{},
+		Parents:             []ParentOp{},
+		RelationsAdded:      []RelationOp{},
+		RelationsRemoved:    []RelationOp{},
+		Orphans:             []IssueRef{},
+		SkippedDrafts:       []string{},
+		UnplannedChanges:    append([]string{}, g.UnplannedChanges...),
+		MissingCapabilities: []registry.WriteCapability{},
+		graph:               g,
+		existing:            map[string]domain.PlanIssue{},
+	}
+
+	byID := map[string]domain.PlanIssue{}
+	for _, i := range issues {
+		if _, dup := p.existing[i.PlanKey]; !dup {
+			p.existing[i.PlanKey] = i
+		}
+		byID[i.ID] = i
+	}
+
+	inGraph := map[string]bool{}
+	approved := map[string]Node{}
+	skipped := map[string]bool{}
+	for _, n := range g.Nodes {
+		inGraph[n.PlanKey] = true
+		switch n.Approval {
+		case ApprovalApproved:
+			approved[n.PlanKey] = n
+		case ApprovalDraft:
+			skipped[n.Change] = true
+		}
+	}
+	for c := range skipped {
+		p.SkippedDrafts = append(p.SkippedDrafts, c)
+	}
+	slices.Sort(p.SkippedDrafts)
+
+	parentOf := map[string]string{}
+	for _, e := range g.Parents {
+		parentOf[e.Child] = e.Parent
+	}
+
+	// Epics first, then stories, each in graph order: the order an apply
+	// creates them in.
+	ordered := make([]Node, 0, len(approved))
+	for _, kind := range []string{KindEpic, KindStory} {
+		for _, n := range g.Nodes {
+			if _, ok := approved[n.PlanKey]; ok && n.Kind == kind {
+				ordered = append(ordered, n)
+			}
+		}
+	}
+
+	for _, n := range ordered {
+		parentKey := ""
+		if n.Kind == KindStory {
+			if pk, ok := parentOf[n.PlanKey]; ok {
+				if _, ok := approved[pk]; ok {
+					parentKey = pk
+				}
+			}
+		}
+		issue, ok := p.existing[n.PlanKey]
+		if !ok {
+			p.Creates = append(p.Creates, CreateOp{PlanKey: n.PlanKey, Kind: n.Kind, Title: strings.TrimSpace(n.Title), ParentKey: parentKey})
+			continue
+		}
+		ref := IssueRef{PlanKey: n.PlanKey, IssueID: issue.ID, Identifier: issue.Identifier}
+		var fields []string
+		if strings.TrimSpace(n.Title) != issue.Title {
+			fields = append(fields, "title")
+		}
+		if BodyDigest(n.Body) != issue.BodyDigest {
+			fields = append(fields, "body")
+		}
+		if string(issue.Kind) != n.Kind {
+			fields = append(fields, "kind")
+		}
+		if len(fields) > 0 {
+			p.Updates = append(p.Updates, UpdateOp{IssueRef: ref, Fields: fields})
+		}
+		if parentKey != "" {
+			parent, exists := p.existing[parentKey]
+			if !exists || issue.ParentID != parent.ID {
+				p.Parents = append(p.Parents, ParentOp{IssueRef: ref, ParentKey: parentKey})
+			}
+		}
+	}
+
+	// Relations: the graph's edges between approved nodes, against the
+	// tracker's relations between plan-keyed issues. A relation is removed
+	// only when both ends are approved nodes or orphans, so relations of
+	// draft changes and relations people added to issues without a plan
+	// key are left alone.
+	want := map[RelationOp]bool{}
+	for _, e := range g.Blocks {
+		_, a := approved[e.Blocker]
+		_, b := approved[e.Blocked]
+		if a && b {
+			want[RelationOp(e)] = true
+		}
+	}
+	managed := func(key string) bool {
+		_, ok := approved[key]
+		return ok || !inGraph[key]
+	}
+	have := map[RelationOp]bool{}
+	for _, i := range issues {
+		for _, blockerID := range i.BlockedBy {
+			blocker, ok := byID[blockerID]
+			if !ok || blocker.PlanKey == "" {
+				continue
+			}
+			have[RelationOp{Blocker: blocker.PlanKey, Blocked: i.PlanKey}] = true
+		}
+	}
+	for r := range want {
+		if !have[r] {
+			p.RelationsAdded = append(p.RelationsAdded, r)
+		}
+	}
+	for r := range have {
+		if !want[r] && managed(r.Blocker) && managed(r.Blocked) {
+			p.RelationsRemoved = append(p.RelationsRemoved, r)
+		}
+	}
+	sortRelations(p.RelationsAdded)
+	sortRelations(p.RelationsRemoved)
+
+	for _, i := range issues {
+		if !inGraph[i.PlanKey] {
+			p.Orphans = append(p.Orphans, IssueRef{PlanKey: i.PlanKey, IssueID: i.ID, Identifier: i.Identifier})
+		}
+	}
+	slices.SortFunc(p.Orphans, func(a, b IssueRef) int { return cmp.Compare(a.PlanKey, b.PlanKey) })
+
+	need := map[registry.WriteCapability]bool{}
+	if len(p.Creates) > 0 {
+		need[registry.CapCreateIssue] = true
+	}
+	if len(p.Updates) > 0 {
+		need[registry.CapUpdateIssue] = true
+	}
+	if len(p.Parents) > 0 {
+		need[registry.CapSetParent] = true
+	}
+	if len(want) > 0 || len(p.RelationsRemoved) > 0 {
+		need[registry.CapLinkDependency] = true
+	}
+	for _, c := range registry.AllWriteCapabilities() {
+		if need[c] && !t.Has(c) {
+			p.MissingCapabilities = append(p.MissingCapabilities, c)
+		}
+	}
+
+	p.Counts = Counts{
+		Creates: len(p.Creates), Updates: len(p.Updates), Parents: len(p.Parents),
+		RelationsAdded: len(p.RelationsAdded), RelationsRemoved: len(p.RelationsRemoved), Orphans: len(p.Orphans),
+	}
+	return p
+}
+
+func sortRelations(rs []RelationOp) {
+	slices.SortFunc(rs, func(a, b RelationOp) int {
+		return cmp.Or(cmp.Compare(a.Blocked, b.Blocked), cmp.Compare(a.Blocker, b.Blocker))
+	})
+}
+
+// BodyDigest is the hex SHA-256 of a Markdown body, the form
+// [domain.PlanIssue.BodyDigest] reports.
+func BodyDigest(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// TrackerDigest identifies the plan-keyed tracker state a preview was
+// computed from: each issue's id, plan key, title, body digest, kind,
+// parent, and blockers.
+func TrackerDigest(issues []domain.PlanIssue) string {
+	lines := make([]string, 0, len(issues))
+	for _, i := range issues {
+		blockers := slices.Sorted(slices.Values(i.BlockedBy))
+		lines = append(lines, fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
+			i.ID, i.PlanKey, i.Title, i.BodyDigest, i.Kind, i.ParentID, strings.Join(blockers, ",")))
+	}
+	slices.Sort(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
