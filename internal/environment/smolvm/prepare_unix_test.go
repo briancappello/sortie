@@ -126,7 +126,7 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 	}
 
 	control := filepath.Join(f.ws.HostPath, ".sortie")
-	binDir := filepath.Join(f.stateDir, "env", "bin")
+	binDir := filepath.Join(f.stateDir, "env-bin")
 	socket := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock")
 	wantCreate := []string{
 		"machine", "create", "--name", "sortie-VM-1", "--from", f.pack,
@@ -370,7 +370,7 @@ func TestPrepare_RequiresAPack(t *testing.T) {
 func TestPrepare_RefusesKeysThatCannotNameAStateDirectory(t *testing.T) {
 	t.Parallel()
 
-	for _, key := range []string{"", "bin", "..", "a/b"} {
+	for _, key := range []string{"", ".", "..", "a/b"} {
 		f := newPrepareFixture(t, fakeState{}, nil)
 		ws := f.ws
 		ws.Key = key
@@ -380,6 +380,23 @@ func TestPrepare_RefusesKeysThatCannotNameAStateDirectory(t *testing.T) {
 		if got := f.fake.argvs(); len(got) != 0 {
 			t.Errorf("Prepare(key %q) calls = %q, want none", key, got)
 		}
+	}
+}
+
+func TestPrepare_KeyBinKeepsItsOwnStateDirectory(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, nil)
+	ws := f.ws
+	ws.Key = "bin"
+	if _, err := f.env.Prepare(context.Background(), ws); err != nil {
+		t.Fatalf("Prepare(key bin) error = %v", err)
+	}
+	create := strings.Join(f.fake.argvs()[1], " ")
+	binDir := filepath.Join(f.stateDir, "env-bin")
+	socket := filepath.Join(f.stateDir, "env", "bin", "tools.sock")
+	if !strings.Contains(create, "-v "+binDir+":/opt/sortie:ro") || !strings.Contains(create, "--mount-socket "+socket+":") {
+		t.Errorf("create argv = %q, want the binary directory %s apart from the socket %s", create, binDir, socket)
 	}
 }
 

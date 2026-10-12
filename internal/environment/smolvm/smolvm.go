@@ -69,10 +69,12 @@ const (
 	LabelWorkflow  = "sortie.workflow"
 )
 
-// Layout of the environment's directory under the state directory.
+// Layout of the environment's directories under the state directory:
+// env/<key> holds each workspace's tool socket, and env-bin, apart from
+// every per-workspace directory, holds the Sortie binary the VMs mount.
 const (
 	stateEnvDir      = "env"
-	stateBinDir      = "bin"
+	stateBinDir      = "env-bin"
 	toolSocketName   = "tools.sock"
 	recordMaxBytes   = 4096
 	maxUnixSocketLen = 107 // sun_path holds 108 bytes, one of them the terminating NUL
@@ -278,7 +280,7 @@ func (e *Environment) preparePaths(ws environment.Workspace) (hostPaths, error) 
 	if e.stateDir == "" || e.workflowHash == "" {
 		return hostPaths{}, errors.New("smolvm environment: a state directory and a workflow path are required to prepare a VM")
 	}
-	if ws.Key == "" || ws.Key == stateBinDir || !filepath.IsLocal(ws.Key) || strings.ContainsAny(ws.Key, `/\`) {
+	if ws.Key == "" || ws.Key == "." || !filepath.IsLocal(ws.Key) || strings.ContainsAny(ws.Key, `/\`) {
 		return hostPaths{}, fmt.Errorf("smolvm environment: workspace key %q cannot name a state directory", ws.Key)
 	}
 	if !filepath.IsAbs(ws.HostPath) {
@@ -291,7 +293,7 @@ func (e *Environment) preparePaths(ws environment.Workspace) (hostPaths, error) 
 	envDir := filepath.Join(stateDir, stateEnvDir)
 	paths := hostPaths{
 		control: filepath.Join(ws.HostPath, workspacekit.SortieDir),
-		binDir:  filepath.Join(envDir, stateBinDir),
+		binDir:  filepath.Join(stateDir, stateBinDir),
 		socket:  filepath.Join(envDir, ws.Key, toolSocketName),
 	}
 	if len(paths.socket) > maxUnixSocketLen {
