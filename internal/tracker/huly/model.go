@@ -74,6 +74,11 @@ type hulyIssue struct {
 	BlockedBy   []relatedDoc `json:"blockedBy"`
 	CreatedOn   *int64       `json:"createdOn"`
 	ModifiedOn  int64        `json:"modifiedOn"`
+
+	Kind           string `json:"kind"`
+	Rank           string `json:"rank"`
+	PlanKey        string `json:"sortiePlanKey"`
+	PlanBodyDigest string `json:"sortiePlanBodyDigest"`
 }
 
 type hulyPerson struct {

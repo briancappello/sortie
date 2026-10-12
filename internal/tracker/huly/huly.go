@@ -56,6 +56,10 @@ type HulyAdapter struct {
 	// plan maps the planning kinds to the project's task types.
 	plan planTypes
 
+	// attrMu guards attrsReady, set once the plan attributes exist.
+	attrMu     sync.Mutex
+	attrsReady bool
+
 	mu       sync.RWMutex
 	statuses map[string]hulyStatus // status id -> status, any project
 	metrics  domain.Metrics

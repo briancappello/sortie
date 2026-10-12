@@ -60,6 +60,14 @@ Plan writes map the planning kinds `epic` and `story` to two task types of the p
 
 A change to the space type applies to every project of that type. The adapter resolves both names when it starts, compared without regard to letter case. If one is missing, the constructor fails and the error lists the project's task types. With neither key set, the adapter still reads and writes as before, and a plan write fails with `tracker_payload_error`. The same task types can be created through the transactor by replaying what the settings page sends: push the type's statuses into the space type's `statuses`, create a mixin class that extends `tracker:class:Issue`, create the `task:class:TaskType` document, and push its id into the space type's `tasks`.
 
+## Plan keys
+
+Plan writes store each issue's plan key in a custom attribute, `sortiePlanKey`, on `tracker:class:Issue`. A second, hidden attribute, `sortiePlanBodyDigest`, holds the SHA-256 of the Markdown body the last plan write stored, so a sync can tell whether a body changed without reading it back. The adapter creates both on its first plan write, the way Huly's settings page creates a class attribute: a `TxCreateDoc` of `core:class:Attribute` in `core:space:Model`, marked custom and read-only. Before that it reads the model, so a second adapter, or a restart, creates nothing. On v0.7.426 this needs no workspace upgrade, and the issue page shows the key as **Sortie plan key**.
+
+The adapter finds an issue by key with `find-all` on the attribute, matched by `$in`. The key is separate from the title, status, and labels, so a rename does not affect it: a live check stored a key, renamed the issue in Huly's UI, and found it again by key.
+
+To remove the attributes, delete them in Settings, **Classes**, **Issue**, or send a `TxRemoveDoc` for each `core:class:Attribute` document named `sortiePlanKey` or `sortiePlanBodyDigest`. Issues keep the stored values in their data, and Huly no longer shows them.
+
 ## How it works
 
 - At startup, the adapter reads `/config.json` from the front. It sends the token to the account service's `selectWorkspace` method and gets a workspace token and the transactor URL. It also reads the caller's social id, which it writes as `modifiedBy` on its transactions.

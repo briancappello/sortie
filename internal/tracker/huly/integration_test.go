@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sortie-ai/sortie/internal/domain"
 )
 
 // skipUnlessIntegration skips the current test when SORTIE_HULY_TEST is not
@@ -157,5 +159,69 @@ func TestIntegrationReadWrite(t *testing.T) {
 	unlabeled, err := a.FetchIssueByID(ctx, identifier)
 	if err != nil || slices.Contains(unlabeled.Labels, label) {
 		t.Errorf("labels after remove = %v, %v", unlabeled.Labels, err)
+	}
+}
+
+// TestIntegrationPlanKey creates the plan attributes (once), stores a
+// probe plan key on SORTIE_HULY_ISSUE, finds the issue by it before and
+// after a rename, and then clears the key and restores the title.
+func TestIntegrationPlanKey(t *testing.T) {
+	skipUnlessIntegration(t)
+
+	a := integrationAdapter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	for range 2 {
+		if err := integrationAdapter(t).ensurePlanAttributes(ctx); err != nil {
+			t.Fatalf("ensurePlanAttributes() error = %v", err)
+		}
+	}
+	raws, err := a.rpc.FindAll(ctx, classAttribute, map[string]any{
+		"attributeOf": idIn([]string{classIssue}),
+		"name":        idIn([]string{attrPlanKey, attrPlanBodyDigest}),
+	}, nil)
+	if err != nil || len(raws) != 2 {
+		t.Fatalf("plan attributes = %d, %v; want exactly 2", len(raws), err)
+	}
+
+	issue, err := a.findIssue(ctx, requireEnv(t, "SORTIE_HULY_ISSUE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := fmt.Sprintf("sortie-integration/probe-%d", time.Now().UnixNano())
+	update := func(ctx context.Context, operations map[string]any) error {
+		tx := a.txBase(classIssue, classTxUpdateDoc, issue.Space, issue.ID)
+		tx["operations"] = operations
+		return a.rpc.Tx(ctx, tx)
+	}
+	setTitle := func(title string) {
+		t.Helper()
+		if err := update(ctx, map[string]any{"title": title}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := update(ctx, map[string]any{attrPlanKey: key}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = update(context.Background(), map[string]any{attrPlanKey: "", "title": issue.Title})
+	}()
+
+	found, err := a.FindIssueByPlanKey(ctx, key)
+	if err != nil || found.ID != issue.ID || found.PlanKey != key {
+		t.Fatalf("FindIssueByPlanKey() = %+v, %v; want %s", found, err, issue.Identifier)
+	}
+	setTitle(issue.Title + " (renamed)")
+	found, err = a.FindIssueByPlanKey(ctx, key)
+	if err != nil || found.ID != issue.ID || !strings.HasSuffix(found.Title, "(renamed)") {
+		t.Fatalf("FindIssueByPlanKey() after rename = %+v, %v", found, err)
+	}
+	keyed, err := a.ListPlanIssues(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(keyed, func(p domain.PlanIssue) bool { return p.PlanKey == key }) {
+		t.Errorf("ListPlanIssues() = %+v, want it to hold %s", keyed, key)
 	}
 }
