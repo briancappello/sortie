@@ -2,6 +2,11 @@
 // runs each issue workspace in its own smolvm microVM. It registers
 // itself in [environment.Registry] from init.
 //
+// The package drives smolvm through its command line only, with [CLI];
+// it is the one place that knows smolvm's flags, JSON output, and exit
+// codes. The kind's host check, [CheckHost], refuses a smolvm release
+// outside [SupportedVersion].
+//
 // This version registers the kind and its type only. Preparing a
 // workspace and building a command both fail with [ErrNotImplemented],
 // so a workflow that selects the kind fails workspace preparation and
@@ -23,7 +28,7 @@ import (
 var ErrNotImplemented = errors.New("smolvm environment: VM preparation and command execution are not implemented in this build")
 
 func init() {
-	environment.Registry.Register(config.EnvironmentKindSmolvm, New)
+	environment.Registry.RegisterWithMeta(config.EnvironmentKindSmolvm, New, environment.Meta{CheckHost: CheckHost})
 }
 
 // Environment is the smolvm kind.

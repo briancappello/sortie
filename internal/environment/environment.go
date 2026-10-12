@@ -265,6 +265,24 @@ type Meta struct {
 // configured kind at runtime.
 var Registry = registry.NewRegistry[Constructor, Meta]("environment")
 
+// CheckHost runs the host check of the kind cfg selects, resolved
+// through [Registry] as [New] resolves it. A kind that declares no check
+// passes; an unregistered kind is an error.
+func CheckHost(cfg config.EnvironmentConfig) error {
+	kind := cfg.Kind
+	if kind == "" {
+		kind = config.EnvironmentKindLocal
+	}
+	if _, err := Registry.Get(kind); err != nil {
+		return err
+	}
+	meta, _ := Registry.Meta(kind)
+	if meta.CheckHost == nil {
+		return nil
+	}
+	return meta.CheckHost(cfg)
+}
+
 // New builds the environment params.Config selects by resolving its kind
 // through [Registry]. An empty kind selects [config.EnvironmentKindLocal],
 // the kind of a configuration built without the environment block. An

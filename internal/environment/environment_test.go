@@ -72,6 +72,36 @@ func TestNew_PassesParams(t *testing.T) {
 	}
 }
 
+var errHostCheck = errors.New("host cannot run this kind")
+
+func TestCheckHost(t *testing.T) {
+	t.Parallel()
+
+	const kind = "environment-test-host-check"
+	if !environment.Registry.Has(kind) {
+		environment.Registry.RegisterWithMeta(kind, func(environment.Params) (environment.Environment, error) {
+			return &environmenttest.Recorder{KindName: kind}, nil
+		}, environment.Meta{CheckHost: func(cfg config.EnvironmentConfig) error {
+			if cfg.Kind != kind {
+				return errors.New("check received another kind's configuration")
+			}
+			return errHostCheck
+		}})
+	}
+
+	if err := environment.CheckHost(config.EnvironmentConfig{Kind: kind}); !errors.Is(err, errHostCheck) {
+		t.Errorf("CheckHost(%q) = %v, want the kind's own check error", kind, err)
+	}
+	for _, k := range []string{"", config.EnvironmentKindLocal} {
+		if err := environment.CheckHost(config.EnvironmentConfig{Kind: k}); err != nil {
+			t.Errorf("CheckHost(kind %q) = %v, want nil: local declares no check", k, err)
+		}
+	}
+	if err := environment.CheckHost(config.EnvironmentConfig{Kind: "no-such-kind"}); err == nil {
+		t.Error("CheckHost(unregistered kind) = nil, want an error")
+	}
+}
+
 // paramsEnvironment keeps the params its constructor received.
 type paramsEnvironment struct {
 	environmenttest.Recorder
