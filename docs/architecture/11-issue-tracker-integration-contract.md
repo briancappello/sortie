@@ -79,6 +79,7 @@ Recommended error categories:
 - `tracker_api_error` (non-200 HTTP or API-level error)
 - `tracker_payload_error` (malformed or unexpected response structure, an adapter configuration value whose YAML type does not match what the reader requires, a blank label in a label write, a label write the tracker rejects as invalid, or a label write the tracker acknowledges without applying)
 - `tracker_missing_end_cursor` (pagination integrity error)
+- `tracker_unsupported_operation` (a call to an optional write capability the adapter does not declare, §11.7; no request is sent)
 
 Each adapter maps its native errors to these categories.
 
@@ -271,3 +272,29 @@ The GitHub adapter targets the REST API (plus the search endpoint) at `tracker.e
 - `remove_label` reads the issue's labels and deletes each matching stored spelling by name through the issue-label delete route. That route answers 404 both for a label that is already gone and for a missing issue, so a 404 is settled by a read of the issue's labels, which itself returns `tracker_not_found` for a missing issue.
 
 **Operator query filter.** `tracker.query_filter` (Section 5.3.1) is a raw GitHub search-qualifier fragment appended after the adapter's own `repo:`, `type:issue`, and `state:open` qualifiers. It merges into the search-endpoint candidate fetch when non-empty (an empty filter keeps candidate fetches on the plain issues-list route) and never into the closed-issue search `fetch_issues_by_states` performs for terminal-state matching, so an operator filter never hides a terminal issue from that lookup.
+
+### 11.7 Optional Write Capabilities
+
+Beyond the required operations of §11.1, a tracker adapter may implement four optional write capabilities. They let a caller create and link issues without depending on one tracker's model. None of them is part of the `TrackerAdapter` interface, and an adapter that implements none keeps working for every operation in §11.1.
+
+| Capability | Interface | Operation |
+|---|---|---|
+| `create_issue` | `IssueCreator` | Create an issue with a title, a Markdown body, a kind (`epic` or `story`), a plan key, and an optional parent. Returns the issue's ID and identifier. |
+| `update_issue` | `IssueUpdater` | Change an issue's title, body, or kind. A field left unset is not touched. |
+| `set_parent` | `IssueParenter` | Make one issue the parent of another, or remove the parent. |
+| `link_dependency` | `DependencyLinker` | Add or remove a "blocks" relation between two issues. |
+
+**Declared at registration.** An adapter declares the capabilities it implements in `TrackerMeta.WriteCapabilities`, next to its blocker source, and declares how it records a plan key in `TrackerMeta.PlanKeyStorage`. It also gives `TrackerMeta.Implementation`, a value of its concrete type, usually a typed nil pointer. Registration checks the declaration against that type and panics when a declared capability is not implemented, when no plan-key storage is declared, or when the type does not implement `PlanKeyFinder`. So an adapter cannot claim a capability it lacks, and a caller can read the declarations through `registry.Trackers.Meta(kind)` before it calls anything. A tracker with no blocking relation, such as GitLab Community Edition, does not declare `link_dependency`.
+
+**Plan keys.** Every adapter that declares a write capability implements `PlanKeyFinder`: find the configured project's issue that carries a plan key, and list every plan-keyed issue of the project, with or without the unkeyed ones. An adapter that declares `create_issue` stores the plan key on every issue it creates, in a way that survives edits people make to the title, status, and labels. `PlanKeyStorage` names the way:
+
+- `custom_field`: a tracker custom field or attribute, queried directly. Huly, Jira, and Linear fit this.
+- `body_marker`: a one-line marker at the end of the body, `<!-- sortie-plan-key: <key> -->`, found through the tracker's search. A tracker without custom fields, such as GitHub or Gitea, fits this. The caller that writes the body owns it, so the marker survives.
+
+A plan-keyed issue also reports a digest of the body the last plan write stored, so a caller can tell whether the body still matches without reading it back in the tracker's own format.
+
+**Kinds.** Each adapter maps `epic` and `story` to its tracker's own concepts and documents the mapping in its adapter notes. A story's parent is its epic's issue.
+
+**Errors.** Each write returns the categories of §11.4. A call to a capability the adapter did not declare returns `tracker_unsupported_operation` and sends no request; callers check the declaration before they call. Adding a relation that already exists, removing one that does not, and setting the parent an issue already has succeed and change nothing.
+
+**Callers.** The orchestrator never calls a write capability: its tracker writes stay the three points of §11.5.
