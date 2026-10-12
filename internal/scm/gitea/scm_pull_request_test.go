@@ -1,0 +1,140 @@
+package gitea
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/sortie-ai/sortie/internal/domain"
+)
+
+// giteaPullsServer fakes Gitea's pull request list and create routes
+// for org/app. open holds the list response; create answers a POST.
+type giteaPullsServer struct {
+	t      *testing.T
+	mu     sync.Mutex
+	open   string
+	create func(w http.ResponseWriter)
+
+	lists int
+	posts []giteaCreatePullRequest
+}
+
+func (s *giteaPullsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.URL.Path != "/api/v1/repos/org/app/pulls" {
+		s.t.Errorf("request %s %s, want /api/v1/repos/org/app/pulls", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.lists++
+		if q := r.URL.Query(); q.Get("state") != "open" || q.Get("page") != "1" {
+			s.t.Errorf("list query = %q, want the first page of open pull requests", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(s.open))
+	case http.MethodPost:
+		var body giteaCreatePullRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			s.t.Errorf("decode create body: %v", err)
+		}
+		s.posts = append(s.posts, body)
+		s.create(w)
+	default:
+		s.t.Errorf("unexpected method %s", r.Method)
+	}
+}
+
+func TestEnsurePullRequest(t *testing.T) {
+	t.Parallel()
+
+	const existing = `[` +
+		`{"number":2,"html_url":"https://gitea.example/org/app/pulls/2","head":{"ref":"other","repo":{"full_name":"org/app"}}},` +
+		`{"number":3,"html_url":"https://gitea.example/org/app/pulls/3","head":{"ref":"sortie/ENG-42","repo":{"full_name":"fork/app"}}},` +
+		`{"number":4,"html_url":"https://gitea.example/org/app/pulls/4","head":{"ref":"sortie/ENG-42","repo":{"full_name":"org/app"}}}]`
+	ensure := func(t *testing.T, s *giteaPullsServer, title, body string) (domain.PullRequest, error) {
+		t.Helper()
+		srv := httptest.NewServer(s)
+		t.Cleanup(srv.Close)
+		return mustSCMAdapter(t, srv.URL).EnsurePullRequest(t.Context(), "org", "app", "sortie/ENG-42", "main", title, body)
+	}
+
+	t.Run("an open pull request is found unchanged, never a fork's", func(t *testing.T) {
+		t.Parallel()
+		s := &giteaPullsServer{t: t, open: existing, create: func(w http.ResponseWriter) {
+			t.Error("pull request created, want none")
+			w.WriteHeader(http.StatusInternalServerError)
+		}}
+		got, err := ensure(t, s, "New title", "New body")
+		if err != nil {
+			t.Fatalf("EnsurePullRequest() error = %v", err)
+		}
+		want := domain.PullRequest{Number: 4, URL: "https://gitea.example/org/app/pulls/4"}
+		if got != want {
+			t.Errorf("EnsurePullRequest() = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("a missing pull request is created", func(t *testing.T) {
+		t.Parallel()
+		s := &giteaPullsServer{t: t, open: `[]`, create: func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"number":5,"html_url":"https://gitea.example/org/app/pulls/5","head":{"ref":"sortie/ENG-42"}}`))
+		}}
+		got, err := ensure(t, s, "Fix add()", "Adds a test.")
+		if err != nil {
+			t.Fatalf("EnsurePullRequest() error = %v", err)
+		}
+		want := domain.PullRequest{Number: 5, URL: "https://gitea.example/org/app/pulls/5", Created: true}
+		if got != want {
+			t.Errorf("EnsurePullRequest() = %+v, want %+v", got, want)
+		}
+		wantPost := giteaCreatePullRequest{Head: "sortie/ENG-42", Base: "main", Title: "Fix add()", Body: "Adds a test."}
+		if len(s.posts) != 1 || s.posts[0] != wantPost {
+			t.Errorf("posts = %+v, want one %+v", s.posts, wantPost)
+		}
+	})
+
+	t.Run("a pull request created concurrently is found after a 409", func(t *testing.T) {
+		t.Parallel()
+		var s *giteaPullsServer
+		s = &giteaPullsServer{t: t, open: `[]`, create: func(w http.ResponseWriter) {
+			s.open = existing
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"message":"pull request already exists for these targets"}`))
+		}}
+		got, err := ensure(t, s, "t", "b")
+		if err != nil {
+			t.Fatalf("EnsurePullRequest() error = %v", err)
+		}
+		if got.Number != 4 || got.Created || s.lists != 2 {
+			t.Errorf("EnsurePullRequest() = %+v after %d lists, want pull request 4, not created, after 2", got, s.lists)
+		}
+	})
+
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"a token without the write scope", `{"message":"token does not have at least one of required scope(s): [write:repository]"}`},
+		{"a token whose owner cannot write", `{"message":"user should have permission to write to the target branch"}`},
+	} {
+		t.Run(tt.name+" fails with an auth error naming the scope", func(t *testing.T) {
+			t.Parallel()
+			s := &giteaPullsServer{t: t, open: `[]`, create: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(tt.body))
+			}}
+			_, err := ensure(t, s, "t", "b")
+			assertSCMErrorKind(t, err, domain.ErrSCMAuth)
+			if !strings.Contains(err.Error(), "write:repository") {
+				t.Errorf("error = %v, want it to name write:repository", err)
+			}
+		})
+	}
+}
