@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/environment/environmenttest"
 	"github.com/sortie-ai/sortie/internal/environment/local"
@@ -223,6 +224,53 @@ func TestFinish_RunsAfterRunThroughEnvironment(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(ws.Path, "done.txt")); statErr != nil {
 		t.Errorf("after_run output: %v", statErr)
+	}
+}
+
+// elsewhereRecorder is a recording environment that declares it runs
+// workspace code elsewhere, with the workspace at /workspace there.
+type elsewhereRecorder struct {
+	*environmenttest.Recorder
+}
+
+func (elsewhereRecorder) LaunchArgv(environment.Workspace, domain.CarrierLaunch) ([]string, error) {
+	return nil, errors.New("no agent launch in this test")
+}
+
+func (elsewhereRecorder) ConnectionFailed(environment.Workspace, int, []string) bool { return false }
+
+func TestFinish_SummaryPathIsTheGuestPathInAnEnvironmentThatRunsElsewhere(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ws, err := Ensure(root, "ENV-6")
+	if err != nil {
+		t.Fatalf("Ensure() error = %v", err)
+	}
+	rec := recordingEnvironment()
+	rec.GuestPathFunc = func(string) string { return "/workspace" }
+	env := elsewhereRecorder{Recorder: rec}
+	if !environment.RunsElsewhere(env) {
+		t.Fatal("test environment must run elsewhere")
+	}
+
+	Finish(context.Background(), FinishParams{
+		Path:                  ws.Path,
+		Identifier:            "ENV-6",
+		IssueID:               "id-env-6",
+		AfterRun:              "true",
+		HookTimeoutMS:         5000,
+		SelfReviewSummaryPath: filepath.Join(ws.Path, ".sortie", "review_summary.md"),
+		Environment:           env,
+	})
+
+	cmds := rec.Commands()
+	if len(cmds) != 1 {
+		t.Fatalf("commands = %d (ops %q), want 1", len(cmds), rec.Ops())
+	}
+	const want = "SORTIE_SELF_REVIEW_SUMMARY_PATH=/workspace/.sortie/review_summary.md"
+	if !slices.Contains(cmds[0].Spec.Env, want) {
+		t.Errorf("after_run env = %q, want %s", cmds[0].Spec.Env, want)
 	}
 }
 

@@ -407,8 +407,14 @@ func Finish(ctx context.Context, params FinishParams) {
 		reviewStatus = "disabled"
 	}
 	env["SORTIE_SELF_REVIEW_STATUS"] = reviewStatus
-	if params.SelfReviewSummaryPath != "" {
-		env["SORTIE_SELF_REVIEW_SUMMARY_PATH"] = params.SelfReviewSummaryPath
+	target := NewTarget(params.Environment, filepath.Base(params.Path), params.Path, params.IssueID, params.Identifier)
+	if summary := params.SelfReviewSummaryPath; summary != "" {
+		// A hook that runs elsewhere reads the summary at its path
+		// there, inside the guest workspace's .sortie.
+		if environment.RunsElsewhere(target.Environment) {
+			summary = target.Workspace.GuestPathOf(summary)
+		}
+		env["SORTIE_SELF_REVIEW_SUMMARY_PATH"] = summary
 	}
 
 	logger.InfoContext(ctx, "running hook", slog.String("hook", "after_run"), slog.String("workspace", params.Path))
@@ -417,7 +423,7 @@ func Finish(ctx context.Context, params FinishParams) {
 		Dir:       params.Path,
 		Env:       env,
 		TimeoutMS: params.HookTimeoutMS,
-		Target:    NewTarget(params.Environment, filepath.Base(params.Path), params.Path, params.IssueID, params.Identifier),
+		Target:    target,
 	})
 	if hookErr != nil {
 		var he *HookError
