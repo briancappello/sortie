@@ -43,13 +43,23 @@ func shellScripts(cmds []environmenttest.Call) []string {
 	return scripts
 }
 
-// gitSubcommands returns the first argument after "git" of each recorded
-// git command, in order.
+// gitSubcommands returns the subcommand of each recorded git command,
+// the first argument after "git" and its global options, in order.
 func gitSubcommands(cmds []environmenttest.Call) []string {
 	var subs []string
 	for _, c := range cmds {
-		if len(c.Spec.Argv) > 1 && c.Spec.Argv[0] == "git" {
-			subs = append(subs, c.Spec.Argv[1])
+		if len(c.Spec.Argv) < 2 || c.Spec.Argv[0] != "git" {
+			continue
+		}
+		args := c.Spec.Argv[1:]
+		for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+			if args[0] == "-c" || args[0] == "-C" {
+				args = args[1:]
+			}
+			args = args[1:]
+		}
+		if len(args) > 0 {
+			subs = append(subs, args[0])
 		}
 	}
 	return subs

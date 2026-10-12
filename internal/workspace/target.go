@@ -102,6 +102,13 @@ func (t Target) Command(ctx context.Context, spec environment.CommandSpec) (*exe
 // from the launch and keeps running, so the operator's own setting is
 // left alone there.
 func (t Target) GitCommand(ctx context.Context, env []string, args ...string) (*exec.Cmd, error) {
+	return t.gitCommand(ctx, env, false, args...)
+}
+
+// gitCommand is [Target.GitCommand] with standard input kept open when
+// stdin is true, as [environment.CommandSpec.Stdin] describes; the
+// caller connects it.
+func (t Target) gitCommand(ctx context.Context, env []string, stdin bool, args ...string) (*exec.Cmd, error) {
 	if err := workspacekit.VerifyDir(t.Workspace.HostPath); err != nil {
 		return nil, fmt.Errorf("verify git working directory: %w", err)
 	}
@@ -112,7 +119,7 @@ func (t Target) GitCommand(ctx context.Context, env []string, args ...string) (*
 		argv = append(argv, "-c", "core.fsmonitor=false")
 	}
 	argv = append(argv, args...)
-	return t.Command(ctx, environment.CommandSpec{Argv: argv, Env: env})
+	return t.Command(ctx, environment.CommandSpec{Argv: argv, Env: env, Stdin: stdin})
 }
 
 // relativeDir returns dir relative to the target's workspace root, as
