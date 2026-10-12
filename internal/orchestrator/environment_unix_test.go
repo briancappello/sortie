@@ -483,3 +483,39 @@ func TestRunWorkerAttempt_SessionLaunchCarrier(t *testing.T) {
 		})
 	}
 }
+
+func TestRunWorkerAttempt_CarrierSessionKeepsToolChannel(t *testing.T) {
+	root := t.TempDir()
+	cfg := defaultWorkerConfig(root)
+	cfg.Agent.MaxTurns = 1
+	env := carrierEnvironment{Recorder: recordingEnvironment(t)}
+
+	var mu sync.Mutex
+	var remotes []bool
+	ec := newExitCapture()
+	RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+		TrackerAdapter:         &mockTrackerAdapter{},
+		AgentAdapter:           &mockAgentAdapter{},
+		ConfigFunc:             func() config.ServiceConfig { return cfg },
+		PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+		OnEvent:                func(_ string, _ domain.AgentEvent) {},
+		OnExit:                 ec.onExit,
+		Logger:                 discardLogger(),
+		EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+			return env, nil
+		},
+		AgentToolChannelFunc: func(_ string, remote bool) bool {
+			mu.Lock()
+			remotes = append(remotes, remote)
+			mu.Unlock()
+			return true
+		},
+	})
+	ec.waitResult(t)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(remotes, []bool{false}) {
+		t.Errorf("AgentToolChannelFunc remote = %v, want [false]: a carried session receives the generated MCP configuration", remotes)
+	}
+}

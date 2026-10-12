@@ -245,8 +245,11 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 	}
 
 	remote := target.Remote()
+	// A remote runtime gets the MCP servers only where the generated
+	// configuration is valid; they are parsed from the host copy.
+	noMCP := remote && !target.MCPInGuest()
 
-	parsedServers, agentErr := parseMCPServers(params.MCPConfigPath, target.RemoteCommand != "")
+	parsedServers, agentErr := parseMCPServers(params.MCPConfigPath, noMCP)
 	if agentErr != nil {
 		return domain.Session{}, agentErr
 	}
@@ -379,7 +382,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		// The capability record is built here, before the pump starts, so the pump
 		// is its sole mutator afterward: StartSession must not touch state.caps past
 		// this point.
-		state.caps = newCapabilityRecord(target.RemoteCommand != "", len(claims.claimed) > 0)
+		state.caps = newCapabilityRecord(noMCP, len(claims.claimed) > 0)
 		state.usage = usage
 
 		// Start the pump before the handshake, so it is the sole mutator of session

@@ -142,7 +142,7 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 		return domain.Session{}, agentErr
 	}
 
-	servers, translateErr := translateMCPServers(params.MCPConfigPath, target.RemoteCommand != "")
+	servers, translateErr := translateMCPServers(params.MCPConfigPath, target.Remote() && !target.MCPInGuest())
 	if translateErr != nil {
 		return domain.Session{}, &domain.AgentError{
 			Kind:    domain.ErrResponseError,

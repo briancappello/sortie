@@ -394,6 +394,34 @@ func NewCodexAdapter() (domain.AgentAdapter, error) {
 	return &CodexAdapter{}, nil
 }
 
+// mcpOverrideArgs returns the override arguments that hand the MCP
+// servers of the generated configuration at mcpConfigPath to the runtime
+// target launches, parsed from the host copy of the file. It returns none
+// when mcpConfigPath is empty, or when target is remote where that
+// configuration is not valid (over SSH).
+func mcpOverrideArgs(target agentcore.LaunchTarget, mcpConfigPath string) ([]string, *domain.AgentError) {
+	if mcpConfigPath == "" || target.Remote() && !target.MCPInGuest() {
+		return nil, nil
+	}
+	servers, parseErr := mcpconfig.Parse(mcpConfigPath)
+	if parseErr != nil {
+		return nil, &domain.AgentError{
+			Kind:    domain.ErrResponseError,
+			Message: fmt.Sprintf("parse MCP config: %v", parseErr),
+			Err:     parseErr,
+		}
+	}
+	overrideArgs, renderErr := renderMCPServerOverrides(servers, os.Environ())
+	if renderErr != nil {
+		return nil, &domain.AgentError{
+			Kind:    domain.ErrResponseError,
+			Message: fmt.Sprintf("render MCP server overrides: %v", renderErr),
+			Err:     renderErr,
+		}
+	}
+	return overrideArgs, nil
+}
+
 // StartSession parses the session's settings, validates the workspace path,
 // resolves the codex binary, launches the app-server subprocess, performs
 // the initialization handshake, authenticates if needed, and starts or
@@ -408,25 +436,11 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 		return domain.Session{}, agentErr
 	}
 
-	if params.MCPConfigPath != "" && target.RemoteCommand == "" {
-		servers, parseErr := mcpconfig.Parse(params.MCPConfigPath)
-		if parseErr != nil {
-			return domain.Session{}, &domain.AgentError{
-				Kind:    domain.ErrResponseError,
-				Message: fmt.Sprintf("parse MCP config: %v", parseErr),
-				Err:     parseErr,
-			}
-		}
-		overrideArgs, renderErr := renderMCPServerOverrides(servers, os.Environ())
-		if renderErr != nil {
-			return domain.Session{}, &domain.AgentError{
-				Kind:    domain.ErrResponseError,
-				Message: fmt.Sprintf("render MCP server overrides: %v", renderErr),
-				Err:     renderErr,
-			}
-		}
-		target.Args = append(target.Args, overrideArgs...)
+	overrideArgs, agentErr := mcpOverrideArgs(target, params.MCPConfigPath)
+	if agentErr != nil {
+		return domain.Session{}, agentErr
 	}
+	target.Args = append(target.Args, overrideArgs...)
 
 	state := &sessionState{
 		target:                 target,

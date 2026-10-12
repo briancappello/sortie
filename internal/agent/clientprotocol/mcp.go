@@ -23,15 +23,17 @@ type parsedMCPServers struct {
 }
 
 // parseMCPServers reads and normalizes the generated configuration at
-// mcpConfigPath. On a remote launch it holds no servers regardless of
-// mcpConfigPath: the protocol's stdio server names an executable path a
-// remote agent resolves on the far side, and the configuration's
+// mcpConfigPath. With noMCP set, for a remote launch where that
+// configuration is not valid (over SSH), it holds no servers regardless
+// of mcpConfigPath: the protocol's stdio server names an executable path
+// a remote agent resolves on the far side, and the configuration's
 // environment block can carry tracker credentials that must not cross
-// to a remote host. A server whose Enabled field is present and false is
+// to a remote host. A launch into an execution environment whose
+// generated configuration is valid there passes noMCP false. A server whose Enabled field is present and false is
 // dropped here, before rendering, because the protocol carries no
 // disabled state of its own.
-func parseMCPServers(mcpConfigPath string, remote bool) (parsedMCPServers, *domain.AgentError) {
-	if remote || mcpConfigPath == "" {
+func parseMCPServers(mcpConfigPath string, noMCP bool) (parsedMCPServers, *domain.AgentError) {
+	if noMCP || mcpConfigPath == "" {
 		return parsedMCPServers{}, nil
 	}
 

@@ -212,8 +212,10 @@ type WorkerResult struct {
 type SessionToolRegistryFunc func(ctx context.Context, issueID, workspacePath string) (*domain.ToolRegistry, error)
 
 // AgentToolChannelFunc reports whether a session of the given kind, in the
-// given mode, can execute the registry's tools. remote is true for SSH. A
-// nil [WorkerDeps.AgentToolChannelFunc] means the answer is unknown, not
+// given mode, can execute the registry's tools. remote is true for SSH,
+// where the generated MCP configuration is not valid; a session an
+// execution environment carries receives that configuration, so it passes
+// false. A nil [WorkerDeps.AgentToolChannelFunc] means the answer is unknown, not
 // that no channel exists.
 type AgentToolChannelFunc func(kind string, remote bool) bool
 
@@ -1339,6 +1341,8 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		}
 
 		if turnNumber == 1 {
+			// Only SSH withholds the generated MCP configuration: an
+			// environment's launch carrier delivers it into the guest.
 			remote := strings.TrimSpace(deps.SSHHost) != ""
 			switch {
 			case deps.AgentToolChannelFunc == nil:
