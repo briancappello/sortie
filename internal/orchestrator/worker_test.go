@@ -3506,7 +3506,7 @@ func TestRunWorkerAttempt_HandoffEvidenceBaselineBoundary(t *testing.T) {
 		if result.HandoffEvidenceBaseline == nil {
 			t.Fatalf("HandoffEvidenceBaseline is nil; capture error: %v", result.HandoffEvidenceBaselineError)
 		}
-		change, err := workspace.CompareHandoffEvidenceBaseline(context.Background(), result.WorkspacePath, *result.HandoffEvidenceBaseline)
+		change, err := workspace.HostTarget(result.WorkspacePath).CompareHandoffEvidenceBaseline(context.Background(), *result.HandoffEvidenceBaseline)
 		if err != nil {
 			t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 		}
@@ -3545,7 +3545,7 @@ func TestRunWorkerAttempt_HandoffEvidenceBaselineBoundary(t *testing.T) {
 		if result.HandoffEvidenceBaseline == nil {
 			t.Fatalf("HandoffEvidenceBaseline is nil; capture error: %v", result.HandoffEvidenceBaselineError)
 		}
-		change, err := workspace.CompareHandoffEvidenceBaseline(context.Background(), result.WorkspacePath, *result.HandoffEvidenceBaseline)
+		change, err := workspace.HostTarget(result.WorkspacePath).CompareHandoffEvidenceBaseline(context.Background(), *result.HandoffEvidenceBaseline)
 		if err != nil {
 			t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 		}
@@ -3589,7 +3589,7 @@ func TestRunWorkerAttempt_HandoffEvidenceBaselineBoundary(t *testing.T) {
 		if result.HandoffEvidenceBaseline == nil {
 			t.Fatalf("HandoffEvidenceBaseline is nil; capture error: %v", result.HandoffEvidenceBaselineError)
 		}
-		change, err := workspace.CompareHandoffEvidenceBaseline(context.Background(), result.WorkspacePath, *result.HandoffEvidenceBaseline)
+		change, err := workspace.HostTarget(result.WorkspacePath).CompareHandoffEvidenceBaseline(context.Background(), *result.HandoffEvidenceBaseline)
 		if err != nil {
 			t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 		}
@@ -3716,7 +3716,7 @@ func TestRunWorkerAttempt_AfterRunCommitPushCountsAsHandoffWork(t *testing.T) {
 	if got := strings.TrimSpace(handoffEvidenceGitOutput(t, result.WorkspacePath, "status", "--porcelain")); got != "" {
 		t.Fatalf("workspace is dirty after after_run commit/push: %q", got)
 	}
-	change, err := workspace.CompareHandoffEvidenceBaseline(context.Background(), result.WorkspacePath, *result.HandoffEvidenceBaseline)
+	change, err := workspace.HostTarget(result.WorkspacePath).CompareHandoffEvidenceBaseline(context.Background(), *result.HandoffEvidenceBaseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 	}

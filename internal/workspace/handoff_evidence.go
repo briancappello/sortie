@@ -37,21 +37,6 @@ type HandoffEvidenceChange struct {
 	WorktreeChanged bool
 }
 
-// CaptureHandoffEvidenceBaseline inspects the Git workspace at
-// workspacePath with host git, as [Target.CaptureHandoffEvidenceBaseline]
-// does for [HostTarget](workspacePath).
-func CaptureHandoffEvidenceBaseline(ctx context.Context, workspacePath string) (HandoffEvidenceBaseline, error) {
-	return HostTarget(workspacePath).CaptureHandoffEvidenceBaseline(ctx)
-}
-
-// CompareHandoffEvidenceBaseline compares the Git workspace at
-// workspacePath with baseline using host git, as
-// [Target.CompareHandoffEvidenceBaseline] does for
-// [HostTarget](workspacePath).
-func CompareHandoffEvidenceBaseline(ctx context.Context, workspacePath string, baseline HandoffEvidenceBaseline) (HandoffEvidenceChange, error) {
-	return HostTarget(workspacePath).CompareHandoffEvidenceBaseline(ctx, baseline)
-}
-
 // CaptureHandoffEvidenceBaseline inspects the target's Git workspace
 // without modifying its index or working tree. Every git command runs
 // through [Target.Command].
@@ -300,13 +285,6 @@ func quoteStdinPath(path []byte) string {
 	}
 	b.WriteByte('"')
 	return b.String()
-}
-
-// GitCommand returns a host git command for args that runs in dir,
-// inheriting the host process environment, as [Target.GitCommand] does
-// for [HostTarget](dir).
-func GitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
-	return HostTarget(dir).GitCommand(ctx, nil, args...)
 }
 
 // gitInspectionEnv is the environment of the inspection's git commands

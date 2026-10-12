@@ -53,7 +53,7 @@ func TestCaptureHandoffEvidenceBaseline_HeldDescendantHoldingOutput(t *testing.T
 		"sleep 30 & echo $! > '"+pidFile+"'\n")
 
 	start := time.Now()
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), repoDir)
+	baseline, err := HostTarget(repoDir).CaptureHandoffEvidenceBaseline(context.Background())
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("CaptureHandoffEvidenceBaseline() took %v, want within 5s", elapsed)
 	}
@@ -99,7 +99,7 @@ func TestCompareHandoffEvidenceBaseline_EscapedDescendantYieldsIncompleteOutputE
 	}
 
 	dir := newHandoffEvidenceGitWorkspace(t)
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline() error = %v", err)
 	}
@@ -122,7 +122,7 @@ func TestCompareHandoffEvidenceBaseline_EscapedDescendantYieldsIncompleteOutputE
 		"fi\n"+
 		"exec \""+realGit+"\" \"$@\"\n")
 
-	_, err = CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	_, err = HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err == nil {
 		t.Fatal("CompareHandoffEvidenceBaseline() error = nil, want an error containing \"output did not complete\"")
 	}

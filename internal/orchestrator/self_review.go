@@ -111,12 +111,6 @@ func (s *cappedWriterSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// generateWorkspaceDiff returns the diff of the workspace at
-// workspacePath, produced by host git.
-func generateWorkspaceDiff(ctx context.Context, workspacePath string, maxDiffBytes int) (diff string, originalSize int, truncated bool, err error) {
-	return workspaceDiff(ctx, workspace.HostTarget(workspacePath), maxDiffBytes)
-}
-
 // workspaceDiff returns the diff of the target's workspace against HEAD,
 // cut to maxDiffBytes when positive. Every git command runs through
 // target.
@@ -185,12 +179,6 @@ func timedOutVerification(command string, duration time.Duration, stdout, stderr
 		DurationMS: duration.Milliseconds(),
 		TimedOut:   true,
 	}
-}
-
-// runSingleVerification runs one verification command as a host process
-// in workspacePath.
-func runSingleVerification(ctx context.Context, command, workspacePath string, timeoutMS int, logger *slog.Logger, metrics domain.Metrics) domain.VerificationResult {
-	return runVerification(ctx, workspace.HostTarget(workspacePath), command, timeoutMS, logger, metrics)
 }
 
 // runVerification runs one verification command through target, in its

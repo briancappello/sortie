@@ -40,12 +40,12 @@ func newHandoffEvidenceGitWorkspace(t *testing.T) string {
 
 func TestHandoffEvidenceBaselineNoChange(t *testing.T) {
 	dir := newHandoffEvidenceGitWorkspace(t)
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
 
-	change, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	change, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestHandoffEvidenceBaselineNoChange(t *testing.T) {
 
 func TestHandoffEvidenceDetectsCommitMovement(t *testing.T) {
 	dir := newHandoffEvidenceGitWorkspace(t)
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestHandoffEvidenceDetectsCommitMovement(t *testing.T) {
 	handoffEvidenceGit(t, dir, "add", "tracked.txt")
 	handoffEvidenceGit(t, dir, "commit", "-m", "work")
 
-	change, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	change, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestHandoffEvidenceDetectsCommitMovement(t *testing.T) {
 
 func TestHandoffEvidenceDetectsWorkingTreeChange(t *testing.T) {
 	dir := newHandoffEvidenceGitWorkspace(t)
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestHandoffEvidenceDetectsWorkingTreeChange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("modified\n"), 0o600); err != nil {
 		t.Fatalf("write tracked file: %v", err)
 	}
-	change, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	change, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 	}
@@ -104,12 +104,12 @@ func TestHandoffEvidencePreexistingDirtyTreeNeedsFurtherChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte("dirty before run\n"), 0o600); err != nil {
 		t.Fatalf("write preexisting dirty file: %v", err)
 	}
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
 
-	unchanged, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	unchanged, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline unchanged: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestHandoffEvidencePreexistingDirtyTreeNeedsFurtherChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte("dirty and changed during run\n"), 0o600); err != nil {
 		t.Fatalf("update dirty file: %v", err)
 	}
-	changed, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	changed, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline changed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestHandoffEvidenceDetectsUntrackedContentChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
 		t.Fatalf("write untracked file: %v", err)
 	}
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestHandoffEvidenceDetectsUntrackedContentChange(t *testing.T) {
 		t.Fatalf("update untracked file: %v", err)
 	}
 
-	change, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	change, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestHandoffEvidenceDetectsUntrackedContentChange(t *testing.T) {
 
 func TestHandoffEvidenceExcludesSortieControlFiles(t *testing.T) {
 	dir := newHandoffEvidenceGitWorkspace(t)
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestHandoffEvidenceExcludesSortieControlFiles(t *testing.T) {
 		t.Fatalf("write control file: %v", err)
 	}
 
-	change, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	change, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestHandoffEvidenceExcludesSortieControlFiles(t *testing.T) {
 
 func TestHandoffEvidenceNonGitWorkspace(t *testing.T) {
 	dir := t.TempDir()
-	_, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	_, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if !errors.Is(err, ErrNotGitWorkspace) {
 		t.Fatalf("CaptureHandoffEvidenceBaseline error = %v, want ErrNotGitWorkspace", err)
 	}
@@ -187,7 +187,7 @@ func TestCaptureHandoffEvidenceBaseline_LinkedWorkspaceRefused(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "workspace-link")
 	mustSymlink(t, target, link)
 
-	_, err := CaptureHandoffEvidenceBaseline(context.Background(), link)
+	_, err := HostTarget(link).CaptureHandoffEvidenceBaseline(context.Background())
 	if err == nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline(%q) error = nil, want non-nil", link)
 	}
@@ -201,7 +201,7 @@ func TestGitCommand_LinkedWorkspaceRefused(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "workspace-link")
 	mustSymlink(t, target, link)
 
-	cmd, err := GitCommand(context.Background(), link, "status")
+	cmd, err := HostTarget(link).GitCommand(context.Background(), nil, "status")
 	if err == nil {
 		t.Fatalf("GitCommand(%q) error = nil, want non-nil", link)
 	}
@@ -212,7 +212,7 @@ func TestGitCommand_LinkedWorkspaceRefused(t *testing.T) {
 
 func TestGitCommand_DisablesFilesystemMonitorOnlyOnWindows(t *testing.T) {
 	dir := t.TempDir()
-	cmd, err := GitCommand(context.Background(), dir, "status")
+	cmd, err := HostTarget(dir).GitCommand(context.Background(), nil, "status")
 	if err != nil {
 		t.Fatalf("GitCommand: %v", err)
 	}

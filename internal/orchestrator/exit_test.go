@@ -2482,7 +2482,7 @@ func handoffEvidenceGitWorkspace(t *testing.T) (string, *workspace.HandoffEviden
 	t.Helper()
 	dir := t.TempDir()
 	initGitRepo(t, dir)
-	baseline, err := workspace.CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := workspace.HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline: %v", err)
 	}
@@ -3580,7 +3580,7 @@ func TestHandleWorkerExit_HandoffEvidencePriorSCMMetadataPermitsHandoff(t *testi
 
 func TestHandleWorkerExit_HandoffEvidenceNonGitPolicies(t *testing.T) {
 	dir := t.TempDir()
-	_, baselineErr := workspace.CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	_, baselineErr := workspace.HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if !errors.Is(baselineErr, workspace.ErrNotGitWorkspace) {
 		t.Fatalf("baseline error = %v, want ErrNotGitWorkspace", baselineErr)
 	}

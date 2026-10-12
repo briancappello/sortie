@@ -124,11 +124,11 @@ func TestHandoffEvidence_UnhashableUntrackedPathsKeepTheFingerprint(t *testing.T
 		t.Fatalf("write quoted-name file: %v", err)
 	}
 
-	baseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	baseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("CaptureHandoffEvidenceBaseline() error = %v", err)
 	}
-	unchanged, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	unchanged, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline() unchanged error = %v", err)
 	}
@@ -139,7 +139,7 @@ func TestHandoffEvidence_UnhashableUntrackedPathsKeepTheFingerprint(t *testing.T
 	if err := os.WriteFile(quoted, []byte("after\n"), 0o600); err != nil {
 		t.Fatalf("update quoted-name file: %v", err)
 	}
-	changed, err := CompareHandoffEvidenceBaseline(context.Background(), dir, baseline)
+	changed, err := HostTarget(dir).CompareHandoffEvidenceBaseline(context.Background(), baseline)
 	if err != nil {
 		t.Fatalf("CompareHandoffEvidenceBaseline() changed error = %v", err)
 	}
@@ -159,7 +159,7 @@ func TestHandoffEvidence_TooManyUnhashableUntrackedPathsFails(t *testing.T) {
 		mustSymlink(t, "missing", filepath.Join(dir, "dangling-"+strconv.Itoa(i)))
 	}
 
-	if _, err := CaptureHandoffEvidenceBaseline(context.Background(), dir); err == nil {
+	if _, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background()); err == nil {
 		t.Fatal("CaptureHandoffEvidenceBaseline() error = nil, want the unhashable-path bound exceeded")
 	}
 }

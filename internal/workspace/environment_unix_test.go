@@ -356,7 +356,7 @@ func TestHandoffEvidence_RunsGitThroughEnvironment(t *testing.T) {
 	t.Parallel()
 
 	dir := newHandoffEvidenceGitWorkspace(t)
-	hostBaseline, err := CaptureHandoffEvidenceBaseline(context.Background(), dir)
+	hostBaseline, err := HostTarget(dir).CaptureHandoffEvidenceBaseline(context.Background())
 	if err != nil {
 		t.Fatalf("host CaptureHandoffEvidenceBaseline() error = %v", err)
 	}

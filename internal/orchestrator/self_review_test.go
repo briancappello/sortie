@@ -851,7 +851,7 @@ func TestRunVerification_Success(t *testing.T) {
 	wsPath := t.TempDir()
 	m := &reviewMetricsCount{}
 
-	result := runSingleVerification(context.Background(), "echo hello", wsPath, 5000, discardLogger(), m)
+	result := runVerification(context.Background(), workspace.HostTarget(wsPath), "echo hello", 5000, discardLogger(), m)
 
 	if result.ExitCode != 0 {
 		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
@@ -877,7 +877,7 @@ func TestRunVerification_Failure(t *testing.T) {
 	t.Parallel()
 
 	wsPath := t.TempDir()
-	result := runSingleVerification(context.Background(), "exit 42", wsPath, 5000, discardLogger(), &domain.NoopMetrics{})
+	result := runVerification(context.Background(), workspace.HostTarget(wsPath), "exit 42", 5000, discardLogger(), &domain.NoopMetrics{})
 
 	if result.ExitCode != 42 {
 		t.Errorf("ExitCode = %d, want 42", result.ExitCode)
@@ -896,7 +896,7 @@ func TestRunVerification_Timeout(t *testing.T) {
 	wsPath := t.TempDir()
 	// Use an infinite shell-builtin loop so no child process is forked.
 	// This ensures the pipe closes promptly when the shell is killed.
-	result := runSingleVerification(context.Background(), "while true; do :; done", wsPath, 100, discardLogger(), &domain.NoopMetrics{})
+	result := runVerification(context.Background(), workspace.HostTarget(wsPath), "while true; do :; done", 100, discardLogger(), &domain.NoopMetrics{})
 
 	if !result.TimedOut {
 		t.Error("TimedOut = false, want true")
@@ -912,13 +912,13 @@ func TestRunVerification_DeadlinePassedBeforeStartIsTimedOut(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	t.Cleanup(cancel)
 
-	result := runSingleVerification(ctx, "echo hello", t.TempDir(), 5000, discardLogger(), &domain.NoopMetrics{})
+	result := runVerification(ctx, workspace.HostTarget(t.TempDir()), "echo hello", 5000, discardLogger(), &domain.NoopMetrics{})
 
 	if !result.TimedOut {
-		t.Errorf("runSingleVerification(past deadline).TimedOut = false, want true (ExecutionError = %q)", result.ExecutionError)
+		t.Errorf("runVerification(past deadline).TimedOut = false, want true (ExecutionError = %q)", result.ExecutionError)
 	}
 	if result.ExitCode != -1 {
-		t.Errorf("runSingleVerification(past deadline).ExitCode = %d, want -1", result.ExitCode)
+		t.Errorf("runVerification(past deadline).ExitCode = %d, want -1", result.ExitCode)
 	}
 }
 
@@ -934,7 +934,7 @@ func TestRunVerification_CommandNotFound(t *testing.T) {
 
 	wsPath := t.TempDir()
 	// sh returns exit 127 when a command is not found.
-	result := runSingleVerification(context.Background(), "nonexistent_binary_xyz_abc_sortie_test", wsPath, 5000, discardLogger(), &domain.NoopMetrics{})
+	result := runVerification(context.Background(), workspace.HostTarget(wsPath), "nonexistent_binary_xyz_abc_sortie_test", 5000, discardLogger(), &domain.NoopMetrics{})
 
 	if result.ExitCode == 0 {
 		t.Error("ExitCode = 0 for not-found binary, want non-zero")
@@ -958,7 +958,7 @@ func TestRunVerification_OutputTruncation(t *testing.T) {
 	}
 
 	cmd := fmt.Sprintf("cat %q", outputPath)
-	result := runSingleVerification(context.Background(), cmd, wsPath, 10000, discardLogger(), &domain.NoopMetrics{})
+	result := runVerification(context.Background(), workspace.HostTarget(wsPath), cmd, 10000, discardLogger(), &domain.NoopMetrics{})
 
 	if len(result.Stdout) > int(domain.MaxVerificationOutputBytes) {
 		t.Errorf("Stdout len = %d, exceeds MaxVerificationOutputBytes %d",
@@ -974,7 +974,7 @@ func TestRunVerification_ContextCancelled(t *testing.T) {
 
 	wsPath := t.TempDir()
 	// Should not panic when context is pre-cancelled.
-	result := runSingleVerification(ctx, "echo hello", wsPath, 5000, discardLogger(), &domain.NoopMetrics{})
+	result := runVerification(ctx, workspace.HostTarget(wsPath), "echo hello", 5000, discardLogger(), &domain.NoopMetrics{})
 	_ = result
 }
 
@@ -984,10 +984,10 @@ func TestGenerateDiff_EmptyDiff(t *testing.T) {
 	wsPath := t.TempDir()
 	initGitRepo(t, wsPath)
 
-	diff, _, truncated, err := generateWorkspaceDiff(context.Background(), wsPath, 102400)
+	diff, _, truncated, err := workspaceDiff(context.Background(), workspace.HostTarget(wsPath), 102400)
 
 	if err != nil {
-		t.Fatalf("generateWorkspaceDiff: %v", err)
+		t.Fatalf("workspaceDiff: %v", err)
 	}
 	if truncated {
 		t.Error("truncated = true, want false for empty diff")
@@ -1015,10 +1015,10 @@ func TestGenerateDiff_ModifiedFile(t *testing.T) {
 		t.Fatalf("WriteFile modify: %v", err)
 	}
 
-	diff, _, _, err := generateWorkspaceDiff(context.Background(), wsPath, 102400)
+	diff, _, _, err := workspaceDiff(context.Background(), workspace.HostTarget(wsPath), 102400)
 
 	if err != nil {
-		t.Fatalf("generateWorkspaceDiff: %v", err)
+		t.Fatalf("workspaceDiff: %v", err)
 	}
 	if !strings.Contains(diff, "modified") {
 		t.Errorf("diff = %q, want to contain modified file content", diff)
@@ -1044,10 +1044,10 @@ func TestGenerateDiff_Truncation(t *testing.T) {
 	}
 
 	const maxBytes = 50
-	diff, _, truncated, err := generateWorkspaceDiff(context.Background(), wsPath, maxBytes)
+	diff, _, truncated, err := workspaceDiff(context.Background(), workspace.HostTarget(wsPath), maxBytes)
 
 	if err != nil {
-		t.Fatalf("generateWorkspaceDiff: %v", err)
+		t.Fatalf("workspaceDiff: %v", err)
 	}
 	if len(diff) > maxBytes {
 		t.Errorf("diff len = %d, want <= %d", len(diff), maxBytes)
@@ -1064,10 +1064,10 @@ func TestGenerateDiff_NoGit(t *testing.T) {
 
 	wsPath := t.TempDir()
 
-	_, _, _, err := generateWorkspaceDiff(context.Background(), wsPath, 102400)
+	_, _, _, err := workspaceDiff(context.Background(), workspace.HostTarget(wsPath), 102400)
 
 	if err == nil {
-		t.Error("generateWorkspaceDiff with non-git dir: expected error, got nil")
+		t.Error("workspaceDiff with non-git dir: expected error, got nil")
 	}
 }
 
@@ -1079,7 +1079,7 @@ func TestRunSingleVerification_LinkedWorkspaceRefusedBeforeStart(t *testing.T) {
 	mustSymlink(t, target, link)
 	marker := filepath.Join(target, "marker")
 
-	result := runSingleVerification(context.Background(), "touch "+marker, link, 5000, discardLogger(), &reviewMetricsCount{})
+	result := runVerification(context.Background(), workspace.HostTarget(link), "touch "+marker, 5000, discardLogger(), &reviewMetricsCount{})
 
 	if result.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", result.ExitCode)
