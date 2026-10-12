@@ -51,12 +51,13 @@ func (p planTypes) forKind(kind domain.IssueKind) (taskTypeRef, error) {
 // kindOf returns the planning kind of a task type id, empty when the type
 // is neither the epic nor the story type.
 func (p planTypes) kindOf(taskTypeID string) domain.IssueKind {
-	switch {
-	case taskTypeID == "":
+	if taskTypeID == "" {
 		return ""
-	case taskTypeID == p.epic.ID:
+	}
+	switch taskTypeID {
+	case p.epic.ID:
 		return domain.IssueKindEpic
-	case taskTypeID == p.story.ID:
+	case p.story.ID:
 		return domain.IssueKindStory
 	default:
 		return ""
@@ -104,7 +105,7 @@ func (a *HulyAdapter) resolvePlanTypes(ctx context.Context, epicName, storyName 
 	find := func(name string) (taskTypeRef, bool) {
 		for _, t := range types {
 			if strings.EqualFold(strings.TrimSpace(t.Name), name) {
-				return taskTypeRef{ID: t.ID, Name: t.Name, Statuses: t.Statuses}, true
+				return taskTypeRef(t), true
 			}
 		}
 		return taskTypeRef{}, false
