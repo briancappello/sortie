@@ -73,7 +73,9 @@ Fields (logical):
 
 - `path` (workspace path; current runtime typically uses absolute paths, but relative roots are possible if configured without path separators)
 - `workspace_key` (sanitized issue identifier)
-- `created_now` (boolean, used to gate `after_create` hook)
+- `created_now` (boolean, used to gate `after_create` hook; with an execution environment, whether the environment was created now)
+- `guest_path` (the workspace path inside the execution environment: the host path under `local`, `/workspace` under `smolvm`)
+- `environment` (the kind that created the workspace and its instance name, recorded in `.sortie/environment`; absent for `local`)
 
 #### 4.1.5 Run Attempt
 
@@ -111,6 +113,12 @@ Fields (logical):
   - The rule the attempt's hop decision targeted. Empty when the attempt reached no hop decision.
 - `stage_result` (string)
   - The decision's result: `advanced`, `partial` (the target's label was added but an old stage label was not removed), `failed`, or `ceiling`. Empty exactly when `stage_target` is empty.
+- `environment` (kind and instance name)
+  - The execution environment instance the attempt's workspace ran in, such as a smolvm VM. Empty on the host. Shown in the runtime snapshot, not persisted.
+- `environment_image_sha256` (string)
+  - The SHA-256 of the image the instance was created from, for `smolvm` the pack file. Empty on the host.
+- `exported_commit` (string)
+  - The commit the attempt pushed to the upstream issue branch, under `smolvm` with a repository. Empty when it pushed nothing.
 - `error` (optional)
 
 #### 4.1.6 Live Session (Agent Session Metadata)
@@ -149,6 +157,7 @@ Fields:
 - `due_at_ms` (monotonic clock timestamp)
 - `timer_handle` (runtime-specific timer reference; runtime-only, not persisted to SQLite)
 - `error` (string or null)
+- `environment` (kind and instance name of the workspace's execution environment, described from the current configuration for status surfaces; runtime-only, not persisted)
 
 Note: `timer_handle` is a runtime-only field and is not persisted. On restart, pending retries are reconstructed from the persisted `due_at` timestamps stored in SQLite.
 

@@ -34,7 +34,7 @@ These pages are for working on Sortie itself. To install, configure, and run Sor
     - [Configuration specification](architecture/06-configuration-specification.md) - source precedence, dynamic reload, preflight validation, and the cheat sheet
     - [Orchestration state machine](architecture/07-orchestration-state-machine.md) - issue states, the run-attempt lifecycle, and recovery rules
     - [Polling, scheduling, and reconciliation](architecture/08-polling-scheduling-and-reconciliation.md) - the poll loop, candidate selection, concurrency caps, retries, and reconciliation
-    - [Workspace management and safety](architecture/09-workspace-management-and-safety.md) - workspace layout, retention, hooks, `.sortie` artifacts, and safety invariants
+    - [Workspace management and safety](architecture/09-workspace-management-and-safety.md) - workspace layout, retention, hooks, `.sortie` artifacts, safety invariants, and the execution environments that run workspace code
     - [Agent adapter contract](architecture/10-agent-adapter-contract.md) - the adapter interface, session lifecycle, event types, and error mapping
     - [Issue tracker integration contract](architecture/11-issue-tracker-integration-contract.md) - required tracker operations, normalization, the error contract, and the write boundary
     - [CI feedback contract](architecture/12-ci-feedback-contract.md) - the CI status provider interface and CI feedback in the reconcile loop
@@ -51,7 +51,7 @@ These pages are for working on Sortie itself. To install, configure, and run Sor
     - [Implementation checklist](architecture/23-implementation-checklist.md) - the definition of done: conformance requirements and operational validation
     - [Persistence schema](architecture/24-persistence-schema.md) - the SQLite schema, table definitions, and migration strategy
     - [Webhook support](architecture/25-webhook-support.md) - the webhook-ingress design held as a future extension
-    - [Agent-authored workspace files](architecture/26-agent-authored-workspace-files.md) - the `.sortie/status` and `.sortie/review_verdict.json` files the agent leaves
+    - [Agent-authored workspace files](architecture/26-agent-authored-workspace-files.md) - the `.sortie/status`, `.sortie/review_verdict.json`, and `.sortie/pr.json` files the agent leaves
     - [SSH worker extension](architecture/27-appendix-a-ssh-worker-extension.md) - the optional remote-execution model for workers over SSH
     - [Label command and read-only review contract](architecture/28-label-command-and-read-only-review-contract.md) - PR label-command detection and the read-only review and read-write fix dispatches
     - [Merge completion reaction contract](architecture/29-merge-completion-reaction-contract.md) - the post-merge continuation trigger, the review wait, and terminal-target selection

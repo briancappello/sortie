@@ -56,3 +56,25 @@ Safety rules:
 - Symlink protection: the read goes through the workspace directory and `.sortie/` under Invariant 7. A link, a wrong entry type, or an entry replaced while it is being opened, at either directory or at the file, rejects the file with a warn record. This follows the same pattern as `.sortie/status` (Section 21.1).
 - Missing or invalid verdict content on a non-final iteration is treated as `"iterate"`. Missing or invalid verdict content on the final iteration does not count as `"pass"`; the run ends with no final verdict recorded and `CapReached=true`.
 
+### 21.3 `.sortie/pr.json`
+
+Under `environment.kind: smolvm` with `environment.smolvm.repository.provider` set, Sortie opens the pull request for the issue branch after it pushes it (Section 9.7.2). The agent may suggest the title and body of that pull request:
+
+```json
+{"title": "Fix add()", "body": "Adds a test for negative numbers."}
+```
+
+- Both members must be JSON strings. A file that is absent, malformed, or misses either member is ignored with a warn record, and the defaults apply: the title `<identifier>: <issue title>`, and a body that names the issue and its URL.
+- Safety rules: the read goes through the workspace directory and `.sortie/` under Invariant 7, with the same link refusal as the other files here, and reads at most 65536 bytes (64 KiB). Control characters other than newline and tab are removed. The title also has its newlines and tabs turned into spaces, is trimmed, and is cut to 256 characters.
+- The text is passed to the SCM adapter as data and never through a shell.
+- The file is used only when Sortie creates the pull request. An open pull request that already exists for the branch keeps its title and body.
+
+The file has no effect under the `local` kind, or without a repository provider: there the agent opens its own pull request.
+
+### 21.4 Sortie-owned entries in a VM workspace
+
+Two other entries in a `smolvm` workspace are written by Sortie, not by the agent:
+
+- `.sortie/environment` records the execution environment kind and instance that created the workspace (Section 9.7.1). It sits in the shared directory, so the agent can change it. Sortie therefore lets it move workspace removal only to a recorded kind other than `local` (Invariant 11).
+- `.sortie-host/scm.json` is the trusted SCM record Sortie writes after a push (Section 9.7.2). It is a sibling of `.sortie` on the host, outside the shared directory, so the agent cannot read or write it. Under `smolvm` with a repository, an agent-written `.sortie/scm.json` is ignored.
+

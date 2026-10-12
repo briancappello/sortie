@@ -254,6 +254,18 @@ GitLab takes a single commit message per strategy rather than a separate title, 
 
 An already-absent branch is returned as a not-found error that the caller treats as a successful no-op, while an already-absent label on removal returns nil. **The two dispositions are opposite on purpose** and are each pinned by their own conformance assertion, so they must not be written from one template.
 
+## Opening a merge request for an issue branch
+
+The SCM adapter implements the optional `domain.PullRequestOpener`, whose `EnsurePullRequest` the repository export of the `smolvm` execution environment calls after Sortie pushes an issue branch. On GitLab the result is a merge request; `Number` is its project-scoped `iid`.
+
+**Find first, then create.** The adapter pages through `GET /projects/{project}/merge_requests?state=opened&source_branch=<branch>` and returns the first one whose source branch is the branch and whose source project is the target project, unchanged, with `Created` false. The project check keeps a merge request from a fork's branch of the same name out of the result. Otherwise it creates one with `POST /projects/{project}/merge_requests`, the body becoming the description.
+
+**A lost create race is a 409.** GitLab refuses a second open merge request for one source branch with 409. The adapter re-reads and returns the one another caller created, or the 409 when there is none.
+
+**The scope error names the scope.** An authorization refusal maps to `ErrSCMAuth` with a message stating that the token needs the `api` scope and at least the Developer role in the project.
+
+The repository's `project` setting is split at its last `/`, so a nested namespace such as `group/subgroup/app` reaches the adapter as owner `group/subgroup` and repository `app`.
+
 ## Bot classification costs a request here
 
 **The platform bot marker does not reach note authors.** Every embedded user object in the API, a note's author included, is rendered with a basic entity that carries no bot field. A bot identity and a human are indistinguishable by shape.

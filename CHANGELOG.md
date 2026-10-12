@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- A new `environment` block selects where workspace code runs. The default kind, `local`, runs everything on Sortie's host as before. `environment.kind: smolvm` runs each issue workspace in its own smolvm microVM, created from a pack file (`environment.smolvm.pack`): the agent and its credential check, auxiliary agent commands, all four hooks, self-review verification commands, reaction triage, and every `git` command that inspects the workspace run in the VM, and none of them falls back to the host. The VM is created on first dispatch, stopped when the worker exits, deleted with its workspace, and swept when its workspace is gone. It reaches only the hosts in `allow_hosts`, sees API keys only as placeholders through `credentials` bindings, and shares only the `.sortie` directory, the issue's tool socket, and a read-only copy of the Sortie binary with the host. It requires Linux and smolvm 1.26.x, which Sortie checks at startup and on reload, and it cannot be combined with `worker.ssh_hosts`. `sortie validate` reports every setting error, and the dispatch preflight refuses an agent credential variable that is set on the host but neither bound nor listed in `pass_env`. See `docs/workflow-reference.md`.
+
+- `environment.smolvm.repository` lets Sortie, not the agent, talk to the git host. Sortie keeps a hardened mirror of the repository, seeds a new VM on the issue branch (`branch_prefix` plus the workspace key) before `after_create`, refreshes `origin` before each later run, and after each normal run exports the committed issue branch as a bundle, pushes it with a lease that never overwrites someone else's commits (the run fails with `branch moved upstream`), and, with `provider` and `project`, opens or finds the pull request, using the agent's `.sortie/pr.json` title and body when present. A failed export fails the run, skips the tracker handoff, and retries. The guest needs no git credential and no route to the git host, and Sortie records the push and pull request in a host-only SCM record that every reaction reads instead of `.sortie/scm.json`.
+
+- `environment.host_prefix` keeps a command such as `acp-broker` on the host in front of the agent session and its credential check, so the broker keeps the session token while the agent runs in the VM.
+
+- Agents in a VM keep Sortie's tools: the generated MCP configuration starts the new `sortie mcp-relay` subcommand from the read-only binary copy, and Sortie serves `sortie mcp-server` on the host through a per-issue socket, so the workflow file, tracker credentials, and database stay on the host.
+
+- `/api/v1/state` and the per-issue detail name the VM of each running and retrying issue in a new `environment` object. Run history records each run's pack digest in `environment_image_sha256` and its pushed commit in `exported_commit`, both added by migrations.
+
+- The GitHub, GitLab, and Gitea SCM adapters can now find or open the pull request (merge request on GitLab) for a branch, and report a token without the needed scope as an authentication error naming that scope.
+
 - Every agent process now receives the identity of the session it serves in its environment: `SORTIE_ISSUE_ID`, `SORTIE_ISSUE_IDENTIFIER`, `SORTIE_DISPATCH_ID`, `SORTIE_ATTEMPT`, `SORTIE_RULE`, `SORTIE_CHAIN_ID`, `SORTIE_WORKSPACE`, `SORTIE_API_URL`, and `SORTIE_SESSION_PURPOSE` (`credential-check` or `work`). A wrapper in `agent.command` can now tell which issue and stage it runs for, and skip the short credential check. On SSH workers the variables arrive on standard input like other carried variables. Each one overrides a variable of the same name in Sortie's own environment.
 
 - `server.control_token` protects the HTTP endpoints that change Sortie's state, starting with `POST /api/v1/refresh`: once it is set, callers send `Authorization: Bearer <token>`. It supports `$VAR` indirection, is masked in logs, and is removed from the environment agents and hooks inherit. Each working session also receives `SORTIE_SESSION_TOKEN`, a token that only works for its own issue's control routes and expires with the run, so a wrapper in `agent.command` can call Sortie without operator setup. Read-only endpoints, the dashboard, and `/metrics` need no token.
@@ -39,6 +51,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `sortie validate` now warns when `tracker.active_states` is empty, because no issue is dispatched. ([#1278](https://github.com/sortie-ai/sortie/issues/1278))
 
 ### Changed
+
+- The handoff evidence now fingerprints untracked files by the object IDs `git hash-object` prints for them, instead of reading their contents on the host. A symlink retargeted to identical content, or a change of only an untracked file's executable bit, no longer counts as a change.
 
 - **Breaking:** Sortie now refuses to start when its HTTP server binds to a non-loopback address, such as `--host 0.0.0.0` in a container, and `server.control_token` is not set; the error names `server.control_token`. Before upgrading such a deployment, set `server.control_token` (for example `control_token: $SORTIE_CONTROL_TOKEN` with the variable supplied by your secret store), and send `Authorization: Bearer <token>` from any caller of `POST /api/v1/refresh`. Deployments bound to `127.0.0.1` need no change.
 

@@ -6,6 +6,7 @@ This appendix describes a common extension profile in which Sortie keeps one cen
 
 - The orchestrator remains the single source of truth for polling, claims, retries, and reconciliation.
 - `worker.ssh_hosts` provides the candidate SSH destinations for remote execution.
+- The SSH profile cannot be combined with the `smolvm` execution environment (Section 9.7): validation fails when `environment.kind` is `smolvm` and `worker.ssh_hosts` is non-empty, naming both settings. SSH mode runs under the `local` kind, and its hooks run on the orchestrator host.
 - Each worker run is assigned to one host at a time, and that host becomes part of the run's effective execution identity along with the issue workspace.
 - `workspace.root` is interpreted on the remote host, not on the orchestrator host. The orchestrator validates workspace safety invariants locally (path sanitization, no traversal) and trusts the remote host to enforce filesystem permissions.
 - The coding-agent is launched over SSH stdio instead of as a local subprocess, so the orchestrator still owns the session lifecycle even though commands execute remotely.

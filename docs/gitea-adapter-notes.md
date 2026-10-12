@@ -90,6 +90,16 @@ Gitea's own delete-branch-after-merge and merge-when-checks-succeed options stay
 
 Branch names are percent-encoded, slashes included. Deleting an already-absent branch is a not-found error that the caller treats as a successful no-op.
 
+## Opening a pull request for an issue branch
+
+The SCM adapter implements the optional `domain.PullRequestOpener`, whose `EnsurePullRequest` the repository export of the `smolvm` execution environment calls after Sortie pushes an issue branch.
+
+**The list route has no head filter.** The adapter pages through `GET /repos/{owner}/{repo}/pulls?state=open`, most recently updated first, and matches the head itself: the head ref must equal the branch and, when the response names the head repository, that repository must be the target one (compared without case), so a fork's branch of the same name is never returned. A match is returned unchanged, with `Created` false. Otherwise the adapter creates the pull request.
+
+**A lost create race is a 409.** Gitea refuses a second open pull request for the same head and base with 409. The adapter re-reads the open pull requests and returns the one another caller created, or the 409 when there is none.
+
+**The scope error names the scope.** A permission refusal maps to `ErrSCMAuth` with a message stating that the token needs the `write:repository` scope and write access to the repository.
+
 ## The auto-merge scope preflight cannot verify a scope
 
 Gitea exposes no scope introspection: no rate-limit endpoint, no scopes response header, and a token's own scopes appear only inside the body of a rejection on a write call. The repository permissions block reports the token *owner's role*, not the token's scope: a read-only token owned by a repository admin still reports push access. And there is one coarse write scope covering both merge and branch delete, with no contents/pull-request split, so the "requires contents" argument is accepted and inert.
