@@ -277,3 +277,91 @@ func TestIntegrationCreatePlanIssues(t *testing.T) {
 	}
 	t.Logf("epic kind=%s rank=%s; story parent=%s; description:\n%s", e.Kind, e.Rank, full.Parent.Identifier, full.Description)
 }
+
+// TestIntegrationPlanEdits creates an epic and two stories, then links,
+// relinks, and unlinks a dependency, updates a story's title and body,
+// and moves it out from under the epic and back. The blocked story is
+// moved to an active state so the candidate listing must report the new
+// blocker. The issues are removed unless SORTIE_HULY_KEEP is "1".
+func TestIntegrationPlanEdits(t *testing.T) {
+	skipUnlessIntegration(t)
+
+	a := integrationAdapter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	prefix := fmt.Sprintf("sortie-integration-%d", time.Now().Unix())
+	create := func(in domain.NewIssue) domain.CreatedIssue {
+		t.Helper()
+		c, err := a.CreateIssue(ctx, in)
+		if err != nil {
+			t.Fatalf("CreateIssue(%s) error = %v", in.PlanKey, err)
+		}
+		return c
+	}
+	epic := create(domain.NewIssue{Title: "Edits epic " + prefix, Kind: domain.IssueKindEpic, PlanKey: prefix})
+	first := create(domain.NewIssue{Title: "First story", Kind: domain.IssueKindStory, PlanKey: prefix + "/first", ParentID: epic.ID})
+	second := create(domain.NewIssue{Title: "Second story", Kind: domain.IssueKindStory, PlanKey: prefix + "/second", ParentID: epic.ID, Body: "- before"})
+	t.Logf("epic %s, stories %s and %s", epic.Identifier, first.Identifier, second.Identifier)
+	if os.Getenv("SORTIE_HULY_KEEP") != "1" {
+		defer func() {
+			for _, id := range []string{second.ID, first.ID, epic.ID} {
+				_ = a.rpc.Tx(context.Background(), a.removeTx(classIssue, a.project.ID, id))
+			}
+		}()
+	}
+
+	for range 2 {
+		if err := a.AddDependency(ctx, first.ID, second.ID); err != nil {
+			t.Fatalf("AddDependency() error = %v", err)
+		}
+	}
+	if err := a.RemoveDependency(ctx, second.ID, first.ID); err != nil {
+		t.Fatalf("RemoveDependency(missing) error = %v", err)
+	}
+	got, err := a.FindIssueByPlanKey(ctx, prefix+"/second")
+	if err != nil || !slices.Equal(got.BlockedBy, []string{first.ID}) {
+		t.Fatalf("second blockedBy = %v, %v; want exactly the first story", got.BlockedBy, err)
+	}
+
+	if err := a.TransitionIssue(ctx, second.ID, a.activeStates[0]); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := a.FetchCandidateIssues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := slices.IndexFunc(candidates, func(i domain.Issue) bool { return i.ID == second.ID })
+	if idx < 0 || len(candidates[idx].BlockedBy) != 1 || candidates[idx].BlockedBy[0].Identifier != first.Identifier {
+		t.Fatalf("candidate %s = %+v, want it blocked by %s", second.Identifier, candidates[idx:idx+1], first.Identifier)
+	}
+
+	title, body := "Second story, renamed", "- after\n- and more"
+	if err := a.UpdateIssue(ctx, second.ID, domain.IssueFields{Title: &title, Body: &body}); err != nil {
+		t.Fatalf("UpdateIssue() error = %v", err)
+	}
+	full, err := a.FetchIssueByID(ctx, second.ID)
+	if err != nil || full.Title != title || !strings.Contains(full.Description, "and more") {
+		t.Errorf("after update: %q %q, %v", full.Title, full.Description, err)
+	}
+
+	if err := a.SetParent(ctx, second.ID, ""); err != nil {
+		t.Fatalf("SetParent(none) error = %v", err)
+	}
+	if got, _ := a.FindIssueByPlanKey(ctx, prefix+"/second"); got.ParentID != "" {
+		t.Errorf("parent after removal = %q, want none", got.ParentID)
+	}
+	if err := a.SetParent(ctx, second.ID, epic.ID); err != nil {
+		t.Fatalf("SetParent(epic) error = %v", err)
+	}
+	if got, _ := a.FindIssueByPlanKey(ctx, prefix+"/second"); got.ParentID != epic.ID {
+		t.Errorf("parent after restore = %q, want the epic", got.ParentID)
+	}
+
+	if err := a.RemoveDependency(ctx, first.ID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.FindIssueByPlanKey(ctx, prefix+"/second"); len(got.BlockedBy) != 0 {
+		t.Errorf("blockedBy after unlink = %v, want empty", got.BlockedBy)
+	}
+}

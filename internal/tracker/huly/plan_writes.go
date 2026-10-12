@@ -233,3 +233,147 @@ func isNotFound(err error) bool {
 	te, ok := errors.AsType[*domain.TrackerError](err)
 	return ok && te.Kind == domain.ErrTrackerNotFound
 }
+
+// UpdateIssue changes the title, body, or kind of a project issue. A
+// field that already holds the value is not written; with nothing to
+// change, no request is sent beyond the read.
+func (a *HulyAdapter) UpdateIssue(ctx context.Context, issueID string, fields domain.IssueFields) error {
+	return trackermetrics.Track(a.recorder(), "update_issue", func() error {
+		issue, err := a.projectIssue(ctx, issueID)
+		if err != nil {
+			return err
+		}
+		ops := map[string]any{}
+		if fields.Title != nil {
+			title := strings.TrimSpace(*fields.Title)
+			if title == "" {
+				return &domain.TrackerError{Kind: domain.ErrTrackerPayload, Message: "huly: an issue needs a title"}
+			}
+			if title != issue.Title {
+				ops["title"] = title
+			}
+		}
+		if fields.Kind != nil {
+			taskType, err := a.plan.forKind(*fields.Kind)
+			if err != nil {
+				return err
+			}
+			if taskType.ID != issue.Kind {
+				ops["kind"] = taskType.ID
+			}
+		}
+		if fields.Body != nil && bodyDigest(*fields.Body) != issue.PlanBodyDigest {
+			if err := a.ensurePlanAttributes(ctx); err != nil {
+				return err
+			}
+			serialized := markup.FromMarkdown(*fields.Body)
+			if issue.Description != nil && *issue.Description != "" {
+				if err := a.rpc.UpdateMarkup(ctx, classIssue, issue.ID, "description", serialized); err != nil {
+					return err
+				}
+			} else {
+				ref, err := a.rpc.CreateMarkup(ctx, classIssue, issue.ID, "description", serialized)
+				if err != nil {
+					return err
+				}
+				ops["description"] = ref
+			}
+			ops[attrPlanBodyDigest] = bodyDigest(*fields.Body)
+		}
+		if len(ops) == 0 {
+			return nil
+		}
+		return a.rpc.Tx(ctx, a.updateTx(classIssue, issue.Space, issue.ID, ops))
+	})
+}
+
+// SetParent moves a project issue under parentID, or to the top level when
+// parentID is empty. It updates attachedTo and the parents chain in one
+// transaction filed in the old parent's sub-issue collection, as Huly's
+// own parent picker does. Setting the parent the issue has is a no-op.
+func (a *HulyAdapter) SetParent(ctx context.Context, issueID, parentID string) error {
+	return trackermetrics.Track(a.recorder(), "set_parent", func() error {
+		issue, err := a.projectIssue(ctx, issueID)
+		if err != nil {
+			return err
+		}
+		current := issue.AttachedTo
+		if current == "" {
+			current = noParent
+		}
+
+		target, chain := noParent, []map[string]any{}
+		if parentID != "" {
+			parent, err := a.projectIssue(ctx, parentID)
+			if err != nil {
+				return err
+			}
+			if parent.ID == issue.ID || slices.ContainsFunc(parent.Parents, func(p parentInfo) bool { return p.ParentID == issue.ID }) {
+				return &domain.TrackerError{
+					Kind:    domain.ErrTrackerPayload,
+					Message: fmt.Sprintf("huly: %s cannot be a parent of itself or of its own ancestor", issue.Identifier),
+				}
+			}
+			target, chain = parent.ID, parentChain(parent)
+		}
+		if target == current {
+			return nil
+		}
+
+		tx := a.updateTx(classIssue, issue.Space, issue.ID, map[string]any{"attachedTo": target, "parents": chain})
+		attach(tx, current, collectionSubIssues)
+		return a.rpc.Tx(ctx, tx)
+	})
+}
+
+// AddDependency records that blockerID blocks blockedID, in the blocked
+// issue's blockedBy list. A relation that exists already is left alone.
+func (a *HulyAdapter) AddDependency(ctx context.Context, blockerID, blockedID string) error {
+	return trackermetrics.Track(a.recorder(), "add_dependency", func() error {
+		blocker, blocked, err := a.dependencyPair(ctx, blockerID, blockedID)
+		if err != nil {
+			return err
+		}
+		if slices.Contains(blockerIDs(blocked), blocker.ID) {
+			return nil
+		}
+		return a.rpc.Tx(ctx, a.updateTx(classIssue, blocked.Space, blocked.ID, map[string]any{
+			"$push": map[string]any{"blockedBy": map[string]any{"_id": blocker.ID, "_class": classIssue}},
+		}))
+	})
+}
+
+// RemoveDependency removes the relation. A relation that does not exist
+// is left alone.
+func (a *HulyAdapter) RemoveDependency(ctx context.Context, blockerID, blockedID string) error {
+	return trackermetrics.Track(a.recorder(), "remove_dependency", func() error {
+		blocker, blocked, err := a.dependencyPair(ctx, blockerID, blockedID)
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(blockerIDs(blocked), blocker.ID) {
+			return nil
+		}
+		return a.rpc.Tx(ctx, a.updateTx(classIssue, blocked.Space, blocked.ID, map[string]any{
+			"$pull": map[string]any{"blockedBy": map[string]any{"_id": blocker.ID}},
+		}))
+	})
+}
+
+func (a *HulyAdapter) dependencyPair(ctx context.Context, blockerID, blockedID string) (hulyIssue, hulyIssue, error) {
+	blocker, err := a.projectIssue(ctx, blockerID)
+	if err != nil {
+		return hulyIssue{}, hulyIssue{}, err
+	}
+	blocked, err := a.projectIssue(ctx, blockedID)
+	if err != nil {
+		return hulyIssue{}, hulyIssue{}, err
+	}
+	if blocker.ID == blocked.ID {
+		return hulyIssue{}, hulyIssue{}, &domain.TrackerError{
+			Kind:    domain.ErrTrackerPayload,
+			Message: fmt.Sprintf("huly: %s cannot block itself", blocked.Identifier),
+		}
+	}
+	return blocker, blocked, nil
+}

@@ -9,7 +9,7 @@ import (
 
 // writeCapableTrackerKinds lists the tracker kinds that declare write
 // capabilities. Every other registered kind must declare none.
-var writeCapableTrackerKinds = []string{}
+var writeCapableTrackerKinds = []string{"huly"}
 
 // TestEveryTrackerKindDeclaresOnlyImplementedWriteCapabilities walks
 // every tracker kind main registers. Each declaration passes the

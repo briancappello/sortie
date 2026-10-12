@@ -79,6 +79,13 @@ To remove the attributes, delete them in Settings, **Classes**, **Issue**, or se
 
 A new issue gets the project's default issue status when its task type allows it, and the type's first status otherwise (`Backlog` on a classic project). A live check created an epic and a story under it; Huly showed the story as a sub-issue of the epic, with task types Epic and Story and both descriptions rendered.
 
+## Updating, parenting, and linking
+
+- `UpdateIssue` writes only fields that differ. A new body goes through the collaborator's `updateContent` when the issue has a description, because `createContent` refuses a document that is open in an editor; the collaborator stores it and updates `description` itself. An issue without a description gets one through `createContent`. Either way the body digest is updated.
+- `SetParent` updates `attachedTo` and the `parents` chain in one `TxUpdateDoc`, filed in the old parent's `subIssues` collection as Huly's parent picker does, so the transactor moves the sub-issue counts. It refuses to make an issue its own ancestor.
+- `AddDependency` and `RemoveDependency` read the blocked issue first and send `$push` or `$pull` on `blockedBy` only when the relation is missing or present. Linking twice and unlinking a missing relation succeed without a write.
+- Every write accepts only issues of the configured project; an issue of another project is `tracker_not_found`.
+
 ## How it works
 
 - At startup, the adapter reads `/config.json` from the front. It sends the token to the account service's `selectWorkspace` method and gets a workspace token and the transactor URL. It also reads the caller's social id, which it writes as `modifiedBy` on its transactions.
@@ -96,7 +103,7 @@ SORTIE_HULY_WORKSPACE=sortie SORTIE_HULY_PROJECT=HULY SORTIE_HULY_ISSUE=HULY-5 \
   go test ./internal/tracker/huly/ -run Integration -v
 ```
 
-The test posts a comment on `SORTIE_HULY_ISSUE`. It also moves the issue to another state and back, and adds and removes a label.
+The tests post a comment on `SORTIE_HULY_ISSUE`, move it to another state and back, and add and remove a label. They store a probe plan key on it and clear it again. They create plan issues, an epic with stories, link and unlink them, and remove them at the end; set `SORTIE_HULY_KEEP=1` to keep them for a look in the UI. The plan tests need the task types of "Plan task types"; `SORTIE_HULY_EPIC_TYPE` and `SORTIE_HULY_STORY_TYPE` override the names `Epic` and `Story`.
 
 ## Known gaps
 

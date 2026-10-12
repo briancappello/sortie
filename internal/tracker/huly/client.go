@@ -71,6 +71,11 @@ type rpcClient interface {
 	// in it.
 	CreateMarkup(ctx context.Context, objectClass, objectID, objectAttr, markup string) (string, error)
 
+	// UpdateMarkup replaces the content of an existing collaborative
+	// document. The collaborator stores it and updates the attribute's
+	// blob reference itself.
+	UpdateMarkup(ctx context.Context, objectClass, objectID, objectAttr, markup string) error
+
 	// GetMarkup returns the serialized markup of a collaborative document
 	// attribute, read from the blob source.
 	GetMarkup(ctx context.Context, objectClass, objectID, objectAttr, source string) (string, error)
@@ -256,6 +261,12 @@ func (c *httpRPC) CreateMarkup(ctx context.Context, objectClass, objectID, objec
 		err = &domain.TrackerError{Kind: domain.ErrTrackerPayload, Message: "huly collaborator: createContent returned no blob reference"}
 	}
 	return ref, err
+}
+
+func (c *httpRPC) UpdateMarkup(ctx context.Context, objectClass, objectID, objectAttr, markup string) error {
+	_, err := c.collaboratorRPC(ctx, objectClass, objectID, objectAttr, "updateContent",
+		map[string]any{"content": map[string]string{objectAttr: markup}})
+	return err
 }
 
 // collaboratorRPC calls one method of the collaborator's document RPC and

@@ -259,6 +259,23 @@ func fieldsMatch(item, match any) bool {
 	return true
 }
 
+func (f *fakeRPC) UpdateMarkup(_ context.Context, objectClass, objectID, objectAttr, markup string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.txErr != nil {
+		return f.txErr
+	}
+	for _, d := range f.docs[objectClass] {
+		if d["_id"] == objectID {
+			if ref, ok := d[objectAttr].(string); ok && ref != "" {
+				f.markup[ref] = markup
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("fake: no %s document for %s", objectAttr, objectID)
+}
+
 func (f *fakeRPC) CreateMarkup(_ context.Context, _, _, _, markup string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

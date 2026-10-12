@@ -26,11 +26,21 @@ func init() {
 		DefaultActiveStates:   defaultActiveStates,
 		DefaultTerminalStates: defaultTerminalStates,
 		BlockerSource:         registry.BlockersFromCandidates,
+		WriteCapabilities:     registry.AllWriteCapabilities(),
+		PlanKeyStorage:        registry.PlanKeyCustomField,
+		Implementation:        (*HulyAdapter)(nil),
 	})
 }
 
-// Compile-time interface satisfaction check.
-var _ domain.TrackerAdapter = (*HulyAdapter)(nil)
+// Compile-time interface satisfaction checks.
+var (
+	_ domain.TrackerAdapter   = (*HulyAdapter)(nil)
+	_ domain.PlanKeyFinder    = (*HulyAdapter)(nil)
+	_ domain.IssueCreator     = (*HulyAdapter)(nil)
+	_ domain.IssueUpdater     = (*HulyAdapter)(nil)
+	_ domain.IssueParenter    = (*HulyAdapter)(nil)
+	_ domain.DependencyLinker = (*HulyAdapter)(nil)
+)
 
 // defaultActiveStates is applied when the config omits active_states.
 var defaultActiveStates = []string{"Todo", "In Progress"}
