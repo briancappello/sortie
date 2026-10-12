@@ -541,6 +541,7 @@ var contractBoundedSinkTypes = map[string]string{
 	"bytes.Buffer":        "grows in memory and never blocks on Write",
 	"procutil.TailBuffer": "drops the earliest bytes once its cap is exceeded",
 	"cappedWriter":        "discards bytes past its cap and always reports success",
+	"cappedFile":          "writes at most its cap to a local regular file, then discards and stops the command, always reporting success",
 }
 
 // contractSinkTypeOwner is the map rule SINK directs a caller to extend

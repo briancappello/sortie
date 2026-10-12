@@ -22,6 +22,10 @@ import (
 // the control directory the host shares.
 const GuestGitDir = "/run/sortie/git"
 
+// defaultMaxBundleMiB caps an exported bundle when the repository sets
+// no cap, the configuration's own default.
+const defaultMaxBundleMiB = 512
+
 // guestOutputCap bounds the output a failed guest command reports.
 const guestOutputCap = 4 << 10
 
@@ -55,6 +59,9 @@ type Syncer struct {
 
 	// guestDir is the directory bundles pass through in the environment.
 	guestDir string
+
+	// maxBundleMiB caps an exported bundle, in MiB.
+	maxBundleMiB int
 }
 
 // New returns the syncer of p.Repository, whose mirror lives under
@@ -71,7 +78,11 @@ func New(p Params) (*Syncer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Syncer{repo: p.Repository, mirror: m, logger: logger, guestDir: GuestGitDir}, nil
+	maxBundleMiB := p.Repository.MaxBundleMiB
+	if maxBundleMiB <= 0 {
+		maxBundleMiB = defaultMaxBundleMiB
+	}
+	return &Syncer{repo: p.Repository, mirror: m, logger: logger, guestDir: GuestGitDir, maxBundleMiB: maxBundleMiB}, nil
 }
 
 // IssueBranch returns the issue branch of the workspace key: the
@@ -250,9 +261,15 @@ func (s *Syncer) guestBundle() string { return path.Join(s.guestDir, "in.bundle"
 // ctx has ended. A failure is logged: the bundle is on the guest's tmpfs
 // and the next transfer replaces it.
 func (s *Syncer) removeGuestBundle(ctx context.Context, env environment.Environment, ws environment.Workspace) {
+	s.removeGuestFile(ctx, env, ws, s.guestBundle())
+}
+
+// removeGuestFile deletes the file at guestPath from the environment,
+// even when ctx has ended, logging a failure.
+func (s *Syncer) removeGuestFile(ctx context.Context, env environment.Environment, ws environment.Workspace, guestPath string) {
 	rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), guestCleanupTimeout)
 	defer cancel()
-	if err := s.guest(rmCtx, env, ws, nil, "rm", "-f", "--", s.guestBundle()); err != nil {
+	if err := s.guest(rmCtx, env, ws, nil, "rm", "-f", "--", guestPath); err != nil {
 		s.logger.WarnContext(ctx, "removing the repository bundle from the environment failed",
 			slog.String("workspace", ws.HostPath), slog.Any("error", err))
 	}

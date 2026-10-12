@@ -224,6 +224,98 @@ func (l *Locked) Ref(ctx context.Context, branch string) (string, bool, error) {
 	return strings.TrimSpace(string(out)), true, nil
 }
 
+// CheckRefName fails, naming ref, when ref is not a valid full ref name.
+func (l *Locked) CheckRefName(ctx context.Context, ref string) error {
+	if _, err := l.m.git.run(ctx, "check-ref-format", ref); err != nil {
+		if exitedWith(err, 1) || exitedWith(err, 128) {
+			return fmt.Errorf("ref %q is not a valid git ref name: %w", ref, err)
+		}
+		return fmt.Errorf("check ref %q: %w", ref, err)
+	}
+	return nil
+}
+
+// RefValue returns the object the full ref name ref holds in the mirror,
+// unpeeled, and false when the mirror has no such ref.
+func (l *Locked) RefValue(ctx context.Context, ref string) (string, bool, error) {
+	out, err := l.m.git.run(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", ref)
+	if exitedWith(err, 1) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve %s in the mirror: %w", ref, err)
+	}
+	return strings.TrimSpace(string(out)), true, nil
+}
+
+// ObjectType returns the type of the object id in the mirror, such as
+// "commit". id must be a full hexadecimal object id.
+func (l *Locked) ObjectType(ctx context.Context, id string) (string, error) {
+	if !isObjectID(id) {
+		return "", fmt.Errorf("%q is not an object id", id)
+	}
+	out, err := l.m.git.run(ctx, "cat-file", "-t", id)
+	if err != nil {
+		return "", fmt.Errorf("read the type of %s in the mirror: %w", id, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// SetRef points the full ref name ref at id, or deletes ref when id is
+// empty.
+func (l *Locked) SetRef(ctx context.Context, ref, id string) error {
+	args := []string{"update-ref", "--no-deref", "-d", ref}
+	if id != "" {
+		args = []string{"update-ref", "--no-deref", ref, id}
+	}
+	if _, err := l.m.git.run(ctx, args...); err != nil {
+		return fmt.Errorf("update %s in the mirror: %w", ref, err)
+	}
+	return nil
+}
+
+// isObjectID reports whether s is a full SHA-1 or SHA-256 object id in
+// lowercase hexadecimal.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// BundleHead is one ref a bundle names.
+type BundleHead struct {
+	// Object is the object id the bundle gives the ref.
+	Object string
+
+	// Ref is the ref's full name.
+	Ref string
+}
+
+// ListHeads returns the refs the bundle file at bundlePath, an absolute
+// path, names, in the bundle's order. It reads only the bundle's header.
+func (l *Locked) ListHeads(ctx context.Context, bundlePath string) ([]BundleHead, error) {
+	out, err := l.m.git.run(ctx, "bundle", "list-heads", bundlePath)
+	if err != nil {
+		return nil, fmt.Errorf("read the bundle's refs: %w", err)
+	}
+	var heads []BundleHead
+	for line := range strings.Lines(string(out)) {
+		line = strings.TrimRight(line, "\n")
+		if line == "" {
+			continue
+		}
+		object, ref, _ := strings.Cut(line, " ")
+		heads = append(heads, BundleHead{Object: object, Ref: ref})
+	}
+	return heads, nil
+}
+
 // CreateBundle writes a bundle of refs/heads/<branch> for each branch to
 // path, which must not exist.
 func (l *Locked) CreateBundle(ctx context.Context, path string, branches ...string) error {
