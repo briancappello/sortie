@@ -11,6 +11,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/environment"
+	"github.com/sortie-ai/sortie/internal/gitsync"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -117,6 +118,21 @@ func (o *Orchestrator) describeEnvironment(cfg config.ServiceConfig) func(identi
 			Key: key, HostPath: hostPath, GuestPath: env.GuestPath(hostPath), Identifier: identifier,
 		})
 	}
+}
+
+// repositorySync returns what places the repository cfg configures in a
+// workspace's environment, with its mirror under stateDir, or nil when
+// cfg configures none.
+func repositorySync(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (workspace.RepositorySync, error) {
+	repo := cfg.Smolvm.Repository
+	if normalizeEnvironmentKind(cfg.Kind) != config.EnvironmentKindSmolvm || repo == nil {
+		return nil, nil
+	}
+	syncer, err := gitsync.New(gitsync.Params{Repository: *repo, StateDir: stateDir, Logger: logger})
+	if err != nil {
+		return nil, err
+	}
+	return syncer, nil
 }
 
 // normalizeEnvironmentKind returns kind, or the local kind for "".

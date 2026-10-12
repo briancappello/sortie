@@ -852,11 +852,11 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// The attempt's workspace code runs in the environment its
 	// attempt-start config selects. One that cannot be built fails the
 	// preparation: nothing falls back to the host.
+	stateDir := ""
+	if deps.DBPath != "" {
+		stateDir = filepath.Dir(deps.DBPath)
+	}
 	buildEnvironment := func(envCfg config.EnvironmentConfig) (environment.Environment, error) {
-		stateDir := ""
-		if deps.DBPath != "" {
-			stateDir = filepath.Dir(deps.DBPath)
-		}
 		return environment.New(environment.Params{
 			Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, SortieBinary: deps.MCPServerBinary, Logger: logger,
 		})
@@ -897,8 +897,32 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// environment is ready for the session, with the operator's setup
 	// hooks left out. A hook-running dispatch runs the full lifecycle.
 	afterCreate, beforeRun := cfg.Hooks.AfterCreate, cfg.Hooks.BeforeRun
-	if !deps.Posture.RunsSetupHooks() {
+	// The configured repository is placed in the environment by the same
+	// rule: a scratch dispatch gets none.
+	var repoSync workspace.RepositorySync
+	var repoErr error
+	if deps.Posture.RunsSetupHooks() {
+		repoSync, repoErr = repositorySync(cfg.Environment, stateDir, logger)
+	} else {
 		afterCreate, beforeRun = "", ""
+	}
+	if repoErr != nil {
+		cancelledAtEnding = ctx.Err() != nil
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: repository: %w", repoErr),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
+		})
+		return
 	}
 	wsResult, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root:          cfg.Workspace.Root,
@@ -911,6 +935,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		Logger:        logger,
 		SSHHost:       deps.SSHHost,
 		Environment:   resolvedEnv,
+		Repository:    repoSync,
 		// A workspace another kind created is removed by that kind,
 		// built from the attempt's environment block with only the
 		// kind changed. It is built apart from the shared instance,

@@ -91,6 +91,18 @@ type PrepareParams struct {
 	// Nil handles only a workspace created by the local kind, whose
 	// removal is the host directory's alone.
 	EnvironmentForKind func(kind string) (environment.Environment, error)
+
+	// Repository places the configured repository in the workspace's
+	// environment, which must be set. Nil places none.
+	Repository RepositorySync
+}
+
+// RepositorySync places a repository in a workspace's execution
+// environment, without host code ever reading the workspace.
+type RepositorySync interface {
+	// Seed places the repository in ws's environment, created by this
+	// preparation, before the after_create hook runs in it.
+	Seed(ctx context.Context, env environment.Environment, ws environment.Workspace) error
 }
 
 // PrepareResult holds the outcome of successful workspace preparation.
@@ -126,12 +138,17 @@ type PrepareResult struct {
 // itself, with its instance name when it is an [environment.Namer],
 // once its environment is prepared.
 //
+// With Repository set, the repository is seeded into a newly created
+// environment before after_create runs; see [RepositorySync].
+//
 // Failure semantics:
 //   - a stale workspace whose recorded kind cannot be built, or whose
 //     instance removal fails, fails preparation and is kept as it is.
 //   - an environment preparation failure is fatal: a workspace
 //     directory created by this call is removed, and no hook runs, on
 //     the host or anywhere else.
+//   - a repository seed failure is fatal and removes the workspace
+//     directory, as an after_create failure does.
 //   - after_create failure is fatal: the workspace directory is removed
 //     (transactional rollback) so the next retry starts with a clean
 //     slate. A failure of the environment's own step after after_create
@@ -145,6 +162,10 @@ type PrepareResult struct {
 func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 	if err := ctx.Err(); err != nil {
 		return PrepareResult{}, err
+	}
+
+	if params.Repository != nil && params.Environment == nil {
+		return PrepareResult{}, errors.New("repository sync needs an execution environment")
 	}
 
 	logger := params.Logger
@@ -189,6 +210,12 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 				rollbackWorkspace(ctx, logger, wsResult.Path)
 			}
 			return PrepareResult{}, fmt.Errorf("record %s environment: %w", want.Kind, err)
+		}
+	}
+
+	if params.Repository != nil {
+		if err := syncRepository(ctx, logger, params, target, createdNow); err != nil {
+			return PrepareResult{}, err
 		}
 	}
 
@@ -272,6 +299,25 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 	}
 
 	return PrepareResult{Key: wsResult.Key, Path: wsResult.Path, CreatedNow: createdNow, Instance: instance}, nil
+}
+
+// syncRepository seeds the repository into the target's environment when
+// this preparation created it. A failed seed removes the workspace
+// directory, as a failed after_create does, so the next attempt creates
+// the environment and seeds it again.
+func syncRepository(ctx context.Context, logger *slog.Logger, params PrepareParams, target Target, createdNow bool) error {
+	path := target.Workspace.HostPath
+	if !createdNow {
+		return nil
+	}
+	logger.InfoContext(ctx, "seeding repository", slog.String("workspace", path))
+	if err := params.Repository.Seed(ctx, params.Environment, target.Workspace); err != nil {
+		logger.WarnContext(ctx, "repository seeding failed, rolling back workspace",
+			slog.String("workspace", path), slog.Any("error", err))
+		rollbackWorkspace(ctx, logger, path)
+		return fmt.Errorf("seed repository: %w", err)
+	}
+	return nil
 }
 
 // rollbackWorkspace removes a workspace directory whose preparation
