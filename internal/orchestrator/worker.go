@@ -824,15 +824,16 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// The attempt's workspace code runs in the environment its
 	// attempt-start config selects. One that cannot be built fails the
 	// preparation: nothing falls back to the host.
+	buildEnvironment := func(envCfg config.EnvironmentConfig) (environment.Environment, error) {
+		stateDir := ""
+		if deps.DBPath != "" {
+			stateDir = filepath.Dir(deps.DBPath)
+		}
+		return environment.New(environment.Params{Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, Logger: logger})
+	}
 	resolveEnvironment := deps.EnvironmentFunc
 	if resolveEnvironment == nil {
-		resolveEnvironment = func(envCfg config.EnvironmentConfig) (environment.Environment, error) {
-			stateDir := ""
-			if deps.DBPath != "" {
-				stateDir = filepath.Dir(deps.DBPath)
-			}
-			return environment.New(environment.Params{Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, Logger: logger})
-		}
+		resolveEnvironment = buildEnvironment
 	}
 	resolvedEnv, envErr := resolveEnvironment(cfg.Environment)
 	if envErr != nil {
@@ -903,6 +904,15 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			Logger:        logger,
 			SSHHost:       deps.SSHHost,
 			Environment:   resolvedEnv,
+			// A workspace another kind created is removed by that kind,
+			// built from the attempt's environment block with only the
+			// kind changed. It is built apart from the shared instance,
+			// which keeps serving the configured kind.
+			EnvironmentForKind: func(kind string) (environment.Environment, error) {
+				envCfg := cfg.Environment
+				envCfg.Kind = kind
+				return buildEnvironment(envCfg)
+			},
 			PreRunFunc: func(wsPath string) {
 				workspace.CleanupStatusFile(wsPath, logger)
 			},

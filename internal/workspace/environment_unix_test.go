@@ -99,10 +99,16 @@ func TestPrepare_EnvironmentCreatedNowRunsAfterCreate(t *testing.T) {
 			t.Parallel()
 
 			root := t.TempDir()
-			if _, err := Ensure(root, "ENV-2"); err != nil {
+			existing, err := Ensure(root, "ENV-2")
+			if err != nil {
 				t.Fatalf("Ensure() error = %v", err)
 			}
 			env := recordingEnvironment()
+			// The existing workspace was created by this kind, so it is
+			// reused rather than recreated as a stale one.
+			if err := writeEnvironmentRecord(existing.Path, EnvironmentRecord{Kind: env.Kind()}); err != nil {
+				t.Fatalf("writeEnvironmentRecord() error = %v", err)
+			}
 			env.PrepareResult = environment.PrepareResult{CreatedNow: tt.envCreatedNow}
 
 			res, err := Prepare(context.Background(), PrepareParams{

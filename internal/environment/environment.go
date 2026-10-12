@@ -108,6 +108,14 @@ type AfterCreateFinisher interface {
 	AfterCreate(ctx context.Context, ws Workspace) error
 }
 
+// Namer is implemented by an environment whose workspaces run in a
+// named instance, such as a virtual machine. The name is recorded with
+// the workspace's kind when the workspace is prepared.
+type Namer interface {
+	// InstanceName returns the name of the instance that runs ws.
+	InstanceName(ws Workspace) string
+}
+
 // Params carries what a [Constructor] needs to build an [Environment].
 type Params struct {
 	// Config is the parsed environment block.

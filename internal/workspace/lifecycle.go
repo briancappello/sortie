@@ -82,8 +82,15 @@ type PrepareParams struct {
 	PreRunFunc func(workspacePath string)
 
 	// Environment is the execution environment the workspace's hooks run
-	// in. Nil runs them as host processes in the workspace directory.
+	// in. Nil runs them as host processes in the workspace directory,
+	// which is the local kind.
 	Environment environment.Environment
+
+	// EnvironmentForKind builds the environment of a kind other than
+	// Environment's, to remove an existing workspace that kind created.
+	// Nil handles only a workspace created by the local kind, whose
+	// removal is the host directory's alone.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
 }
 
 // PrepareResult holds the outcome of successful workspace preparation.
@@ -105,7 +112,17 @@ type PrepareResult struct {
 // created, then before_run) inside that environment. Returns a
 // [PrepareResult] on success.
 //
+// An existing workspace created by another environment kind is stale:
+// the kind recorded in .sortie/environment, or local when there is no
+// record, differs from Environment's. Prepare removes that kind's
+// instance and the host directory, then prepares the workspace from
+// scratch, so after_create runs again. A kind other than local records
+// itself, with its instance name when it is an [environment.Namer],
+// once its environment is prepared.
+//
 // Failure semantics:
+//   - a stale workspace whose recorded kind cannot be built, or whose
+//     instance removal fails, fails preparation and is kept as it is.
 //   - an environment preparation failure is fatal: a workspace
 //     directory created by this call is removed, and no hook runs, on
 //     the host or anywhere else.
@@ -133,6 +150,10 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 	if err != nil {
 		return PrepareResult{}, err
 	}
+	wsResult, err = recreateStaleWorkspace(ctx, logger, params, wsResult)
+	if err != nil {
+		return PrepareResult{}, err
+	}
 
 	target := NewTarget(params.Environment, wsResult.Key, wsResult.Path, params.IssueID, params.Identifier)
 	createdNow := wsResult.CreatedNow
@@ -148,6 +169,17 @@ func Prepare(ctx context.Context, params PrepareParams) (PrepareResult, error) {
 			return PrepareResult{}, fmt.Errorf("prepare %s environment: %w", params.Environment.Kind(), prepErr)
 		}
 		createdNow = createdNow || prep.CreatedNow
+	}
+	if want, ok := wantedEnvironmentRecord(params.Environment, target.Workspace); ok {
+		if err := ensureEnvironmentRecord(wsResult.Path, want); err != nil {
+			logger.WarnContext(ctx, "recording the workspace's execution environment failed",
+				slog.String("environment", want.Kind),
+				slog.String("workspace", wsResult.Path), slog.Any("error", err))
+			if wsResult.CreatedNow {
+				rollbackWorkspace(ctx, logger, wsResult.Path)
+			}
+			return PrepareResult{}, fmt.Errorf("record %s environment: %w", want.Kind, err)
+		}
 	}
 
 	env := HookEnv(params.IssueID, params.Identifier, wsResult.Path, params.Attempt, params.SSHHost)
