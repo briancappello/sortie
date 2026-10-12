@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/plan"
 )
 
 // SnapshotFunc returns a point-in-time capture of the orchestrator's
@@ -160,6 +161,15 @@ type Params struct {
 	// POST /api/v1/{identifier}/escalate. When nil, that route answers
 	// 503.
 	EscalateFn EscalateFunc
+
+	// PlanSyncer serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
+	// and GET /api/v1/plan/capabilities. When nil, those routes answer
+	// 503.
+	PlanSyncer *plan.Syncer
+
+	// TerminalStatesFn returns the workflow's current terminal states,
+	// which mark plan graph nodes terminal. When nil, no node is.
+	TerminalStatesFn func() []string
 }
 
 // Server is the embedded HTTP server for JSON API, dashboard, and
@@ -187,6 +197,8 @@ type Server struct {
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
+	planSyncer       *plan.Syncer
+	terminalStatesFn func() []string
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -237,6 +249,8 @@ func New(params Params) *Server {
 		holdFn:           params.HoldFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
+		planSyncer:       params.PlanSyncer,
+		terminalStatesFn: params.TerminalStatesFn,
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -253,6 +267,9 @@ func New(params Params) *Server {
 	// 405 responses use JSON error envelopes instead of the default
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
+	mux.HandleFunc("/api/v1/plan/sync", s.controlRoute(scopeOperator, s.handlePlanSync))
+	mux.HandleFunc("/api/v1/plan/graph", s.controlGet(s.handlePlanGraph))
+	mux.HandleFunc("/api/v1/plan/capabilities", s.controlGet(s.handlePlanCapabilities))
 	mux.HandleFunc("/api/v1/refresh", s.controlRoute(scopeOperator, s.handleRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))

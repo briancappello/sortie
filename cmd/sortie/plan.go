@@ -128,6 +128,13 @@ func runPlanSync(ctx context.Context, args []string, stdout io.Writer, stderr io
 	return 0
 }
 
+// newPlanSyncer returns the syncer behind the HTTP plan endpoints, for the
+// tracker adapter the orchestrator already built.
+func newPlanSyncer(adapter domain.TrackerAdapter, kind string) *plan.Syncer {
+	meta, _ := registry.Trackers.Meta(kind)
+	return plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta})
+}
+
 // newPlanTracker is planTracker; tests substitute a fake tracker.
 var newPlanTracker = planTracker
 

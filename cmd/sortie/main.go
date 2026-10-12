@@ -888,6 +888,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			HoldFn:           server.HoldFunc(o.HoldFunc()),
 			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
 			EscalateFn:       server.EscalateFunc(o.EscalateFunc()),
+			PlanSyncer:       newPlanSyncer(br.trackerAdapter, br.cfg.Tracker.Kind),
+			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
 				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
 				if err != nil {
