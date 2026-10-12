@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 // pullsServer fakes GitHub's pull request list and create routes for
@@ -181,4 +182,16 @@ func TestEnsurePullRequest(t *testing.T) {
 		_, err := newTestSCMAdapter(t, srv.URL).EnsurePullRequest(t.Context(), "org", "app", "sortie/ENG-42", "main", "t", "b")
 		assertSCMErrorKind(t, err, domain.ErrSCMAPI)
 	})
+}
+
+func TestRegistration_DeclaresThePullRequestOpener(t *testing.T) {
+	t.Parallel()
+	meta, ok := registry.SCMAdapters.Meta("github")
+	if !ok || !meta.OpensPullRequests {
+		t.Errorf("registry meta = %+v, %v; want OpensPullRequests declared", meta, ok)
+	}
+	var adapter domain.SCMAdapter = newTestSCMAdapter(t, "http://github.invalid")
+	if _, ok := adapter.(domain.PullRequestOpener); !ok {
+		t.Error("the adapter does not implement domain.PullRequestOpener")
+	}
 }

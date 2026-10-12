@@ -20,7 +20,7 @@ import (
 )
 
 func init() {
-	registry.SCMAdapters.Register("gitea", NewGiteaSCMAdapter)
+	registry.SCMAdapters.RegisterWithMeta("gitea", NewGiteaSCMAdapter, registry.SCMMeta{OpensPullRequests: true})
 }
 
 // Compile-time interface satisfaction check.

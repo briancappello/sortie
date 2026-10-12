@@ -30,18 +30,23 @@ const (
 
 // workflowValidate is the shared promotion-validation hook every
 // [workflow.Manager] the program constructs wires through
-// [workflow.WithValidateFunc]. It adds the notification destination check
-// and the execution environment's host check to the orchestrator's own
-// rules, so a reload whose destinations cannot be constructed, or that
+// [workflow.WithValidateFunc]. It adds the notification destination
+// check, the repository provider check, and the execution environment's
+// host check to the orchestrator's own rules, so a reload whose
+// destinations cannot be constructed, whose repository provider differs
+// from an active SCM reaction's or cannot open pull requests, or that
 // selects an environment this host cannot run, is rejected and the
 // previous configuration stays in force. The first load runs it too, so
-// either refusal stops startup.
+// any such refusal stops startup.
 var workflowValidate workflow.ValidateFunc = func(cfg config.ServiceConfig) error {
 	trackerMeta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
 	if err := orchestrator.ValidateConfigForPromotion(cfg, trackerMeta); err != nil {
 		return err
 	}
 	if err := route.CheckDestinations(cfg.Notifications.Backends, registry.Notifiers.Get); err != nil {
+		return err
+	}
+	if err := checkRepositoryProvider(cfg); err != nil {
 		return err
 	}
 	return environment.CheckHost(cfg.Environment)

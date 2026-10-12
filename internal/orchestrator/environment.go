@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/gitsync"
 	"github.com/sortie-ai/sortie/internal/workspace"
@@ -142,6 +143,22 @@ type RepositoryFunc func(cfg config.EnvironmentConfig, stateDir string, logger *
 func configuresRepository(cfg config.EnvironmentConfig) bool {
 	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && cfg.Smolvm.Repository != nil
 }
+
+// RepositoryProvider returns the SCM provider that opens the pull
+// request for each issue branch Sortie pushes under cfg, or "" when cfg
+// configures no repository or the repository names no provider.
+func RepositoryProvider(cfg config.EnvironmentConfig) string {
+	if !configuresRepository(cfg) {
+		return ""
+	}
+	return cfg.Smolvm.Repository.Provider
+}
+
+// PullRequestOpenerFunc returns the pull request opener of the SCM
+// provider cfg's repository names, built from the same settings the SCM
+// reactions use. It is called only when [RepositoryProvider] is not
+// empty.
+type PullRequestOpenerFunc func(cfg config.ServiceConfig) (domain.PullRequestOpener, error)
 
 // repositorySync returns the [Repository] cfg configures, with its
 // mirror under stateDir, or nil when cfg configures none.

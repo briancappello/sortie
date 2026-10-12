@@ -58,9 +58,19 @@ var CIProviders = NewRegistry[CIProviderConstructor, struct{}]("ci_provider")
 type SCMAdapterConstructor func(adapterConfig map[string]any) (domain.SCMAdapter, error)
 
 // SCMAdapters is the default SCM adapter registry. Adapter packages
-// register themselves via [Registry.Register] in their init functions;
-// the orchestrator resolves adapters via [Registry.Get] at runtime.
-var SCMAdapters = NewRegistry[SCMAdapterConstructor, struct{}]("scm")
+// register themselves via [Registry.Register] or, to declare a
+// capability, [Registry.RegisterWithMeta] in their init functions; the
+// orchestrator resolves adapters via [Registry.Get] at runtime.
+var SCMAdapters = NewRegistry[SCMAdapterConstructor, SCMMeta]("scm")
+
+// SCMMeta holds optional SCM-adapter-declared capabilities queried when
+// a configuration is validated, before any adapter is constructed. Zero
+// value means no optional capability.
+type SCMMeta struct {
+	// OpensPullRequests declares that the adapter implements
+	// [domain.PullRequestOpener].
+	OpensPullRequests bool
+}
 
 // NotifierConstructor creates a [domain.Notifier] from the backend
 // entry's pass-through config map. Implementations validate their

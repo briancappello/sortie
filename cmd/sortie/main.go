@@ -574,8 +574,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	labelReviewActive := labelReviewCommandActive(br.cfg)
 	labelFixActive := labelFixCommandActive(br.cfg)
 
+	// One SCM adapter serves every active SCM reaction and the pull
+	// requests of the configured repository; validation has made them
+	// name the same provider. It is built when either needs it.
+	repositoryProvider := orchestrator.RepositoryProvider(br.cfg.Environment)
+	scmProvider := repositoryProvider
 	if len(activeKindNames) > 0 {
-		provider := activeProviders[0]
+		scmProvider = activeProviders[0]
+	}
+	var sharedSCM domain.SCMAdapter
+	if scmProvider != "" {
+		provider := scmProvider
 		scmCtor, scmErr := registry.SCMAdapters.Get(provider)
 		if scmErr != nil {
 			br.logger.Error("unknown SCM adapter kind",
@@ -584,11 +593,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			)
 			return 1
 		}
-		adapterCfgMap := make(map[string]any)
-		config.MergeAdapterExtensions(adapterCfgMap, br.cfg, provider)
-		if provider == br.cfg.Tracker.Kind {
-			mergeTrackerCredentials(adapterCfgMap, br.cfg.Tracker)
-		}
+		adapterCfgMap := scmAdapterSettings(br.cfg, provider)
 		if reviewActive {
 			for k, v := range reviewRC.Extra {
 				if _, exists := adapterCfgMap[k]; !exists {
@@ -621,7 +626,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		// are orchestrator settings, not adapter settings, so unlike the
 		// sibling blocks above, its Extra map is never merged in, matching
 		// the label_commands precedent.
-		scmAdapter, scmErr = scmCtor(adapterCfgMap)
+		sharedSCM, scmErr = scmCtor(adapterCfgMap)
 		if scmErr != nil {
 			br.logger.Error("failed to construct SCM adapter",
 				slog.String("kind", provider),
@@ -629,6 +634,22 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			)
 			return 1
 		}
+	}
+	if repositoryProvider != "" {
+		if _, ok := sharedSCM.(domain.PullRequestOpener); !ok {
+			br.logger.Error("the SCM adapter of the repository provider cannot open pull requests",
+				slog.String("provider", repositoryProvider))
+			return 1
+		}
+		br.logger.Info("pull requests for pushed issue branches enabled",
+			slog.String("provider", repositoryProvider),
+			slog.String("project", br.cfg.Environment.Smolvm.Repository.Project),
+		)
+	}
+
+	if len(activeKindNames) > 0 {
+		scmAdapter = sharedSCM
+		var scmErr error
 
 		if reviewActive {
 			reviewConfig, scmErr = orchestrator.BuildReviewReactionConfig(reviewRC)
@@ -889,6 +910,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		DBPath:                            dbPath,
 		CIProvider:                        ciProvider,
 		SCMAdapter:                        scmAdapter,
+		PullRequestOpenerFunc:             pullRequestOpeners(sharedSCM, scmProvider),
 		ReviewConfig:                      reviewConfig,
 		ReviewConfigured:                  reviewActive,
 		AutoMergeConfig:                   autoMergeConfig,

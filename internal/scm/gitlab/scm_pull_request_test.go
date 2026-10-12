@@ -10,6 +10,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/adaptertest"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 // mergeRequestsServer fakes GitLab's merge request list and create
@@ -131,4 +132,16 @@ func TestEnsurePullRequest(t *testing.T) {
 			t.Errorf("error = %v, want it to name the api scope", err)
 		}
 	})
+}
+
+func TestRegistration_DeclaresThePullRequestOpener(t *testing.T) {
+	t.Parallel()
+	meta, ok := registry.SCMAdapters.Meta("gitlab")
+	if !ok || !meta.OpensPullRequests {
+		t.Errorf("registry meta = %+v, %v; want OpensPullRequests declared", meta, ok)
+	}
+	var adapter domain.SCMAdapter = mustSCMAdapter(t, "http://gitlab.invalid")
+	if _, ok := adapter.(domain.PullRequestOpener); !ok {
+		t.Error("the adapter does not implement domain.PullRequestOpener")
+	}
 }

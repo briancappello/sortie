@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 // giteaPullsServer fakes Gitea's pull request list and create routes
@@ -136,5 +137,17 @@ func TestEnsurePullRequest(t *testing.T) {
 				t.Errorf("error = %v, want it to name write:repository", err)
 			}
 		})
+	}
+}
+
+func TestRegistration_DeclaresThePullRequestOpener(t *testing.T) {
+	t.Parallel()
+	meta, ok := registry.SCMAdapters.Meta("gitea")
+	if !ok || !meta.OpensPullRequests {
+		t.Errorf("registry meta = %+v, %v; want OpensPullRequests declared", meta, ok)
+	}
+	var adapter domain.SCMAdapter = mustSCMAdapter(t, "http://gitea.invalid")
+	if _, ok := adapter.(domain.PullRequestOpener); !ok {
+		t.Error("the adapter does not implement domain.PullRequestOpener")
 	}
 }

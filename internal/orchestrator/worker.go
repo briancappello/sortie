@@ -396,6 +396,12 @@ type WorkerDeps struct {
 	// gitsync. Optional.
 	RepositoryFunc RepositoryFunc
 
+	// PullRequestOpenerFunc returns the opener of the pull request for
+	// the issue branch the export pushes, called only when the
+	// attempt-start config's repository names a provider. Nil fails
+	// such an export. Optional.
+	PullRequestOpenerFunc PullRequestOpenerFunc
+
 	// WorkflowPath is the absolute WORKFLOW.md path, passed to MCP config
 	// generation. Empty disables MCP config generation.
 	WorkflowPath string

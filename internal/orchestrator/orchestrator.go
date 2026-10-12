@@ -154,6 +154,12 @@ type OrchestratorParams struct {
 	// review comment routing is not configured.
 	SCMAdapter domain.SCMAdapter
 
+	// PullRequestOpenerFunc returns the opener of the pull request for
+	// each issue branch Sortie pushes when the configuration's
+	// repository names a provider. Nil when no configuration the
+	// program loads can name one.
+	PullRequestOpenerFunc PullRequestOpenerFunc
+
 	// ReviewConfig holds validated review reaction configuration. Zero when
 	// SCMAdapter is nil.
 	ReviewConfig ReviewReactionConfig
@@ -263,6 +269,7 @@ type Orchestrator struct {
 	sessionAPIURL                     string
 	ciProvider                        domain.CIStatusProvider
 	scmAdapter                        domain.SCMAdapter
+	pullRequestOpenerFunc             PullRequestOpenerFunc
 	reviewConfig                      ReviewReactionConfig
 	reviewReactionConfigured          bool
 	autoMergeConfig                   AutoMergeReactionConfig
@@ -419,6 +426,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		sessionAPIURL:                     params.SessionAPIURL,
 		ciProvider:                        params.CIProvider,
 		scmAdapter:                        params.SCMAdapter,
+		pullRequestOpenerFunc:             params.PullRequestOpenerFunc,
 		reviewConfig:                      params.ReviewConfig,
 		reviewReactionConfigured:          params.ReviewConfigured,
 		autoMergeConfig:                   params.AutoMergeConfig,
@@ -1160,15 +1168,16 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 				declared := append(meta.CredentialEnv.Names(), convertedCredentialEnv...)
 				return carriedEnvNames(declared, sshPassEnv, sshDisallowPassEnv)
 			},
-			Metrics:         o.metrics,
-			EnvironmentFunc: o.environments.resolve,
-			WorkflowPath:    o.workflowManager.WorkflowAbsPath(),
-			DBPath:          o.dbPath,
-			MCPServerBinary: o.mcpServerBinary,
-			ToolSockets:     o.toolSockets,
-			SessionAPIURL:   o.sessionAPIURL,
-			ReactionKind:    reactionKind,
-			Posture:         posture,
+			Metrics:               o.metrics,
+			EnvironmentFunc:       o.environments.resolve,
+			PullRequestOpenerFunc: o.pullRequestOpenerFunc,
+			WorkflowPath:          o.workflowManager.WorkflowAbsPath(),
+			DBPath:                o.dbPath,
+			MCPServerBinary:       o.mcpServerBinary,
+			ToolSockets:           o.toolSockets,
+			SessionAPIURL:         o.sessionAPIURL,
+			ReactionKind:          reactionKind,
+			Posture:               posture,
 		}
 
 		RunWorkerAttempt(ctx, issue, attempt, deps)
