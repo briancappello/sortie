@@ -390,7 +390,9 @@ func TestMaskTruncated_CompleteValueOverlappingTheCutStaysMasked(t *testing.T) {
 func TestMaskTruncated_NothingRegisteredMatchesMask(t *testing.T) {
 	t.Parallel()
 
-	text := "no registered value here " + randomSecret(t)[:12]
+	// Ends in a character no registered value of a parallel test starts
+	// with, so no suffix of the text is a fragment of one.
+	text := "no registered value here " + randomSecret(t)[:12] + "."
 	if got, want := MaskTruncated(text), Mask(text); got != want {
 		t.Errorf("MaskTruncated(%q) = %q, want %q", text, got, want)
 	}
