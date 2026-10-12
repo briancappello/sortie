@@ -204,6 +204,11 @@ type ToolSocketer interface {
 	// GuestToolSocketPath returns the path of the tool socket inside the
 	// environment.
 	GuestToolSocketPath() string
+
+	// GuestSortieBinaryPath returns the path, inside the environment, of
+	// the copy of the Sortie binary the environment keeps current. Its
+	// mcp-relay subcommand connects the agent to the tool socket.
+	GuestSortieBinaryPath() string
 }
 
 // EnvForwarder is implemented by an environment that runs elsewhere and
@@ -330,6 +335,11 @@ type Params struct {
 
 	// WorkflowPath is the path of the workflow file.
 	WorkflowPath string
+
+	// SortieBinary is the absolute path of the Sortie binary an
+	// environment that runs elsewhere gives its instances a copy of.
+	// Empty is the running executable.
+	SortieBinary string
 
 	// Logger receives the environment's diagnostics. Never nil when
 	// the orchestrator constructs an environment.

@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/environment/environmenttest"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/toolsocket"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
@@ -36,6 +38,8 @@ func (s socketEnvironment) ToolSocketPath(ws environment.Workspace) (string, err
 }
 
 func (socketEnvironment) GuestToolSocketPath() string { return "/run/sortie/tools.sock" }
+
+func (socketEnvironment) GuestSortieBinaryPath() string { return "/opt/sortie/sortie" }
 
 func (s socketEnvironment) Remove(ctx context.Context, ws environment.Workspace) error {
 	if err := s.Recorder.Remove(ctx, ws); err != nil {
@@ -290,5 +294,77 @@ func TestRunWorkerAttempt_ServesTheToolSocket(t *testing.T) {
 	rec, found, err := readToolSessionRecord(filepath.Dir(f.socketOf(ws)))
 	if err != nil || !found || rec.IssueID != issue.ID || rec.DispatchID != "dispatch-7" {
 		t.Errorf("session record = %+v, %v, %v", rec, found, err)
+	}
+	entry := sortieEntry(t, readMCPConfig(t, filepath.Join(f.root, issue.Identifier)))
+	if entry["command"] != "/opt/sortie/sortie" || entry["env"] != nil {
+		t.Errorf("sortie-tools = %v, want the guest relay with no env block", entry)
+	}
+}
+
+// TestGenerateMCPConfig_PerEnvironmentKind generates the session's MCP
+// configuration the way the worker does for each kind of launch: on
+// this host, over SSH (which runs with the local environment), and in an
+// environment that reaches the tools through a socket.
+func TestGenerateMCPConfig_PerEnvironmentKind(t *testing.T) {
+	t.Parallel()
+	local, err := environment.New(environment.Params{Config: config.EnvironmentConfig{Kind: config.EnvironmentKindLocal}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newToolSocketFixture(t)
+	secret := mcpconfigSecret(t)
+
+	for _, tc := range []struct {
+		name  string
+		env   environment.Environment
+		guest bool
+	}{
+		{name: "local", env: local},
+		{name: "ssh", env: local},
+		{name: "socket environment", env: f.env, guest: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			p := mcpParams(dir)
+			p.ProcessEnv = map[string]string{"SORTIE_TEST_TOKEN": secret}
+			p.GuestCommand = guestToolCommand(tc.env)
+			if _, err := GenerateMCPConfig(p); err != nil {
+				t.Fatalf("GenerateMCPConfig: %v", err)
+			}
+			entry := sortieEntry(t, readMCPConfig(t, dir))
+			if !tc.guest {
+				if entry["command"] != p.BinaryPath {
+					t.Errorf("command = %v, want %q", entry["command"], p.BinaryPath)
+				}
+				env, _ := entry["env"].(map[string]any)
+				if env["SORTIE_ISSUE_ID"] != p.IssueID || env["SORTIE_TEST_TOKEN"] != secret {
+					t.Errorf("env = %v, want the session identity and process variables", env)
+				}
+				return
+			}
+			want := map[string]any{
+				"type":    "stdio",
+				"command": "/opt/sortie/sortie",
+				"args":    []any{"mcp-relay", "/run/sortie/tools.sock"},
+			}
+			got, _ := json.Marshal(entry)
+			wantJSON, _ := json.Marshal(want)
+			if string(got) != string(wantJSON) {
+				t.Errorf("sortie-tools = %s, want %s", got, wantJSON)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, ".sortie", "mcp.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, leaked := range []string{secret, p.DBPath, p.WorkflowPath, p.BinaryPath} {
+				if strings.Contains(string(data), leaked) {
+					t.Errorf("guest mcp.json holds host value %q:\n%s", leaked, data)
+				}
+			}
+			if got := redact.Mask(secret); got == secret {
+				t.Errorf("the host tool server's credential stayed unmasked")
+			}
+		})
 	}
 }

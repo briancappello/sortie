@@ -25,6 +25,7 @@ type EnvironmentFunc func(cfg config.EnvironmentConfig) (environment.Environment
 type environmentResolver struct {
 	stateDir     string
 	workflowPath string
+	sortieBinary string // "" is the running executable
 	logger       *slog.Logger
 
 	mu  sync.Mutex
@@ -48,7 +49,7 @@ func (r *environmentResolver) params(cfg config.EnvironmentConfig) environment.P
 	if r == nil {
 		return environment.Params{Config: cfg, Logger: slog.Default()}
 	}
-	return environment.Params{Config: cfg, StateDir: r.stateDir, WorkflowPath: r.workflowPath, Logger: r.logger}
+	return environment.Params{Config: cfg, StateDir: r.stateDir, WorkflowPath: r.workflowPath, SortieBinary: r.sortieBinary, Logger: r.logger}
 }
 
 // resolve returns the environment cfg selects. A failure is not cached,

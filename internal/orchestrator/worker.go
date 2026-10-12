@@ -857,7 +857,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		if deps.DBPath != "" {
 			stateDir = filepath.Dir(deps.DBPath)
 		}
-		return environment.New(environment.Params{Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, Logger: logger})
+		return environment.New(environment.Params{
+			Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, SortieBinary: deps.MCPServerBinary, Logger: logger,
+		})
 	}
 	resolveEnvironment := deps.EnvironmentFunc
 	if resolveEnvironment == nil {
@@ -1005,6 +1007,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			Attempt:               attempt,
 			AgentKind:             agentKind,
 			OperatorMCPConfigPath: deps.AgentSettings.MCPConfigPath,
+			GuestCommand:          guestToolCommand(workspaceEnv),
 			ProcessEnv:            CollectSortieEnv(),
 		}
 		generatedPath, genErr := GenerateMCPConfig(mcpParams)

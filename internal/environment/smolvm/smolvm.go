@@ -16,7 +16,8 @@
 // [Environment.Remove] deletes it with its workspace, and
 // [Environment.Sweep] deletes the VMs whose workspace directory is gone.
 // [Environment.ToolSocketPath] names the host socket each VM reaches
-// Sortie's tools through.
+// Sortie's tools through, with the copy of the Sortie binary Prepare
+// keeps current at [GuestSortieBinary] as the relay.
 //
 // The package touches only a VM it labeled as managed, for the
 // workspace key the VM's name derives from, and for this workflow; any
@@ -113,6 +114,12 @@ type Environment struct {
 
 	packMu   sync.Mutex
 	packSums map[string]packSum
+
+	// sortieBinary is the Sortie binary the binary directory holds a
+	// copy of; "" is the running executable.
+	sortieBinary string
+	binMu        sync.Mutex
+	binSource    binarySource
 }
 
 // packSum is a pack file's SHA-256 together with the size and
@@ -149,6 +156,8 @@ func New(params environment.Params) (environment.Environment, error) {
 		stateDir: params.StateDir,
 		logger:   logger,
 		packSums: map[string]packSum{},
+
+		sortieBinary: params.SortieBinary,
 	}
 	if params.WorkflowPath != "" {
 		abs, err := filepath.Abs(params.WorkflowPath)
@@ -206,6 +215,9 @@ func (e *Environment) ToolSocketPath(ws environment.Workspace) (string, error) {
 // GuestToolSocketPath returns [GuestToolSocket].
 func (*Environment) GuestToolSocketPath() string { return GuestToolSocket }
 
+// GuestSortieBinaryPath returns [GuestSortieBinary].
+func (*Environment) GuestSortieBinaryPath() string { return GuestSortieBinary }
+
 // InstanceName returns the name of the VM that runs ws.
 func (*Environment) InstanceName(ws environment.Workspace) string { return VMName(ws.Key) }
 
@@ -251,7 +263,8 @@ func shortHash(s string) string {
 // Prepare makes the workspace's VM ready to run commands.
 //
 // It creates the host workspace's .sortie directory and the state
-// directories the VM's mounts name, then looks the VM up. Without a VM,
+// directories the VM's mounts name, refreshes the binary directory's
+// copy of the Sortie binary, then looks the VM up. Without a VM,
 // it creates one from the pack and starts it, and reports CreatedNow. A
 // stopped VM is started; a running one is left as it is. A VM is reused
 // only when the workspace's environment record names it: a VM that
@@ -264,6 +277,9 @@ func shortHash(s string) string {
 func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (environment.PrepareResult, error) {
 	paths, err := e.preparePaths(ws)
 	if err != nil {
+		return environment.PrepareResult{}, err
+	}
+	if err := e.ensureBinary(paths.binDir); err != nil {
 		return environment.PrepareResult{}, err
 	}
 	name := VMName(ws.Key)

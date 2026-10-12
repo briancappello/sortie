@@ -443,6 +443,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		workflowPath = params.WorkflowManager.WorkflowAbsPath()
 	}
 	o.environments = newEnvironmentResolver(params.DBPath, workflowPath, logger)
+	o.environments.sortieBinary = params.MCPServerBinary
 	o.toolSockets = toolsocket.NewRegistry(logger)
 	if o.preflightParams.EnvironmentFunc == nil {
 		o.preflightParams.EnvironmentFunc = o.environments.resolve
