@@ -25,6 +25,12 @@ const GuestGitDir = "/run/sortie/git"
 // guestOutputCap bounds the output a failed guest command reports.
 const guestOutputCap = 4 << 10
 
+// excludeControlDirScript adds /.sortie to the clone's info/exclude, run
+// at the workspace root. The control directory link placed there after
+// after_create then never shows as untracked, so a commit of every
+// change cannot carry it onto the issue branch.
+const excludeControlDirScript = `exclude="$(git rev-parse --git-path info/exclude)" && mkdir -p "$(dirname "$exclude")" && printf '%s\n' /.sortie >> "$exclude"`
+
 // guestCleanupTimeout bounds the removal of a bundle from the guest.
 const guestCleanupTimeout = 30 * time.Second
 
@@ -105,7 +111,9 @@ func GuestRemoteURL(raw string) string {
 // mirror, failing when that fails, and sends the environment a bundle of
 // the base branch and, when the upstream has it, the issue branch. In
 // the environment it clones the bundle into the workspace with the
-// remote origin, checks out the issue branch, and sets origin's URL to
+// remote origin, excludes /.sortie from the clone so the control
+// directory link never reaches a commit, checks out the issue branch,
+// and sets origin's URL to
 // the repository URL without credentials ([GuestRemoteURL]).
 //
 // The issue branch tracks origin/<issue branch> when the upstream has
@@ -124,6 +132,9 @@ func (s *Syncer) Seed(ctx context.Context, env environment.Environment, ws envir
 
 	if err := s.guest(ctx, env, ws, nil, "git", "clone", "--quiet", "--no-checkout", "--origin", "origin", "--", s.guestBundle(), ws.GuestPath); err != nil {
 		return fmt.Errorf("clone the repository in the environment: %w", err)
+	}
+	if err := s.guest(ctx, env, ws, nil, "sh", "-c", excludeControlDirScript); err != nil {
+		return fmt.Errorf("exclude the control directory in the environment: %w", err)
 	}
 	checkout := []string{"git", "checkout", "--quiet", "--no-track", "-b", branch, "origin/" + s.repo.Base}
 	if hasBranch {

@@ -144,6 +144,9 @@ func TestIntegration_SeedsTheRepositoryBeforeAfterCreate(t *testing.T) {
 		out != GuestControlDir+"\n"+up.dir+"\n" {
 		t.Errorf("guest bundle, control link, and origin URL = %q, %v; want no bundle, %s, and %s", out, err, GuestControlDir, up.dir)
 	}
+	if out, err := ie.guest(ctx, fresh, "cd /workspace && git add -A && git status --porcelain --untracked-files=all"); err != nil || out != "" {
+		t.Errorf("guest status after add -A with the control link = %q, %v; want it clean", out, err)
+	}
 
 	prepare(existing)
 	if got := guestFile(existing, "/tmp/branch"); got != "sortie/"+existing {

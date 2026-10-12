@@ -114,6 +114,7 @@ func TestSeed_NewIssueBranchAtBase(t *testing.T) {
 	want := [][]string{
 		{"sh", "-c", `umask 077 && mkdir -p "$1" && cat > "$1/in.bundle"`, "sh", f.guestDir},
 		{"git", "clone", "--quiet", "--no-checkout", "--origin", "origin", "--", bundle, f.ws.GuestPath},
+		{"sh", "-c", excludeControlDirScript},
 		{"git", "checkout", "--quiet", "--no-track", "-b", "sortie/ENG-42", "origin/main"},
 		{"git", "remote", "set-url", "origin", f.up.dir},
 		{"rm", "-f", "--", bundle},
@@ -160,7 +161,7 @@ func TestSeed_ExistingUpstreamBranchAtItsTip(t *testing.T) {
 	if err := f.syncer.Seed(context.Background(), f.env, f.ws); err != nil {
 		t.Fatalf("Seed() error = %v", err)
 	}
-	if got := f.argvs()[2]; !slices.Equal(got, []string{"git", "checkout", "--quiet", "--track", "-b", "sortie/ENG-43", "origin/sortie/ENG-43"}) {
+	if got := f.argvs()[3]; !slices.Equal(got, []string{"git", "checkout", "--quiet", "--track", "-b", "sortie/ENG-43", "origin/sortie/ENG-43"}) {
 		t.Errorf("checkout = %q, want the issue branch tracking its upstream", got)
 	}
 	if got := f.git("rev-parse", "--abbrev-ref", "HEAD"); got != "sortie/ENG-43" {
@@ -176,6 +177,41 @@ func TestSeed_ExistingUpstreamBranchAtItsTip(t *testing.T) {
 		t.Errorf("guest remote refs = %q, want only the base and the issue branch", got)
 	}
 	f.assertNoBundlesLeft()
+}
+
+func TestSeed_ExcludesTheControlDirectoryLink(t *testing.T) {
+	f := newSyncFixture(t, "ENG-48", config.SmolvmRepository{})
+	// An empty template leaves the clone without .git/info, as a guest
+	// git configured that way would.
+	t.Setenv("GIT_TEMPLATE_DIR", t.TempDir())
+
+	if err := f.syncer.Seed(context.Background(), f.env, f.ws); err != nil {
+		t.Fatalf("Seed() error = %v", err)
+	}
+	control := t.TempDir()
+	if err := os.WriteFile(filepath.Join(control, "issue.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(control, filepath.Join(f.ws.HostPath, ".sortie")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.git("status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("status with the control directory linked = %q, want it clean", got)
+	}
+	f.git("add", "-A")
+	if got := f.git("diff", "--cached", "--name-only"); got != "" {
+		t.Errorf("staged after add -A = %q, want nothing", got)
+	}
+	// Only the workspace root's .sortie is excluded.
+	if err := os.Mkdir(filepath.Join(f.ws.HostPath, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.ws.HostPath, "sub", ".sortie"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.git("status", "--porcelain", "--untracked-files=all"); got != "?? sub/.sortie" {
+		t.Errorf("status with a nested .sortie = %q, want it untracked", got)
+	}
 }
 
 func TestSeed_InvalidIssueBranchRunsNothing(t *testing.T) {
