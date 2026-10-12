@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -262,15 +261,17 @@ func (s *ForkPerTurnSession) RunTurn(
 	cmdArgs := s.hooks.BuildArgs(prospectiveTurn, prompt)
 
 	var cmd *exec.Cmd
-	if s.target.RemoteCommand != "" {
-		launch := sshutil.BuildSSHLaunch(
-			s.target.SSHHost,
-			s.target.WorkspacePath,
-			s.target.RemoteCommand,
-			cmdArgs,
-			s.target.SSHOptions(),
-		)
-		cmd = exec.CommandContext(cmdCtx, s.target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
+	if s.target.Remote() {
+		launch, launchErr := s.target.RemoteLaunch(cmdArgs)
+		if launchErr != nil {
+			usage, measured := s.hooks.GetUsage()
+			return domain.TurnResult{
+				SessionID:     s.hooks.GetSessionID(),
+				Usage:         usage,
+				UsageMeasured: measured,
+			}, launchErr
+		}
+		cmd = exec.CommandContext(cmdCtx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 		cmd.Stdin = launch.StdinReader()
 	} else {
 		allArgs := append(slices.Clip(s.target.Args), cmdArgs...)       //nolint:gocritic // intentional: target.Args has cap==len so append always allocates
@@ -484,17 +485,18 @@ loop:
 
 	exitCode := procutil.ExtractExitCode(waitErr)
 
-	sshFailed := s.target.RemoteCommand != "" && sshutil.ConnectionFailed(exitCode)
+	sshFailed := s.target.ConnectionFailed(exitCode, func() []string { return stderrLines })
 	if ConnectionFailedForRequest(sshFailed, lastParsed != nil) {
+		connErr := s.target.ConnectionFailedError()
 		usage, measured := s.hooks.GetUsage()
-		EmitTurnFailed(emit, "ssh connection failed", 0, usage)
+		EmitTurnFailed(emit, connErr.Message, 0, usage)
 		result := domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			ExitReason:    domain.EventTurnFailed,
 			Usage:         usage,
 			UsageMeasured: measured,
 		}
-		return result, ConnectionFailedError()
+		return result, connErr
 	}
 
 	earlyExit := output.ExitedBeforeOutput(*s.target, waitErr).Report(stderrCollector)

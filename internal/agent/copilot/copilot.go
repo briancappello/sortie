@@ -197,7 +197,7 @@ func (s *sessionState) recoverUsage(logger *slog.Logger) *agentcore.RecoveredUsa
 		return nil
 	}
 
-	remote := s.target.RemoteCommand != ""
+	remote := s.target.Remote()
 	sessionID := s.copilotSessionID
 	validID := sessionID != "" && sessionIDPattern.MatchString(sessionID)
 
@@ -275,7 +275,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 	}
 
 	// The canary check is local-mode only.
-	if target.RemoteCommand == "" {
+	if !target.Remote() {
 		stopGrace := procutil.StopGrace(params.AgentConfig.StopGraceMS)
 
 		canaryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

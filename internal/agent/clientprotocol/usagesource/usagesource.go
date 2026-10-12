@@ -34,8 +34,8 @@ var Sources = registry.NewRegistry[Constructor, struct{}]("usage source")
 type Reader interface {
 	// Claim reports whether this source can measure a session launched against
 	// target and, when it can, arms itself and returns the environment
-	// assignments ("NAME=value") the launch needs. It refuses every launch with
-	// target.RemoteCommand set. With runtime empty (the first offer), a source
+	// assignments ("NAME=value") the launch needs. It refuses every remote
+	// launch (target.Remote()). With runtime empty (the first offer), a source
 	// whose claim returns an assignment or creates a file or directory claims
 	// only a local launch whose command line (target.Command and every element
 	// of target.Args) names the runtime it reads; a claim that returns no

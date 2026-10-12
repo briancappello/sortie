@@ -7,7 +7,6 @@ import (
 	"log/slog"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -332,7 +331,7 @@ func DecideTurn(ev TurnEvidence) TurnDisposition {
 
 	if ev.EarlyExit != nil {
 		var earlyExitErr *EarlyExitError
-		if errors.As(ev.EarlyExit, &earlyExitErr) || errors.Is(ev.EarlyExit, sshutil.ErrConnectionFailed) {
+		if errors.As(ev.EarlyExit, &earlyExitErr) || IsConnectionFailure(ev.EarlyExit) {
 			return TurnDisposition{
 				Row:          RowExitedBeforeOutput,
 				ExitReason:   domain.EventTurnFailed,

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/config"
@@ -383,5 +384,102 @@ func TestReactionTriageGate_PassesEnvironmentToRun(t *testing.T) {
 
 	if got := len(env.Commands()); got != 1 {
 		t.Errorf("environment commands = %d, want the triage command run through params.Environment", got)
+	}
+}
+
+// carrierEnvironment is a recording environment that also carries agent
+// launches, standing in for a kind that runs the agent elsewhere.
+type carrierEnvironment struct {
+	*environmenttest.Recorder
+}
+
+var _ environment.Carrier = carrierEnvironment{}
+
+func (carrierEnvironment) LaunchArgv(_ environment.Workspace, launch domain.CarrierLaunch) ([]string, error) {
+	return append([]string{"carrier", "--"}, launch.Argv...), nil
+}
+
+func (carrierEnvironment) ConnectionFailed(int, []string) bool { return false }
+
+// paramsRecordingAdapter records the parameters of every session start,
+// the credential check included, and delegates to the mock adapter.
+type paramsRecordingAdapter struct {
+	mockAgentAdapter
+	mu     sync.Mutex
+	params []domain.StartSessionParams
+}
+
+func (a *paramsRecordingAdapter) StartSession(ctx context.Context, params domain.StartSessionParams) (domain.Session, error) {
+	a.mu.Lock()
+	a.params = append(a.params, params)
+	a.mu.Unlock()
+	return a.mockAgentAdapter.StartSession(ctx, params)
+}
+
+func TestRunWorkerAttempt_SessionLaunchCarrier(t *testing.T) {
+	tests := []struct {
+		name        string
+		env         func(t *testing.T) environment.Environment
+		wantCarrier bool
+	}{
+		{name: "local passes no carrier", env: func(t *testing.T) environment.Environment { return recordingEnvironment(t) }},
+		{name: "carrier environment carries every session", env: func(t *testing.T) environment.Environment {
+			return carrierEnvironment{Recorder: recordingEnvironment(t)}
+		}, wantCarrier: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := defaultWorkerConfig(root)
+			cfg.Agent.MaxTurns = 1
+			adapter := &paramsRecordingAdapter{}
+			env := tt.env(t)
+
+			ec := newExitCapture()
+			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+				TrackerAdapter:         &mockTrackerAdapter{},
+				AgentAdapter:           adapter,
+				ConfigFunc:             func() config.ServiceConfig { return cfg },
+				PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+				OnEvent:                func(_ string, _ domain.AgentEvent) {},
+				OnExit:                 ec.onExit,
+				Logger:                 discardLogger(),
+				EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+					return env, nil
+				},
+			})
+			result := ec.waitResult(t)
+
+			adapter.mu.Lock()
+			defer adapter.mu.Unlock()
+			var sawCheck, sawWork bool
+			for _, p := range adapter.params {
+				if p.CredentialVerification {
+					sawCheck = true
+				} else {
+					sawWork = true
+				}
+				if !tt.wantCarrier {
+					if p.Carrier != nil {
+						t.Errorf("session (credential check %v) Carrier = %v, want nil: the agent launches as it does without an environment", p.CredentialVerification, p.Carrier)
+					}
+					continue
+				}
+				if p.Carrier == nil {
+					t.Fatalf("session (credential check %v) Carrier = nil, want the environment's carrier", p.CredentialVerification)
+				}
+				argv, err := p.Carrier.LaunchArgv(domain.CarrierLaunch{Argv: []string{"agent"}})
+				if err != nil || !slices.Equal(argv, []string{"carrier", "--", "agent"}) {
+					t.Errorf("Carrier.LaunchArgv() = %q, %v, want the environment's launch", argv, err)
+				}
+				mcp := filepath.Join(result.WorkspacePath, ".sortie", "mcp.json")
+				if got := p.Carrier.GuestPath(mcp); got != mcp {
+					t.Errorf("Carrier.GuestPath(%q) = %q, want it unchanged: the recorder's guest path is the host path", mcp, got)
+				}
+			}
+			if !sawCheck || !sawWork {
+				t.Errorf("session starts = %d (credential check %v, work %v), want both", len(adapter.params), sawCheck, sawWork)
+			}
+		})
 	}
 }

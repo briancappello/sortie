@@ -1082,6 +1082,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		MCPConfigPath:            mcpConfigPath,
 		Settings:                 deps.AgentSettings.Passthrough,
 		SessionEnv:               buildSessionEnv(sessionEnv),
+		// An environment that runs the workspace elsewhere carries the
+		// session there; the credential check below shares it.
+		Carrier: wsTarget.LaunchCarrier(),
 	}
 	verificationParams := params
 	sessionEnv.Purpose = sessionPurposeCredentialCheck

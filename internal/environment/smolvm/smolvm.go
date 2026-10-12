@@ -14,6 +14,7 @@ import (
 	"os/exec"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 )
 
@@ -28,7 +29,10 @@ func init() {
 // Environment is the smolvm kind.
 type Environment struct{}
 
-var _ environment.Environment = (*Environment)(nil)
+var (
+	_ environment.Environment = (*Environment)(nil)
+	_ environment.Carrier     = (*Environment)(nil)
+)
 
 // New returns the smolvm environment. It reads nothing from params in
 // this build.
@@ -52,6 +56,17 @@ func (*Environment) Prepare(context.Context, environment.Workspace) (environment
 func (*Environment) Command(context.Context, environment.Workspace, environment.CommandSpec) (*exec.Cmd, error) {
 	return nil, ErrNotImplemented
 }
+
+// LaunchArgv fails with [ErrNotImplemented]. The kind implements
+// [environment.Carrier] so that an agent session it is asked to carry
+// fails instead of starting on the host.
+func (*Environment) LaunchArgv(environment.Workspace, domain.CarrierLaunch) ([]string, error) {
+	return nil, ErrNotImplemented
+}
+
+// ConnectionFailed reports false: [Environment.LaunchArgv] never builds
+// a launch in this build.
+func (*Environment) ConnectionFailed(int, []string) bool { return false }
 
 // Release does nothing: [Environment.Prepare] never creates a VM.
 func (*Environment) Release(context.Context, environment.Workspace) error { return nil }

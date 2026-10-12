@@ -10,8 +10,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -114,6 +118,117 @@ type AfterCreateFinisher interface {
 type Namer interface {
 	// InstanceName returns the name of the instance that runs ws.
 	InstanceName(ws Workspace) string
+}
+
+// Carrier is implemented by an environment that runs the agent session
+// somewhere other than this host. An environment that does not
+// implement it runs the agent the way Sortie runs it without one: on
+// this host, or over SSH.
+type Carrier interface {
+	// LaunchArgv returns the host argv, program first, whose process
+	// runs launch.Argv in ws inside the environment, as
+	// [domain.LaunchCarrier.LaunchArgv] describes. launch.Env holds the
+	// session's identity variables; the environment forwards them by the
+	// rules of [GuestEnv].
+	LaunchArgv(ws Workspace, launch domain.CarrierLaunch) ([]string, error)
+
+	// ConnectionFailed reports whether a process built from LaunchArgv
+	// that exited with exitCode failed before the agent command started,
+	// as [domain.LaunchCarrier.ConnectionFailed] describes.
+	ConnectionFailed(exitCode int, stderrTail []string) bool
+}
+
+// LaunchCarrier returns the agent launch carrier for ws when env
+// implements [Carrier], and nil otherwise, so a nil result launches the
+// agent as Sortie launches it without an environment.
+func LaunchCarrier(env Environment, ws Workspace) domain.LaunchCarrier {
+	carrier, ok := env.(Carrier)
+	if !ok {
+		return nil
+	}
+	return boundCarrier{carrier: carrier, ws: ws}
+}
+
+// boundCarrier is a [Carrier] bound to one workspace.
+type boundCarrier struct {
+	carrier Carrier
+	ws      Workspace
+}
+
+func (b boundCarrier) LaunchArgv(launch domain.CarrierLaunch) ([]string, error) {
+	return b.carrier.LaunchArgv(b.ws, launch)
+}
+
+func (b boundCarrier) GuestPath(hostPath string) string {
+	return b.ws.GuestPathOf(hostPath)
+}
+
+func (b boundCarrier) ConnectionFailed(exitCode int, stderrTail []string) bool {
+	return b.carrier.ConnectionFailed(exitCode, stderrTail)
+}
+
+// GuestPathOf returns the path inside the environment for hostPath, a
+// path in ws on this host: the same path relative to ws.GuestPath, with
+// slash separators. A path outside ws.HostPath is returned unchanged.
+func (ws Workspace) GuestPathOf(hostPath string) string {
+	if ws.HostPath == "" || ws.GuestPath == "" {
+		return hostPath
+	}
+	rel, err := filepath.Rel(ws.HostPath, hostPath)
+	if err != nil {
+		return hostPath
+	}
+	if rel == "." {
+		return ws.GuestPath
+	}
+	if !filepath.IsLocal(rel) {
+		return hostPath
+	}
+	return path.Join(ws.GuestPath, filepath.ToSlash(rel))
+}
+
+// Session variables an environment that runs elsewhere treats apart
+// from the rest.
+const (
+	// SessionTokenEnv and APIURLEnv name the host API a session reaches.
+	// Neither crosses into such an environment: it cannot reach the host
+	// loopback API.
+	SessionTokenEnv = "SORTIE_SESSION_TOKEN"
+	APIURLEnv       = "SORTIE_API_URL"
+
+	// WorkspaceEnv names the workspace path. It is rewritten to the path
+	// inside the environment.
+	WorkspaceEnv = "SORTIE_WORKSPACE"
+
+	// KindEnv names the kind of the environment a command runs in.
+	KindEnv = "SORTIE_ENVIRONMENT"
+
+	sortieEnvPrefix = "SORTIE_"
+)
+
+// GuestEnv returns the KEY=VALUE entries of env that cross into an
+// environment of kind that runs elsewhere, whose workspace path is
+// guestWorkspace: every SORTIE_* entry except SORTIE_SESSION_TOKEN,
+// SORTIE_API_URL, SORTIE_WORKSPACE, and SORTIE_ENVIRONMENT, in order,
+// followed by SORTIE_WORKSPACE=guestWorkspace and
+// SORTIE_ENVIRONMENT=kind. No other entry crosses. A name env repeats
+// keeps its first entry.
+func GuestEnv(env []string, guestWorkspace, kind string) []string {
+	out := make([]string, 0, len(env)+2)
+	seen := make(map[string]bool, len(env))
+	for _, entry := range env {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(name, sortieEnvPrefix) || seen[name] {
+			continue
+		}
+		seen[name] = true
+		switch name {
+		case SessionTokenEnv, APIURLEnv, WorkspaceEnv, KindEnv:
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, WorkspaceEnv+"="+guestWorkspace, KindEnv+"="+kind)
 }
 
 // Params carries what a [Constructor] needs to build an [Environment].

@@ -246,6 +246,60 @@ type StartSessionParams struct {
 	// carries its other variables, never as arguments. An entry with an
 	// empty Value is still set, to the empty string.
 	SessionEnv []EnvVar
+
+	// Carrier, when non-nil, launches the agent inside the execution
+	// environment it stands for rather than on this host. It never
+	// combines with SSHHost. Nil launches the agent on this host or,
+	// with SSHHost set, over SSH.
+	Carrier LaunchCarrier
+}
+
+// LaunchCarrier carries an agent launch into an execution environment
+// that runs the workspace's code somewhere other than this host. The
+// agent binary is resolved inside that environment, and the MCP
+// configuration Sortie generates in the workspace is valid there.
+// Implementations must be safe for concurrent use.
+type LaunchCarrier interface {
+	// LaunchArgv returns the host argv, program first, whose process
+	// runs launch.Argv in the workspace inside the environment, with its
+	// standard input and output connected to that host process. The
+	// carrier passes every variable it carries through the argv, never
+	// through standard input, which belongs to the agent alone.
+	LaunchArgv(launch CarrierLaunch) ([]string, error)
+
+	// GuestPath returns the path inside the environment for hostPath, a
+	// path in the workspace on this host. A path outside the workspace
+	// is returned unchanged.
+	GuestPath(hostPath string) string
+
+	// ConnectionFailed reports whether a carrier process that exited
+	// with exitCode failed before the agent command started, such as an
+	// environment that is not running. stderrTail holds the last lines
+	// the carrier process wrote to standard error, or nil where the
+	// caller holds none.
+	ConnectionFailed(exitCode int, stderrTail []string) bool
+}
+
+// CarrierLaunch describes one agent launch for
+// [LaunchCarrier.LaunchArgv].
+type CarrierLaunch struct {
+	// Argv is the agent command and its arguments. Argv[0] is resolved
+	// inside the environment.
+	Argv []string
+
+	// Env holds the session's KEY=VALUE identity variables as a launch on
+	// this host would set them. The carrier decides which of them cross
+	// into the environment and how each is rewritten there.
+	Env []string
+
+	// AgentEnv holds KEY=VALUE variables the agent adapter computed for
+	// this launch, such as a runtime setting. The carrier passes each to
+	// the agent unchanged. None of them is a credential.
+	AgentEnv []string
+
+	// Unset names variables the agent must run without, even when the
+	// environment itself defines them.
+	Unset []string
 }
 
 // EnvVar is one environment variable a launch sets. Every rendering of

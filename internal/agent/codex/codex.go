@@ -25,7 +25,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -167,14 +166,31 @@ type sessionState struct {
 }
 
 func (state *sessionState) sshConnectionFailed() bool {
-	return agentcore.ReaperConnectionFailed(state.target.RemoteCommand != "", state.reaper, state.drainGrace)
+	return agentcore.TargetReaperConnectionFailed(state.target, state.reaper, state.drainGrace, state.stderrTail)
+}
+
+// stderrTail returns the lines the runtime's host process wrote to
+// standard error, waiting for them as [sessionState.reportStderr] does,
+// or nil before the process started.
+func (state *sessionState) stderrTail() []string {
+	state.mu.Lock()
+	collector := state.stderrCollector
+	grace := state.drainGrace
+	state.mu.Unlock()
+	if collector == nil {
+		return nil
+	}
+	if grace <= 0 {
+		grace = procutil.DefaultDrainGrace
+	}
+	return collector.FinishAndCollect(grace)
 }
 
 func connectionFailureErr(state *sessionState) *domain.AgentError {
 	if !state.sshConnectionFailed() {
 		return nil
 	}
-	return agentcore.ConnectionFailedError()
+	return state.target.ConnectionFailedError()
 }
 
 // earlyExitObservation records the shared early-exit observation for a
@@ -421,10 +437,13 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 	}
 
 	var cmd *exec.Cmd
-	var launch sshutil.SSHLaunch
-	if target.RemoteCommand != "" {
-		launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, target.SSHOptions())
-		cmd = exec.CommandContext(ctx, target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
+	var launch agentcore.HostLaunch
+	if target.Remote() {
+		launch, agentErr = target.RemoteLaunch(nil)
+		if agentErr != nil {
+			return domain.Session{}, agentErr
+		}
+		cmd = exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	} else {
 		cmd = exec.CommandContext(ctx, target.Command, target.Args...) //nolint:gosec // args are constructed programmatically
 	}
@@ -812,7 +831,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					TerminalMessage:   state.release.TurnEndMessage("subprocess stdout closed unexpectedly"),
 				}
 				if agentcore.ConnectionFailedForRequest(state.sshConnectionFailed(), false) {
-					connErr := agentcore.ConnectionFailedError()
+					connErr := state.target.ConnectionFailedError()
 					ev.TerminalErrorKind = connErr.Kind
 					ev.TerminalMessage = connErr.Message
 					ev.Cause = connErr.Err

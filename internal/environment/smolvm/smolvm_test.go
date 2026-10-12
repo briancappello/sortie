@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 )
 
@@ -28,6 +29,14 @@ func TestUnimplementedOperationsFail(t *testing.T) {
 	cmd, err := env.Command(ctx, ws, environment.CommandSpec{Argv: []string{"uname", "-n"}})
 	if !errors.Is(err, ErrNotImplemented) || cmd != nil {
 		t.Errorf("Command() = %v, %v, want nil and ErrNotImplemented: no command may run on the host instead", cmd, err)
+	}
+	carrier := environment.LaunchCarrier(env, ws)
+	if carrier == nil {
+		t.Fatal("LaunchCarrier() = nil, want a carrier: a nil carrier would launch the agent on the host")
+	}
+	argv, err := carrier.LaunchArgv(domain.CarrierLaunch{Argv: []string{"opencode", "acp"}})
+	if !errors.Is(err, ErrNotImplemented) || argv != nil {
+		t.Errorf("LaunchArgv() = %q, %v, want nil and ErrNotImplemented", argv, err)
 	}
 	for name, op := range map[string]func() error{
 		"Release": func() error { return env.Release(ctx, ws) },

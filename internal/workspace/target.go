@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
@@ -60,6 +61,17 @@ func (t Target) GuestPath(hostPath string) string {
 		return hostPath
 	}
 	return t.Environment.GuestPath(hostPath)
+}
+
+// LaunchCarrier returns the carrier that launches the agent session
+// inside the target's environment, or nil when the agent runs as Sortie
+// runs it without one: without an Environment, or with one that does not
+// implement [environment.Carrier].
+func (t Target) LaunchCarrier() domain.LaunchCarrier {
+	if t.Environment == nil {
+		return nil
+	}
+	return environment.LaunchCarrier(t.Environment, t.Workspace)
 }
 
 // Command returns a command for spec bound to ctx. With an Environment

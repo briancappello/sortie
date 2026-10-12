@@ -23,7 +23,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -226,17 +225,16 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 	logger := state.loggerLocked()
 
 	var cmd *exec.Cmd
-	var launch sshutil.SSHLaunch
-	if state.target.RemoteCommand != "" {
+	var launch agentcore.HostLaunch
+	if state.target.Remote() {
 		managedEnv["OPENCODE_CONFIG_CONTENT"] = state.turnConfigContent
-		launch = sshutil.BuildSSHLaunch(
-			state.target.SSHHost,
-			state.target.WorkspacePath,
-			state.target.RemoteCommand,
-			cmdArgs,
-			state.target.SSHOptions(sortedEnvVars(managedEnv)...),
-		)
-		cmd = exec.CommandContext(ctx, state.target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
+		var launchErr *domain.AgentError
+		launch, launchErr = state.target.RemoteLaunch(cmdArgs, sortedEnvVars(managedEnv)...)
+		if launchErr != nil {
+			state.mu.Unlock()
+			return domain.TurnResult{}, launchErr
+		}
+		cmd = exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	} else {
 		allArgs := append(slices.Clone(state.target.Args), cmdArgs...)
 		cmd = exec.CommandContext(ctx, state.target.Command, allArgs...) //nolint:gosec // args are constructed programmatically
@@ -307,7 +305,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 	startWait(runtime, cmd, logger)
 
 	emit := func(event domain.AgentEvent) {
-		if state.target.RemoteCommand == "" {
+		if !state.target.Remote() {
 			event.AgentPID = runtime.pid
 		}
 		params.OnEvent(event)
@@ -676,12 +674,12 @@ func (a *OpenCodeAdapter) finalizeExitedTurn(ctx context.Context, state *session
 		ev.EarlyExit = runtime.output.ExitedBeforeOutput(state.target, exit.err).Report(runtime.stderrCollector)
 	}
 
-	sshFailed := state.target.RemoteCommand != "" && sshutil.ConnectionFailed(exit.exitCode)
+	sshFailed := state.target.ConnectionFailed(exit.exitCode, func() []string { return stderrLines })
 	hasTerminalResult := runtime.terminalOutcome == domain.EventTurnFailed || runtime.turnFinished
 
 	switch {
 	case agentcore.ConnectionFailedForRequest(sshFailed, hasTerminalResult):
-		connErr := agentcore.ConnectionFailedError()
+		connErr := state.target.ConnectionFailedError()
 		ev.Terminal = agentcore.TerminalFailure
 		ev.TerminalErrorKind = connErr.Kind
 		ev.TerminalMessage = connErr.Message

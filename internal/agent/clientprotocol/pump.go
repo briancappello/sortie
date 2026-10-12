@@ -447,7 +447,7 @@ func (p *pumpState) handleStreamEnd() {
 
 func streamEndedEvidence(state *sessionState, message string, cause error) agentcore.TurnEvidence {
 	if agentcore.ConnectionFailedForRequest(state.sshConnectionFailed(), false) {
-		connErr := agentcore.ConnectionFailedError()
+		connErr := state.target.ConnectionFailedError()
 		return agentcore.TurnEvidence{
 			Terminal:          agentcore.TerminalFailure,
 			TerminalErrorKind: connErr.Kind,
