@@ -29,6 +29,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
@@ -417,6 +418,21 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}()
 	agentAdapterByKind := makeAgentAdapterByKind(agentAdapterCache)
 
+	// The startup cleanup's before_remove hooks run in the configured
+	// execution environment, as every later cleanup's do; an environment
+	// that cannot be built stops startup rather than running them on the
+	// host.
+	startupEnv, envErr := environment.New(environment.Params{
+		Config:       br.cfg.Environment,
+		StateDir:     filepath.Dir(dbPath),
+		WorkflowPath: br.mgr.WorkflowAbsPath(),
+		Logger:       br.logger,
+	})
+	if envErr != nil {
+		br.logger.Error("failed to build the execution environment", slog.Any("error", envErr))
+		return 1
+	}
+
 	keys, err := workspace.ListWorkspaceKeys(br.cfg.Workspace.Root)
 	if err != nil {
 		br.logger.Warn("failed to list workspace keys, skipping cleanup", slog.Any("error", err))
@@ -444,6 +460,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 					BeforeRemove:  br.cfg.Hooks.BeforeRemove,
 					HookTimeoutMS: br.cfg.Hooks.TimeoutMS,
 					Logger:        br.logger,
+					Environment:   startupEnv,
 				})
 			}
 		}

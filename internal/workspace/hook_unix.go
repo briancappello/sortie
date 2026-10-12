@@ -4,7 +4,6 @@ package workspace
 
 import (
 	"context"
-	"os/exec"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
@@ -14,6 +13,10 @@ import (
 // directory, enforcing a timeout and capturing output. The parent
 // context ctx allows the caller to cancel the hook independently of
 // the timeout (e.g., on graceful shutdown).
+//
+// The process is built through params.Target, so with an environment
+// the script runs inside it; the timeout, the teardown, and the output
+// capture stay on the host side either way.
 //
 // The subprocess receives a restricted environment: only standard
 // POSIX infrastructure variables and SORTIE_* variables are inherited
@@ -43,9 +46,10 @@ func RunHook(ctx context.Context, params HookParams) (HookResult, error) {
 	hookCtx, cancel := context.WithTimeout(ctx, time.Duration(params.TimeoutMS)*time.Millisecond)
 	defer cancel()
 
-	cmd := exec.CommandContext(hookCtx, "sh", "-c", params.Script) //nolint:gosec // G204: hook scripts are from trusted workflow configuration
-	cmd.Dir = params.Dir
-	cmd.Env = hookEnv(params.Env)
+	cmd, err := hookCommand(hookCtx, params, "sh", "-c", params.Script)
+	if err != nil {
+		return HookResult{}, err
+	}
 
 	// A hook that overran its timeout, or whose caller cancelled ctx,
 	// has already had its whole budget, so cancellation force-kills

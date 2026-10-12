@@ -191,6 +191,7 @@ var contractSharedFamilyPackages = map[string]contractSharedPackage{
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel":       {reason: "shared scripted model endpoint and scripted-model conformance driver; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/notify/route":                    {reason: "shared notification routing for orchestrator events; registers no kind and holds no adapter", coreImportable: true},
 	"github.com/sortie-ai/sortie/internal/environment":                     {reason: "the execution environment interface and kind registry; registers no kind and holds no adapter", coreImportable: true},
+	"github.com/sortie-ai/sortie/internal/environment/environmenttest":     {reason: "shared execution environment test doubles; registers no kind and holds no adapter; only tests reach it", coreImportable: false},
 }
 
 // contractPackageBannedImports maps one package's import path to the
@@ -2766,9 +2767,7 @@ var contractAnchorSortieDirSites = []contractSiteEntry{
 // permits with the workspace verification that precedes it.
 var contractWorkdirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agentcore", name: "LaunchTarget.BindWorkspace", reason: "workspace verified before launch"},
-	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "GitCommand", reason: "workspace verified before launch"},
-	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "RunHook", reason: "workspace verified before launch"},
-	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "runSingleVerification", reason: "workspace verified before launch"},
+	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "Target.Command", reason: "workspace verified before launch"},
 	{importPath: "github.com/sortie-ai/sortie/internal/environment/local", name: "Environment.Command", reason: "workspace verified before launch"},
 }
 

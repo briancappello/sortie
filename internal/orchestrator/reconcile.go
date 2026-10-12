@@ -8,6 +8,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
@@ -204,6 +205,11 @@ type ReconcileParams struct {
 	// pending reaction's workspace path through [workspace.ComputePath].
 	// Empty disables every triage command.
 	WorkspaceRoot string
+
+	// Environment is the execution environment of the current
+	// configuration, which every triage command runs in. Nil runs them
+	// on the host.
+	Environment environment.Environment
 
 	// CITriage is the frozen ci_failure triage configuration, copied
 	// from the orchestrator's construction-time capture. The CI pass
@@ -945,6 +951,7 @@ func runAgePass(params SweepWorkspacesParams, summary *sweepSummary, ageKeys []s
 			BeforeRemove:  params.BeforeRemoveHook,
 			HookTimeoutMS: params.HookTimeoutMS,
 			Logger:        log,
+			Environment:   params.Environment,
 		})
 		if cleanupErr != nil {
 			log.Warn("sweep: failed to remove expired workspace",
@@ -974,6 +981,12 @@ type SweepWorkspacesParams struct {
 	TerminalStates   []string
 	BeforeRemoveHook string
 	HookTimeoutMS    int
+
+	// Environment is the execution environment of the current
+	// configuration. Each removed workspace's before_remove hook runs in
+	// it, and its environment is removed with it. Nil runs the hooks on
+	// the host.
+	Environment environment.Environment
 
 	// RetentionDays is the configured workspace.retention_days window.
 	// A value below [config.WorkspaceRetentionMinDays] disables the age
@@ -1089,6 +1102,7 @@ func SweepWorkspaces(state *State, params SweepWorkspacesParams) {
 			BeforeRemove:  params.BeforeRemoveHook,
 			HookTimeoutMS: params.HookTimeoutMS,
 			Logger:        log,
+			Environment:   params.Environment,
 		})
 		summary.removedTerminal += len(result.Removed)
 		summary.failed += len(result.Errors)

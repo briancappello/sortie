@@ -14,6 +14,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
@@ -82,6 +83,11 @@ type HandleWorkerExitParams struct {
 	BeforeRemoveHook string
 
 	HookTimeoutMS int
+
+	// Environment is the execution environment of the current
+	// configuration. The deferred workspace cleanup and the handoff
+	// evidence comparison run in it. Nil runs them on the host.
+	Environment environment.Environment
 
 	// TrackerAdapter performs handoff transitions. Required when
 	// HandoffState is non-empty; nil is safe when it is empty.
@@ -256,6 +262,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 			BeforeRemove:  params.BeforeRemoveHook,
 			HookTimeoutMS: params.HookTimeoutMS,
 			Logger:        log,
+			Environment:   params.Environment,
 		}); err != nil {
 			log.Warn("workspace cleanup failed",
 				slog.Any("error", err),
@@ -310,7 +317,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 		policy := workerResult.HandoffEvidencePolicy.Effective()
 		if handoffPath && !terminal && policy != config.HandoffEvidenceOff {
-			evidenceResult = evaluateHandoffEvidence(ctx, workerResult, log)
+			evidenceResult = evaluateHandoffEvidence(ctx, workerResult, params.Environment, log)
 			if evidenceResult.Verdict == handoffEvidenceUndetermined {
 				log.Info("handoff evidence not determinable",
 					slog.String("policy", string(policy)),

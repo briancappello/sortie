@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
@@ -44,6 +45,11 @@ type HookParams struct {
 	// Sourced from [config.HooksConfig] TimeoutMS (default 60000).
 	// Must be positive.
 	TimeoutMS int
+
+	// Target is the environment the hook runs in. Its workspace must
+	// contain Dir. A zero Target, with no Environment, runs the hook as
+	// a host process in Dir.
+	Target Target
 }
 
 // HookResult holds the outcome of a successful hook execution (exit
@@ -158,6 +164,27 @@ func formatHookOutput(buf *procutil.TailBuffer) string {
 		return retained
 	}
 	return fmt.Sprintf("[truncated: showing last %d bytes of hook output]\n%s", MaxHookOutputBytes, retained)
+}
+
+// hookCommand builds the hook's process for argv through params.Target,
+// in params.Dir, with the restricted [hookEnv] environment. A failure is
+// a *HookError with Op "start".
+func hookCommand(ctx context.Context, params HookParams, argv ...string) (*exec.Cmd, error) {
+	target := params.Target
+	rel := ""
+	if target.Environment == nil {
+		target = HostTarget(params.Dir)
+	} else {
+		var err error
+		if rel, err = target.relativeDir(params.Dir); err != nil {
+			return nil, &HookError{Op: "start", Script: truncateScript(params.Script), ExitCode: -1, Err: err}
+		}
+	}
+	cmd, err := target.Command(ctx, environment.CommandSpec{Argv: argv, Dir: rel, Env: hookEnv(params.Env)})
+	if err != nil {
+		return nil, &HookError{Op: "start", Script: truncateScript(params.Script), ExitCode: -1, Err: err}
+	}
+	return cmd, nil
 }
 
 // hookEnv builds a restricted environment for the hook subprocess.

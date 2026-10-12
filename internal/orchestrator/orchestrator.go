@@ -278,6 +278,10 @@ type Orchestrator struct {
 	mergeCompletionReactionConfigured bool
 	handoffParkingLabel               string
 
+	// environments resolves the execution environment of the current
+	// configuration for workers, cleanups, and reaction triage.
+	environments *environmentResolver
+
 	// ciTriage is the frozen ci_failure triage configuration, captured once
 	// at construction. Unlike every other CI feedback field, it does not
 	// reach the reconcile pass from the reloaded config, so a script or
@@ -429,6 +433,11 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		blockerResolver:                   params.BlockerResolver,
 		abandonCh:                         params.AbandonCh,
 	}
+	workflowPath := ""
+	if params.WorkflowManager != nil {
+		workflowPath = params.WorkflowManager.WorkflowAbsPath()
+	}
+	o.environments = newEnvironmentResolver(params.DBPath, workflowPath, logger)
 	if params.WorkflowManager != nil {
 		o.updateRouter(params.WorkflowManager.Config())
 	}
@@ -528,6 +537,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			Logger:                            o.logger,
 			BeforeRemoveHook:                  cfg.Hooks.BeforeRemove,
 			HookTimeoutMS:                     cfg.Hooks.TimeoutMS,
+			Environment:                       o.environmentOrUnavailable(cfg.Environment),
 			TrackerAdapter:                    o.trackerAdapter,
 			HandoffState:                      cfg.Tracker.HandoffState,
 			NoChangeState:                     cfg.Tracker.NoChangeState,
@@ -763,6 +773,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		MergeCompletionConfig:             o.mergeCompletionConfig,
 		MergeCompletionReactionConfigured: o.mergeCompletionReactionConfigured,
 		WorkspaceRoot:                     cfg.Workspace.Root,
+		Environment:                       o.environmentOrUnavailable(cfg.Environment),
 		CITriage:                          o.ciTriage,
 	})
 
@@ -777,6 +788,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			TerminalStates:   cfg.Tracker.TerminalStates,
 			BeforeRemoveHook: cfg.Hooks.BeforeRemove,
 			HookTimeoutMS:    cfg.Hooks.TimeoutMS,
+			Environment:      o.environmentOrUnavailable(cfg.Environment),
 			RetentionDays:    cfg.Workspace.RetentionDays,
 			Store:            o.store,
 			Ctx:              ctx,
@@ -1102,6 +1114,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 				return carriedEnvNames(declared, sshPassEnv, sshDisallowPassEnv)
 			},
 			Metrics:         o.metrics,
+			EnvironmentFunc: o.environments.resolve,
 			WorkflowPath:    o.workflowManager.WorkflowAbsPath(),
 			DBPath:          o.dbPath,
 			MCPServerBinary: o.mcpServerBinary,
@@ -1603,6 +1616,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				Logger:                            o.logger,
 				BeforeRemoveHook:                  cfg.Hooks.BeforeRemove,
 				HookTimeoutMS:                     cfg.Hooks.TimeoutMS,
+				Environment:                       o.environmentOrUnavailable(cfg.Environment),
 				TrackerAdapter:                    o.trackerAdapter,
 				HandoffState:                      cfg.Tracker.HandoffState,
 				NoChangeState:                     cfg.Tracker.NoChangeState,

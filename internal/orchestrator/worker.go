@@ -17,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/prompt"
@@ -366,6 +367,12 @@ type WorkerDeps struct {
 	// Metrics records dispatch-time counters. Always non-nil:
 	// NewOrchestrator falls back to NoopMetrics.
 	Metrics domain.Metrics
+
+	// EnvironmentFunc returns the execution environment for the
+	// attempt-start config's environment block. The workspace hooks,
+	// handoff evidence, and self-review commands of the attempt run in
+	// it. Nil builds it through [environment.New]. Optional.
+	EnvironmentFunc EnvironmentFunc
 
 	// WorkflowPath is the absolute WORKFLOW.md path, passed to MCP config
 	// generation. Empty disables MCP config generation.
@@ -769,6 +776,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	var sessionStartedAt time.Time
 	var handoffEvidenceBaseline *workspace.HandoffEvidenceBaseline
 	var handoffEvidenceBaselineErr error
+	var workspaceEnv environment.Environment
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -787,6 +795,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 					HookTimeoutMS: cfg.Hooks.TimeoutMS,
 					Logger:        logger,
 					SSHHost:       deps.SSHHost,
+					Environment:   workspaceEnv,
 				})
 			}
 			if !reported {
@@ -811,6 +820,39 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			}
 		}
 	}()
+
+	// The attempt's workspace code runs in the environment its
+	// attempt-start config selects. One that cannot be built fails the
+	// preparation: nothing falls back to the host.
+	resolveEnvironment := deps.EnvironmentFunc
+	if resolveEnvironment == nil {
+		resolveEnvironment = func(envCfg config.EnvironmentConfig) (environment.Environment, error) {
+			stateDir := ""
+			if deps.DBPath != "" {
+				stateDir = filepath.Dir(deps.DBPath)
+			}
+			return environment.New(environment.Params{Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, Logger: logger})
+		}
+	}
+	resolvedEnv, envErr := resolveEnvironment(cfg.Environment)
+	if envErr != nil {
+		cancelledAtEnding = ctx.Err() != nil
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: execution environment: %w", envErr),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
+		})
+		return
+	}
 
 	// A dispatch with no setup hooks gets a scratch directory via
 	// workspace.Ensure (no clone, no build); a hook-running dispatch runs
@@ -860,6 +902,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			HookTimeoutMS: cfg.Hooks.TimeoutMS,
 			Logger:        logger,
 			SSHHost:       deps.SSHHost,
+			Environment:   resolvedEnv,
 			PreRunFunc: func(wsPath string) {
 				workspace.CleanupStatusFile(wsPath, logger)
 			},
@@ -885,6 +928,8 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	}
 
 	workspacePath = wsResult.Path
+	workspaceEnv = resolvedEnv
+	wsTarget := workspace.NewTarget(workspaceEnv, wsResult.Key, wsResult.Path, issue.ID, issue.Identifier)
 	logger.Info("workspace prepared", slog.String("workspace", wsResult.Path))
 
 	// finishWorkspace runs the after_run hook best-effort on every exit path
@@ -903,6 +948,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			HookTimeoutMS: cfg.Hooks.TimeoutMS,
 			Logger:        logger,
 			SSHHost:       deps.SSHHost,
+			Environment:   workspaceEnv,
 		})
 	}
 
@@ -1055,7 +1101,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	}
 
 	if handoffEvidencePolicy != config.HandoffEvidenceOff {
-		baseline, baselineErr := workspace.CaptureHandoffEvidenceBaseline(ctx, wsResult.Path)
+		baseline, baselineErr := wsTarget.CaptureHandoffEvidenceBaseline(ctx)
 		if baselineErr != nil {
 			handoffEvidenceBaselineErr = baselineErr
 		} else {
@@ -1471,6 +1517,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			Session:       session,
 			Issue:         issue,
 			WorkspacePath: wsResult.Path,
+			Target:        wsTarget,
 			Config:        reviewCfg.SelfReview,
 			AgentAdapter:  deps.AgentAdapter,
 			OnEvent: func(_ string, event domain.AgentEvent) {
@@ -1544,6 +1591,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				SSHHost:               deps.SSHHost,
 				SelfReviewStatus:      selfReviewStatus,
 				SelfReviewSummaryPath: selfReviewSummaryPath,
+				Environment:           workspaceEnv,
 			})
 		}
 		report(WorkerResult{
@@ -1584,6 +1632,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				SSHHost:               deps.SSHHost,
 				SelfReviewStatus:      selfReviewStatus,
 				SelfReviewSummaryPath: selfReviewSummaryPath,
+				Environment:           workspaceEnv,
 			})
 		}
 		report(WorkerResult{
@@ -1620,6 +1669,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			SSHHost:               deps.SSHHost,
 			SelfReviewStatus:      selfReviewStatus,
 			SelfReviewSummaryPath: selfReviewSummaryPath,
+			Environment:           workspaceEnv,
 		})
 	}
 

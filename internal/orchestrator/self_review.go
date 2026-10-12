@@ -16,6 +16,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
@@ -53,6 +54,11 @@ type RunSelfReviewParams struct {
 	// TurnTimeoutMS bounds each agent turn the phase runs. Sourced
 	// from the attempt-start config snapshot, not re-read per turn.
 	TurnTimeoutMS int
+
+	// Target is the environment the phase's diff and verification
+	// commands run in. A zero Target runs them as host processes in
+	// WorkspacePath.
+	Target workspace.Target
 }
 
 // maxVerdictFileBytes is the cap on .sortie/review_verdict.json reads.
@@ -105,17 +111,26 @@ func (s *cappedWriterSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// generateWorkspaceDiff returns the diff of the workspace at
+// workspacePath, produced by host git.
 func generateWorkspaceDiff(ctx context.Context, workspacePath string, maxDiffBytes int) (diff string, originalSize int, truncated bool, err error) {
+	return workspaceDiff(ctx, workspace.HostTarget(workspacePath), maxDiffBytes)
+}
+
+// workspaceDiff returns the diff of the target's workspace against HEAD,
+// cut to maxDiffBytes when positive. Every git command runs through
+// target.
+func workspaceDiff(ctx context.Context, target workspace.Target, maxDiffBytes int) (diff string, originalSize int, truncated bool, err error) {
 	// Stage intent-to-add so new files appear in the diff. Best-effort:
 	// its outcome is ignored, as before.
-	if intentCmd, intentErr := workspace.GitCommand(ctx, workspacePath, "add", "--intent-to-add", "."); intentErr == nil {
+	if intentCmd, intentErr := target.GitCommand(ctx, nil, "add", "--intent-to-add", "."); intentErr == nil {
 		_, _ = procutil.RunCapture(ctx, intentCmd, procutil.DefaultStopGrace, procutil.CaptureParams{})
 	}
 
-	output, cmdErr := runGitDiffCombined(ctx, workspacePath, "diff", "HEAD")
+	output, cmdErr := runGitDiffCombined(ctx, target, "diff", "HEAD")
 	if cmdErr != nil {
 		// Fallback: try without HEAD (empty repo with staged files).
-		output2, err2 := runGitDiffCombined(ctx, workspacePath, "diff")
+		output2, err2 := runGitDiffCombined(ctx, target, "diff")
 		if err2 != nil {
 			return "", 0, false, fmt.Errorf("git diff failed: %w (fallback: %w)", cmdErr, err2)
 		}
@@ -134,8 +149,8 @@ func generateWorkspaceDiff(ctx context.Context, workspacePath string, maxDiffByt
 // runGitDiffCombined runs a Git diff command with stdout and stderr
 // merged into one sink, matching the combined-output shape the
 // self-review prompt has always embedded.
-func runGitDiffCombined(ctx context.Context, workspacePath string, args ...string) ([]byte, error) {
-	cmd, err := workspace.GitCommand(ctx, workspacePath, args...)
+func runGitDiffCombined(ctx context.Context, target workspace.Target, args ...string) ([]byte, error) {
+	cmd, err := target.GitCommand(ctx, nil, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +187,17 @@ func timedOutVerification(command string, duration time.Duration, stdout, stderr
 	}
 }
 
+// runSingleVerification runs one verification command as a host process
+// in workspacePath.
 func runSingleVerification(ctx context.Context, command, workspacePath string, timeoutMS int, logger *slog.Logger, metrics domain.Metrics) domain.VerificationResult {
+	return runVerification(ctx, workspace.HostTarget(workspacePath), command, timeoutMS, logger, metrics)
+}
+
+// runVerification runs one verification command through target, in its
+// workspace root, with the inherited environment, bounded by timeoutMS
+// when positive. Its output is capped, and the timeout and teardown stay
+// on the host side.
+func runVerification(ctx context.Context, target workspace.Target, command string, timeoutMS int, logger *slog.Logger, metrics domain.Metrics) domain.VerificationResult {
 	var cmdCtx context.Context
 	var cancel context.CancelFunc
 	if timeoutMS > 0 {
@@ -183,7 +208,7 @@ func runSingleVerification(ctx context.Context, command, workspacePath string, t
 	defer cancel()
 
 	start := time.Now()
-	if verifyErr := workspacekit.VerifyDir(workspacePath); verifyErr != nil {
+	if verifyErr := workspacekit.VerifyDir(target.Workspace.HostPath); verifyErr != nil {
 		logger.Warn("verification command failed to start",
 			slog.String("command", command),
 			slog.Any("error", verifyErr),
@@ -196,8 +221,19 @@ func runSingleVerification(ctx context.Context, command, workspacePath string, t
 		}
 	}
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command) //nolint:gosec // command comes from operator-controlled config
-	cmd.Dir = workspacePath
+	cmd, cmdErr := target.Command(cmdCtx, environment.CommandSpec{Argv: []string{"sh", "-c", command}})
+	if cmdErr != nil {
+		logger.Warn("verification command failed to start",
+			slog.String("command", command),
+			slog.Any("error", cmdErr),
+		)
+		return domain.VerificationResult{
+			Command:        command,
+			ExitCode:       -1,
+			DurationMS:     time.Since(start).Milliseconds(),
+			ExecutionError: cmdErr.Error(),
+		}
+	}
 
 	// cappedWriter never blocks the writing subprocess, so RunCapture's
 	// reader goroutines never stall on a full buffer.
@@ -514,13 +550,18 @@ func runSelfReviewLoop(ctx context.Context, params RunSelfReviewParams) (*domain
 		})
 	}
 
+	target := params.Target
+	if target.Environment == nil {
+		target = workspace.HostTarget(params.WorkspacePath)
+	}
+
 	for i := 1; i <= maxIter; i++ {
 		if ctx.Err() != nil {
 			cancelledAtEnding = true
 			break
 		}
 
-		diff, diffSize, truncated, diffErr := generateWorkspaceDiff(ctx, params.WorkspacePath, params.Config.MaxDiffBytes)
+		diff, diffSize, truncated, diffErr := workspaceDiff(ctx, target, params.Config.MaxDiffBytes)
 		if diffErr != nil {
 			logger.Warn("self-review diff generation failed", slog.Any("error", diffErr))
 			diff = ""
@@ -532,7 +573,7 @@ func runSelfReviewLoop(ctx context.Context, params RunSelfReviewParams) (*domain
 			if ctx.Err() != nil {
 				break
 			}
-			result := runSingleVerification(ctx, cmd, params.WorkspacePath, params.Config.VerificationTimeoutMS, logger, params.Metrics)
+			result := runVerification(ctx, target, cmd, params.Config.VerificationTimeoutMS, logger, params.Metrics)
 			verificationResults = append(verificationResults, result)
 		}
 

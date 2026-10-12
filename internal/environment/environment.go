@@ -7,6 +7,7 @@ package environment
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os/exec"
 
@@ -140,3 +141,23 @@ type Meta struct {
 // themselves from their init functions; the orchestrator resolves the
 // configured kind at runtime.
 var Registry = registry.NewRegistry[Constructor, Meta]("environment")
+
+// New builds the environment params.Config selects by resolving its kind
+// through [Registry]. An empty kind selects [config.EnvironmentKindLocal],
+// the kind of a configuration built without the environment block. An
+// unregistered kind is an error: there is no fallback to another kind.
+func New(params Params) (Environment, error) {
+	kind := params.Config.Kind
+	if kind == "" {
+		kind = config.EnvironmentKindLocal
+	}
+	constructor, err := Registry.Get(kind)
+	if err != nil {
+		return nil, err
+	}
+	env, err := constructor(params)
+	if err != nil {
+		return nil, fmt.Errorf("environment %q: %w", kind, err)
+	}
+	return env, nil
+}

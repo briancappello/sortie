@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
@@ -38,7 +40,10 @@ type handoffEvidenceResult struct {
 	Reason  string
 }
 
-func evaluateHandoffEvidence(ctx context.Context, result WorkerResult, log *slog.Logger) handoffEvidenceResult {
+// evaluateHandoffEvidence decides the run's evidence verdict. The
+// workspace comparison runs its git commands in env; nil runs them on
+// the host.
+func evaluateHandoffEvidence(ctx context.Context, result WorkerResult, env environment.Environment, log *slog.Logger) handoffEvidenceResult {
 	if result.SoftStop && result.SoftStopReason == string(workspace.StatusNoChangeNeeded) {
 		return handoffEvidenceResult{
 			Verdict: handoffWorkObserved,
@@ -69,7 +74,8 @@ func evaluateHandoffEvidence(ctx context.Context, result WorkerResult, log *slog
 	compareCtx, cancel := context.WithTimeout(ctx, handoffEvidenceTimeout)
 	defer cancel()
 
-	change, err := workspace.CompareHandoffEvidenceBaseline(compareCtx, result.WorkspacePath, *result.HandoffEvidenceBaseline)
+	target := workspace.NewTarget(env, filepath.Base(result.WorkspacePath), result.WorkspacePath, result.IssueID, result.Identifier)
+	change, err := target.CompareHandoffEvidenceBaseline(compareCtx, *result.HandoffEvidenceBaseline)
 	if err != nil {
 		return handoffEvidenceResult{
 			Verdict: handoffEvidenceUndetermined,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -156,6 +157,10 @@ type ReactionTriageRequest struct {
 	// Subject is the same map the continuation template receives for
 	// this kind, so the command sees what the agent would have seen.
 	Subject any
+
+	// Environment is the execution environment the command runs in.
+	// Nil runs it as a host process in the workspace directory.
+	Environment environment.Environment
 }
 
 // triageInputIssue is the issue identity block of the input document.
@@ -234,24 +239,13 @@ func RunReactionTriage(
 		return finish(triageFallbackOutcome(triageFallbackWorkspaceMissing, 0), "")
 	}
 
-	// The temporary directory sits outside the workspace so a stale
-	// result file cannot be read as this run's answer and so externally
-	// authored text stays out of the tree the agent reads.
-	tmpDir, tmpErr := os.MkdirTemp("", "sortie-triage-")
-	if tmpErr != nil {
+	files, filesErr := newHostTriageFiles()
+	if filesErr != nil {
 		return finish(triageFallbackOutcome(triageFallbackStartFailed, 0), "")
 	}
-	defer func() {
-		if rmErr := os.RemoveAll(tmpDir); rmErr != nil {
-			log.Warn("failed to remove reaction triage temporary directory",
-				slog.String("reaction_kind", req.Kind),
-				slog.Any("error", rmErr),
-			)
-		}
-	}()
-
-	inputPath := filepath.Join(tmpDir, "input.json")
-	resultPath := filepath.Join(tmpDir, "result.json")
+	defer files.remove(req.Kind, log)
+	inputPath := files.inputPath
+	resultPath := files.resultPath
 
 	if writeErr := writeTriageInput(inputPath, req, pathResult.Path); writeErr != nil {
 		return finish(triageFallbackOutcome(triageFallbackStartFailed, 0), "")
@@ -268,6 +262,7 @@ func RunReactionTriage(
 		Dir:       pathResult.Path,
 		Env:       env,
 		TimeoutMS: cfg.TimeoutMS,
+		Target:    workspace.NewTarget(req.Environment, pathResult.Key, pathResult.Path, req.IssueID, req.Identifier),
 	})
 	elapsed := time.Since(started)
 
@@ -290,6 +285,41 @@ func RunReactionTriage(
 		log.Info(procutil.LeftoversTerminatedMessage, slog.String("reaction_kind", req.Kind)) //nolint:sloglint // procutil.LeftoversTerminatedMessage is a fixed string constant
 	}
 	return finish(decodeResult(resultPath, elapsed), "")
+}
+
+// hostTriageFiles is the exchange of one triage run with a command that
+// runs on the host: the input and result files in a fresh host temporary
+// directory. The directory sits outside the workspace so a stale result
+// file cannot be read as this run's answer and so externally authored
+// text stays out of the tree the agent reads. An environment that runs
+// the command elsewhere needs the exchange there instead.
+type hostTriageFiles struct {
+	dir        string
+	inputPath  string
+	resultPath string
+}
+
+// newHostTriageFiles creates the run's host temporary directory.
+func newHostTriageFiles() (hostTriageFiles, error) {
+	dir, err := os.MkdirTemp("", "sortie-triage-")
+	if err != nil {
+		return hostTriageFiles{}, err
+	}
+	return hostTriageFiles{
+		dir:        dir,
+		inputPath:  filepath.Join(dir, "input.json"),
+		resultPath: filepath.Join(dir, "result.json"),
+	}, nil
+}
+
+// remove deletes the run's temporary directory, logging a failure.
+func (f hostTriageFiles) remove(kind string, log *slog.Logger) {
+	if rmErr := os.RemoveAll(f.dir); rmErr != nil {
+		log.Warn("failed to remove reaction triage temporary directory",
+			slog.String("reaction_kind", kind),
+			slog.Any("error", rmErr),
+		)
+	}
 }
 
 // triageFallbackOutcome builds the defaulted outcome for one fallback
@@ -523,6 +553,10 @@ func reactionTriageGate(
 	}
 	if params.WorkspaceRoot == "" || !cfg.Enabled() {
 		return triageProceed
+	}
+
+	if req.Environment == nil {
+		req.Environment = params.Environment
 	}
 
 	if pending.Triage == nil {
