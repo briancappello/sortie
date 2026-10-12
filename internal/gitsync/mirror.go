@@ -1,0 +1,238 @@
+// Package gitsync moves git data between an upstream repository and a
+// workspace's execution environment through a bare mirror that only
+// Sortie writes. Host git runs only on that mirror, always with hooks,
+// the filesystem monitor, and unchecked objects turned off; git data
+// enters and leaves the environment only as a bundle piped through a
+// command run in it, so host git never opens a repository the
+// environment controls.
+package gitsync
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/sortie-ai/sortie/internal/httpkit"
+	"github.com/sortie-ai/sortie/internal/redact"
+)
+
+// reposDir is the directory under the state directory that holds every
+// mirror and its lock file.
+const reposDir = "repos"
+
+// lockPoll is how often a waiter retries a lock file another process
+// holds.
+const lockPoll = 25 * time.Millisecond
+
+// MirrorPath returns the bare mirror directory of url under stateDir:
+// <stateDir>/repos/<first 16 hex digits of sha256(url)>.git.
+func MirrorPath(stateDir, url string) string {
+	sum := sha256.Sum256([]byte(url))
+	return filepath.Join(stateDir, reposDir, hex.EncodeToString(sum[:])[:16]+".git")
+}
+
+// Mirror is the bare mirror of one upstream URL. Every operation runs
+// while the mirror is locked; see [Mirror.Lock].
+type Mirror struct {
+	url  string
+	dir  string
+	lock string
+	git  runner
+}
+
+// OpenMirror returns the mirror of url under stateDir, an absolute
+// directory. It touches nothing on disk; [Mirror.Lock] creates the
+// mirror on first use. The credentials url carries are registered with
+// [redact].
+func OpenMirror(stateDir, url string) (*Mirror, error) {
+	if stateDir == "" || !filepath.IsAbs(stateDir) {
+		return nil, fmt.Errorf("gitsync: state directory %q is not an absolute path", stateDir)
+	}
+	if url == "" {
+		return nil, errors.New("gitsync: repository url is empty")
+	}
+	// git may repeat the URL in its messages; registering its
+	// credentials masks them in every error and log that carries one.
+	redact.AddURLCredentials("environment.smolvm.repository.url", url)
+	dir := MirrorPath(filepath.Clean(stateDir), url)
+	return &Mirror{
+		url:  url,
+		dir:  dir,
+		lock: strings.TrimSuffix(dir, ".git") + ".lock",
+		git:  runner{gitDir: dir},
+	}, nil
+}
+
+// Dir returns the mirror's directory.
+func (m *Mirror) Dir() string { return m.dir }
+
+// displayURL returns the upstream URL without credentials, for errors
+// and logs.
+func (m *Mirror) displayURL() string { return httpkit.RedactURLUserinfo(m.url) }
+
+// inProcess holds one token per mirror directory, so goroutines of this
+// process queue for a mirror without each blocking on its lock file.
+var inProcess = struct {
+	sync.Mutex
+	tokens map[string]chan struct{}
+}{tokens: make(map[string]chan struct{})}
+
+func processToken(dir string) chan struct{} {
+	inProcess.Lock()
+	defer inProcess.Unlock()
+	token, ok := inProcess.tokens[dir]
+	if !ok {
+		token = make(chan struct{}, 1)
+		inProcess.tokens[dir] = token
+	}
+	return token
+}
+
+// Locked is a mirror held exclusively by one caller. Its methods are the
+// only way to read or write the mirror. The holder must call
+// [Locked.Unlock].
+type Locked struct {
+	m     *Mirror
+	file  *os.File
+	token chan struct{}
+	once  sync.Once
+}
+
+// Lock waits until it holds the mirror exclusively, across goroutines
+// and processes, and creates the mirror as an empty bare repository when
+// it does not exist yet. It gives up when ctx ends.
+func (m *Mirror) Lock(ctx context.Context) (*Locked, error) {
+	token := processToken(m.dir)
+	select {
+	case token <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	file, err := m.lockFile(ctx)
+	if err != nil {
+		<-token
+		return nil, err
+	}
+	l := &Locked{m: m, file: file, token: token}
+	if err := l.ensure(ctx); err != nil {
+		l.Unlock()
+		return nil, err
+	}
+	return l, nil
+}
+
+// lockFile opens the mirror's lock file and waits for its exclusive
+// lock.
+func (m *Mirror) lockFile(ctx context.Context) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(m.lock), 0o700); err != nil {
+		return nil, fmt.Errorf("gitsync: create %s: %w", filepath.Dir(m.lock), err)
+	}
+	file, err := os.OpenFile(m.lock, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: the lock path is derived from the state directory
+	if err != nil {
+		return nil, fmt.Errorf("gitsync: open lock file: %w", err)
+	}
+	for {
+		locked, err := tryLockFile(file)
+		if err != nil {
+			_ = file.Close() //nolint:errcheck // the lock was never taken
+			return nil, fmt.Errorf("gitsync: lock %s: %w", m.lock, err)
+		}
+		if locked {
+			return file, nil
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close() //nolint:errcheck // the lock was never taken
+			return nil, ctx.Err()
+		case <-time.After(lockPoll):
+		}
+	}
+}
+
+// Unlock releases the mirror. Later calls do nothing.
+func (l *Locked) Unlock() {
+	l.once.Do(func() {
+		_ = l.file.Close() //nolint:errcheck // closing the file releases its lock
+		<-l.token
+	})
+}
+
+// ensure creates the mirror as a bare repository, without template
+// files, unless it already is one.
+func (l *Locked) ensure(ctx context.Context) error {
+	if _, err := os.Stat(filepath.Join(l.m.dir, "HEAD")); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(l.m.dir, 0o700); err != nil {
+		return fmt.Errorf("gitsync: create mirror %s: %w", l.m.dir, err)
+	}
+	if _, err := l.m.git.run(ctx, "init", "--quiet", "--bare", "--template="); err != nil {
+		return fmt.Errorf("gitsync: create mirror %s: %w", l.m.dir, err)
+	}
+	return nil
+}
+
+// FetchUpstream fetches every upstream branch into the mirror's
+// refs/heads/*, with the host's git configuration and credentials, and
+// prunes the branches the upstream no longer has. Refs outside
+// refs/heads/* are never pruned. Tags are not fetched.
+func (l *Locked) FetchUpstream(ctx context.Context) error {
+	if _, err := l.m.git.run(ctx, "fetch", "--quiet", "--prune", "--no-tags", "--", l.m.url, "+refs/heads/*:refs/heads/*"); err != nil {
+		return fmt.Errorf("fetch %s into the mirror: %w", l.m.displayURL(), err)
+	}
+	return nil
+}
+
+// FetchBundle fetches refspec from the bundle file at bundlePath into
+// the mirror, checking every object it receives.
+func (l *Locked) FetchBundle(ctx context.Context, bundlePath, refspec string) error {
+	if _, err := l.m.git.run(ctx, "fetch", "--quiet", "--no-tags", "--", bundlePath, refspec); err != nil {
+		return fmt.Errorf("import bundle into the mirror: %w", err)
+	}
+	return nil
+}
+
+// CheckBranchName fails, naming branch, when branch is not a valid git
+// branch name.
+func (l *Locked) CheckBranchName(ctx context.Context, branch string) error {
+	if _, err := l.m.git.run(ctx, "check-ref-format", "--branch", branch); err != nil {
+		if exitedWith(err, 1) || exitedWith(err, 128) {
+			return fmt.Errorf("issue branch %q is not a valid git branch name: %w", branch, err)
+		}
+		return fmt.Errorf("check issue branch %q: %w", branch, err)
+	}
+	return nil
+}
+
+// Ref returns the commit refs/heads/<branch> holds in the mirror, and
+// false when the mirror has no such branch.
+func (l *Locked) Ref(ctx context.Context, branch string) (string, bool, error) {
+	out, err := l.m.git.run(ctx, "rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/"+branch+"^{commit}")
+	if exitedWith(err, 1) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve refs/heads/%s in the mirror: %w", branch, err)
+	}
+	return strings.TrimSpace(string(out)), true, nil
+}
+
+// CreateBundle writes a bundle of refs/heads/<branch> for each branch to
+// path, which must not exist.
+func (l *Locked) CreateBundle(ctx context.Context, path string, branches ...string) error {
+	args := []string{"bundle", "create", "--quiet", path}
+	for _, b := range branches {
+		args = append(args, "refs/heads/"+b)
+	}
+	if _, err := l.m.git.run(ctx, args...); err != nil {
+		return fmt.Errorf("create bundle: %w", err)
+	}
+	return nil
+}
