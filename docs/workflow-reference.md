@@ -38,6 +38,7 @@
   - [4.3 `worker` — SSH Worker Extension](#43-worker--ssh-worker-extension)
   - [4.4 `token_rates` — Cost Estimation](#44-token_rates--cost-estimation)
   - [4.5 Adapter-Specific Pass-Through Config](#45-adapter-specific-pass-through-config)
+  - [4.6 Plan Sync (`sortie plan sync`)](#46-plan-sync-sortie-plan-sync)
 - [5. Prompt Template Reference](#5-prompt-template-reference)
   - [5.1 Template Engine](#51-template-engine)
   - [5.2 Template Input Variables](#52-template-input-variables)
@@ -402,6 +403,19 @@ Fix {{ .issue.identifier }}: {{ .issue.title }}
 ```
 
 Four prompt-template variables (see [Section 5.2](#52-template-input-variables)) are always empty for this tracker, so a template that reads them renders nothing rather than failing: `{{ .issue.priority }}`, because GitLab issues carry no priority field; `{{ .issue.blocked_by }}`, because Community Edition has no blocking relationship between issues; `{{ .issue.parent }}`, because the issue route exposes no sub-issue relationship; and `{{ .issue.branch_name }}`, because GitLab computes branch names in the UI rather than storing one on the issue. Both `{{ .issue.id }}` and `{{ .issue.identifier }}` are the project-scoped issue number (GitLab's `iid`), the number shown as `#7` in the GitLab UI, never the instance-global issue ID.
+
+**Huly tracker (`kind: huly`):**
+
+- `endpoint` is the Huly front URL, for example `http://localhost:8087`. `api_key` is a Huly token; `project` is the project identifier, the prefix of issue keys such as `HULY` in `HULY-12`.
+- The `huly` extension block names the workspace and, for plan sync, the task types the planning kinds map to:
+
+  | Field        | Type   | Required             | Description |
+  |--------------|--------|----------------------|-------------|
+  | `workspace`  | string | No                   | Workspace URL name. Omit it only when the token is scoped to one workspace. |
+  | `epic_type`  | string | With `story_type`    | Project task type that a plan epic becomes, compared without regard to letter case. |
+  | `story_type` | string | With `epic_type`     | Project task type that a plan story becomes. |
+
+  Set both task types or neither. The adapter resolves them when it starts and fails, listing the project's task types, when one is missing. Without them the adapter reads and writes as before and a plan write fails. See [the Huly adapter notes](huly-adapter-notes.md) for creating the task types.
 
 ---
 
@@ -2662,6 +2676,20 @@ my-custom-adapter:
 The orchestrator forwards the entire sub-object to the matching adapter without interpretation. Any adapter you register can read its fields from this block.
 
 ---
+
+### 4.6 Plan Sync (`sortie plan sync`)
+
+`sortie plan sync --graph FILE [--dry-run] [--format text|json] [workflow-path]` makes the workflow's tracker match a validated plan graph, the JSON document the plan validator writes (`planlib graph`). It uses the workflow's tracker configuration and needs no running orchestrator.
+
+- One epic is created or updated per planned change, and one story per deliverable, parented to its epic. The graph's blocking edges become the tracker's blocking relations.
+- Only approved nodes are synced; the output names changes skipped as drafts.
+- Issues are matched by their stored plan key, so a second run with the same graph writes nothing, and a changed title updates the existing issue.
+- Nothing is deleted, and an issue's status, assignee, and labels are never changed. An issue whose deliverable left the graph is reported as orphaned, and the relations among plan-keyed issues that the graph no longer holds are removed.
+- `--dry-run` prints the preview and writes nothing. Without it, the command previews and applies in one step, in dependency order, and stops at the first failed write, reporting what it wrote; a later run completes the rest.
+- A graph with an unsupported `schema_version`, a malformed shape, or an edge to a missing node is rejected before the tracker is contacted. A tracker that lacks a capability the writes need, such as linking dependencies, fails with `tracker_unsupported_operation` before the first write.
+- The exit code is `0` on success and `1` on any refusal or failure.
+
+The same sync is served over HTTP by `POST /api/v1/plan/sync` (see [architecture §13.7.2](architecture/18-logging-status-and-observability.md#1372-json-rest-api-apiv1)). Which trackers support it is listed in [architecture §11.7](architecture/11-issue-tracker-integration-contract.md#117-optional-write-capabilities).
 
 ## 5. Prompt Template Reference
 

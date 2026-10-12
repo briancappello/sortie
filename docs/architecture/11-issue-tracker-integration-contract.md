@@ -320,4 +320,9 @@ A plan-keyed issue also reports a digest of the body the last plan write stored,
 
 **Errors.** Each write returns the categories of §11.4. A call to a capability the adapter did not declare returns `tracker_unsupported_operation` and sends no request; callers check the declaration before they call. Adding a relation that already exists, removing one that does not, and setting the parent an issue already has succeed and change nothing.
 
-**Callers.** The orchestrator never calls a write capability: its tracker writes stay the three points of §11.5.
+**Callers.** The orchestrator never calls a write capability: its tracker writes stay the three points of §11.5. Two callers do, both outside the orchestrator's loop:
+
+- Plan sync, `sortie plan sync` and `POST /api/v1/plan/sync`, which makes the tracker match a validated plan graph (workflow reference §4.6).
+- The `tracker_api` tool's planning operations, `create_issue`, `update_issue`, `set_parent`, and `link_dependency`, each offered only when the adapter declares its capability (Section 10.4.5).
+
+**Implemented.** The Huly adapter declares all four, with `custom_field` plan-key storage. Every other adapter declares none.

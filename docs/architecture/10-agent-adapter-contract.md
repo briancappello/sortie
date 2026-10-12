@@ -205,6 +205,15 @@ Supported operations:
 | `search_issues` | (none) | Return issues in configured active states |
 | `transition_issue` | `issue_id`, `target_state` | Transition an issue to a target state |
 
+Planning operations, each listed in the tool's description and input schema, and accepted, only when the tracker kind declares the matching write capability (Section 11.7) and the adapter implements it. A call to one the adapter lacks fails with `unsupported_operation`. Every issue an operation names is read first and checked against the project; one outside it fails with `project_scope_violation` and nothing is written. Each returns the affected issue in the `fetch_issue` shape; `create_issue` adds its `plan_key` and `kind`.
+
+| Operation | Required fields | Description |
+|---|---|---|
+| `create_issue` | `title`, `kind` (`epic` or `story`), `plan_key`; optional `body`, `parent_id` | Create an issue, under `parent_id` when given |
+| `update_issue` | `issue_id`, at least one of `title`, `body`, `kind` | Change those fields |
+| `set_parent` | `issue_id`, `parent_id` (string, or null to remove) | Set or remove the parent |
+| `link_dependency` | `blocker_id`, `blocked_id`, `action` (`add` or `remove`) | Add or remove a blocking relation; returns the blocked issue |
+
 The `TrackerAdapter.CommentIssue` method exists on the adapter interface but is not yet exposed through `tracker_api`.
 
 Tracker dispatch:

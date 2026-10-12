@@ -1,6 +1,6 @@
 # Huly adapter notes (prototype)
 
-The `huly` tracker adapter connects Sortie to one project in a Huly workspace. It is a prototype on the `prototype/huly-tracker` branch. The architecture specification, the workflow reference, and the changelog do not describe it yet.
+The `huly` tracker adapter connects Sortie to one project in a Huly workspace. It is a prototype on the `prototype/huly-tracker` branch and the plan sync work built on it. The workflow reference describes its configuration keys, and the changelog its plan writes; the architecture specification lists it only as the adapter that implements the write capabilities (§11.7).
 
 ## Run Huly locally
 
@@ -59,6 +59,15 @@ Plan writes map the planning kinds `epic` and `story` to two task types of the p
 3. Repeat for `Story`.
 
 A change to the space type applies to every project of that type. The adapter resolves both names when it starts, compared without regard to letter case. If one is missing, the constructor fails and the error lists the project's task types. With neither key set, the adapter still reads and writes as before, and a plan write fails with `tracker_payload_error`. The same task types can be created through the transactor by replaying what the settings page sends: push the type's statuses into the space type's `statuses`, create a mixin class that extends `tracker:class:Issue`, create the `task:class:TaskType` document, and push its id into the space type's `tasks`.
+
+## Kind mapping
+
+| Plan kind | Huly | Parent |
+|---|---|---|
+| `epic` | An issue of task type `huly.epic_type` | None (`tracker:ids:NoParent`) |
+| `story` | An issue of task type `huly.story_type` | Its epic's issue, through `attachedTo` and `parents`; Huly shows it as a sub-issue |
+
+A blocking relation is an entry `{_id, _class: "tracker:class:Issue"}` in the blocked issue's `blockedBy` list, the same list candidate reads take blockers from. The adapter declares every write capability, `create_issue`, `update_issue`, `set_parent`, and `link_dependency`, with `custom_field` plan-key storage. An issue of any other task type reads back with no kind.
 
 ## Plan keys
 
