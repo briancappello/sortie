@@ -39,9 +39,13 @@ type ExportResult struct {
 // key is imported into.
 func IncomingRef(key string) string { return "refs/sortie/incoming/" + key }
 
-// Export takes the committed issue branch out of ws's environment and
-// imports it into the mirror. Uncommitted changes stay in the
-// environment.
+// PushedRef returns the mirror ref that holds the commit Sortie last
+// pushed to the upstream's issue branch of the workspace key.
+func PushedRef(key string) string { return "refs/sortie/pushed/" + key }
+
+// Export takes the committed issue branch out of ws's environment,
+// imports it into the mirror, and pushes it to the upstream when it has
+// new commits. Uncommitted changes stay in the environment.
 //
 // In the environment it bundles refs/heads/<issue branch> under the
 // guest bundle directory, then reads the bundle out through a command,
@@ -58,6 +62,14 @@ func IncomingRef(key string) string { return "refs/sortie/incoming/" + key }
 // state decides that. Otherwise it imports the branch into
 // [IncomingRef], which must then hold a commit, and a failed upstream
 // fetch fails the export.
+//
+// The import is pushed to the upstream's issue branch with a lease: the
+// push succeeds only while that branch holds [PushedRef], the commit
+// Sortie pushed last, or is absent when Sortie never pushed it. So the
+// agent may replace Sortie's own push, as after a rebase, but a commit
+// anyone else pushed since is never overwritten: the export fails with
+// [ErrBranchMoved] and the upstream keeps that commit. After the push
+// Export points [PushedRef] and the mirror's issue branch at the commit.
 //
 // Every failure before the import leaves the mirror's refs as they were,
 // apart from the upstream fetch.
@@ -94,11 +106,34 @@ func (s *Syncer) Export(ctx context.Context, env environment.Environment, ws env
 	if err != nil || !needPush {
 		return res, err
 	}
+	if err := s.push(ctx, l, ws.Key, branch, commit); err != nil {
+		return res, err
+	}
+	res.Pushed = true
+	res.PushedAt = time.Now().UTC()
 	return res, nil
 }
 
-// checkExportRefs fails when branch or the incoming ref of key is not a
-// valid name.
+// push pushes the incoming ref of key to the upstream's branch with a
+// lease on [PushedRef], then records commit as Sortie's last push and
+// as the mirror's copy of the upstream branch.
+func (s *Syncer) push(ctx context.Context, l *Locked, key, branch, commit string) error {
+	pushed := PushedRef(key)
+	expected, _, err := l.RefValue(ctx, pushed)
+	if err != nil {
+		return err
+	}
+	if err := l.Push(ctx, IncomingRef(key), branch, expected); err != nil {
+		return err
+	}
+	if err := l.SetRef(ctx, pushed, commit); err != nil {
+		return err
+	}
+	return l.SetRef(ctx, "refs/heads/"+branch, commit)
+}
+
+// checkExportRefs fails when branch, or the incoming or pushed ref of
+// key, is not a valid name.
 func (s *Syncer) checkExportRefs(ctx context.Context, key, branch string) error {
 	l, err := s.mirror.Lock(ctx)
 	if err != nil {
@@ -108,7 +143,10 @@ func (s *Syncer) checkExportRefs(ctx context.Context, key, branch string) error 
 	if err := l.CheckBranchName(ctx, branch); err != nil {
 		return err
 	}
-	return l.CheckRefName(ctx, IncomingRef(key))
+	if err := l.CheckRefName(ctx, IncomingRef(key)); err != nil {
+		return err
+	}
+	return l.CheckRefName(ctx, PushedRef(key))
 }
 
 // guestOutBundle returns the exported bundle's path inside the

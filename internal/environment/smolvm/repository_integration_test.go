@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/gitsync"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
@@ -154,6 +155,64 @@ func TestIntegration_SeedsTheRepositoryBeforeAfterCreate(t *testing.T) {
 	}
 	if got := guestFile(existing, "/tmp/heads"); got != tip+"\n"+main {
 		t.Errorf("after_create HEAD and origin/main = %q, want the upstream branch tip %s and main %s", got, tip, main)
+	}
+}
+
+// Not parallel: it sets the git configuration variables in the process
+// environment.
+func TestIntegration_ExportsAndPushesTheIssueBranch(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	up := newRepoFixture(t)
+	key := ie.newKey("SMOLEXPORT")
+	syncer := newSyncer(t, up.dir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
+		Root:          ie.root,
+		Identifier:    key,
+		IssueID:       "10001",
+		HookTimeoutMS: 120_000,
+		Environment:   ie.env,
+		Repository:    syncer,
+	})
+	if err != nil {
+		t.Fatalf("workspace.Prepare() error = %v", err)
+	}
+	ws := environment.Workspace{Key: res.Key, HostPath: res.Path, GuestPath: GuestWorkspace, Identifier: key}
+
+	// No commit yet: nothing to push.
+	if got, err := syncer.Export(ctx, ie.env, ws); err != nil || got.Pushed || got.NothingToExport {
+		t.Fatalf("Export() before any commit = %+v, %v; want the branch found and no push", got, err)
+	}
+
+	head, err := ie.guest(ctx, key, `cd /workspace && echo work > agent.txt && git add agent.txt &&
+git -c user.name=Agent -c user.email=agent@example.com commit -q -m work &&
+echo draft > draft.txt && git rev-parse HEAD`)
+	if err != nil {
+		t.Fatalf("guest commit: %v", err)
+	}
+	head = strings.TrimSpace(head)
+	got, err := syncer.Export(ctx, ie.env, ws)
+	if err != nil {
+		t.Fatalf("Export() error = %v", err)
+	}
+	if !got.Pushed || got.Commit != head {
+		t.Errorf("Export() = %+v, want %s pushed", got, head)
+	}
+	if tip := up.git("rev-parse", "refs/heads/sortie/"+key); tip != head {
+		t.Errorf("upstream sortie/%s = %s, want %s", key, tip, head)
+	}
+	if out, err := ie.guest(ctx, key, "cd /workspace && test ! -e /run/sortie/git/out.bundle && git status --porcelain"); err != nil || out != "?? draft.txt\n" {
+		t.Errorf("guest bundle and status = %q, %v; want no bundle and the draft kept", out, err)
+	}
+
+	// A guest without the issue branch has nothing to export.
+	if _, err := ie.guest(ctx, key, "cd /workspace && git checkout -q --detach && git branch -q -D sortie/"+key); err != nil {
+		t.Fatalf("guest branch removal: %v", err)
+	}
+	if got, err := syncer.Export(ctx, ie.env, ws); err != nil || !got.NothingToExport {
+		t.Errorf("Export() without the branch = %+v, %v; want nothing to export", got, err)
 	}
 }
 

@@ -316,6 +316,46 @@ func (l *Locked) ListHeads(ctx context.Context, bundlePath string) ([]BundleHead
 	return heads, nil
 }
 
+// ErrBranchMoved reports a push refused because the upstream branch no
+// longer holds the commit the push expected.
+var ErrBranchMoved = errors.New("branch moved upstream")
+
+// Push pushes the mirror's full ref src to the upstream's
+// refs/heads/<branch>, with the host's git configuration and
+// credentials, only while the upstream branch holds expected, or is
+// absent when expected is empty. The upstream decides that, not a
+// remote-tracking ref, so a replacement that is not a fast-forward is
+// allowed when the lease holds. A push refused because the branch holds
+// something else fails with [ErrBranchMoved].
+func (l *Locked) Push(ctx context.Context, src, branch, expected string) error {
+	dst := "refs/heads/" + branch
+	out, err := l.m.git.run(ctx, "push", "--porcelain", "--no-follow-tags",
+		"--force-with-lease="+dst+":"+expected, "--", l.m.url, src+":"+dst)
+	if err == nil {
+		return nil
+	}
+	if leaseRejected(string(out), dst) {
+		return fmt.Errorf("push %s to %s: %w", branch, l.m.displayURL(), ErrBranchMoved)
+	}
+	return fmt.Errorf("push %s to %s: %w", branch, l.m.displayURL(), err)
+}
+
+// leaseRejected reports whether the porcelain output of a push shows dst
+// refused for a lease that no longer holds.
+func leaseRejected(porcelain, dst string) bool {
+	for line := range strings.Lines(porcelain) {
+		flag, rest, ok := strings.Cut(strings.TrimRight(line, "\n"), "\t")
+		if !ok || flag != "!" {
+			continue
+		}
+		refs, summary, _ := strings.Cut(rest, "\t")
+		if strings.HasSuffix(refs, ":"+dst) && strings.Contains(summary, "(stale info)") {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateBundle writes a bundle of refs/heads/<branch> for each branch to
 // path, which must not exist.
 func (l *Locked) CreateBundle(ctx context.Context, path string, branches ...string) error {
