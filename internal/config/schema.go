@@ -202,6 +202,11 @@ func ValidateFrontMatter(raw map[string]any, cfg ServiceConfig) []FrontMatterWar
 	if cfg.Agent.Kind != "" {
 		recognized[cfg.Agent.Kind] = true
 	}
+	// An SCM or CI provider reads its adapter settings from the
+	// top-level block named for it, whatever the tracker kind.
+	for _, provider := range adapterProviders(cfg) {
+		recognized[provider] = true
+	}
 
 	// Augment the recognized set with every agent kind referenced by
 	// dispatch.rules and dispatch.default. Deriving from the raw map
@@ -898,4 +903,27 @@ func derivePassThroughKindsFromRaw(raw map[string]any) []string {
 	}
 
 	return kinds
+}
+
+// adapterProviders returns the SCM and CI providers cfg names: each
+// reaction's provider, the CI feedback provider, the label commands
+// provider, and the execution environment's repository provider. Each
+// reads its adapter settings from the top-level block of its name. The
+// slice may contain duplicates and holds no empty name.
+func adapterProviders(cfg ServiceConfig) []string {
+	var providers []string
+	add := func(name string) {
+		if name != "" {
+			providers = append(providers, name)
+		}
+	}
+	for _, kind := range maputil.SortedKeys(cfg.Reactions) {
+		add(cfg.Reactions[kind].Provider)
+	}
+	add(cfg.CIFeedback.Kind)
+	add(cfg.LabelCommands.Provider)
+	if repo := cfg.Environment.Smolvm.Repository; repo != nil {
+		add(repo.Provider)
+	}
+	return providers
 }

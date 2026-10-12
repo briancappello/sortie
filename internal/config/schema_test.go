@@ -310,6 +310,49 @@ func TestValidateFrontMatter(t *testing.T) {
 			wantFields: []string{"jira"},
 		},
 		{
+			// A reaction provider reads its adapter settings from the
+			// block of its name, whatever the tracker kind.
+			name: "dynamic extension key matches a reaction provider",
+			raw: map[string]any{
+				"tracker":   map[string]any{"kind": "file"},
+				"reactions": map[string]any{"review_comments": map[string]any{"provider": "github"}},
+				"github":    map[string]any{"api_key": "x", "project": "o/r"},
+			},
+			cfg: ServiceConfig{
+				Tracker:   TrackerConfig{Kind: "file"},
+				Reactions: map[string]ReactionConfig{"review_comments": {Provider: "github"}},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "dynamic extension key matches the CI feedback and label command providers",
+			raw: map[string]any{
+				"tracker": map[string]any{"kind": "file"},
+				"gitea":   map[string]any{"api_key": "x"},
+				"gitlab":  map[string]any{"api_key": "x"},
+			},
+			cfg: ServiceConfig{
+				Tracker:       TrackerConfig{Kind: "file"},
+				CIFeedback:    CIFeedbackConfig{Kind: "gitea"},
+				LabelCommands: LabelCommandsConfig{Provider: "gitlab"},
+			},
+			wantCount: 0,
+		},
+		{
+			name: "dynamic extension key matches the repository provider",
+			raw: map[string]any{
+				"tracker": map[string]any{"kind": "file"},
+				"github":  map[string]any{"api_key": "x", "project": "o/r"},
+			},
+			cfg: ServiceConfig{
+				Tracker: TrackerConfig{Kind: "file"},
+				Environment: EnvironmentConfig{Kind: EnvironmentKindSmolvm, Smolvm: SmolvmConfig{
+					Repository: &SmolvmRepository{URL: "git@example.com:o/r.git", Base: "main", Provider: "github"},
+				}},
+			},
+			wantCount: 0,
+		},
+		{
 			// env-override-created section: tracker with known keys only.
 			name:      "env-override-created tracker section no false positives",
 			raw:       map[string]any{"tracker": map[string]any{"kind": "file"}},
