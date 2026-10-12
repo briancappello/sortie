@@ -16,6 +16,7 @@ Usage:
 Commands:
   validate                  Validate a workflow file without running it
   stats                     Summarize past runs: outcomes, duration, and cost
+  plan sync                 Sync a validated plan graph into the tracker
   mcp-server                Start the MCP stdio server for agent-to-orchestrator communication
 
 Flags:
@@ -61,6 +62,30 @@ Global flags:
 Examples:
   sortie validate WORKFLOW.md
   sortie validate --format json WORKFLOW.md
+`)
+}
+
+func printPlanHelp(w io.Writer) {
+	fmt.Fprint(w, //nolint:errcheck // help output write failure is unrecoverable
+		`Sync a validated plan graph into the configured tracker.
+
+Creates and updates one epic per planned change and one story per
+deliverable, parents each story to its epic, and makes the tracker's
+blocking relations match the graph. Only approved nodes are synced.
+Issues are matched by plan key, so a second run updates and never
+duplicates. Nothing is deleted, and status, assignee, and labels are
+never changed. The graph is the JSON document "planlib graph" writes.
+
+Usage:
+  sortie plan sync --graph FILE [flags] [workflow-path]
+
+Flags:
+  --graph FILE      Plan graph document (required)
+  --dry-run         Print the preview and write nothing
+  --format FORMAT   Output format: text, json (default: text)
+
+Global flags:
+  -h, --help        Print this help message and quit
 `)
 }
 
@@ -127,7 +152,7 @@ Global flags:
 // tokens and the POSIX "--" terminator stop the scan immediately.
 func interceptShortFlags(args []string) string {
 	for _, arg := range args {
-		if arg == "validate" || arg == "stats" || arg == "mcp-server" {
+		if arg == "validate" || arg == "stats" || arg == "plan" || arg == "mcp-server" {
 			return ""
 		}
 		if arg == "--" {

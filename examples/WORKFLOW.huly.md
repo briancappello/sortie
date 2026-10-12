@@ -18,6 +18,10 @@ tracker:
 
 huly:
   workspace: $SORTIE_HULY_WORKSPACE
+  # Plan sync needs task types for epics and stories. Create them in the
+  # project's space type (docs/huly-adapter-notes.md), then uncomment:
+  # epic_type: Epic
+  # story_type: Story
 
 polling:
   interval_ms: 30000
