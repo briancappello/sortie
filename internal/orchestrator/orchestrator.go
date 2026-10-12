@@ -17,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/toolsocket"
 )
 
 // WorkflowManager provides the current workflow config and prompt template.
@@ -282,6 +283,10 @@ type Orchestrator struct {
 	// configuration for workers, cleanups, and reaction triage.
 	environments *environmentResolver
 
+	// toolSockets serves the tool server on the host to each workspace
+	// whose environment reaches Sortie's tools through a socket.
+	toolSockets *toolsocket.Registry
+
 	// ciTriage is the frozen ci_failure triage configuration, captured once
 	// at construction. Unlike every other CI feedback field, it does not
 	// reach the reconcile pass from the reloaded config, so a script or
@@ -438,6 +443,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		workflowPath = params.WorkflowManager.WorkflowAbsPath()
 	}
 	o.environments = newEnvironmentResolver(params.DBPath, workflowPath, logger)
+	o.toolSockets = toolsocket.NewRegistry(logger)
 	if o.preflightParams.EnvironmentFunc == nil {
 		o.preflightParams.EnvironmentFunc = o.environments.resolve
 	}
@@ -447,6 +453,24 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 	// Startup preflight must have passed for construction to reach here.
 	o.preflightOK.Store(true)
 	return o
+}
+
+// recoverToolSockets listens again on the tool socket of every
+// workspace whose environment, under cfg, reaches Sortie's tools through
+// one, as [recoverToolSockets] describes.
+func (o *Orchestrator) recoverToolSockets(cfg config.ServiceConfig) {
+	env, err := o.environments.resolve(cfg.Environment)
+	if err != nil {
+		return
+	}
+	recoverToolSockets(cfg, toolSocketRecovery{
+		Sockets:      o.toolSockets,
+		Environment:  env,
+		BinaryPath:   o.mcpServerBinary,
+		WorkflowPath: o.workflowManager.WorkflowAbsPath(),
+		DBPath:       o.dbPath,
+		Logger:       o.logger,
+	})
 }
 
 // applyQueued calls apply for each message ch holds, in order, without
@@ -575,6 +599,10 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	// the first tick, so the worker settings it launches under must be in
 	// force before it is activated.
 	o.applyWorkerConfig(o.workflowManager.Config())
+	if o.toolSockets != nil {
+		o.recoverToolSockets(o.workflowManager.Config())
+		defer o.toolSockets.Close()
+	}
 	o.activateReconstructedRetries()
 
 	tickTimer := time.NewTimer(0)
@@ -1133,6 +1161,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			WorkflowPath:    o.workflowManager.WorkflowAbsPath(),
 			DBPath:          o.dbPath,
 			MCPServerBinary: o.mcpServerBinary,
+			ToolSockets:     o.toolSockets,
 			SessionAPIURL:   o.sessionAPIURL,
 			ReactionKind:    reactionKind,
 			Posture:         posture,

@@ -23,6 +23,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/toolsocket"
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
@@ -392,6 +393,11 @@ type WorkerDeps struct {
 	// MCPServerBinary is the absolute path to the sortie binary spawned as
 	// the tool server. Empty resolves to the running executable.
 	MCPServerBinary string
+
+	// ToolSockets serves the tool server on the host to an environment
+	// that reaches Sortie's tools through a socket. Nil serves none, and
+	// such an environment's agent then finds no tool server. Optional.
+	ToolSockets *toolsocket.Registry
 
 	// ContinuationContext carries reaction continuation data to inject into
 	// the first-turn prompt. Non-nil only for reaction continuations.
@@ -988,7 +994,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			return
 		}
 
-		generatedPath, genErr := GenerateMCPConfig(MCPConfigParams{
+		mcpParams := MCPConfigParams{
 			BinaryPath:            execPath,
 			WorkflowPath:          deps.WorkflowPath,
 			WorkspacePath:         wsResult.Path,
@@ -1000,7 +1006,16 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			AgentKind:             agentKind,
 			OperatorMCPConfigPath: deps.AgentSettings.MCPConfigPath,
 			ProcessEnv:            CollectSortieEnv(),
-		})
+		}
+		generatedPath, genErr := GenerateMCPConfig(mcpParams)
+		if genErr == nil {
+			// An environment that reaches the tools through a socket
+			// gets its listener before the agent starts, serving this
+			// session's identity from now on.
+			if _, sockErr := serveToolSocket(deps.ToolSockets, workspaceEnv, wsTarget.Workspace, mcpParams); sockErr != nil {
+				genErr = fmt.Errorf("tool socket: %w", sockErr)
+			}
+		}
 		if genErr != nil {
 			finishWorkspace()
 			report(WorkerResult{

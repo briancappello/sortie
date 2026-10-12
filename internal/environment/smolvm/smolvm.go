@@ -15,6 +15,8 @@
 // [Environment.Resume] starts it again for the before_remove hook,
 // [Environment.Remove] deletes it with its workspace, and
 // [Environment.Sweep] deletes the VMs whose workspace directory is gone.
+// [Environment.ToolSocketPath] names the host socket each VM reaches
+// Sortie's tools through.
 //
 // The package touches only a VM it labeled as managed, for the
 // workspace key the VM's name derives from, and for this workflow; any
@@ -129,6 +131,7 @@ var (
 	_ environment.AfterCreateFinisher = (*Environment)(nil)
 	_ environment.Resumer             = (*Environment)(nil)
 	_ environment.EnvForwarder        = (*Environment)(nil)
+	_ environment.ToolSocketer        = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a
@@ -177,6 +180,31 @@ func (e *Environment) ForwardsEnv(name string) bool {
 	}
 	return slices.Contains(e.cfg.PassEnv, name)
 }
+
+// ToolSocketPath returns the host path of the socket mounted at
+// [GuestToolSocket] in ws's VM: <state dir>/env/<key>/tools.sock. Its
+// directory is removed with the VM.
+func (e *Environment) ToolSocketPath(ws environment.Workspace) (string, error) {
+	if e.stateDir == "" {
+		return "", errors.New("smolvm environment: a state directory is required for the tool socket")
+	}
+	if !validKey(ws.Key) {
+		return "", fmt.Errorf("smolvm environment: workspace key %q cannot name a state directory", ws.Key)
+	}
+	stateDir, err := filepath.Abs(e.stateDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve state directory: %w", err)
+	}
+	path := filepath.Join(stateDir, stateEnvDir, ws.Key, toolSocketName)
+	if len(path) > maxUnixSocketLen {
+		return "", fmt.Errorf("smolvm environment: tool socket path %q is longer than a Unix socket path may be (%d bytes)",
+			path, maxUnixSocketLen)
+	}
+	return path, nil
+}
+
+// GuestToolSocketPath returns [GuestToolSocket].
+func (*Environment) GuestToolSocketPath() string { return GuestToolSocket }
 
 // InstanceName returns the name of the VM that runs ws.
 func (*Environment) InstanceName(ws environment.Workspace) string { return VMName(ws.Key) }

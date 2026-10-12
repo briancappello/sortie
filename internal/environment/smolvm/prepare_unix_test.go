@@ -482,3 +482,30 @@ func TestPrepare_ReportsThePackDigestTheVMRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestToolSocketPath_IsTheMountedSocket(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, nil)
+	if _, err := f.env.Prepare(context.Background(), f.ws); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	got, err := f.env.ToolSocketPath(f.ws)
+	if err != nil {
+		t.Fatalf("ToolSocketPath() error = %v", err)
+	}
+	if want := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock"); got != want {
+		t.Errorf("ToolSocketPath() = %q, want %q", got, want)
+	}
+	argvs := f.fake.argvs()
+	if len(argvs) < 2 {
+		t.Fatalf("calls = %q, want a create", argvs)
+	}
+	create := strings.Join(argvs[1], " ")
+	if !strings.Contains(create, "--mount-socket "+got+":"+f.env.GuestToolSocketPath()) {
+		t.Errorf("create argv %q does not mount %q at %q", create, got, f.env.GuestToolSocketPath())
+	}
+	if _, err := f.env.ToolSocketPath(environment.Workspace{Key: "../x"}); err == nil {
+		t.Error("ToolSocketPath(../x) succeeded, want an error")
+	}
+}

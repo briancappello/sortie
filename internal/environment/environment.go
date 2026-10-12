@@ -189,6 +189,23 @@ type Carrier interface {
 	ConnectionFailed(ws Workspace, exitCode int, stderrTail []string) bool
 }
 
+// ToolSocketer is implemented by an environment whose instances reach
+// Sortie's tool server through a Unix socket on this host instead of
+// starting it themselves. Sortie listens on the socket for each such
+// workspace and serves the tool server on this host for every
+// connection.
+type ToolSocketer interface {
+	// ToolSocketPath returns the host path of ws's tool socket. Its
+	// directory belongs to ws alone, outside the workspace and out of
+	// the instance's reach, and is removed with ws's environment, so a
+	// caller may keep its own files for ws there.
+	ToolSocketPath(ws Workspace) (string, error)
+
+	// GuestToolSocketPath returns the path of the tool socket inside the
+	// environment.
+	GuestToolSocketPath() string
+}
+
 // EnvForwarder is implemented by an environment that runs elsewhere and
 // makes chosen host variables available to the commands it runs. Any
 // other host variable never reaches them.
