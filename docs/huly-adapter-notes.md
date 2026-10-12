@@ -124,3 +124,19 @@ The tests post a comment on `SORTIE_HULY_ISSUE`, move it to another state and ba
 ## Gotcha: a wrong workspace name
 
 When the requested name matches no workspace, Huly's `selectWorkspace` does not fail. It selects some other workspace of the account. The adapter compares the selected workspace with `huly.workspace` and refuses to start when they differ.
+
+## Live end-to-end check (plan workbench)
+
+On 2026-10-11, the whole planning loop ran against the local Huly v0.7.426, workspace `sortie`, project `HULY`. The parts were Sortie from this branch with the mock agent and a 20-second turn delay, `acp-broker`, and the plan workbench from a clean checkout, following its `docs/operator-guide.md`. The planning agent was OpenCode over the broker. The spec store was a scratch clone of `agent-platform-specs`, so the real store stayed untouched. Before the run, the demo issue `HULY-1` was moved out of `In Progress` so that Sortie would not run the mock agent on it; it was moved back afterwards.
+
+| Step | What happened | Result |
+|---|---|---|
+| 1. The agent drafts a breakdown | In the chat: "Break the agent-telemetry change into deliverables …". The agent switched the change to `spec-driven-planned`, wrote `breakdown.yaml` with 9 deliverables covering the change's 17 requirements, ran `planlib validate`, found two acceptance criteria that YAML had read as maps, fixed them, and validated again. | The graph redrew with the 9 drafts while the agent wrote. |
+| 2. A planted cycle | `session-context` was edited by hand to depend on `turn-recorder`. The validation panel listed `cycle agent-telemetry/session-context -> agent-telemetry/turn-recorder`, the graph kept its last valid state, and Sync was disabled. With `session-context` selected, the chat message "The validator reports a cycle around this deliverable. Fix it …" went out with the selection block. The agent removed the reverse edge and validated. | The panel cleared. |
+| 3. Approval | Approve breakdown on the `agent-telemetry` epic. | `status: approved` and `approved_digest` were written; the epic read as approved. |
+| 4. Sync preview and confirm | Sync… showed 10 creates, 8 relations to add, and `plan-to-tracker-dag` skipped as a draft. The changes without a breakdown were not approved, so they were not synced. Apply ran 18 writes. | 10 created and 8 relations added; a second preview showed no writes. |
+| 5. Huly | `HULY-34` (task type Epic, plan key `agent-telemetry`) with 9 sub-issues `HULY-35`…`HULY-43` of task type Story. Each has its acceptance criteria and covered requirements as its description, and Blocked by / Blocks shows the breakdown's 8 dependencies. | Matches the breakdown. |
+| 6. Dispatch | `HULY-36` (`session-context`, unblocked) and `HULY-37` (`turn-recorder`, blocked by `HULY-36`) were moved to `Todo`. | Sortie dispatched only `HULY-36` and moved it to `In Progress`; `HULY-37` stayed in `Todo`. |
+| 7. Running badge | The workbench showed `running · turn 1` on `session-context`, `1 agent running` on the `agent-telemetry` epic, and `now · 1 agent` on the playhead, within one five-second poll. | As specified. |
+
+The issues the check created are still in the project as a reference.
