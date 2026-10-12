@@ -120,15 +120,36 @@ func (o *Orchestrator) describeEnvironment(cfg config.ServiceConfig) func(identi
 	}
 }
 
-// repositorySync returns what places the repository cfg configures in a
-// workspace's environment, with its mirror under stateDir, or nil when
-// cfg configures none.
-func repositorySync(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (workspace.RepositorySync, error) {
-	repo := cfg.Smolvm.Repository
-	if normalizeEnvironmentKind(cfg.Kind) != config.EnvironmentKindSmolvm || repo == nil {
+// Repository places the repository an environment block configures in
+// a workspace's environment, and takes the issue branch's committed work
+// back out of it, without host code ever reading the workspace.
+type Repository interface {
+	workspace.RepositorySync
+
+	// Export takes the committed issue branch out of ws's environment
+	// and pushes its new commits to the upstream. A failure leaves the
+	// work in the environment.
+	Export(ctx context.Context, env environment.Environment, ws environment.Workspace) (gitsync.ExportResult, error)
+}
+
+// RepositoryFunc returns the [Repository] an environment block
+// configures, with its state under stateDir. It is called only for a
+// block that configures one; see [configuresRepository].
+type RepositoryFunc func(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error)
+
+// configuresRepository reports whether cfg places a repository in each
+// workspace's environment: the smolvm kind with a repository block.
+func configuresRepository(cfg config.EnvironmentConfig) bool {
+	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && cfg.Smolvm.Repository != nil
+}
+
+// repositorySync returns the [Repository] cfg configures, with its
+// mirror under stateDir, or nil when cfg configures none.
+func repositorySync(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error) {
+	if !configuresRepository(cfg) {
 		return nil, nil
 	}
-	syncer, err := gitsync.New(gitsync.Params{Repository: *repo, StateDir: stateDir, Logger: logger})
+	syncer, err := gitsync.New(gitsync.Params{Repository: *cfg.Smolvm.Repository, StateDir: stateDir, Logger: logger})
 	if err != nil {
 		return nil, err
 	}

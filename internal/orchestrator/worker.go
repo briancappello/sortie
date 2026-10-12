@@ -213,6 +213,11 @@ type WorkerResult struct {
 	// run's first prompt presented under that kind's template variable.
 	// Set only on [WorkerExitNormal].
 	HandedOffComments map[string][]string
+
+	// ExportedCommit is the commit the run's export pushed to the
+	// upstream's issue branch. Empty when the run configures no
+	// repository, or its export pushed nothing.
+	ExportedCommit string
 }
 
 // SessionToolRegistryFunc builds the first-turn tool advertisement.
@@ -382,6 +387,14 @@ type WorkerDeps struct {
 	// handoff evidence, and self-review commands of the attempt run in
 	// it. Nil builds it through [environment.New]. Optional.
 	EnvironmentFunc EnvironmentFunc
+
+	// RepositoryFunc returns the repository the attempt-start config's
+	// environment block configures, called only when it configures one
+	// and the dispatch runs the setup hooks. The repository is seeded or
+	// refreshed in the workspace's environment during preparation and
+	// exported from it when the run ends normally. Nil builds it through
+	// gitsync. Optional.
+	RepositoryFunc RepositoryFunc
 
 	// WorkflowPath is the absolute WORKFLOW.md path, passed to MCP config
 	// generation. Empty disables MCP config generation.
@@ -899,12 +912,22 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	afterCreate, beforeRun := cfg.Hooks.AfterCreate, cfg.Hooks.BeforeRun
 	// The configured repository is placed in the environment by the same
 	// rule: a scratch dispatch gets none.
-	var repoSync workspace.RepositorySync
+	var repo Repository
 	var repoErr error
 	if deps.Posture.RunsSetupHooks() {
-		repoSync, repoErr = repositorySync(cfg.Environment, stateDir, logger)
+		if configuresRepository(cfg.Environment) {
+			newRepository := deps.RepositoryFunc
+			if newRepository == nil {
+				newRepository = repositorySync
+			}
+			repo, repoErr = newRepository(cfg.Environment, stateDir, logger)
+		}
 	} else {
 		afterCreate, beforeRun = "", ""
+	}
+	var repoSync workspace.RepositorySync
+	if repo != nil {
+		repoSync = repo
 	}
 	if repoErr != nil {
 		cancelledAtEnding = ctx.Err() != nil
@@ -1737,6 +1760,43 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		})
 	}
 
+	// The committed work leaves the environment after after_run and
+	// before the exit report, whose handling makes the tracker handoff,
+	// and before the environment is released. A failed export fails the
+	// run, so no handoff happens without the work upstream.
+	var exportedCommit string
+	if repo != nil {
+		var exportErr error
+		if ctx.Err() != nil {
+			exportErr = &ExportError{Err: fmt.Errorf("run stopped before the export: %w", context.Cause(ctx))}
+		} else {
+			exportedCommit, exportErr = exportIssueBranch(ctx, repo, workspaceEnv, wsTarget.Workspace, logger)
+		}
+		if exportErr != nil {
+			cancelledAtEnding = ctx.Err() != nil
+			report(WorkerResult{
+				IssueID:            issue.ID,
+				Identifier:         issue.Identifier,
+				ExitKind:           exitKindAtEnding(ctx, cancelledAtEnding),
+				Error:              exportErr,
+				ReviewMetadata:     reviewMeta,
+				TurnsCompleted:     turnsCompleted,
+				TurnsStarted:       turnsStarted,
+				WorkspacePath:      wsResult.Path,
+				AgentAdapter:       agentKind,
+				Attempt:            attempt,
+				SSHHost:            deps.SSHHost,
+				ObservedIssueState: observedIssueState,
+				Usage:              localUsage,
+				UsageMeasured:      localMeasured,
+				UnaccountedTurns:   localUnaccounted,
+				ModelName:          localModelName,
+				APIRequestCount:    localRequestCount,
+			})
+			return
+		}
+	}
+
 	logger.Info("worker exiting",
 		slog.Any("exit_kind", WorkerExitNormal),
 		slog.Int("turns_completed", turnsCompleted),
@@ -1766,6 +1826,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		UsageMeasured:                localMeasured,
 		UnaccountedTurns:             localUnaccounted,
 		HandedOffComments:            presentedComments,
+		ExportedCommit:               exportedCommit,
 	})
 }
 

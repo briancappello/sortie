@@ -1,0 +1,312 @@
+//go:build unix
+
+package orchestrator
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
+	"github.com/sortie-ai/sortie/internal/environment/environmenttest"
+	"github.com/sortie-ai/sortie/internal/gitsync"
+	"github.com/sortie-ai/sortie/internal/prompt"
+)
+
+// fakeRepository stands in for gitsync: seeding and refreshing do
+// nothing, and Export returns result and err after recording the
+// environment's operations so far and appending "export" to sequence.
+type fakeRepository struct {
+	env      *environmenttest.Recorder
+	sequence *[]string
+	result   gitsync.ExportResult
+	err      error
+
+	mu        sync.Mutex
+	exports   []environment.Workspace
+	opsAtCall []environmenttest.Call
+}
+
+var _ Repository = (*fakeRepository)(nil)
+
+func (f *fakeRepository) Seed(context.Context, environment.Environment, environment.Workspace) error {
+	return nil
+}
+
+func (f *fakeRepository) Refresh(context.Context, environment.Environment, environment.Workspace) error {
+	return nil
+}
+
+func (f *fakeRepository) Export(_ context.Context, _ environment.Environment, ws environment.Workspace) (gitsync.ExportResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.exports = append(f.exports, ws)
+	f.opsAtCall = f.env.Calls()
+	if f.sequence != nil {
+		*f.sequence = append(*f.sequence, "export")
+	}
+	return f.result, f.err
+}
+
+func (f *fakeRepository) exportCalls() []environment.Workspace {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.exports)
+}
+
+// exportWorkerConfig returns a one-turn worker configuration under the
+// smolvm kind with a repository, an after_run hook, and the handoff
+// evidence policy off.
+func exportWorkerConfig(t *testing.T) config.ServiceConfig {
+	t.Helper()
+	cfg := defaultWorkerConfig(t.TempDir())
+	cfg.Agent.MaxTurns = 1
+	cfg.Hooks.AfterRun = "echo finished > after-run.txt"
+	cfg.Tracker.HandoffEvidence = config.HandoffEvidenceOff
+	cfg.Environment = config.EnvironmentConfig{
+		Kind: config.EnvironmentKindSmolvm,
+		Smolvm: config.SmolvmConfig{Repository: &config.SmolvmRepository{
+			URL: "https://example.com/org/app.git", Base: "main", BranchPrefix: "sortie/", MaxBundleMiB: 512,
+		}},
+	}
+	return cfg
+}
+
+// runExportWorker runs one worker attempt under cfg with env and repo,
+// and returns its result and how many times the repository was built.
+func runExportWorker(t *testing.T, ctx context.Context, cfg config.ServiceConfig, env environment.Environment, repo *fakeRepository, agent domain.AgentAdapter, posture DispatchPosture) (WorkerResult, int) {
+	t.Helper()
+	if agent == nil {
+		agent = &mockAgentAdapter{}
+	}
+	var built int
+	ec := newExitCapture()
+	RunWorkerAttempt(ctx, workerTestIssue(), nil, WorkerDeps{
+		TrackerAdapter:         &mockTrackerAdapter{},
+		AgentAdapter:           agent,
+		ConfigFunc:             func() config.ServiceConfig { return cfg },
+		PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+		OnEvent:                func(_ string, _ domain.AgentEvent) {},
+		OnExit:                 ec.onExit,
+		Logger:                 discardLogger(),
+		Posture:                posture,
+		EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
+			return env, nil
+		},
+		RepositoryFunc: func(config.EnvironmentConfig, string, *slog.Logger) (Repository, error) {
+			built++
+			return repo, nil
+		},
+	})
+	return ec.waitResult(t), built
+}
+
+// handOff feeds result to the exit handling of an issue in an active
+// state with a handoff state configured, and returns the state, the
+// store, and the tracker.
+func handOff(t *testing.T, result WorkerResult, sequence *[]string) (*State, *mockExitStore, *mockTrackerAdapter) {
+	t.Helper()
+	store := &mockExitStore{}
+	tracker := &mockTrackerAdapter{transitionIssueFn: func(context.Context, string, string) error {
+		*sequence = append(*sequence, "transition")
+		return nil
+	}}
+	state := exitStateWithIssue(t, result.IssueID, "To Do")
+	params := defaultExitParams(t, store)
+	params.TrackerAdapter = tracker
+	params.HandoffState = "Human Review"
+	params.ActiveStates = []string{"To Do", "In Progress"}
+	HandleWorkerExit(state, result, params)
+	t.Cleanup(func() { CancelRetry(state, result.IssueID) })
+	return state, store, tracker
+}
+
+func TestRunWorkerAttempt_ExportPrecedesTheHandoff(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	env := recordingEnvironment(t)
+	var sequence []string
+	const commit = "0b4c5d3e2f1a0b4c5d3e2f1a0b4c5d3e2f1a0b4c"
+	repo := &fakeRepository{env: env, sequence: &sequence, result: gitsync.ExportResult{Branch: "sortie/TEST-1", Commit: commit, Pushed: true}}
+
+	result, built := runExportWorker(t, context.Background(), cfg, env, repo, nil, PostureNormal)
+
+	if built != 1 {
+		t.Errorf("repository built %d times, want 1", built)
+	}
+	if result.ExitKind != WorkerExitNormal || result.Error != nil {
+		t.Fatalf("result = %v, %v; want a normal exit", result.ExitKind, result.Error)
+	}
+	if result.ExportedCommit != commit {
+		t.Errorf("ExportedCommit = %q, want %q", result.ExportedCommit, commit)
+	}
+	calls := repo.exportCalls()
+	if len(calls) != 1 || calls[0].Key != "TEST-1" || calls[0].HostPath != result.WorkspacePath {
+		t.Fatalf("Export calls = %+v, want one for the workspace %s", calls, result.WorkspacePath)
+	}
+	// The export follows after_run and precedes the release.
+	before := repo.opsAtCall
+	if !slices.Contains(shellScripts(before), cfg.Hooks.AfterRun) {
+		t.Errorf("commands before the export = %q, want after_run among them", shellScripts(before))
+	}
+	if slices.ContainsFunc(before, func(c environmenttest.Call) bool { return c.Op == environmenttest.OpRelease }) {
+		t.Error("the environment was released before the export")
+	}
+	if ops := env.Ops(); ops[len(ops)-1] != environmenttest.OpRelease {
+		t.Errorf("environment ops = %q, want the release last", ops)
+	}
+
+	state, store, tracker := handOff(t, result, &sequence)
+	if !slices.Equal(sequence, []string{"export", "transition"}) {
+		t.Errorf("sequence = %q, want the export before the handoff transition", sequence)
+	}
+	if len(tracker.transitionCalls) != 1 || tracker.transitionCalls[0].TargetState != "Human Review" {
+		t.Errorf("transitions = %+v, want the handoff", tracker.transitionCalls)
+	}
+	if _, retry := state.RetryAttempts[result.IssueID]; retry {
+		t.Error("retry scheduled after a successful export and handoff")
+	}
+	if len(store.runHistories) != 1 || store.runHistories[0].ExportedCommit != commit || store.runHistories[0].Status != "succeeded" {
+		t.Errorf("run history = %+v, want one succeeded row with the exported commit", store.runHistories)
+	}
+}
+
+func TestRunWorkerAttempt_FailedExportFailsTheRun(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	env := recordingEnvironment(t)
+	var sequence []string
+	cause := fmt.Errorf("push sortie/TEST-1: %w", gitsync.ErrBranchMoved)
+	repo := &fakeRepository{env: env, sequence: &sequence, result: gitsync.ExportResult{Branch: "sortie/TEST-1"}, err: cause}
+
+	result, _ := runExportWorker(t, context.Background(), cfg, env, repo, nil, PostureNormal)
+
+	if result.ExitKind != WorkerExitError {
+		t.Fatalf("ExitKind = %v, want %v", result.ExitKind, WorkerExitError)
+	}
+	exportErr, ok := errors.AsType[*ExportError](result.Error)
+	if !ok || exportErr.Branch != "sortie/TEST-1" || !errors.Is(result.Error, gitsync.ErrBranchMoved) {
+		t.Fatalf("result error = %v, want an export error for sortie/TEST-1 wrapping %v", result.Error, gitsync.ErrBranchMoved)
+	}
+	if result.ExportedCommit != "" {
+		t.Errorf("ExportedCommit = %q, want empty", result.ExportedCommit)
+	}
+	// The environment is stopped as after every run, never removed, and
+	// the workspace stays.
+	ops := env.Ops()
+	if ops[len(ops)-1] != environmenttest.OpRelease || slices.Contains(ops, environmenttest.OpRemove) {
+		t.Errorf("environment ops = %q, want a release and no removal", ops)
+	}
+	if _, err := os.Stat(result.WorkspacePath); err != nil {
+		t.Errorf("workspace stat error = %v, want it kept", err)
+	}
+
+	state, store, tracker := handOff(t, result, &sequence)
+	if len(tracker.transitionCalls) != 0 {
+		t.Errorf("transitions = %+v, want none: the issue stays active", tracker.transitionCalls)
+	}
+	if retry, ok := state.RetryAttempts[result.IssueID]; !ok || retry.Attempt != 1 {
+		t.Errorf("retry = %+v, %v; want attempt 1 scheduled", retry, ok)
+	}
+	if _, claimed := state.Claimed[result.IssueID]; !claimed {
+		t.Error("claim released, want it kept for the retry")
+	}
+	if len(store.runHistories) != 1 {
+		t.Fatalf("run history rows = %d, want 1", len(store.runHistories))
+	}
+	row := store.runHistories[0]
+	if row.Status != "failed" || row.Error == nil || !strings.Contains(*row.Error, "branch moved upstream") || row.ExportedCommit != "" {
+		t.Errorf("run history = status %q, error %v, exported %q; want failed with the export error and no commit", row.Status, row.Error, row.ExportedCommit)
+	}
+}
+
+func TestRunWorkerAttempt_NoExportWithoutARepository(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(cfg *config.ServiceConfig)
+		posture DispatchPosture
+	}{
+		{name: "local kind", mutate: func(cfg *config.ServiceConfig) { cfg.Environment.Kind = config.EnvironmentKindLocal }},
+		{name: "default kind", mutate: func(cfg *config.ServiceConfig) { cfg.Environment.Kind = "" }},
+		{name: "smolvm without repository", mutate: func(cfg *config.ServiceConfig) { cfg.Environment.Smolvm.Repository = nil }},
+		{name: "scratch dispatch", mutate: func(*config.ServiceConfig) {}, posture: PostureReview},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := exportWorkerConfig(t)
+			tt.mutate(&cfg)
+			env := recordingEnvironment(t)
+			repo := &fakeRepository{env: env, err: errors.New("must not be called")}
+
+			result, built := runExportWorker(t, context.Background(), cfg, env, repo, nil, tt.posture)
+
+			if built != 0 || len(repo.exportCalls()) != 0 {
+				t.Errorf("repository built %d times, exported %d times; want neither", built, len(repo.exportCalls()))
+			}
+			if result.ExitKind != WorkerExitNormal || result.ExportedCommit != "" {
+				t.Errorf("result = %v, %v, exported %q; want a normal exit without an export", result.ExitKind, result.Error, result.ExportedCommit)
+			}
+		})
+	}
+}
+
+func TestRunWorkerAttempt_NoExportForACancelledRun(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	env := recordingEnvironment(t)
+	repo := &fakeRepository{env: env, result: gitsync.ExportResult{Pushed: true, Commit: "c"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent := &mockAgentAdapter{runTurnFn: func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error) {
+		cancel()
+		return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
+	}}
+
+	result, _ := runExportWorker(t, ctx, cfg, env, repo, agent, PostureNormal)
+
+	if len(repo.exportCalls()) != 0 {
+		t.Errorf("Export called %d times, want none for a cancelled run", len(repo.exportCalls()))
+	}
+	if result.ExitKind != WorkerExitCancelled || result.ExportedCommit != "" {
+		t.Errorf("result = %v, %v, exported %q; want a cancelled exit without an export", result.ExitKind, result.Error, result.ExportedCommit)
+	}
+}
+
+// cancellingEnvironment cancels the worker's context when the after_run
+// hook starts, so the run ends normally with its context done.
+type cancellingEnvironment struct {
+	*environmenttest.Recorder
+	script string
+	cancel context.CancelFunc
+}
+
+func (e cancellingEnvironment) Command(ctx context.Context, ws environment.Workspace, spec environment.CommandSpec) (*exec.Cmd, error) {
+	if len(spec.Argv) == 3 && spec.Argv[2] == e.script {
+		e.cancel()
+	}
+	return e.Recorder.Command(ctx, ws, spec)
+}
+
+func TestRunWorkerAttempt_NoExportAfterTheRunWasStopped(t *testing.T) {
+	cfg := exportWorkerConfig(t)
+	rec := recordingEnvironment(t)
+	repo := &fakeRepository{env: rec, result: gitsync.ExportResult{Pushed: true, Commit: "c"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := cancellingEnvironment{Recorder: rec, script: cfg.Hooks.AfterRun, cancel: cancel}
+
+	result, _ := runExportWorker(t, ctx, cfg, env, repo, nil, PostureNormal)
+
+	if len(repo.exportCalls()) != 0 {
+		t.Errorf("Export called %d times, want none once the run was stopped", len(repo.exportCalls()))
+	}
+	if _, ok := errors.AsType[*ExportError](result.Error); !ok || result.ExitKind != WorkerExitCancelled {
+		t.Errorf("result = %v, %v; want a cancelled exit reporting the skipped export", result.ExitKind, result.Error)
+	}
+}

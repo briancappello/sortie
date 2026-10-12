@@ -439,6 +439,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		HeldMS: entry.HeldTotal.Milliseconds(),
 
 		EnvironmentImageSHA256: workerResult.EnvironmentInstance.ImageDigest,
+		ExportedCommit:         workerResult.ExportedCommit,
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
