@@ -477,7 +477,10 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 		caps = *initResp.AgentCapabilities
 	}
 
-	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, target.WorkspacePath, wireServers)
+	// The runtime resolves cwd where it runs: inside an execution
+	// environment that is the guest workspace, not the host path.
+	cwd := target.GuestPath(target.WorkspacePath)
+	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, cwd, wireServers)
 	if agentErr != nil {
 		teardownOnFailure()
 		procutil.EmitWarnLines(state.stderrCollector.Lines(), state.logger)

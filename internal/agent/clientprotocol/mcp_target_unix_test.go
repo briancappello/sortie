@@ -4,6 +4,7 @@ package clientprotocol
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,5 +81,68 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 				t.Errorf("carrier launches = %d, want the session's one launch", len(carrier.Launches()))
 			}
 		})
+	}
+}
+
+// TestSessionCwdByLaunchTarget asserts that session/new names the
+// workspace as the runtime sees it: the host path for a local launch,
+// and the guest path for a launch through an execution environment,
+// where the host path does not exist. The credential verification
+// session, which carries no tool servers, names the same path.
+func TestSessionCwdByLaunchTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{"local", "carrier"} {
+		for _, verification := range []bool{false, true} {
+			// The fake carrier runs the agent through env(1), which would
+			// read a temporary path holding '=' as an assignment.
+			name := target + " session"
+			if verification {
+				name = target + " credential verification"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				ws := t.TempDir()
+				dir := t.TempDir()
+				capturePath := filepath.Join(dir, "session_new.jsonl")
+				params := domain.StartSessionParams{
+					WorkspacePath:          ws,
+					AgentConfig:            domain.AgentConfig{Command: agenttest.WriteScript(t, dir, "agent.sh", mcpHandshakeScript(capturePath))},
+					CredentialVerification: verification,
+				}
+				wantCwd := ws
+				if target == "carrier" {
+					params.Carrier = &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace"}
+					wantCwd = "/workspace"
+				}
+
+				session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, params)
+				if err != nil {
+					t.Fatalf("startSession() error = %v", err)
+				}
+				t.Cleanup(func() {
+					if err := stopSession(context.Background(), session); err != nil {
+						t.Errorf("stopSession() error = %v", err)
+					}
+				})
+
+				captured, err := os.ReadFile(capturePath)
+				if err != nil {
+					t.Fatalf("read captured session/new request: %v", err)
+				}
+				var request struct {
+					Params struct {
+						Cwd string `json:"cwd"`
+					} `json:"params"`
+				}
+				if err := json.Unmarshal(captured, &request); err != nil {
+					t.Fatalf("decode session/new %s: %v", captured, err)
+				}
+				if request.Params.Cwd != wantCwd {
+					t.Errorf("session/new cwd = %q, want %q", request.Params.Cwd, wantCwd)
+				}
+			})
+		}
 	}
 }
