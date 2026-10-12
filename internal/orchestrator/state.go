@@ -102,6 +102,29 @@ type RunningEntry struct {
 	// the lifetime of the entry.
 	DispatchID string
 
+	// SessionToken is the run's scoped session token, minted by
+	// [DispatchIssue] and given to the working session only. It lives in
+	// memory alone and stops working when the entry is removed.
+	SessionToken string
+
+	// HeldSince is when the current hold began; zero when the run is not
+	// held. HoldReason and Holder describe that hold. Mutated only by the
+	// event loop.
+	HeldSince  time.Time
+	HoldReason string
+	Holder     string
+
+	// HeldTotal is the time this run has spent held in holds that ended.
+	HeldTotal time.Duration
+
+	// HoldReleasedAt is when the last hold ended; stall detection measures
+	// silence from no earlier than this instant.
+	HoldReleasedAt time.Time
+
+	// TurnClock bounds the run's turns; a hold pauses it. Shared with the
+	// worker goroutine, and safe for concurrent use.
+	TurnClock *turnClock
+
 	ThreadID string
 
 	TurnID string
@@ -282,6 +305,11 @@ type RunningEntry struct {
 	// token warning reaching its threshold and cleared once that write
 	// succeeds.
 	MetadataWritePending bool
+
+	// NoStateObserved is true after a reconcile read the issue in no state
+	// and no later reconcile read it in a state. Set and cleared only by
+	// [reconcileTrackerState].
+	NoStateObserved bool
 }
 
 // RetryEntry holds the runtime state for a pending retry. IssueID,
@@ -301,6 +329,10 @@ type RetryEntry struct {
 	// LastSSHHost is the SSH host from the previous attempt, passed as the
 	// preferred host to [HostPool.AcquireHost]. Runtime-only.
 	LastSSHHost string
+
+	// noStateObserved is true when the fire that scheduled this entry read
+	// the issue in no state. Runtime-only.
+	noStateObserved bool
 
 	// scheduledAt is time.Now() when ScheduleRetry created this entry. Its
 	// monotonic reading makes staleness detection immune to wall-clock
@@ -788,6 +820,11 @@ type StageHopEntry struct {
 
 	// ChainID is the chain of the run whose exit made the hop.
 	ChainID string
+
+	// NoStateObserved is true after a reconcile read the issue in no state
+	// and no later reconcile read it in a state. Set and cleared only by
+	// [reconcileTrackerState].
+	NoStateObserved bool
 }
 
 // State is the single authoritative runtime state owned by the
@@ -808,6 +845,15 @@ type State struct {
 	// drain cancels every worker before it waits, so an add cannot race
 	// the wait.
 	TrackerOpsWg sync.WaitGroup
+
+	// SessionTokens indexes the session token of every running entry,
+	// for the HTTP server's authentication. Nil holds no token.
+	SessionTokens *SessionTokenIndex
+
+	// LastEscalation maps issue ID to when its last session escalation was
+	// accepted, bounding escalations to one per issue per window. Written
+	// only by the event loop; nil until the first escalation.
+	LastEscalation map[string]time.Time
 
 	// TriageWg tracks in-flight reaction triage goroutines so shutdown can
 	// drain them.
@@ -1002,6 +1048,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		maxConcurrentByState = make(map[string]int)
 	}
 	return &State{
+		SessionTokens:             NewSessionTokenIndex(),
 		PollIntervalMS:            pollIntervalMS,
 		MaxConcurrentAgents:       maxConcurrentAgents,
 		MaxTokens:                 maxTokens,
@@ -1079,6 +1126,15 @@ type SnapshotRunningEntry struct {
 	UsageAttribution    registry.UsageAttribution `json:"usage_attribution"`
 	TokensPending       bool                      `json:"tokens_pending"`
 	TokensAwaited       bool                      `json:"tokens_awaited"`
+
+	// Held reports a hold in effect; HoldReason, Holder, and HeldSince
+	// describe it and are empty otherwise. HeldTotal counts every hold of
+	// the run, the current one up to the snapshot included.
+	Held       bool          `json:"held"`
+	HoldReason string        `json:"hold_reason,omitempty"`
+	Holder     string        `json:"holder,omitempty"`
+	HeldSince  time.Time     `json:"held_since"`
+	HeldTotal  time.Duration `json:"held_total"`
 }
 
 // SnapshotRetryEntry is a read-only view of a pending retry, produced by
@@ -1278,6 +1334,11 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			TokensPending: entry.UsageArrival == registry.UsageArrivalTurnEnd &&
 				entry.UsageMeasured && !isTurnTerminalEvent(entry.LastAgentEvent),
 			TokensAwaited: tokensAwaited,
+			Held:          !entry.HeldSince.IsZero(),
+			HoldReason:    entry.HoldReason,
+			Holder:        entry.Holder,
+			HeldSince:     entry.HeldSince,
+			HeldTotal:     holdStateOf(entry.Issue.ID, entry, now).HeldTotal,
 		})
 
 		if !entry.StartedAt.IsZero() {
@@ -1652,12 +1713,9 @@ func BuildLabelFixReactionConfig(cfg config.LabelCommandsConfig) LabelFixReactio
 
 // BuildMergeCompletionReactionConfig extracts and validates
 // merge-completion-specific configuration from a [config.ReactionConfig].
-//
-// meta resolves the default active-state list only; the terminal list is
-// read from tracker as written, with no fallback to
-// [registry.TrackerMeta.DefaultTerminalStates], so the offline validator
-// and the runtime terminal drop agree on what "terminal" means.
-func BuildMergeCompletionReactionConfig(rc config.ReactionConfig, tracker config.TrackerConfig, meta registry.TrackerMeta) (MergeCompletionReactionConfig, error) {
+// The state lists are read from tracker as written, so the offline
+// validator and the runtime terminal drop agree on what "terminal" means.
+func BuildMergeCompletionReactionConfig(rc config.ReactionConfig, tracker config.TrackerConfig) (MergeCompletionReactionConfig, error) {
 	cfg := MergeCompletionReactionConfig{
 		PollIntervalMS:  60000,
 		Escalation:      rc.Escalation,
@@ -1694,15 +1752,10 @@ func BuildMergeCompletionReactionConfig(rc config.ReactionConfig, tracker config
 		return MergeCompletionReactionConfig{}, fmt.Errorf("target_state is required")
 	}
 
-	effectiveActive := tracker.ActiveStates
-	if len(effectiveActive) == 0 {
-		effectiveActive = meta.DefaultActiveStates
-	}
-
 	if strings.EqualFold(cfg.TargetState, tracker.HandoffState) {
 		return MergeCompletionReactionConfig{}, fmt.Errorf("invalid target_state %q: must not equal tracker.handoff_state", cfg.TargetState)
 	}
-	if _, active := stateSet(effectiveActive)[strings.ToLower(cfg.TargetState)]; active {
+	if _, active := stateSet(tracker.ActiveStates)[strings.ToLower(cfg.TargetState)]; active {
 		return MergeCompletionReactionConfig{}, fmt.Errorf("invalid target_state %q: must not be a member of tracker.active_states", cfg.TargetState)
 	}
 	if _, terminal := stateSet(tracker.TerminalStates)[strings.ToLower(cfg.TargetState)]; !terminal {

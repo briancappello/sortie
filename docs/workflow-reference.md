@@ -33,7 +33,7 @@
   - [3.6 Fields Not Overridable via Env](#36-fields-not-overridable-via-env)
   - [3.7 Dynamic Reload](#37-dynamic-reload)
 - [4. Extensions](#4-extensions)
-  - [4.1 HTTP Server (`server.port`, `server.host`)](#41-http-server-serverport-serverhost)
+  - [4.1 HTTP Server (`server.port`, `server.host`, `server.control_token`)](#41-http-server-serverport-serverhost-servercontrol_token)
   - [4.2 `logging.level` — Log Verbosity](#42-logginglevel--log-verbosity)
   - [4.3 `worker` — SSH Worker Extension](#43-worker--ssh-worker-extension)
   - [4.4 `token_rates` — Cost Estimation](#44-token_rates--cost-estimation)
@@ -180,8 +180,8 @@ tracker:
 | `api_key`         | string          | When adapter requires it  | _(none)_        | Future dispatches                  | API authentication token. May be a literal or `$VAR_NAME`. If `$VAR_NAME` resolves to empty, treated as missing. The `jira`, `github`, `linear`, `gitea`, and `gitlab` adapters require this field; `file` does not. Full env expansion applied (`$VAR` at any position). |
 | `project`         | string          | When adapter requires it  | _(none)_        | Future dispatches                  | Project identifier. Interpretation is adapter-defined: Jira project key, GitHub or Gitea `owner/repo`, GitLab namespace path (`group/project`) or numeric project ID, or Linear team key (e.g., `ENG`). Supports `$VAR` indirection: if the value starts with `$`, it is expanded via `os.ExpandEnv`. |
 | `api_version`     | string          | No                        | `"3"`           | Future dispatches                  | Jira REST API version selector: `"3"` (Cloud) or `"2"` (Server / Data Center). Supports `$VAR` indirection. Quote the value: a bare integer (`api_version: 2`) is coerced to its decimal string but emits a validation advisory. Adapters other than Jira ignore this field. `sortie validate` rejects a value other than `"2"` or `"3"`, and rejects `"2"` against an `.atlassian.net` endpoint. |
-| `active_states`   | list of strings | **Yes** (see rules below) | `[]` (empty)    | Future dispatch and reconciliation | Issue states eligible for agent dispatch. An issue is eligible for dispatch only if its state appears in this list. An empty list means no issues will be dispatched.                           |
-| `terminal_states` | list of strings | **Yes** (see rules below) | `[]` (empty)    | Future dispatch and reconciliation | Issue states that release claims and trigger cleanup.                                                                                                                                           |
+| `active_states`   | list of strings | **Yes** (see rules below) | `[]` (empty)    | Future dispatch, reconciliation, and tracker operations | Issue states eligible for agent dispatch. An issue is eligible for dispatch only if its state appears in this list. An empty list dispatches nothing. No tracker supplies a default list, and an entry cannot be blank.                           |
+| `terminal_states` | list of strings | **Yes** (see rules below) | `[]` (empty)    | Future dispatch, reconciliation, and tracker operations | Issue states that release claims and trigger cleanup. Required and non-empty for `github`, `gitea`, and `gitlab`, where a closed issue reads as the first entry. No tracker supplies a default list, and an entry cannot be blank. |
 | `query_filter`    | string          | No                        | `""` (empty)    | Future dispatches                  | Adapter-defined query fragment that narrows the candidate issue query and, for adapters that apply it there, the terminal-state query. Each adapter interprets it in its own query language. For Jira: JQL fragment (e.g., `"labels = 'agent-ready'"`). For Linear: an `IssueFilter` JSON object, merged rather than appended (see the Linear note below). For Gitea: a URL query fragment for the repo issue-list route, merged into candidate polling only (see the Gitea note below). For GitLab: a URL query fragment for the project issue-list route, key-checked against an allowlist and merged into candidate polling only (see the GitLab note below). |
 | `handoff_state`   | string          | No                        | _(absent)_      | Future worker exits                | Target tracker state for orchestrator-initiated handoff after successful worker run. When absent, no handoff transition is performed. The transition is suppressed when the issue has already reached a terminal state, and withheld when the run's frozen `handoff_evidence` policy does not permit the write ([architecture §11.5](architecture/11-issue-tracker-integration-contract.md#115-tracker-writes-important-boundary)). When the run's rule carries `next` and the hop is made, the exit adds the next rule's stage label in place of this transition, so the transition happens only when the hop is not made ([Stage chains](#stage-chains)). Required when any dispatch rule carries `next`. |
 | `handoff_evidence` | string         | No                        | `observed`      | Future worker attempts             | Policy governing the evidence condition on an otherwise-eligible handoff. `observed` withholds only when absence of work is positively observed and allows an undeterminable verdict; `strict` also withholds an undeterminable verdict; `off` restores the prior four-condition decision and performs no baseline capture, exit-time workspace inspection, or evidence logging. Values outside `observed`, `strict`, and `off` are rejected as a closed set while configuration is parsed, without contacting the tracker, so startup, reload, and `sortie validate` all reject the same value. See [architecture §6.4](architecture/06-configuration-specification.md#64-config-fields-summary-cheat-sheet) for the verdict's derivation. |
@@ -191,8 +191,11 @@ tracker:
 
 **`active_states` / `terminal_states` validation rules:**
 
-- Both default to empty. At startup, if **both** lists are empty, validation fails with an error — at least one of the two must be configured.
-- An issue is dispatch-eligible only if its tracker state appears in `active_states`. With an empty `active_states` list no issues will be dispatched even if other configuration is valid.
+- Neither list has a default, on any tracker. At startup, if **both** lists are empty, validation fails with an error, because at least one of the two must be configured.
+- An issue is dispatch-eligible only if its tracker state appears in `active_states`. With an empty `active_states` list no issues will be dispatched even if other configuration is valid, and `sortie validate` warns under check `tracker.active_states.empty`.
+- The `github`, `gitea`, and `gitlab` trackers require a non-empty `terminal_states`, because a closed issue reads as its first entry. An empty list fails the load under check `config.tracker.terminal_states`.
+- An entry that is empty or only white space fails the load on every tracker, under check `config.tracker.active_states[<i>]` or `config.tracker.terminal_states[<i>]`.
+- A reload that breaks any of these rules keeps the previous configuration.
 
 **`handoff_state` validation rules:**
 
@@ -200,7 +203,7 @@ tracker:
 - When set, must be a non-empty string after `$VAR` resolution. Empty resolution is a configuration error.
 - Must **not** appear in `active_states` (would cause immediate re-dispatch after handoff).
 - Must **not** appear in `terminal_states` (handoff is not terminal — the issue may return to active for further work).
-- Both list checks compare against the effective lists. When `active_states` or `terminal_states` is empty, the effective list is the tracker adapter's own fallback list, and the dispatch preflight reports the collision under check `tracker.handoff_state`.
+- Both list checks compare against the lists as written, and the dispatch preflight reports the collision under check `tracker.handoff_state`.
 - Must be set when any `dispatch.rules[*]` entry carries `next`: the last stage of a chain, and every stage whose hop is not made, ends on this state. The load fails otherwise (see [Section 9.2](#92-configuration-errors)).
 - Requires **write permissions** on the tracker API token. For Jira: `write:jira-work` (classic) or `write:issue:jira` (granular).
 
@@ -210,7 +213,7 @@ tracker:
 - Where the run's rule carries `next`, the exit adds the next rule's stage label instead of writing this state, and the issue stays in its active state. The handoff transition is the fallback when the hop is not made. See [Stage chains](#stage-chains).
 - The orchestrator resolves the freshest tracker observation available at worker exit, in order: reconciliation's observation, then the worker's own per-turn state refresh, then the dispatch-time snapshot. A terminal result suppresses the handoff transition, the continuation retry, and every pending reaction enqueue for that exit.
 - When the resolved observation is not terminal, one verification read runs immediately before the handoff write or the hop, so a state change that landed after the last observation is still caught. The verification read is skipped when `terminal_states` is empty, because no value can classify as terminal there. A failed verification read is logged and the handoff or the hop proceeds.
-- A transition suppressed by a terminal state, or by the issue not being in an active state at worker exit, increments `sortie_handoff_transitions_total` with `result="skipped"`. A run withheld by the evidence verdict increments the same counter with `result="withheld"` instead, but only when its own verification read below does not find the issue terminal; when that read does find the issue terminal, the run increments `result="skipped"` instead (see [Section 4.1](#41-http-server-serverport-serverhost)). A made hop writes no handoff transition and increments the counter with no result.
+- A transition suppressed by a terminal state, or by the issue not being in an active state at worker exit, increments `sortie_handoff_transitions_total` with `result="skipped"`. A run withheld by the evidence verdict increments the same counter with `result="withheld"` instead, but only when its own verification read below does not find the issue terminal; when that read does find the issue terminal, the run increments `result="skipped"` instead (see [Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token)). A made hop writes no handoff transition and increments the counter with no result.
 
 **`handoff_evidence` runtime behavior:**
 
@@ -224,7 +227,7 @@ tracker:
 - Supports `$VAR` environment indirection and the `SORTIE_TRACKER_NO_CHANGE_STATE` environment override.
 - When set, must be a non-empty string after `$VAR` resolution. Empty resolution is a configuration error.
 - Requires `handoff_state` to be non-empty. A declared run performs no transition where no handoff path applies, so a `no_change_state` set with `handoff_state` unset is a configuration error rather than a silently inert field.
-- Must equal `handoff_state` (case-insensitive) or name a member of `terminal_states` exactly as written in front matter (case-insensitive). Unlike `handoff_state` and `in_progress_state`, this check never falls back to the tracker adapter's default terminal-state list, so the check is entirely offline and confined to the two values written in configuration.
+- Must equal `handoff_state` (case-insensitive) or name a member of `terminal_states` exactly as written in front matter (case-insensitive). The check is entirely offline and confined to the two values written in configuration.
 - This is the one target-state field permitted to equal a value that is also a member of `terminal_states`; every sibling target-state field is rejected on that collision.
 
 **`no_change_state` runtime behavior:**
@@ -241,7 +244,7 @@ tracker:
 - Must appear in `active_states` (case-insensitive). If the issue transitions to a state outside `active_states`, reconciliation would immediately cancel the worker.
 - Must **not** appear in `terminal_states` (case-insensitive). A terminal state would trigger workspace cleanup on the next reconciliation tick.
 - Must **not** collide with `handoff_state` (case-insensitive). The two transitions represent different lifecycle phases — dispatch vs. exit.
-- The `terminal_states` check compares against the effective list. When `terminal_states` is empty, the effective list is the tracker adapter's own fallback list, and the dispatch preflight reports the collision under check `tracker.in_progress_state`. The `active_states` membership check compares against the workflow list as written, because dispatch and reconciliation gate on that list.
+- Both list checks compare against the lists as written, because dispatch and reconciliation gate on those lists. The dispatch preflight reports a collision under check `tracker.in_progress_state`.
 - Transition failure at runtime is non-fatal: the worker logs a warning and continues to workspace preparation.
 - If the issue is already in the target state (case-insensitive), the transition API call is skipped and a debug-level message is logged.
 - Requires **write permissions** on the tracker API token (same as `handoff_state`).
@@ -257,7 +260,7 @@ The Linear adapter talks to Linear's single GraphQL endpoint. Configure it with 
 - `endpoint` defaults to `https://api.linear.app/graphql` and rarely needs to be set, since there is no self-hosted Linear.
 - `api_key` is a Linear personal API key (it carries the `lin_api_` prefix). The key is sent verbatim in the `Authorization` header with no `Bearer` prefix, so leading or trailing whitespace fails authentication. Supply it through environment indirection like any other tracker, for example `api_key: $SORTIE_LINEAR_API_KEY`. The key resolves through the standard `tracker.api_key` field (env override `SORTIE_TRACKER_API_KEY`); `SORTIE_LINEAR_API_KEY` is the conventional variable name the `sortie validate` advisory suggests, not a separate config path.
 - `project` is the Linear **team key** (the prefix in identifiers such as `ENG-123`), for example `ENG`. It is not a Linear project and not an `owner/repo` path. Team scoping is required because Linear workflow states are team-scoped.
-- `active_states`, `terminal_states`, and `handoff_state` name Linear **workflow states** by their display name (for example `Backlog`, `Todo`, `In Progress`, `Done`, `Canceled`). The adapter matches names case-insensitively and verifies at startup that every configured name exists in the team. When `active_states` or `terminal_states` is omitted or set to an empty list, the adapter applies the stock Linear defaults: active `["Backlog", "Todo", "In Progress"]`, terminal `["Done", "Canceled", "Duplicate"]`. The general rule that an empty `active_states` pauses dispatch (see the field table above) does not hold for Linear: an empty list is replaced by the defaults, so emptying it does not stop dispatch.
+- `active_states`, `terminal_states`, and `handoff_state` name Linear **workflow states** by their display name (for example `Backlog`, `Todo`, `In Progress`, `Done`, `Canceled`). The adapter matches names case-insensitively and verifies at startup that every configured name exists in the team. The adapter applies no default lists: both lists are configured like any other tracker's, and an empty `active_states` dispatches nothing.
 
 `handoff_state` and `in_progress_state` also name Linear workflow states. At transition time the adapter resolves the configured name to its team-scoped workflow-state id and applies it. Linear imposes no transition graph, so any state can move to any state.
 
@@ -300,11 +303,11 @@ The Gitea adapter talks to a self-hosted Gitea instance over the Gitea REST API 
 - `endpoint` is the instance base URL (for example `https://gitea.example.com`) and is required: there is no default host, because Gitea is self-hosted. Supply the site root; the adapter trims a trailing slash and appends `/api/v1`, and tolerates an endpoint that already ends in `/api/v1`. Use `https`, since the token travels in a request header.
 - `api_key` is a Gitea access token. The adapter sends it verbatim as `Authorization: token <key>` (the canonical Gitea scheme, not a `Bearer` prefix), so leading or trailing whitespace fails authentication. Supply it through environment indirection like any other tracker, for example `api_key: $SORTIE_GITEA_TOKEN`. The key resolves through the standard `tracker.api_key` field (env override `SORTIE_TRACKER_API_KEY`); `SORTIE_GITEA_TOKEN` is the conventional variable name the `sortie validate` advisory suggests, not a separate config path.
 - `project` is the repository in **`owner/repo`** form (for example `sortie-ai/sortie`): exactly one slash, with a non-empty owner and repository.
-- `active_states`, `terminal_states`, and `handoff_state` name repository **labels**, compared case-insensitively (the adapter lowercases them). The adapter carries internal fallback labels (active `["backlog", "in-progress", "review"]`, terminal `["done", "wontfix"]`) that it applies when the matching list is omitted or empty, both to derive an issue's state from its labels and to narrow its own candidate query. The dispatch preflight also checks `handoff_state` and `in_progress_state` against the fallback list when the matching workflow list is empty. But the orchestrator gates dispatch and reconciliation on the workflow's `tracker.active_states` and `tracker.terminal_states`, so the field-table rule above holds for Gitea. An empty `active_states` dispatches nothing, and validation rejects a workflow with both lists empty. Configure `active_states` with the labels a dispatched Gitea issue must carry.
+- `active_states`, `terminal_states`, and `handoff_state` name repository **labels**, compared case-insensitively (the adapter lowercases them). The adapter carries no default labels. An open issue is dispatched only when it carries a label from `active_states`, so labeling an issue is how an operator hands it to Sortie, and an open issue with none of the configured state labels is left alone. `terminal_states` must be non-empty, because a closed issue reads as its first entry. An empty `active_states` dispatches nothing, and validation rejects a workflow with both lists empty. Configure `active_states` with the labels a dispatched Gitea issue must carry.
 
-Gitea has no transition workflow, so the adapter derives an issue's state from its labels: it scans the configured active, terminal, then handoff labels in order and takes the first match. An issue carrying no configured state label falls back to the first active label when it is open and the first terminal label when it is closed. A configured label that does not yet exist in the repository is created on demand the first time an issue transitions into it.
+Gitea has no transition workflow, so the adapter derives an issue's state from its labels: it scans the configured terminal, then handoff, then active labels in list order and takes the first match. A closed issue reads as the first terminal label it carries, otherwise as the first entry of `terminal_states`. An open issue carrying no configured state label is in no state and is not dispatched. A running issue whose state label is removed stops at the second consecutive poll that reads no state label, and its workspace stays. An issue carrying more than one configured state label logs a warning and keeps the first match. The adapter warns once about each active label that neither the repository nor its organization has, `in_progress_state` excepted, and `sortie --dry-run` logs how many open issues it skipped for carrying no state label. A configured label that does not yet exist in the repository is created on demand the first time an issue transitions into it.
 
-`handoff_state` and `in_progress_state` also name repository labels. At transition time the adapter swaps the issue's current state label for the target label; a move to a terminal label also closes the issue, and a move to an active label reopens a closed one. Gitea imposes no transition graph, so any state can move to any state. The dispatch-time `in_progress_state` transition runs through this same label swap, so its generic validation rules (must appear in `active_states`, must not collide with `terminal_states` or `handoff_state`) apply unchanged.
+`handoff_state` and `in_progress_state` also name repository labels. At transition time the adapter adds the target label first, then removes the labels of the other configured states, so the issue never reads as being in no state between the two writes. A move to a terminal label then closes the issue, and a move to an active label reopens a closed one. A move to the handoff state is refused for a closed issue. The issue carries the labels of exactly one configured state afterward, and labels outside the configured states are never touched. Gitea imposes no transition graph, so any open issue can move to any configured state. The dispatch-time `in_progress_state` transition runs through this same label swap, so its generic validation rules (must appear in `active_states`, must not collide with `terminal_states` or `handoff_state`) apply unchanged.
 
 **Gitea `query_filter`:** For `kind: gitea`, `query_filter` is a URL query fragment for Gitea's repository issue-list route, not a string predicate or a JSON object. The adapter parses it with `url.ParseQuery` and merges the parameters into candidate polling, so an operator can scope which open issues the agent picks up (for example, to issues assigned to or mentioning the automation identity). Parameters combine with `&`. Rules:
 
@@ -348,13 +351,13 @@ The GitLab adapter talks to GitLab.com or a self-managed instance over the GitLa
 - `endpoint` is the instance base URL (for example `https://gitlab.example.com`) and is optional: it defaults to `https://gitlab.com`, so a GitLab.com workflow omits it and a self-managed workflow sets it. Supply the site root; the adapter trims a trailing slash and appends `/api/v4`, and tolerates an endpoint that already ends in `/api/v4`, though `sortie validate` warns about the redundant suffix. Use `https`, since the token travels in a request header; a cleartext `http` endpoint also draws a validation warning.
 - `api_key` is a GitLab access token: personal, project, or group. The adapter sends it verbatim in the `PRIVATE-TOKEN` header, so leading or trailing whitespace fails authentication. The token needs the `api` scope, which is the only classic scope that permits issue writes; `read_api` suffices only for a deployment that never transitions an issue, posts a comment, or attaches a label. A project access token is the least-privilege choice, because GitLab confines it to one project server-side, and a self-managed instance offers that token type at any license. On GitLab.com it requires a Premium or Ultimate subscription, so a Free namespace uses a personal access token. Supply the token through environment indirection like any other tracker, for example `api_key: $SORTIE_GITLAB_TOKEN`. The key resolves through the standard `tracker.api_key` field (env override `SORTIE_TRACKER_API_KEY`); `SORTIE_GITLAB_TOKEN` is the conventional variable name the `sortie validate` advisory suggests, not a separate config path.
 - `project` is the project's full namespace path (for example `group/project`) or its numeric project ID (for example `"1"`, quoted so YAML keeps it a string). GitLab nests subgroups to any depth, so `group/subgroup/project` is equally valid and the adapter enforces no one-slash rule, unlike the GitHub and Gitea `owner/repo` grammar. A project in a user namespace works the same way. Write the path unencoded: the adapter percent-encodes it once for the API path, and `sortie validate` rejects a value that is already percent-encoded.
-- `active_states`, `terminal_states`, and `handoff_state` name project or group **labels**, compared case-insensitively (the adapter lowercases them). The adapter carries internal fallback labels (active `["backlog", "in-progress", "review"]`, terminal `["done", "wontfix"]`) that it applies when the matching list is omitted or empty, both to derive an issue's state from its labels and to decide which issues are candidates. The dispatch preflight also checks `handoff_state` and `in_progress_state` against the fallback list when the matching workflow list is empty. But the orchestrator gates dispatch and reconciliation on the workflow's `tracker.active_states` and `tracker.terminal_states`, so the field-table rule above holds for GitLab. An empty `active_states` dispatches nothing, and validation rejects a workflow with both lists empty. Configure `active_states` with the labels a dispatched GitLab issue must carry.
+- `active_states`, `terminal_states`, and `handoff_state` name project or group **labels**, compared case-insensitively (the adapter lowercases them). The adapter carries no default labels. An open issue is dispatched only when it carries a label from `active_states`, so labeling an issue is how an operator hands it to Sortie, and an open issue with none of the configured state labels is left alone. `terminal_states` must be non-empty, because a closed issue reads as its first entry. An empty `active_states` dispatches nothing, and validation rejects a workflow with both lists empty. Configure `active_states` with the labels a dispatched GitLab issue must carry.
 
-GitLab has no transition workflow, so the adapter derives an issue's state from its labels: it scans the configured active, terminal, then handoff labels in order and takes the first match. An issue carrying no configured state label falls back to the first active label when it is open and the first terminal label when it is closed. An issue carrying more than one configured state label logs a warning and keeps the first.
+GitLab has no transition workflow, so the adapter derives an issue's state from its labels: it scans the configured terminal, then handoff, then active labels in list order and takes the first match. A closed issue reads as the first terminal label it carries, otherwise as the first entry of `terminal_states`. An open issue carrying no configured state label is in no state and is not dispatched. A running issue whose state label is removed stops at the second consecutive poll that reads no state label, and its workspace stays. An issue carrying more than one configured state label logs a warning and keeps the first match. The adapter warns once about each active label the project does not hold, inherited group labels included and `in_progress_state` excepted, and `sortie --dry-run` logs how many open issues it skipped for carrying no state label.
 
 GitLab label names are case-sensitive, and attaching a name no label matches creates that label rather than failing. Configuring `review` for a project that already holds `Review` would therefore leave the project with two near-duplicate labels. To prevent that, the adapter reads the project label catalog at startup, project labels and inherited group labels alike, and rewrites every configured state label to the casing the project already stores. Spell the configured labels however you like; the adapter writes the project's spelling. A configured label the project does not hold yet is not an error: it is created the first time an issue transitions into it.
 
-`handoff_state` and `in_progress_state` also name labels. At transition time the adapter swaps the issue's current state label for the target label and reconciles the native status in a single request: a move to a terminal label also closes the issue, and a move to an active label reopens a closed one. GitLab imposes no transition graph, so any state can move to any state, and a transition that is already converged issues no write at all. The dispatch-time `in_progress_state` transition runs through this same label swap, so its generic validation rules (must appear in `active_states`, must not collide with `terminal_states` or `handoff_state`) apply unchanged.
+`handoff_state` and `in_progress_state` also name labels. At transition time the adapter adds the target label and removes the labels of the other configured states in one update request, and checks the labels in the response. A move to a terminal label then closes the issue, and a move to an active label reopens a closed one, each in a request of its own, because GitLab commits a state change before the labels of the same request. A move to the handoff state is refused for a closed issue. The issue carries the labels of exactly one configured state afterward, and labels outside the configured states are never touched. GitLab imposes no transition graph, so any open issue can move to any configured state, and a transition that is already converged issues no write at all. The dispatch-time `in_progress_state` transition runs through this same label swap, so its generic validation rules (must appear in `active_states`, must not collide with `terminal_states` or `handoff_state`) apply unchanged.
 
 **GitLab `query_filter`:** For `kind: gitlab`, `query_filter` is a URL query fragment for GitLab's project issue-list route, not a string predicate or a JSON object. The adapter parses it with `url.ParseQuery` and merges the parameters into candidate polling, so an operator can scope which open issues the agent picks up. Parameters combine with `&`. Every rejection below happens at startup, before the first poll, and `sortie validate` reports the same verdict offline by running the same parser. Rules:
 
@@ -536,6 +539,21 @@ agent:
 **Orchestrator vs adapter fields:** The fields above are consumed by the orchestrator for scheduling, concurrency, and retry decisions. They are **not** passed through to the agent adapter. Adapter-specific configuration uses separate pass-through blocks — see [Section 4.5](#45-adapter-specific-pass-through-config).
 
 **Credential verification:** Before the working session's first turn, every worker run proves the runtime completes one model request with its credential, on every agent kind and every remote host. There is nothing to configure. The step costs one model request at the configured model's rate and one short runtime start each time Sortie starts work on an issue. A failure stops the run before any work and is retried with exponential backoff, `credential_unverified` in the log and the run history. An agent that exits before it responds, on a switch in `agent.command` it does not accept or on a credential it rejects only by printing a message and exiting, is reported as `port_exit` with its exit status and the end of what it wrote to standard error, not as `credential_unverified`. A working turn whose agent exits before it responds is reported the same way. A protocol runtime that offers no way to delete its own session keeps one small leftover conversation per worker run; every other kind leaves none.
+
+**Agent process environment:** Every process Sortie starts for an agent session, the credential verification, each turn, and each one-shot command an adapter runs for the session, receives the variables below, so the agent or a wrapper in `agent.command` knows which issue, stage, and run it serves. Each value overrides a variable of the same name in Sortie's own environment, and an empty value is still set. On an SSH worker the variables reach the remote agent the same way as other carried variables, on the SSH session's standard input, never in the command line. Sortie changes no other variable for this purpose, and never places `server.control_token` in an agent's environment.
+
+| Variable                  | Value                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `SORTIE_ISSUE_ID`         | Stable tracker-internal issue ID.                                                                       |
+| `SORTIE_ISSUE_IDENTIFIER` | Human-readable ticket key (e.g., `PROJ-123`).                                                            |
+| `SORTIE_DISPATCH_ID`      | The run's dispatch ID, the same value the tool server receives.                                          |
+| `SORTIE_ATTEMPT`          | Empty for a first dispatch, otherwise the retry number. The run history's `attempt` is this value plus one. |
+| `SORTIE_RULE`             | The dispatch rule the run was dispatched under; empty when no named rule applied.                        |
+| `SORTIE_CHAIN_ID`         | The stage chain the run belongs to, as recorded in run history.                                          |
+| `SORTIE_WORKSPACE`        | Absolute path to the per-issue workspace directory.                                                      |
+| `SORTIE_API_URL`          | Base URL of Sortie's HTTP server (for example `http://127.0.0.1:7678`), or empty when the server is off. A server bound to `0.0.0.0` or `::` is named by its loopback address. |
+| `SORTIE_SESSION_PURPOSE`  | `credential-check` for the credential verification, `work` for the working session.                       |
+| `SORTIE_SESSION_TOKEN`    | Working session only. A random token that authorizes the per-issue control routes of this issue only, and stops working when the run ends. See [Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token). |
 
 ---
 
@@ -973,7 +991,7 @@ Fields:
 | `escalation`       | string  | `label`       | Requires restart  | Escalation action when retries are exhausted. One of `label`, `comment` (deprecated), or `none`.  |
 | `escalation_label` | string  | `needs-human` | Requires restart  | Label applied when `escalation` is `label`.                                                       |
 
-**Tracker prerequisites:** two `tracker` fields must be set before this block activates, and each is enforced offline. `tracker.handoff_state` must be non-empty: it is the state a merge waits in, and pending-reaction recovery across a restart is disabled entirely without it. `tracker.terminal_states` must be written out in front matter rather than left to the tracker adapter's default list: the reconcile pass and the terminal workspace sweep both read the list exactly as configured, with no fallback to an adapter default, so a defaulted list would let the validator accept a `target_state` the runtime never treats as terminal.
+**Tracker prerequisites:** two `tracker` fields must be set before this block activates, and each is enforced offline. `tracker.handoff_state` must be non-empty: it is the state a merge waits in, and pending-reaction recovery across a restart is disabled entirely without it. `tracker.terminal_states` must be written out in front matter: the reconcile pass and the terminal workspace sweep both read the list exactly as configured, and no tracker supplies a default, so the validator accepts a `target_state` only from a list the runtime treats as terminal.
 
 **Activation:** The `reactions.merge_completion` block is active when `provider` is present and non-empty, on its own, with no other `reactions` block required. Agent-created PRs MUST write `pr_number` (positive integer), `owner`, and `repo` (all non-empty) to `.sortie/scm.json` in the workspace for merge-completion polling to activate; unlike the checkout-bearing kinds, no `branch` is required because the reaction performs no checkout.
 
@@ -1031,7 +1049,7 @@ reactions:
 - `review_label` and `fix_label` for `label_commands` must be strings; each defaults to a non-empty value, and an explicit `""` disables that command.
 - `poll_interval_ms` below `30000` for `label_commands` is clamped up to `30000` with a warning, not rejected.
 - For `label_commands`, setting `provider` while both `review_label` and `fix_label` are `""` is a configuration error surfaced offline by `sortie validate`.
-- `target_state` for `merge_completion` is required, must not equal `tracker.handoff_state`, must not be a member of `tracker.active_states` (falling back to the tracker adapter's default active states when that list is empty), and must be a member of `tracker.terminal_states` as written, with no fallback to the adapter's default terminal states.
+- `target_state` for `merge_completion` is required, must not equal `tracker.handoff_state`, must not be a member of `tracker.active_states`, and must be a member of `tracker.terminal_states`, both as written.
 - `tracker.handoff_state` must be set and `tracker.terminal_states` must be non-empty in front matter when `reactions.merge_completion.provider` is set; each is reported as a configuration error naming the tracker field.
 - `poll_interval_ms` must be >= `30000` for `merge_completion`.
 - When `provider` is absent or empty, all other fields in the kind sub-object are ignored.
@@ -1143,7 +1161,7 @@ An issue that carries the labels of several staged rules runs on the one step 2 
 
 A stage label must not equal a state name or a label that Sortie applies to issues, so that placing an issue on a stage never doubles as a state change or an escalation. `sortie validate`, startup, and the check before each tick reject a stage label that equals, ignoring case:
 
-- an entry of `tracker.active_states` or `tracker.terminal_states`, or an entry of the tracker adapter's own list when the workflow leaves that list empty;
+- an entry of `tracker.active_states` or `tracker.terminal_states`;
 - `tracker.handoff_state`, `tracker.in_progress_state`, or `tracker.no_change_state`, when set;
 - the `escalation_label` of a reaction;
 - the parking label, which is the `escalation_label` of `reactions.review_comments` and `needs-human` when that reaction does not write one.
@@ -1196,14 +1214,14 @@ A hop is made only where the handoff write would have been taken: not after a bl
 
 A failed label removal after a successful add still counts as a hop. The old label stays on the issue, the next stage runs, and Sortie logs a `Warn` record, `stage hop made, stage labels left on the issue`, that names the labels left. Step 1 of the selection picks the new stage over the old label.
 
-**Waiting for the label.** After a hop, Sortie dispatches the issue on no rule until a read shows the label the hop added. A tracker listing can lag a write, and without this wait the previous stage would run again. When the poll listing lacks the label, Sortie reads the issue once, directly. A read that shows the label dispatches the next stage. A read that shows an issue in a terminal state, or outside the active states, resets the count and dispatches nothing. A read that shows neither stage label releases the wait and routes the issue by the labels the read returned, with a log record, `stage hop target label absent, hold released`. A failed read holds the issue until the next tick. Once a read has shown the label, the wait is over, and it stays over across a restart.
+**Waiting for the label.** After a hop, Sortie dispatches the issue on no rule until a read shows the label the hop added. A tracker listing can lag a write, and without this wait the previous stage would run again. When the poll listing lacks the label, Sortie reads the issue once, directly. A read that shows the label dispatches the next stage. A read that shows an issue in a terminal state, or outside the active states, resets the count and dispatches nothing. A read that shows an issue with no state label holds it for that tick, and reconciliation resets the count only when the next reading also shows none, because a healthy label edit can show an issue with no state label for a moment. A read that shows neither stage label releases the wait and routes the issue by the labels the read returned, with a log record, `stage hop target label absent, hold released`. A failed read holds the issue until the next tick. Once a read has shown the label, the wait is over, and it stays over across a restart.
 
 **The ceiling.** `dispatch.max_consecutive_hops` bounds the hops Sortie makes on one issue in a row, so a chain that label automation or a mistake keeps re-entering cannot run without end. The value is a positive integer and at least the number of hops in the longest chain, which is the length of that chain minus one. When it is absent or null, the ceiling is the larger of `10` and that number of hops. A count at the ceiling makes the exit take the handoff write, and that write resets the count.
 
 The count is kept per issue in the database and resets when:
 
 - an exit writes the handoff state, or the run ends on a terminal state or an issue that is not active;
-- Sortie sees the issue in a terminal state or outside the active states, during reconciliation, a retry, or the wait above;
+- Sortie sees the issue in a terminal state or outside the active states, during reconciliation, a retry, or the wait above, where a reading with no state label counts only when the next reading also shows none;
 - a park is placed on the issue, or released.
 
 Each reset logs `stage hop count reset` with the `trigger`. Moving a stage label while the issue stays active does not reset the count, and neither does a failed handoff write, a withheld verdict, a reload, or reaching the ceiling. Reconciliation reads every issue that holds a hop record on each tick, whether or not it is running.
@@ -1546,6 +1564,7 @@ The catalog is closed. Validation accepts exactly these names and rejects any ot
 | `budget.held` | An issue is held out of dispatch by `agent.max_sessions` or `agent.max_tokens`. | `warning` |
 | `stage.advanced` | A stage hop is made: the issue moves to the next stage, even when removing an old stage label failed ([Stage chains](#stage-chains)). | `info` |
 | `stage.not_advanced` | A stage hop is due and not made, because the label add failed or the hop ceiling is reached. The event carries the reason, `failed` or `ceiling`. | `warning` |
+| `session.escalated` | A caller acting for a running session, normally an ACP broker relaying an agent's question or permission request, posts to `POST /api/v1/{identifier}/escalate` ([Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token)). At most one per issue per 60 seconds. The caller's text arrives masked of registered secrets as `agent_text`, and the event carries the kind, the run's rule, and the session link. A destination receives it only when its `events` lists it; nothing subscribes to it implicitly. | `warning` |
 | `agent.message` | The agent calls `notify_operator`. | Set by the agent. |
 
 A run cancelled by Sortie produces no session event. Sortie never counts its own events against `max_per_session`, and an agent that has used its cap never suppresses one.
@@ -1658,8 +1677,9 @@ The `webhook` backend posts a JSON object whose keys use the generic notifier vo
 | `body` | string | Notification detail: the agent's own for `agent.message`, and the text Sortie posts as the comment for an event it produces. |
 | `category` | string | Optional: `decision_needed`, `progress`, `blocked`, `completed`, or `other`. Absent when the agent did not set it. |
 | `event_type` | string | The event type from the catalog above. Present only on an event Sortie produces. An `agent.message` payload carries exactly the keys above and no `event_type`, so an endpoint configured before this key existed receives the same JSON as before. |
-| `agent_text` | string | The agent's reason for stopping, after the cleanup described in [The agent's reason on a stop](#the-agents-reason-on-a-stop). Present only on a `session.stopped` event whose agent wrote a reason, and never inside `body`. |
+| `agent_text` | string | On `session.stopped`, the agent's reason for stopping, after the cleanup described in [The agent's reason on a stop](#the-agents-reason-on-a-stop), present only when the agent wrote one. On `session.escalated`, the escalation's message, masked of registered secrets. Never inside `body`. |
 | `stage` | object | The hop decision, with the keys `source_rule`, `target_rule`, `chain_id`, `hop_count`, and, on `stage.not_advanced` only, `reason`. Present only on a `stage.advanced` or `stage.not_advanced` event. |
+| `escalation` | object | On `session.escalated` only: `kind` (`question`, `permission`, or `other`), `rule` (the run's dispatch rule, `""` when none), and `url` when the caller gave one. |
 
 **`SORTIE_`-prefixed secret rule:**
 
@@ -1851,20 +1871,28 @@ For configuration values that need to change without restarting, use the `.env` 
 
 The front matter is extensible. Unknown top-level keys are collected into an `Extensions` map and are not validated by the core schema. Extensions should document their own field schemas, defaults, and reload behavior.
 
-### 4.1 HTTP Server (`server.port`, `server.host`)
+### 4.1 HTTP Server (`server.port`, `server.host`, `server.control_token`)
 
 ```yaml
 server:
   port: 9090
   host: "0.0.0.0"
+  control_token: $SORTIE_CONTROL_TOKEN
 ```
 
-| Field         | Type        | Required | Default     | Dynamic Reload            | Description                                                                     |
-| ------------- | ----------- | -------- | ----------- | ------------------------- | ------------------------------------------------------------------------------- |
-| `server.port` | integer     | No       | `7678`      | **No** — requires restart | TCP port for the embedded HTTP observability server. `0` disables the server.    |
-| `server.host` | string (IP) | No       | `127.0.0.1` | **No** — requires restart | Bind address for the HTTP server. Must be a parseable IP address.               |
+| Field                  | Type        | Required                                   | Default     | Dynamic Reload            | Description                                                                     |
+| ---------------------- | ----------- | ------------------------------------------ | ----------- | ------------------------- | ------------------------------------------------------------------------------- |
+| `server.port`          | integer     | No                                         | `7678`      | **No** — requires restart | TCP port for the embedded HTTP observability server. `0` disables the server.    |
+| `server.host`          | string (IP) | No                                         | `127.0.0.1` | **No** — requires restart | Bind address for the HTTP server. Must be a parseable IP address.               |
+| `server.control_token` | string      | When the bind address is not loopback      | _(unset)_   | **No** — requires restart | Bearer token every state-changing endpoint requires. Supports `$VAR` indirection and is masked in logs. |
 
 Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observability and operational control. `server.port` overrides the default port; `server.host` overrides the default bind address. CLI `--port` and `--host` flags take precedence over their extension counterparts. Port `0` disables the server entirely (no TCP listener, no Prometheus metrics).
+
+**Control authentication.** The endpoints that change Sortie's runtime state, `POST /api/v1/refresh` and the per-issue control routes below, require `Authorization: Bearer <token>` once `server.control_token` is set. A missing or unknown token receives `401` and Sortie takes no action. Without a control token, those endpoints accept requests with no token, and Sortie refuses to start when the bind address (`server.host` or `--host`) is not a loopback address, with a configuration error that names `server.control_token`. Read-only endpoints, the dashboard, `/api/v1/state`, the per-issue detail, `/livez`, `/readyz`, and `/metrics`, never require a token. Sortie removes every variable of its own environment that holds the control token's value at startup, so agents, hooks, and the tool server never inherit it.
+
+**Session tokens.** Each working session receives its own token in `SORTIE_SESSION_TOKEN` (see [Section 2.6](#26-agent--coding-agent-configuration)); the credential verification receives none. A session token is accepted only on the per-issue control routes of its own issue, so a wrapper such as an ACP broker in `agent.command` can call them with no operator setup. It receives `403` on any other route, refresh included, or for another issue, and `401` once its run has ended. Session tokens live only in memory, are masked in logs, and are never stored.
+
+> **Migration (breaking):** a deployment that binds the server to a non-loopback address, such as a container started with `--host 0.0.0.0`, must set `server.control_token` before upgrading, for example `control_token: $SORTIE_CONTROL_TOKEN` with the variable supplied by your secret store. Without it Sortie exits at startup. A caller of `POST /api/v1/refresh` on such a deployment then sends `Authorization: Bearer <token>`.
 
 #### API Endpoints
 
@@ -1875,7 +1903,10 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, aggregate token/runtime totals, rate limits). |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier. Returns 404 for unknown issues. |
-| POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. |
+| POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Requires the control token when one is set; a session token receives 403. |
+| POST   | `/api/v1/{identifier}/hold`    | Hold the issue's running worker: pause its stall and turn clocks while a person works in its session. Optional body `{"reason": "...", "holder": "..."}`. 200 with the held state, 409 when the issue has no running worker, 404 when the identifier is unknown. Holding a held run keeps its original start. Control token or the issue's own session token. |
+| POST   | `/api/v1/{identifier}/release` | End the issue's hold. 200 with the hold state, also when the run was not held (nothing changes); 409 and 404 as for hold. Control token or the issue's own session token. |
+| POST   | `/api/v1/{identifier}/escalate` | Escalate the running issue to people through the `session.escalated` notification event. Body `{"message": "...", "kind": "question|permission|other", "url": "..."}`. 202 accepted (also when no destination lists the event), 400 for an empty message or an unknown kind, 409 when the issue has no running worker, 404 when the identifier is unknown, 429 within 60 seconds of the issue's last escalation. Control token or the issue's own session token. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
 All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints). Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
@@ -1971,7 +2002,12 @@ Returns the system-wide runtime state including running sessions, retry queue, a
       "usage_arrival": "incremental",
       "usage_attribution": "per_model",
       "tokens_pending": false,
-      "api_requests_measured": true
+      "api_requests_measured": true,
+      "held": false,
+      "hold_reason": "",
+      "holder": "",
+      "held_since": null,
+      "held_total_ms": 0
     }
   ],
   "retrying": [
@@ -2031,6 +2067,11 @@ Returns the system-wide runtime state including running sessions, retry queue, a
 | `usage_attribution`  | string            | The session's kind's declared usage-reporting attribution, frozen at dispatch: `per_model`, `session_total`, `none`, or `""` when undeclared. |
 | `tokens_pending`     | boolean           | True only when `usage_arrival` is `turn_end`, the session is measured, and the turn that figure would settle for is still in flight.      |
 | `api_requests_measured` | boolean        | True when `api_request_count` is a measurement of model API requests: `usage_arrival` is `incremental` and either a figure has arrived or no turn has begun. False for every other arrival, and for an `incremental` session past its first turn that has reported nothing. |
+| `held`               | boolean           | True while a caller holds the run through `POST /api/v1/{identifier}/hold`. |
+| `hold_reason`        | string            | The reason the current hold was given; empty when not held. |
+| `holder`             | string            | Who holds the run, as the hold request named it (for example `acp-broker`); empty when not held. |
+| `held_since`         | string or `null`  | When the current hold began (RFC 3339, UTC); `null` when not held. |
+| `held_total_ms`      | integer           | Time the run has spent held so far, in milliseconds, the current hold included. Recorded in run history as `held_ms` when the run ends. |
 
 **Aggregate totals:**
 
@@ -2133,6 +2174,51 @@ HTTP/1.1 409 Conflict
 
 Callers should check the `queued` field or HTTP status to determine whether the refresh will be processed. A `409` response indicates the server is draining and the caller should retry against another instance or wait for the restart.
 
+**Authentication rejection** — a control token is set and the request carries no token or a wrong one (`401`), or carries a session token (`403`):
+
+```http
+HTTP/1.1 401 Unauthorized
+{"error": {"code": "unauthorized", "message": "a bearer token is required"}}
+```
+
+#### `POST /api/v1/{identifier}/hold` and `/release` — Held Runs
+
+A hold tells Sortie that a person is working in an issue's running session, typically through an ACP broker that took the session over. While a run is held:
+
+- Stall detection skips it, however long its agent stays silent. When the hold ends, the stall clock restarts from the release, so the run counts as stalled no earlier than the release plus `agent.stall_timeout_ms`.
+- Its current turn is not ended for `agent.turn_timeout_ms`. The turn's deadline moves out by the time the turn spent held, so a 30-minute turn held for 10 minutes ends for timeout no earlier than 40 minutes after it began.
+- Tracker reconciliation and the `agent.max_tokens` ceiling still apply. An issue that turns terminal or leaves the active states is stopped as an unheld one is, and its hold ends.
+
+A hold ends on release, when reconciliation stops the run, or when its worker exits for any reason; the run's total held time is stored in run history as `held_ms`. Holds live in memory and do not survive a restart, as running workers do not. There is no time limit on a hold: watch `sortie_runs_held` and `held_since` to alert on a forgotten one.
+
+```http
+POST /api/v1/LIVE-1/hold
+Authorization: Bearer <token>
+
+{"reason": "human takeover", "holder": "acp-broker"}
+
+HTTP/1.1 200 OK
+{"issue_identifier": "LIVE-1", "issue_id": "10001", "held": true, "hold_reason": "human takeover", "holder": "acp-broker", "held_since": "2026-10-11T10:00:00Z", "held_total_ms": 0}
+```
+
+`release` takes no body and answers with the same shape, `held` false and `held_since` null.
+
+#### `POST /api/v1/{identifier}/escalate` — Operator Escalation
+
+Calls people about a running issue, through the destinations whose `notifications` entry lists `session.escalated` (Slack, webhook, a tracker comment). The ACP broker uses it when an agent's question or permission request waits without a viewer to answer it.
+
+```http
+POST /api/v1/LIVE-1/escalate
+Authorization: Bearer <token>
+
+{"message": "Which database should I target?", "kind": "question", "url": "https://viewer.example/LIVE-1"}
+
+HTTP/1.1 202 Accepted
+{"issue_identifier": "LIVE-1", "event_type": "session.escalated", "accepted": true}
+```
+
+`message` is required; `kind` defaults to `other`; `url` is optional. Sortie masks registered secrets in the message and the URL before routing. It delivers at most one escalation per issue per 60 seconds and answers later requests in that window with `429` (`rate_limited`), delivering nothing for them. An escalation no destination subscribes to is accepted and delivered nowhere, and Sortie logs one `session escalation had no destination` record for it. Error responses use the standard envelope with codes `issue_not_found` (404), `issue_not_running` (409), `invalid_request` (400, a malformed body), and `orchestrator_unavailable` (503, during shutdown).
+
 **Kubernetes probe configuration.** Sortie's graceful shutdown cancels running agents before closing the HTTP listener. Configure `terminationGracePeriodSeconds` and liveness probe tolerance to exceed the expected drain duration (default: 30 seconds):
 
 ```yaml
@@ -2182,6 +2268,8 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_ssh_host_usage`                         | Gauge     | `host`                      | Current session count per SSH host.                            |
 | `sortie_budget_exhaustions_total`               | Counter   | `reason`                    | Issue entries into the per-issue budget-exhausted set (`token_budget`, `session_budget`). |
 | `sortie_budget_exhausted_issues`                | Gauge     | `reason`                    | Issues currently held out of dispatch by a per-issue budget ceiling.                     |
+| `sortie_runs_held`                              | Gauge     | —                           | Running issues currently held through the hold endpoint.                                  |
+| `sortie_hold_seconds_total`                     | Counter   | `rule`                      | Seconds runs spent held, by dispatch rule (`<none>` when no rule), added as each hold ends. |
 
 Example scrape:
 
@@ -3113,8 +3201,8 @@ Sortie watches `WORKFLOW.md` for filesystem changes and automatically re-reads a
 | `tracker.endpoint`                     | Future dispatches.                                                                             |
 | `tracker.api_key`                      | Future dispatches.                                                                             |
 | `tracker.project`                      | Future dispatches.                                                                             |
-| `tracker.active_states`                | Future dispatch and reconciliation.                                                            |
-| `tracker.terminal_states`              | Future dispatch and reconciliation.                                                            |
+| `tracker.active_states`                | Future dispatch and reconciliation, and every tracker operation that starts after the reload.  |
+| `tracker.terminal_states`              | Future dispatch and reconciliation, and every tracker operation that starts after the reload.  |
 | `tracker.query_filter`                 | Future dispatches.                                                                             |
 | `tracker.handoff_state`                | Future worker exits, not in-flight sessions.                                                   |
 | `tracker.no_change_state`              | Future worker exits, not in-flight sessions.                                                   |
@@ -3202,23 +3290,25 @@ Before dispatching work, the orchestrator validates the workflow configuration. 
 | Every `next` names another rule that carries `stage` | `next` names no rule, names the rule that carries it, or names a rule without `stage`. |
 | No cycle of `next` links | Following `next` from a rule returns to a rule already on the path. The error shows the path of the loop, starting at its first rule in list order. |
 | `dispatch.max_consecutive_hops` is an integer, greater than `0`, at least the longest chain's hops | The value is not an integer, is zero or negative, or is below the number of hops in the longest chain. The error shows that chain. |
-| `next` requires `tracker.handoff_state` | A rule carries `next` while `handoff_state` is empty. Checked entirely offline, with no tracker call and no adapter fallback. |
+| `next` requires `tracker.handoff_state` | A rule carries `next` while `handoff_state` is empty. Checked entirely offline, with no tracker call. |
 | Every `match` key recognized | A `match` key is not one of `labels`, `issue_type`, `priority`, `identifier`, `assignee`, `title`. |
 | Every `title` key lists phrases | A `title` key is null, bare, or an empty list; its value is not a string or a list; a list element is not a string; or a phrase is empty or only white space. The errors and their fields are listed in [Section 9.2](#92-configuration-errors). |
 | `priority` predicate has exactly one operator | Zero or more than one of `eq`, `in`, `lt`, `lte`, `gt`, `gte`. |
 | Glob patterns syntactically valid | A `labels` or `identifier` pattern fails `path.Match`. |
 | Every referenced `agent` kind registered | `dispatch.rules[*].agent` or `dispatch.default.agent` names an unregistered adapter. |
 | Every rule settings block well formed | A block is named for a kind other than the one the rule runs, is not a map, writes `kind`, `command`, or one of the four `agent` timeouts, belongs to a rule with no `name` or named `default`, or a key of `dispatch.default` names an agent kind. The errors and their fields are listed in [Section 9.2](#92-configuration-errors). |
-| `dispatch.stage.collision` | A rule's stage label equals, ignoring case, a state or a label Sortie applies to issues: an active or terminal state (the tracker adapter's own list when the workflow leaves one empty), `tracker.handoff_state`, `tracker.in_progress_state`, `tracker.no_change_state`, a reaction's `escalation_label`, or the parking label. The message names the rule, the stage label, and what it collides with, and one error is reported for each rule and each collision. |
+| `dispatch.stage.collision` | A rule's stage label equals, ignoring case, a state or a label Sortie applies to issues: an active or terminal state, `tracker.handoff_state`, `tracker.in_progress_state`, `tracker.no_change_state`, a reaction's `escalation_label`, or the parking label. The message names the rule, the stage label, and what it collides with, and one error is reported for each rule and each collision. |
 | `dispatch.agent.missing_block` | A kind other than `agent.kind` that `dispatch.default.agent` or a rule's `agent` names has a top-level block that is not a map, or has no top-level block while some selector of the kind is not a rule carrying the kind's block. The message names the first such selector. |
 | Every rule's resolved settings block passes the adapter checks | The top-level block of the rule's kind with the rule's block laid over it fails a check the top-level block would fail: key types, the adapter's own checks, `agent.kind.session_resume`, and conflicts between keys such as `opencode.allowed_tools.overlap` and `opencode.effort.conflict`. The message opens with `dispatch rule "<name>" (dispatch.rules[<i>].<kind>): `, and the check key is the one the top-level block draws. |
 | Every per-rule template path resolvable and parseable | Path is absolute, `~`-prefixed, escapes the workflow tree, is not a regular file, is unreadable, or fails template parse. |
 | Every `dispatch.partials` entry resolvable | `dispatch.partials` is not a list; an entry is not a string, is only white space, is absolute, is `~`-prefixed, or leaves the workflow tree; a pattern is malformed or matches no file; an explicit entry names a missing file; a selected file resolves outside the tree after symlink evaluation or is not a regular file. The errors and their fields are listed in [Section 9.2](#92-configuration-errors). |
 | Every partial loadable | A partial is unreadable, carries front matter, has a syntax error, holds text or an action outside a `define` block, defines the reserved name `prompt`, or defines a name another partial already defines. The message names the partial file and the line. |
 | Every prompt template free of name clashes and undefined calls | A prompt template defines a name a partial also defines, or calls a name that its partials and the template itself do not define, in any branch of an `{{ if }}`, `{{ range }}`, or `{{ with }}`. The message names the file and the line of the call, and the template that reaches it when the call sits in a partial. |
-| `tracker.handoff_state` and `tracker.in_progress_state` free of collisions against the effective state lists | The state collides with the effective `active_states` or `terminal_states`, where an empty workflow list takes the tracker adapter's own fallback list. |
-| `tracker.no_change_state` requires `tracker.handoff_state` | `no_change_state` is set while `handoff_state` is empty. Checked entirely offline, with no tracker call and no adapter fallback. |
-| `tracker.no_change_state` names a permitted value | `no_change_state` is neither equal to `handoff_state` nor a member of `terminal_states` exactly as written in front matter. Checked entirely offline, with no tracker call and no adapter fallback. |
+| `tracker.handoff_state` and `tracker.in_progress_state` free of collisions against the state lists | The state collides with `active_states` or `terminal_states` as written. |
+| `tracker.no_change_state` requires `tracker.handoff_state` | `no_change_state` is set while `handoff_state` is empty. Checked entirely offline, with no tracker call. |
+| `tracker.no_change_state` names a permitted value | `no_change_state` is neither equal to `handoff_state` nor a member of `terminal_states` exactly as written in front matter. Checked entirely offline, with no tracker call. |
+
+An empty `tracker.active_states` draws the warning `tracker.active_states.empty` (`tracker.active_states is empty, so no issue is dispatched`) and does not block startup.
 
 **Rule settings blocks in preflight.** Every adapter check that reads a settings block runs once for the top-level block of each kind the configuration reaches and again for each rule's resolved block, so a fault a rule inherits from the top-level block is reported for the top-level block and again for each rule that inherits it. A kind other than `agent.kind` whose every selector is a rule carrying that kind's block needs no top-level block, and its top-level block alone is not checked, because no attempt reads it alone. The same checks run for each attempt when it starts: an attempt whose resolved block fails an error-severity check starts no session (see [Freeze-on-dispatch](#freeze-on-dispatch)), which keeps a reload from carrying a bad block into a retry or a continuation that never passes the per-tick preflight.
 
@@ -3236,11 +3326,10 @@ Before dispatching work, the orchestrator validates the workflow configuration. 
 | `tracker.api_key.sortie_linear_api_key_missing`  | warning  | `tracker.api_key is empty and SORTIE_LINEAR_API_KEY environment variable is not set`                                                                |
 | `tracker.api_key.linear_whitespace`              | warning  | `tracker.api_key has leading or trailing whitespace; the key is sent verbatim in the Authorization header, so surrounding whitespace will fail authentication` |
 | `tracker.api_key.linear_prefix`                  | warning  | `tracker.api_key does not start with "lin_api_"; Linear personal API keys carry that prefix`                                                        |
-| `tracker.active_states.empty_element` / `tracker.terminal_states.empty_element` | error | `tracker.active_states[<i>]: empty state name can never match a team state` (same shape for `terminal_states`)               |
 | `tracker.active_states.untrimmed_element` / `tracker.terminal_states.untrimmed_element` | error | `tracker.active_states[<i>]: state name has leading or trailing whitespace and can never match a team state` (same shape for `terminal_states`) |
 | `tracker.states.overlap`                         | warning  | `tracker.active_states and tracker.terminal_states overlap on "<name>"; an issue in state "<name>" would match both sets`                           |
 
-A `handoff_state` or `in_progress_state` that collides with `active_states` or `terminal_states` is not an adapter diagnostic. The generic config validation rejects it for every `tracker.kind` before the adapter hook runs, reporting it as a `config.tracker.*` error. The config loader rules on the state lists as written; the dispatch preflight then runs the same rules against the effective lists and reports a collision that only an adapter fallback exposes under check `tracker.handoff_state` or `tracker.in_progress_state`, without the `config.` prefix.
+A `handoff_state` or `in_progress_state` that collides with `active_states` or `terminal_states` is not an adapter diagnostic. The generic config validation rejects it for every `tracker.kind` before the adapter hook runs, reporting it as a `config.tracker.*` error. Both rules compare against the state lists as written.
 
 These offline checks never contact Linear and never log the API key value. State-name existence against the team and credential validity are checked by the online preflight at adapter construction, not by `sortie validate`.
 
@@ -3343,6 +3432,8 @@ These errors are raised during typed config construction from the parsed front m
 | `config: <field>: expected string, got timestamp`                               | An unquoted date (e.g., `2026-01-01`) decodes to a YAML timestamp rather than a string. | Quote the value (e.g., `"2026-01-01"`) so it decodes as a string.                                                        |
 | `config: tracker.handoff_state: expected string, got <type>`                    | `handoff_state` is not a string (e.g., integer, boolean, list).          | Ensure the value is a string, quoted if necessary.                                                                                   |
 | `config: tracker.handoff_state: must not be empty`                              | `handoff_state` is set to an explicit empty string.                      | Provide a valid state name, or omit the field entirely to disable handoff.                                                           |
+| `config: tracker.terminal_states: must name at least one state for tracker kind "<kind>": a closed issue reads as its first entry` | `tracker.kind` is `github`, `gitea`, or `gitlab` and `terminal_states` is empty. | Name at least one terminal state. A reload that empties the list keeps the previous configuration. |
+| `config: tracker.active_states[<i>]: needs a state name with a character other than white space` | An entry of `active_states` is empty or only white space (same shape for `terminal_states`). | Remove the entry or write a state name. |
 | `config: tracker.handoff_state: resolved to empty (check environment variable)` | `$VAR` reference resolved to an empty string (variable unset or empty).  | Set the referenced environment variable to a valid state name.                                                                       |
 | `config: tracker.handoff_state: "<val>" collides with active state "<state>"`   | `handoff_state` matches one of the `active_states` (case-insensitive).   | Use a state that is not in `active_states`. The handoff state must be distinct from active and terminal states.                      |
 | `config: tracker.handoff_state: "<val>" collides with terminal state "<state>"` | `handoff_state` matches one of the `terminal_states` (case-insensitive). | Use a state that is not in `terminal_states`.                                                                                        |
@@ -3433,8 +3524,8 @@ A flat reference of every configuration field, for quick lookup. The "Env Overri
 | `tracker.endpoint`                      | string           | adapter-defined              | `SORTIE_TRACKER_ENDPOINT`                | `$VAR` supported                                                                       |
 | `tracker.api_key`                       | string or `$VAR` | _(required for Jira)_        | `SORTIE_TRACKER_API_KEY`                 | Full env expansion                                                                     |
 | `tracker.project`                       | string           | _(required for Jira)_        | `SORTIE_TRACKER_PROJECT`                 | `$VAR` supported                                                                       |
-| `tracker.active_states`                 | `[string]`       | `[]` (empty)                 | `SORTIE_TRACKER_ACTIVE_STATES`           | CSV; at least one of active/terminal required                                          |
-| `tracker.terminal_states`               | `[string]`       | `[]` (empty)                 | `SORTIE_TRACKER_TERMINAL_STATES`         | CSV; at least one of active/terminal required                                          |
+| `tracker.active_states`                 | `[string]`       | `[]` (empty)                 | `SORTIE_TRACKER_ACTIVE_STATES`           | CSV; at least one of active/terminal required; no blank entry; no tracker default list |
+| `tracker.terminal_states`               | `[string]`       | `[]` (empty)                 | `SORTIE_TRACKER_TERMINAL_STATES`         | CSV; at least one of active/terminal required; required for `github`, `gitea`, `gitlab`; no blank entry |
 | `tracker.query_filter`                  | string           | `""`                         | `SORTIE_TRACKER_QUERY_FILTER`            | Adapter-interpreted                                                                    |
 | `tracker.handoff_state`                 | string           | _(absent)_                   | `SORTIE_TRACKER_HANDOFF_STATE`           | Must not collide with active/terminal                                                  |
 | `tracker.no_change_state`               | string           | `handoff_state`               | `SORTIE_TRACKER_NO_CHANGE_STATE`         | Must equal `handoff_state` or name a member of `terminal_states`; requires `handoff_state` |

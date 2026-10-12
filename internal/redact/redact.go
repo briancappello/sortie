@@ -1,8 +1,10 @@
 // Package redact masks secret values Sortie has learned about in text it
 // logs, stores, or shows an operator. Every credential a launch, a log
-// record, or a stored row can carry is registered here once known,
-// add-only for the life of the process, and [Mask] replaces every
-// registered value wherever it later occurs.
+// record, or a stored row can carry is registered here once known, and
+// [Mask] replaces every registered value wherever it later occurs. A
+// credential stays registered for the life of the process, except a
+// short-lived one whose owner withdraws it with [Remove] once it can no
+// longer be used.
 package redact
 
 import (
@@ -190,6 +192,22 @@ func addPieces(source string, pieces []string, credentialHasContent bool) {
 
 	if warn {
 		warnTooShort(source)
+	}
+}
+
+// Remove withdraws every piece [Add] would register for value, so a
+// short-lived credential that has expired stops costing every later
+// [Mask] call. Only the owner of a value it registered itself may
+// remove it: a piece another source also registered is withdrawn too.
+func Remove(value string) {
+	pieces := selectPieces(value)
+	registerMu.Lock()
+	defer registerMu.Unlock()
+	current := currentValuesLocked()
+	before := len(current)
+	kept := slices.DeleteFunc(current, func(v string) bool { return slices.Contains(pieces, v) })
+	if len(kept) != before {
+		registered.Store(&kept)
 	}
 }
 

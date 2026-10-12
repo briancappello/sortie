@@ -141,6 +141,10 @@ type OrchestratorParams struct {
 	// must supply the real binary.
 	MCPServerBinary string
 
+	// SessionAPIURL is the base URL of the HTTP server, given to every
+	// agent process as SORTIE_API_URL. Empty when the server is off.
+	SessionAPIURL string
+
 	// CIProvider is the CI status provider for CI failure detection. Nil
 	// when CI feedback is not configured.
 	CIProvider domain.CIStatusProvider
@@ -238,6 +242,7 @@ type Orchestrator struct {
 	turnStartedCh chan turnStartedMsg
 	snapshotCh    chan snapshotRequest
 	refreshCh     chan struct{}
+	controlCh     chan controlRequest
 
 	preflightParams PreflightParams
 	observers       []Observer
@@ -254,6 +259,7 @@ type Orchestrator struct {
 	workflowFileFunc                  func() string
 	dbPath                            string
 	mcpServerBinary                   string
+	sessionAPIURL                     string
 	ciProvider                        domain.CIStatusProvider
 	scmAdapter                        domain.SCMAdapter
 	reviewConfig                      ReviewReactionConfig
@@ -392,6 +398,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		turnStartedCh:                     make(chan turnStartedMsg, eventBuf),
 		snapshotCh:                        make(chan snapshotRequest, 4),
 		refreshCh:                         make(chan struct{}, 1),
+		controlCh:                         make(chan controlRequest, 4),
 		preflightParams:                   params.PreflightParams,
 		observers:                         observers,
 		toolRegistry:                      params.ToolRegistry,
@@ -400,6 +407,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		workflowFileFunc:                  params.WorkflowFileFunc,
 		dbPath:                            params.DBPath,
 		mcpServerBinary:                   params.MCPServerBinary,
+		sessionAPIURL:                     params.SessionAPIURL,
 		ciProvider:                        params.CIProvider,
 		scmAdapter:                        params.SCMAdapter,
 		reviewConfig:                      params.ReviewConfig,
@@ -633,6 +641,9 @@ func (o *Orchestrator) Run(ctx context.Context) {
 
 		case <-o.refreshCh:
 			o.handleTick(ctx)
+
+		case req := <-o.controlCh:
+			req.ReplyCh <- o.handleControl(ctx, req)
 		}
 	}
 }
@@ -645,6 +656,7 @@ func (o *Orchestrator) updateGauges(now time.Time) {
 	o.metrics.SetRetryingSessions(len(o.state.RetryAttempts))
 	o.metrics.SetAvailableSlots(GlobalAvailableSlots(o.state.MaxConcurrentAgents, len(o.state.Running)))
 	o.metrics.SetActiveSessionsElapsed(ActiveElapsedSeconds(o.state, now))
+	o.metrics.SetHeldRuns(heldRuns(o.state))
 
 	// Emit from the full usage map so hosts removed by reload but still
 	// holding in-flight workers decrement to zero on exit rather than
@@ -904,6 +916,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			Previous:        lineage.PreviousRule,
 			PreviousOutcome: lineage.PreviousOutcome,
 		})
+		dispatchCtx = withSessionIdentity(dispatchCtx, sessionIdentity{RuleName: resolution.RuleName, ChainID: lineage.ChainID})
 		DispatchIssue(dispatchCtx, o.state, issue, nil, host, o.makeWorkerFn("", host, resolution.AgentKind, resolution.TemplateID, "", adapter, attemptSettings))
 		if entry := o.state.Running[issue.ID]; entry != nil {
 			entry.ContinuationContext = seed
@@ -1092,6 +1105,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			WorkflowPath:    o.workflowManager.WorkflowAbsPath(),
 			DBPath:          o.dbPath,
 			MCPServerBinary: o.mcpServerBinary,
+			SessionAPIURL:   o.sessionAPIURL,
 			ReactionKind:    reactionKind,
 			Posture:         posture,
 		}
@@ -1627,6 +1641,9 @@ func (o *Orchestrator) drainRunningWorkers() {
 			// Discard refresh signals during drain; the event loop is no
 			// longer accepting new work.
 
+		case req := <-o.controlCh:
+			req.ReplyCh <- ControlReply{Outcome: ControlUnavailable, Message: "shutting down"}
+
 		case <-deadline.C:
 			o.logger.Warn("drain timeout exceeded, abandoning workers",
 				slog.Int("remaining", len(o.state.Running)),
@@ -1754,5 +1771,82 @@ func (o *Orchestrator) RefreshFunc() func() bool {
 		default:
 			return false
 		}
+	}
+}
+
+// SessionTokenFunc returns the lookup the HTTP server uses to resolve a
+// session token to the issue identifier of the running session it was
+// minted for. Safe to call from any goroutine.
+func (o *Orchestrator) SessionTokenFunc() func(token string) (string, bool) {
+	return o.state.SessionTokens.Lookup
+}
+
+// handleControl applies one control request on the event loop.
+func (o *Orchestrator) handleControl(ctx context.Context, req controlRequest) ControlReply {
+	now := time.Now().UTC()
+	var reply ControlReply
+	switch req.Kind {
+	case controlHold:
+		reply = applyHold(o.state, req.Identifier, req.Reason, req.Holder, now, o.logger)
+	case controlRelease:
+		reply = applyRelease(o.state, req.Identifier, now, o.metrics, o.logger)
+	case controlEscalate:
+		reply = applyEscalate(o.state, req.Identifier, req.Escalation, now, escalationParams{
+			Router: o.router,
+			Wg:     &o.state.TrackerOpsWg,
+			Ctx:    ctx,
+			Logger: o.logger,
+		})
+	default:
+		reply = ControlReply{Outcome: ControlInvalid, Message: "unknown control request"}
+	}
+	o.updateGauges(now)
+	o.notifyObservers()
+	return reply
+}
+
+// sendControl delivers req to the event loop and waits for its reply,
+// each step bounded by controlReplyBound.
+func (o *Orchestrator) sendControl(req controlRequest) ControlReply {
+	if o.draining.Load() {
+		return ControlReply{Outcome: ControlUnavailable, Message: "shutting down"}
+	}
+	req.ReplyCh = make(chan ControlReply, 1)
+	select {
+	case o.controlCh <- req:
+	case <-time.After(controlReplyBound):
+		return ControlReply{Outcome: ControlUnavailable, Message: "the orchestrator did not accept the request in time"}
+	}
+	select {
+	case reply := <-req.ReplyCh:
+		return reply
+	case <-time.After(controlReplyBound):
+		return ControlReply{Outcome: ControlUnavailable, Message: "the orchestrator did not answer in time"}
+	}
+}
+
+// HoldFunc returns the function the HTTP server calls to hold the
+// running issue named by identifier. Safe to call from any goroutine.
+func (o *Orchestrator) HoldFunc() func(identifier, reason, holder string) ControlReply {
+	return func(identifier, reason, holder string) ControlReply {
+		return o.sendControl(controlRequest{Kind: controlHold, Identifier: identifier, Reason: reason, Holder: holder})
+	}
+}
+
+// EscalateFunc returns the function the HTTP server calls to escalate the
+// running issue named by identifier to people. Safe to call from any
+// goroutine.
+func (o *Orchestrator) EscalateFunc() func(identifier string, req EscalationRequest) ControlReply {
+	return func(identifier string, req EscalationRequest) ControlReply {
+		return o.sendControl(controlRequest{Kind: controlEscalate, Identifier: identifier, Escalation: req})
+	}
+}
+
+// ReleaseFunc returns the function the HTTP server calls to release the
+// hold on the running issue named by identifier. Safe to call from any
+// goroutine.
+func (o *Orchestrator) ReleaseFunc() func(identifier string) ControlReply {
+	return func(identifier string) ControlReply {
+		return o.sendControl(controlRequest{Kind: controlRelease, Identifier: identifier})
 	}
 }

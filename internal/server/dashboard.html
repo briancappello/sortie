@@ -85,6 +85,15 @@
         font-weight: 700;
       }
 
+      .held-badge {
+        display: inline-block;
+        margin-left: 0.4em;
+        padding: 0 0.4em;
+        border: 1px solid currentColor;
+        border-radius: 3px;
+        font-size: 0.8em;
+        text-transform: uppercase;
+      }
       .version-badge {
         font-size: 0.75rem;
         padding: 0.15rem 0.5rem;
@@ -417,6 +426,7 @@
                   <span class="expand-indicator">&#9654;</span>
                 </button>
                 <a href="{{$e.DetailURL}}">{{$e.Identifier}}</a>
+                {{if $e.HeldRow}}<span class="held-badge" title="{{$e.HeldRow}}">held</span>{{end}}
               </td>
               <td>{{$e.State}}</td>
               <td class="text-right">{{$e.TurnCount}}</td>
@@ -448,6 +458,12 @@
                       <dt>Rule</dt>
                       <dd>{{$e.RuleRow}}</dd>
                     </div>
+                    {{if $e.HeldRow}}
+                    <div class="detail-item">
+                      <dt>Held</dt>
+                      <dd>{{$e.HeldRow}}</dd>
+                    </div>
+                    {{end}}
                     <div class="detail-item">
                       <dt>Configured model</dt>
                       <dd>{{$e.ConfiguredModelRow}}</dd>

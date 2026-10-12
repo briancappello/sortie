@@ -5,7 +5,10 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/logging"
@@ -160,6 +163,79 @@ func resolveServerHost(hostFlag string, hostFlagSet bool, serverSection map[stri
 		return "", fmt.Errorf("invalid server.host value %q: not a valid IP address", hostStr)
 	}
 	return hostStr, nil
+}
+
+// controlTokenSetting names the server setting that holds the token
+// every state-changing HTTP endpoint requires.
+const controlTokenSetting = "server.control_token"
+
+// resolveControlToken returns server.control_token from the server
+// extension section, whose $VAR references the configuration load has
+// already resolved and whose value it has already registered for
+// masking. An absent or blank value returns the empty string.
+func resolveControlToken(serverSection map[string]any) (string, error) {
+	raw, exists := serverSection["control_token"]
+	if !exists || raw == nil {
+		return "", nil
+	}
+	token, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("invalid %s value: unsupported type %T, must be a string", controlTokenSetting, raw)
+	}
+	return strings.TrimSpace(token), nil
+}
+
+// checkControlBinding refuses a non-loopback bind address without a
+// control token, because every state-changing endpoint would then be
+// open to the network.
+func checkControlBinding(host, controlToken string) error {
+	if controlToken != "" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("server.host %q is not a loopback address and %s is not set; set %s or bind to 127.0.0.1", host, controlTokenSetting, controlTokenSetting)
+}
+
+// unsetControlTokenEnv removes from the process environment every
+// variable whose value is the control token, so no agent, hook, or tool
+// server Sortie starts inherits it, and returns the names it removed.
+// The token itself was read when the configuration loaded.
+func unsetControlTokenEnv(controlToken string) []string {
+	if controlToken == "" {
+		return nil
+	}
+	var removed []string
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || name == "" || strings.TrimSpace(value) != controlToken {
+			continue
+		}
+		if err := os.Unsetenv(name); err == nil {
+			removed = append(removed, name)
+		}
+	}
+	return removed
+}
+
+// serverBaseURL returns the base URL a local client uses to reach the
+// HTTP server listening on addr. An unspecified bind address, which
+// accepts connections on every interface, is reached through the
+// loopback address of its family.
+func serverBaseURL(addr net.Addr) string {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return "http://" + addr.String()
+	}
+	ip := tcp.IP
+	switch {
+	case ip == nil || (ip.IsUnspecified() && ip.To4() != nil):
+		ip = net.IPv4(127, 0, 0, 1)
+	case ip.IsUnspecified():
+		ip = net.IPv6loopback
+	}
+	return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(tcp.Port))
 }
 
 // hasServerPortExtension reports whether the server extension section

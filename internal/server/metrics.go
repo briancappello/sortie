@@ -43,6 +43,8 @@ type PromMetrics struct {
 	mergeConflictChecksTotal      *prometheus.CounterVec
 	mergeConflictEscalationsTotal *prometheus.CounterVec
 	dispatchRuleMatchTotal        *prometheus.CounterVec
+	runsHeld                      prometheus.Gauge
+	holdSecondsTotal              *prometheus.CounterVec
 	candidateHoldsTotal           *prometheus.CounterVec
 	budgetExhaustionsTotal        *prometheus.CounterVec
 	runsStoppedByBudgetTotal      *prometheus.CounterVec
@@ -268,6 +270,18 @@ func NewPromMetrics(version, goVersion string) *PromMetrics {
 		Help:      "Dispatch rule match outcomes by resolution layer and rule name.",
 	}, []string{"layer", "rule"})
 
+	runsHeld := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "sortie",
+		Name:      "runs_held",
+		Help:      "Number of running issues currently held.",
+	})
+
+	holdSecondsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "sortie",
+		Name:      "hold_seconds_total",
+		Help:      "Seconds runs spent held, by dispatch rule, counted when each hold ends.",
+	}, []string{"rule"})
+
 	candidateHoldsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "sortie",
 		Name:      "candidate_holds_total",
@@ -343,6 +357,8 @@ func NewPromMetrics(version, goVersion string) *PromMetrics {
 		mergeConflictChecksTotal,
 		mergeConflictEscalationsTotal,
 		dispatchRuleMatchTotal,
+		runsHeld,
+		holdSecondsTotal,
 		candidateHoldsTotal,
 		budgetExhaustionsTotal,
 		runsStoppedByBudgetTotal,
@@ -386,6 +402,8 @@ func NewPromMetrics(version, goVersion string) *PromMetrics {
 		mergeConflictChecksTotal:       mergeConflictChecksTotal,
 		mergeConflictEscalationsTotal:  mergeConflictEscalationsTotal,
 		dispatchRuleMatchTotal:         dispatchRuleMatchTotal,
+		runsHeld:                       runsHeld,
+		holdSecondsTotal:               holdSecondsTotal,
 		candidateHoldsTotal:            candidateHoldsTotal,
 		budgetExhaustionsTotal:         budgetExhaustionsTotal,
 		runsStoppedByBudgetTotal:       runsStoppedByBudgetTotal,
@@ -570,6 +588,20 @@ func (p *PromMetrics) IncDispatchRuleMatch(layer, rule string) {
 		rule = "<none>"
 	}
 	p.dispatchRuleMatchTotal.WithLabelValues(layer, rule).Inc()
+}
+
+// SetHeldRuns records the number of running issues currently held.
+func (p *PromMetrics) SetHeldRuns(n int) {
+	p.runsHeld.Set(float64(n))
+}
+
+// AddHoldSeconds adds an ended hold's duration to its rule's counter.
+// An empty rule is normalized to "<none>".
+func (p *PromMetrics) AddHoldSeconds(rule string, seconds float64) {
+	if rule == "" {
+		rule = "<none>"
+	}
+	p.holdSecondsTotal.WithLabelValues(rule).Add(seconds)
 }
 
 // IncCandidateHolds increments the counter of candidates the dispatch

@@ -2,7 +2,7 @@
 
 What to know before you change `internal/scm/github`: the design decisions behind it, the places GitHub's model does not line up with ours, and the traps that cost someone a day.
 
-Last updated: 2026-08-23
+Last updated: 2026-10-10
 
 ## Shape of the package
 
@@ -16,15 +16,15 @@ Two HTTP clients live side by side: one for REST, one for GraphQL. The GraphQL b
 
 The adapter sets a REST API version header on every request, in one place in the client constructor, and no configuration key overrides it. That pin is deliberate: it makes the payload shapes the normalizers depend on stable, and it makes a payload change an explicit decision rather than something that arrives one morning.
 
-The corollary is that **bumping the pin is a payload-shape change, not a version bump**. A version has already removed a field the adapter used to read. Do not assume a removal announced for one payload is confined to it.
+The corollary is that **bumping the pin is a payload-shape change, not a version bump**. A new version can remove a field the adapter reads, and a removal announced for one payload is not always confined to it.
 
-The method for finding out is worth keeping even though its results are not. Because the pin lives in one place, the probe is a single header change: issue the same request twice against the same live resource, varying only the version header between the outgoing value and the incoming one, and **diff the JSON key sets rather than the values**. A removal surfaces as a missing key and never as an error, so a comparison that looks at values will not see it. Run that across every route the adapter reads, not only the one a release note mentions, and against a resource in each state the adapter cares about: a field can be present-but-null in one state and absent in another, so a merged pull request and an open one are two separate probes, as are an issue with a parent and one without.
+To find out, probe. Because the pin lives in one place, the probe is a single header change: issue the same request twice against the same live resource, varying only the version header between the outgoing value and the incoming one, and **diff the JSON key sets rather than the values**. A removal surfaces as a missing key and never as an error, so a comparison that looks at values will not see it. Run that across every route the adapter reads, not only the one a release note mentions, and against a resource in each state the adapter cares about: a field can be present-but-null in one state and absent in another, so a merged pull request and an open one are two separate probes, as are an issue with a parent and one without.
 
-One consequence is load-bearing today: the pull request payload under the current pin carries no merge commit identifier, so `GetMergeability` sources it from a second, gated GraphQL call when the REST read reports the pull request merged. Two details of that call matter. It asks only for the real merge commit and never for the potential (test) merge commit, so GitHub's speculative merge commit is structurally unreachable through this path. And the merged gate bounds the cost: an open, draft, or closed-unmerged pull request costs no GraphQL call at all.
+One consequence: the pull request payload under the current pin carries no merge commit identifier, so `GetMergeability` sources it from a second, gated GraphQL call when the REST read reports the pull request merged. Two details of that call matter. It asks only for the real merge commit and never for the potential (test) merge commit, so GitHub's speculative merge commit is structurally unreachable through this path. And the merged gate bounds the cost: an open, draft, or closed-unmerged pull request costs no GraphQL call at all.
 
 ## Where GitHub's model does not match ours
 
-**No workflow states.** A GitHub issue is open or closed. The adapter derives workflow state from repository labels and couples that to the native flag: a terminal target closes the issue, an active target on a closed issue reopens it. Native open with no state label reads as the first configured active state, native closed with no terminal label as the first terminal state. This is the same convention the Gitea adapter uses, deliberately, so operator configuration is uniform across the open/closed trackers.
+**No workflow states.** A GitHub issue is open or closed. The adapter derives workflow state from repository labels and couples that to the native flag: a terminal target closes the issue, an active target on a closed issue reopens it. An open issue with no state label is in no state and is never dispatched: labeling an issue is how an operator hands it to Sortie. A closed issue reads terminal whatever its labels, as the terminal label it carries or else as the first configured terminal state, so a workflow names at least one terminal state. This is the same convention the Gitea adapter uses, deliberately, so operator configuration is uniform across the open/closed trackers.
 
 **The adapter creates no labels.** The repository is expected to carry the state labels before Sortie starts. Creating them would need broader permissions and would write into a namespace the repository's own conventions own. This is the opposite of the Gitea adapter's choice, and the difference is not arbitrary: GitHub's label-add route fails loudly on a name it will not accept, so an operator sees the failure. Gitea's does not, which is why that adapter creates on demand instead.
 
@@ -132,7 +132,7 @@ The primary hourly budget, the search per-minute budget, and the GraphQL budget 
 
 - Candidate polling stays off the search route unless an operator filter requires it, because search draws on the smaller budget.
 - The two GraphQL reads are each gated: the review decision is one call per read, and the merge commit is one call only for a pull request already known to be merged.
-- The per-issue state reads used by reconciliation go through a bounded, per-path ETag cache. A not-modified response reuses the previously derived state without re-deriving it, and does not charge the primary budget. This matters precisely because reconciliation polls the same issues over and over. The cache size is an operator-tunable extension key, and zero disables conditional requests entirely.
+- The per-issue state reads used by reconciliation go through a bounded, per-path ETag cache. The cache stores the issue's labels and closed flag rather than a derived state, so a not-modified response is derived again under the state lists in force, and does not charge the primary budget. This matters precisely because reconciliation polls the same issues over and over. The cache size is an operator-tunable extension key, and zero disables conditional requests entirely.
 
 Secondary limits are separate again and are not a quota you can count down; they arrive as a rejection carrying a retry hint. The adapter never sleeps or retries on its own: it classifies, appends the retry hint to the message, and leaves backoff to the orchestrator.
 

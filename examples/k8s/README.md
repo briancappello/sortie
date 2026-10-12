@@ -24,8 +24,14 @@ kubectl create secret generic sortie-secrets \
     --from-literal=ANTHROPIC_API_KEY="sk-..." \
     --from-literal=SORTIE_JIRA_API_KEY="..." \
     --from-literal=SORTIE_JIRA_ENDPOINT="https://your-org.atlassian.net" \
-    --from-literal=SORTIE_JIRA_PROJECT="PROJ"
+    --from-literal=SORTIE_JIRA_PROJECT="PROJ" \
+    --from-literal=SORTIE_CONTROL_TOKEN="$(openssl rand -base64 32)"
 ```
+
+The container binds the HTTP server to `0.0.0.0`, so Sortie requires
+`server.control_token`; the sample workflow reads it from
+`SORTIE_CONTROL_TOKEN`. Send it as `Authorization: Bearer <token>` when you
+call `POST /api/v1/refresh`. Health probes and `/metrics` need no token.
 
 Apply the manifests:
 

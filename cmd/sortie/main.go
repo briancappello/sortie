@@ -683,9 +683,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		}
 
 		if mergeCompletionActive {
-			trackerMeta, _ := registry.Trackers.Meta(br.cfg.Tracker.Kind)
 			var mcErr error
-			mergeCompletionConfig, mcErr = orchestrator.BuildMergeCompletionReactionConfig(mergeCompletionRC, br.cfg.Tracker, trackerMeta)
+			mergeCompletionConfig, mcErr = orchestrator.BuildMergeCompletionReactionConfig(mergeCompletionRC, br.cfg.Tracker)
 			if mcErr != nil {
 				br.logger.Error("invalid merge_completion reaction config", slog.Any("error", mcErr))
 				return 1
@@ -824,8 +823,14 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return sessionTools.Registry, nil
 	}
 
+	var sessionAPIURL string
+	if serverEnabled {
+		sessionAPIURL = serverBaseURL(ln.Addr())
+	}
+
 	o := orchestrator.NewOrchestrator(orchestrator.OrchestratorParams{
 		State:                             state,
+		SessionAPIURL:                     sessionAPIURL,
 		Logger:                            br.logger,
 		TrackerAdapter:                    br.trackerAdapter,
 		Router:                            route.NewRouter(br.trackerAdapter, registry.Notifiers.Get),
@@ -878,6 +883,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			PreflightFn:      o.PreflightOK,
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
 			TokenRates:       tokenRates,
+			ControlToken:     br.controlToken,
+			SessionTokenFn:   o.SessionTokenFunc(),
+			HoldFn:           server.HoldFunc(o.HoldFunc()),
+			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
+			EscalateFn:       server.EscalateFunc(o.EscalateFunc()),
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
 				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
 				if err != nil {

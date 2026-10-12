@@ -42,6 +42,7 @@ const (
 	EventStageAdvanced             EventType = "stage.advanced"
 	EventStageNotAdvanced          EventType = "stage.not_advanced"
 	EventAgentMessage              EventType = "agent.message"
+	EventSessionEscalated          EventType = "session.escalated"
 )
 
 // TrackerCommentKind is the reserved notifications kind of the built-in
@@ -64,6 +65,7 @@ var eventTypes = []EventType{
 	EventStageAdvanced,
 	EventStageNotAdvanced,
 	EventAgentMessage,
+	EventSessionEscalated,
 }
 
 // EventTypes returns the catalog in declaration order. The caller may
@@ -98,7 +100,8 @@ func (t EventType) Severity() string {
 		EventEscalationAutoMerge,
 		EventEscalationMergeCompletion,
 		EventBudgetHeld,
-		EventStageNotAdvanced:
+		EventStageNotAdvanced,
+		EventSessionEscalated:
 		return "warning"
 	default:
 		return ""
@@ -157,6 +160,23 @@ type NotificationEnvelope struct {
 	// Stage is the hop decision of a stage event and the zero value on
 	// every other event.
 	Stage StageTransition
+
+	// Escalation describes a [EventSessionEscalated] event and is the zero
+	// value on every other event.
+	Escalation SessionEscalation
+}
+
+// SessionEscalation is what a session.escalated event reports besides
+// the escalation's own text, which travels as the message's AgentText.
+type SessionEscalation struct {
+	// Kind is "question", "permission", or "other".
+	Kind string
+
+	// Rule is the dispatch rule of the escalated run, empty when none.
+	Rule string
+
+	// URL links to the session, when the caller gave one.
+	URL string
 }
 
 // NotificationMessage carries the content of a notification: agent-supplied

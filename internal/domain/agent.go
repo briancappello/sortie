@@ -2,6 +2,9 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -235,6 +238,40 @@ type StartSessionParams struct {
 	// CredentialVerification marks a session that carries only the
 	// request proving the runtime's credential works.
 	CredentialVerification bool
+
+	// SessionEnv lists the variables that tell the agent process which
+	// session it serves. Every launch of the session sets them last, so
+	// each overrides a variable of the same name the launch would
+	// otherwise inherit, and a remote launch carries them the way it
+	// carries its other variables, never as arguments. An entry with an
+	// empty Value is still set, to the empty string.
+	SessionEnv []EnvVar
+}
+
+// EnvVar is one environment variable a launch sets. Every rendering of
+// an EnvVar - through [fmt], through a [log/slog] handler, or through
+// [encoding/json.Marshal] - carries Name and never Value, so a value
+// that is a credential never reaches a log record.
+type EnvVar struct {
+	Name  string
+	Value string
+}
+
+// Format implements [fmt.Formatter], rendering only v.Name.
+func (v EnvVar) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprintf(f, "domain.EnvVar{Name:%q}", v.Name) //nolint:errcheck // best-effort formatting
+}
+
+// LogValue implements [slog.LogValuer], rendering only v.Name.
+func (v EnvVar) LogValue() slog.Value {
+	return slog.StringValue(v.Name)
+}
+
+// MarshalJSON implements [json.Marshaler], rendering only v.Name.
+func (v EnvVar) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Name string `json:"name"`
+	}{Name: v.Name})
 }
 
 // RunTurnParams contains the inputs for [AgentAdapter.RunTurn].

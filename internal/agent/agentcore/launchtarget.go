@@ -66,6 +66,13 @@ type LaunchTarget struct {
 	// target carries: a local launch runs without them, and a remote launch
 	// neither carries them nor lets the remote shell pass them to the agent.
 	WithheldEnv []string
+
+	// SessionEnv lists the session identity variables every launch
+	// through this target sets, passed through from StartSessionParams.
+	// [LaunchTarget.BindWorkspace] sets them last, and
+	// [LaunchTarget.SSHOptions] carries them last, so each wins over a
+	// variable of the same name from any other source.
+	SessionEnv []domain.EnvVar
 }
 
 // ResolveLaunchTarget resolves the workspace path and agent binary for a
@@ -125,6 +132,7 @@ func ResolveLaunchTarget(params domain.StartSessionParams, defaultCommand string
 		Command:       resolved,
 		Args:          slices.Clone(parts[1:]),
 		WorkspacePath: absPath,
+		SessionEnv:    slices.Clone(params.SessionEnv),
 	}, nil
 }
 
@@ -145,6 +153,7 @@ func resolveSSHLaunch(params domain.StartSessionParams, absPath, sshHost, remote
 		SSHHost:                  sshHost,
 		SSHStrictHostKeyChecking: params.SSHStrictHostKeyChecking,
 		SSHEnvNames:              params.SSHEnvNames,
+		SessionEnv:               slices.Clone(params.SessionEnv),
 	}, nil
 }
 
@@ -160,6 +169,7 @@ func resolveArgvLaunch(params domain.StartSessionParams, absPath, sshHost string
 		Command:       resolved,
 		Args:          slices.Clone(argv[1:]),
 		WorkspacePath: absPath,
+		SessionEnv:    slices.Clone(params.SessionEnv),
 	}, nil
 }
 
@@ -210,14 +220,26 @@ func breaksWhitespaceSplit(arg string) bool {
 //
 // A name in t.WithheldEnv is never carried, whether t.SSHEnvNames or a
 // settings entry names it, and is returned as the options' Unset list.
+//
+// Every entry of t.SessionEnv is carried last, even with an empty
+// Value, and replaces any entry of the same name the other sources
+// would carry; its name is left out of the Unset list, so the remote
+// agent receives exactly the value a local launch would set.
 func (t LaunchTarget) SSHOptions(settings ...sshutil.EnvVar) sshutil.SSHOptions {
 	var carried []sshutil.EnvVar
-	skip := make(map[string]bool, len(t.WithheldEnv)+len(t.SSHEnvNames)+len(settings))
+	sessionNames := make(map[string]bool, len(t.SessionEnv))
+	for _, entry := range t.SessionEnv {
+		sessionNames[entry.Name] = true
+	}
+	skip := make(map[string]bool, len(t.WithheldEnv)+len(t.SSHEnvNames)+len(settings)+len(sessionNames))
 	for _, name := range t.WithheldEnv {
 		skip[name] = true
 	}
 	for _, entry := range settings {
 		skip[entry.Name] = true
+	}
+	for name := range sessionNames {
+		skip[name] = true
 	}
 
 	for _, name := range t.SSHEnvNames {
@@ -234,17 +256,30 @@ func (t LaunchTarget) SSHOptions(settings ...sshutil.EnvVar) sshutil.SSHOptions 
 
 	added := make(map[string]bool, len(settings))
 	for _, entry := range settings {
-		if entry.Value == "" || added[entry.Name] || slices.Contains(t.WithheldEnv, entry.Name) {
+		if entry.Value == "" || added[entry.Name] || slices.Contains(t.WithheldEnv, entry.Name) || sessionNames[entry.Name] {
 			continue
 		}
 		added[entry.Name] = true
 		carried = append(carried, entry)
 	}
 
+	for _, entry := range t.SessionEnv {
+		if added[entry.Name] {
+			continue
+		}
+		added[entry.Name] = true
+		carried = append(carried, sshutil.EnvVar{Name: entry.Name, Value: entry.Value})
+	}
+
+	var unset []string
+	if len(t.WithheldEnv) > 0 {
+		unset = slices.DeleteFunc(slices.Clone(t.WithheldEnv), func(name string) bool { return sessionNames[name] })
+	}
+
 	return sshutil.SSHOptions{
 		StrictHostKeyChecking: t.SSHStrictHostKeyChecking,
 		Env:                   carried,
-		Unset:                 slices.Clone(t.WithheldEnv),
+		Unset:                 unset,
 	}
 }
 
@@ -253,12 +288,14 @@ func (t LaunchTarget) SSHOptions(settings ...sshutil.EnvVar) sshutil.SSHOptions 
 // replaces every PWD entry already in cmd.Env with one naming the same
 // verified path, so a subprocess that trusts PWD over its own working
 // directory still lands in the workspace. It also removes every entry
-// named in t.WithheldEnv from cmd.Env. On failure cmd.Dir and
-// cmd.Env are left untouched and the verification error is returned;
-// the caller must not start cmd.
+// named in t.WithheldEnv from cmd.Env, and then sets every entry of
+// t.SessionEnv last, replacing any entry of the same name. On failure
+// cmd.Dir and cmd.Env are left untouched and the verification error is
+// returned; the caller must not start cmd.
 //
 // Callers MUST assign cmd.Env before calling BindWorkspace and MUST
-// NOT assign it afterward, so the PWD this sets is never overwritten.
+// NOT assign it afterward, so the PWD and session variables this sets
+// are never overwritten.
 func (t LaunchTarget) BindWorkspace(cmd *exec.Cmd) *domain.AgentError {
 	absPath, agentErr := ResolveWorkspace(t.WorkspacePath)
 	if agentErr != nil {
@@ -270,7 +307,32 @@ func (t LaunchTarget) BindWorkspace(cmd *exec.Cmd) *domain.AgentError {
 	}
 	cmd.Env = dropEnvNames(cmd.Env, t.WithheldEnv)
 	cmd.Env = setPWD(cmd.Env, absPath)
+	cmd.Env = setSessionEnv(cmd.Env, t.SessionEnv)
 	return nil
+}
+
+// setSessionEnv returns env with every entry named by an entry of vars
+// removed, compared as [isEnvEntryNamed] compares, and one NAME=value
+// entry appended per name of vars, in order, keeping the first entry
+// for a name vars repeats.
+func setSessionEnv(env []string, vars []domain.EnvVar) []string {
+	if len(vars) == 0 {
+		return env
+	}
+	names := make([]string, 0, len(vars))
+	for _, v := range vars {
+		names = append(names, v.Name)
+	}
+	env = dropEnvNames(env, names)
+	seen := make(map[string]bool, len(vars))
+	for _, v := range vars {
+		if seen[v.Name] {
+			continue
+		}
+		seen[v.Name] = true
+		env = append(env, v.Name+"="+v.Value)
+	}
+	return env
 }
 
 // dropEnvNames returns env without the entries named in names, compared

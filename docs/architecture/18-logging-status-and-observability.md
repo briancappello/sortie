@@ -190,13 +190,23 @@ Enablement and configuration:
 
 - The HTTP server starts by default on `127.0.0.1:7678` with no flags required.
 - `--port N` overrides the listening port. Port `0` disables the server entirely.
-- `--host ADDR` overrides the bind address. `ADDR` must be a parseable IP address. Default: `127.0.0.1`. Container deployments use `0.0.0.0`.
+- `--host ADDR` overrides the bind address. `ADDR` must be a parseable IP address. Default: `127.0.0.1`. Container deployments use `0.0.0.0`, which requires `server.control_token`.
 - `server.port` and `server.host` extension keys provide the same overrides via workflow front matter. CLI flags take precedence over extension keys.
 - `server.port` must be an integer in the range 1–65535, or `0` to disable.
 - `server.host` must be a parseable IP address string. DNS hostnames are not accepted.
 - When the default port (7678) is occupied and the operator did not explicitly request a port (`--port` absent, `server.port` extension absent), Sortie logs a warning and starts without the HTTP server; the orchestrator continues normally. When the operator explicitly requested a port (via `--port` or `server.port`) and it is already in use, Sortie exits with code 1 and a descriptive error. No automatic port selection occurs.
 - The `--dry-run` flag suppresses server startup regardless of port or host settings.
 - Changes to HTTP listener settings require restart (hot-rebind is not supported).
+- `server.control_token` is the bearer token every state-changing endpoint requires (see Control authentication below). It supports `$VAR` indirection and is registered for masking. Sortie refuses to start, with a configuration error naming `server.control_token`, when the resolved bind address is not a loopback address and no control token is set; port `0` does not lift the check. Every variable of Sortie's own environment whose value is the control token is removed at startup, so no agent, hook, or tool server inherits it. Read once at startup.
+
+Control authentication:
+
+- State-changing endpoints are `POST /api/v1/refresh` and the per-issue control routes `POST /api/v1/<issue_identifier>/hold`, `/release`, and `/escalate`. Every other route, the dashboard, `GET /api/v1/state`, the per-issue detail, the health probes, and `/metrics`, keeps its access: no token is required.
+- A state-changing request carries `Authorization: Bearer <token>`. The control token is accepted on every state-changing route; tokens are compared in constant time.
+- For each work session, Sortie mints a session token, `_` followed by 32 random bytes in base64url without padding, and gives it to the agent process as `SORTIE_SESSION_TOKEN` (§10.7). A credential-verification session receives none. The token lives in memory only, on the running entry and in an index the server reads by the token's SHA-256 digest; it is registered for masking when minted, and withdrawn from both the index and the mask set when the running entry is removed, so it stops working when its run ends. It is never written to run history or logs.
+- A session token is accepted only on a per-issue control route whose path names the issue it was minted for. On any other state-changing route, refresh included, or for another issue, it receives `403`.
+- A presented token that is neither the control token nor a live session token receives `401`, a non-bearer `Authorization` header included. A request without an `Authorization` header receives `401` when a control token is set, and is accepted when none is, which startup permits only on a loopback bind.
+- A rejected request takes no action, and is logged at INFO as `control request rejected` with its method, path, and status, never its token.
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
@@ -253,7 +263,12 @@ Minimum endpoints:
           "usage_arrival": "incremental",
           "usage_attribution": "per_model",
           "tokens_pending": false,
-          "api_requests_measured": true
+          "api_requests_measured": true,
+          "held": true,
+          "hold_reason": "human takeover",
+          "holder": "acp-broker",
+          "held_since": "2026-02-24T20:14:00Z",
+          "held_total_ms": 30000
         }
       ],
       "retrying": [
@@ -359,6 +374,7 @@ Minimum endpoints:
 
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations may coalesce repeated requests).
+  - Requires the control token when one is set; a session token receives `403` (see Control authentication).
   - Suggested request body: empty body or `{}`.
   - Suggested response (`202 Accepted`) shape:
 
@@ -370,6 +386,24 @@ Minimum endpoints:
       "operations": ["poll", "reconcile"]
     }
     ```
+
+- `POST /api/v1/<issue_identifier>/hold` and `POST /api/v1/<issue_identifier>/release`
+  - Hold or release the issue's running worker. A hold pauses the run's stall and turn clocks while a person works in its session; tracker reconciliation and the token ceiling keep running.
+  - Hold takes an optional body `{"reason": "...", "holder": "..."}`. Release takes none.
+  - Both answer `200` with `issue_identifier`, `issue_id`, and the hold fields of a running row (`held`, `hold_reason`, `holder`, `held_since`, `held_total_ms`); `409` (`issue_not_running`) when the issue is known but has no running worker; `404` (`issue_not_found`) when the identifier names no issue in the runtime state; `400` for a malformed body; `503` during shutdown.
+  - Holding a held run keeps the original start, reason, and holder. Releasing a run that is not held changes nothing.
+  - Each request reaches the event loop as a control message and waits, bounded, for its reply; the event loop alone changes hold state.
+
+- `POST /api/v1/<issue_identifier>/escalate`
+  - Body `{"message": "...", "kind": "question|permission|other", "url": "..."}`; `kind` defaults to `other`.
+  - The event loop checks the message (`400` when empty or when the kind is unknown), the running worker (`409`, or `404` for an unknown identifier), and the issue's 60-second escalation window (`429`), then masks registered secrets in the message and URL and routes one `session.escalated` event (§10.4.7) through the notification router, delivered detached like the other orchestrator events. It answers `202` whether or not a destination lists the event; with none, it logs one `session escalation had no destination` record. The window is kept per issue in memory, starts at each accepted escalation, and does not survive a restart.
+
+Held runs:
+
+- A running entry carries `HeldSince`, `HoldReason`, `Holder`, `HeldTotal`, and the time its last hold ended. Stall detection skips a held entry and measures silence from no earlier than that release time.
+- The turn timeout is kept by a turn clock the event loop and the worker share: a turn's deadline is its start plus `agent.turn_timeout_ms` plus the time held during that turn, and a held turn has no deadline. The turn's context reports that deadline and fails with a deadline error when it passes.
+- A hold ends when it is released, when reconciliation stops the run for a terminal or non-active tracker state, and when the worker exits. Its duration is added to the run's total, counted in `sortie_hold_seconds_total{rule}`, and the total is written to `run_history.held_ms`.
+- Running rows in `GET /api/v1/state` and the per-issue detail carry `held`, `hold_reason`, `holder`, `held_since` (null when not held), and `held_total_ms`. The dashboard marks a held run and describes the hold in its detail panel.
 
 API design notes:
 
@@ -418,6 +452,8 @@ Defined metrics (label sets and buckets are specified here; see ADR-0008 for his
 | `sortie_candidate_holds_total{reason}` | Counter | `IncCandidateHolds`. Candidates the dispatch loop held, partitioned by reason (`blocked_by`, `blockers_unresolved`, `blockers_not_read`, `blockers_incomplete`). Incremented once per held candidate; never incremented for a candidate rejected by an eligibility or capacity gate, and never incremented a second time for the pass-level `blocker reads halted for this tick` ERROR that accompanies a run of `blockers_unresolved` holds. |
 | `sortie_budget_exhaustions_total{reason}` | Counter | `IncBudgetExhaustions`. Issue entries into the per-issue budget-exhausted set, partitioned by reason (`token_budget`, `session_budget`, open to a later value). Incremented once per hold, from whichever lane discovered it; never incremented on a tick that merely re-observes an already-announced hold. |
 | `sortie_budget_exhausted_issues{reason}` | Gauge | `SetBudgetExhaustedIssues`. Issues currently held out of dispatch, partitioned by reason. Recomputed from the full budget-exhausted set on every gauge update, including every declared reason at zero when nothing is held, so a reason that clears reports zero rather than freezing at its last value. |
+| `sortie_runs_held` | Gauge | `SetHeldRuns`. Running issues currently held through the hold endpoint. Recomputed with the other point-in-time gauges, and after every hold or release. |
+| `sortie_hold_seconds_total{rule}` | Counter | `AddHoldSeconds`. Seconds runs spent held, by the run's dispatch rule, `<none>` when no rule applied. Added once per hold, when it ends, so held time per rule is its rate. |
 | `sortie_runs_stopped_by_budget_total{reason}` | Counter | `IncRunsStoppedByBudget`. Runs recorded `budget_stopped`, partitioned by reason. Only `token_budget` is reachable: a session is a discrete unit, so the session ceiling cannot be crossed part-way through one. Incremented once per run whose exit is recorded `budget_stopped`, at that exit. |
 | `sortie_tool_calls_total{tool,result}` | Counter | Agent tool call completions, partitioned by tool name and result (`success`, `error`). |
 | `sortie_ci_status_checks_total{result}` | Counter | CI status check outcomes, partitioned by result (`passing`, `pending`, `failing`, `error`). |

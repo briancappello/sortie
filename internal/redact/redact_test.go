@@ -467,3 +467,24 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+func TestRemove(t *testing.T) {
+	// Not parallel: mutates the process-wide registry.
+	const kept = "kept-credential-value-91"
+	const withdrawn = "withdrawn-session-token-73"
+	Add("test.remove.kept", kept)
+	Add("test.remove.withdrawn", withdrawn)
+
+	Remove(withdrawn)
+
+	if got := Mask(withdrawn); got != withdrawn {
+		t.Errorf("Mask(withdrawn) = %q after Remove, want it unmasked", got)
+	}
+	if got := Mask(kept); got != Marker {
+		t.Errorf("Mask(kept) = %q after removing another value, want %q", got, Marker)
+	}
+	Remove("never-registered-value-55")
+	if got := Mask(kept); got != Marker {
+		t.Errorf("Mask(kept) = %q after removing an unknown value, want %q", got, Marker)
+	}
+}

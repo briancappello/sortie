@@ -77,6 +77,10 @@ type RunHistory struct {
 	// "advanced", "partial", "failed", or "ceiling".
 	StageTarget string
 	StageResult string
+
+	// HeldMS is the time, in milliseconds, the run spent held through the
+	// control API; 0 for a run never held and for pre-migration rows.
+	HeldMS int64
 }
 
 // AppendRunHistory inserts a completed run attempt. The input ID is
@@ -104,14 +108,14 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, held_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
 		run.InputTokens, run.OutputTokens, run.TotalTokens, run.CacheReadTokens, run.CacheWriteTokens, run.TokensMeasured,
 		run.UnaccountedTurns, run.ConfiguredModel, run.ConfiguredEffort, run.ReportedModel,
-		run.StagePrevious, run.StagePreviousOutcome, run.ChainID, run.StageTarget, run.StageResult,
+		run.StagePrevious, run.StagePreviousOutcome, run.ChainID, run.StageTarget, run.StageResult, run.HeldMS,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)
@@ -132,7 +136,7 @@ func (s *Store) QueryRunHistoryByIssue(ctx context.Context, issueID string) ([]R
 		`SELECT id, issue_id, identifier, display_identifier, attempt, agent_adapter, workspace,
 			started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
 			input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
-			configured_model, configured_effort, reported_model
+			configured_model, configured_effort, reported_model, held_ms
 		FROM run_history
 		WHERE issue_id = ?
 		ORDER BY id DESC`, issueID)
@@ -150,7 +154,7 @@ func (s *Store) QueryRunHistoryByIssue(ctx context.Context, issueID string) ([]R
 			&r.Workspace, &r.StartedAt, &r.CompletedAt, &r.Status, &errVal, &wfVal,
 			&r.TurnsCompleted, &reviewMetaVal, &r.RuleName, &r.TemplateID,
 			&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.TokensMeasured,
-			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel,
+			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel, &r.HeldMS,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}
@@ -266,7 +270,7 @@ func (s *Store) QueryRecentRunHistory(ctx context.Context, limit int, afterID in
 				started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
 				input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
 				configured_model, configured_effort, reported_model,
-				chain_id, stage_previous, stage_target, stage_result
+				chain_id, stage_previous, stage_target, stage_result, held_ms
 			FROM run_history
 			WHERE id < ?
 			ORDER BY id DESC
@@ -277,7 +281,7 @@ func (s *Store) QueryRecentRunHistory(ctx context.Context, limit int, afterID in
 				started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
 				input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
 				configured_model, configured_effort, reported_model,
-				chain_id, stage_previous, stage_target, stage_result
+				chain_id, stage_previous, stage_target, stage_result, held_ms
 			FROM run_history
 			ORDER BY id DESC
 			LIMIT ?`, limit)
@@ -297,7 +301,7 @@ func (s *Store) QueryRecentRunHistory(ctx context.Context, limit int, afterID in
 			&r.TurnsCompleted, &reviewMetaVal, &r.RuleName, &r.TemplateID,
 			&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.TokensMeasured,
 			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel,
-			&r.ChainID, &r.StagePrevious, &r.StageTarget, &r.StageResult,
+			&r.ChainID, &r.StagePrevious, &r.StageTarget, &r.StageResult, &r.HeldMS,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}

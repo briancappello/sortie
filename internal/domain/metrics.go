@@ -177,6 +177,15 @@ type Metrics interface {
 	// (sortie_merge_conflict_escalations_total{action} counter).
 	IncMergeConflictEscalations(action string)
 
+	// SetHeldRuns records the number of running issues currently held
+	// (sortie_runs_held gauge).
+	SetHeldRuns(n int)
+
+	// AddHoldSeconds adds the duration of a hold that ended to the hold
+	// counter of the run's dispatch rule; an empty rule reports as
+	// "<none>" (sortie_hold_seconds_total{rule} counter).
+	AddHoldSeconds(rule string, seconds float64)
+
 	// IncDispatchRuleMatch increments the dispatch rule match counter.
 	// layer is one of "rule", "default", or "fallback" identifying
 	// which resolution layer produced the selection. rule is the
@@ -257,6 +266,8 @@ func (*NoopMetrics) IncAutoMergeReactions(string)                          {}
 func (*NoopMetrics) IncMergeConflictChecks(string)                         {}
 func (*NoopMetrics) IncMergeConflictEscalations(string)                    {}
 func (*NoopMetrics) IncDispatchRuleMatch(string, string)                   {}
+func (*NoopMetrics) SetHeldRuns(int)                                       {}
+func (*NoopMetrics) AddHoldSeconds(string, float64)                        {}
 func (*NoopMetrics) IncCandidateHolds(string)                              {}
 func (*NoopMetrics) IncBudgetExhaustions(string)                           {}
 func (*NoopMetrics) IncRunsStoppedByBudget(string)                         {}
