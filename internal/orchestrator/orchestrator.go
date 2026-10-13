@@ -617,6 +617,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	o.applyWorkerConfig(startCfg)
 	o.state.ReactionMaxAttempts = o.reactionMaxAttempts(startCfg)
 	o.state.StageChains = startCfg.Dispatch.Chains()
+	o.state.RuleAgents = o.ruleAgents(startCfg)
 	o.state.HopCeiling = startCfg.Dispatch.HopCeiling()
 	o.activateReconstructedRetries()
 
@@ -798,6 +799,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.MaxTokens = cfg.Agent.MaxTokens
 	o.state.MaxSessions = cfg.Agent.MaxSessions
 	o.state.StageChains = cfg.Dispatch.Chains()
+	o.state.RuleAgents = o.ruleAgents(cfg)
 	o.state.HopCeiling = cfg.Dispatch.HopCeiling()
 	o.state.ReactionMaxAttempts = o.reactionMaxAttempts(cfg)
 	o.state.TokenWarningThreshold = cfg.Agent.TokenWarningThreshold()
@@ -1391,9 +1393,10 @@ func (o *Orchestrator) fillRetryIdentity(candidates []domain.Issue) {
 // candidates, then against every parked issue the candidate slice omits,
 // read through one batched, comment-free tracker call. A park that still
 // holds no read of its issue takes the candidate's, or, when the candidates
-// omit the issue and the batched read finds it, one single-issue read. Must
-// run on the event loop after the budget rebuild and before the dispatch
-// loop.
+// omit the issue and the batched read finds it, one single-issue read. A
+// park that holds a title or link and no labels takes the candidate's issue
+// type and labels only; the batched read never completes it. Must run on the
+// event loop after the budget rebuild and before the dispatch loop.
 func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []domain.Issue, terminalStates []string) {
 	if len(o.state.Parked) == 0 {
 		return
@@ -1471,17 +1474,24 @@ func (o *Orchestrator) recordParkReleaseOutcome(ctx context.Context, issueID, id
 	recordIssueOutcome(ctx, o.store, terminalOutcome(issueID, observed, time.Now()), logging.WithIssue(o.logger, issueID, identifier))
 }
 
-// backfillParkedIdentity stores the identity of issue on a park that holds
-// no read and is still parked. A read that names nothing leaves the park as
-// it was.
+// backfillParkedIdentity completes the identity of a park that is still
+// parked and holds no read or a partial one, from issue. A read that names
+// neither a title nor a link leaves the park as it was. The stored labels
+// leave out the park's own parking label, which a read taken after the label
+// write carries.
 func (o *Orchestrator) backfillParkedIdentity(ctx context.Context, id string, entry *ParkedEntry, issue domain.Issue) {
-	if o.state.Parked[id] != entry || !entry.IssueIdentity.isZero() {
+	if o.state.Parked[id] != entry {
 		return
 	}
-	identity := issueIdentityOf(issue)
-	if identity.Title == "" && identity.URL == "" {
+	if !entry.IssueIdentity.isZero() && !entry.IssueIdentity.holdsPartialRead() {
 		return
 	}
+	read := issueIdentityOf(issue)
+	if read.Title == "" && read.URL == "" {
+		return
+	}
+	identity := entry.IssueIdentity.filledFrom(read)
+	identity.Labels = labelsWithout(identity.Labels, entry.Label)
 	entry.IssueIdentity = identity
 	if err := o.store.UpsertParkedIssue(ctx, parkedIssueRow(id, entry)); err != nil {
 		logging.WithIssue(o.logger, id, entry.Identifier).Error(
@@ -1515,13 +1525,28 @@ func (o *Orchestrator) parkExhaustedAbsences(ctx context.Context, cfg config.Ser
 		return
 	}
 
+	var exhausted []domain.Issue
 	for _, issue := range candidates {
-		count := counts[issue.ID]
-		if count < ceiling {
+		if counts[issue.ID] < ceiling {
 			continue
 		}
 		if _, parked := o.state.Parked[issue.ID]; parked {
 			continue
+		}
+		if slices.ContainsFunc(exhausted, func(held domain.Issue) bool { return held.ID == issue.ID }) {
+			continue
+		}
+		exhausted = append(exhausted, issue)
+	}
+	if len(exhausted) == 0 {
+		return
+	}
+
+	runs := o.latestRunsOfExhausted(ctx, exhausted)
+	for _, issue := range exhausted {
+		var run parkedRun
+		if row, ok := runs[issue.ID]; ok {
+			run = parkedRunOf(row)
 		}
 		issueLog := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
 		parkHandoffAbsence(
@@ -1534,13 +1559,33 @@ func (o *Orchestrator) parkExhaustedAbsences(ctx context.Context, cfg config.Ser
 			issue.Identifier,
 			issue.DisplayID,
 			issueIdentityOf(issue),
+			run,
 			issue.State,
-			count,
+			counts[issue.ID],
 			ceiling,
 			o.handoffParkingLabel,
 			issueLog,
 		)
 	}
+}
+
+// latestRunsOfExhausted reads the newest agent run of each issue in one call.
+// A failed read yields no runs: the caller parks every issue regardless, so
+// a store fault never lets an issue whose runs produce no work keep
+// dispatching.
+func (o *Orchestrator) latestRunsOfExhausted(ctx context.Context, issues []domain.Issue) map[string]persistence.RunHistory {
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	slices.Sort(ids)
+
+	runs, err := o.store.LatestAgentRuns(ctx, ids)
+	if err != nil {
+		o.logger.Warn("park dispatch context read failed", slog.Any("error", err))
+		return nil
+	}
+	return runs
 }
 
 // ceilingSettingByBudgetReason maps a budget-hold reason to the dotted
@@ -1802,12 +1847,35 @@ func (o *Orchestrator) describeFromWaitingHop(cfg config.ServiceConfig, issueID 
 	if !ok {
 		return false
 	}
-	resolution := ruleResolution(rule, cfg.Dispatch, cfg.Agent.Kind, "")
+	agent := o.ruleAgentOf(cfg, rule)
 	entry.RuleName = rule.Name
 	entry.StageLineage = freshLineage(o.state, issueID, rule.Name)
-	entry.AgentKind = resolution.AgentKind
-	entry.ConfiguredModel = o.resolveAttemptSettings(cfg, resolution, "").Settings.Model
+	entry.AgentKind = agent.AgentKind
+	entry.ConfiguredModel = agent.ConfiguredModel
 	return true
+}
+
+// ruleAgentOf returns the agent kind and model a dispatch of rule resolves to
+// under cfg.
+func (o *Orchestrator) ruleAgentOf(cfg config.ServiceConfig, rule config.DispatchRule) RuleAgent {
+	resolution := ruleResolution(rule, cfg.Dispatch, cfg.Agent.Kind, "")
+	return RuleAgent{
+		AgentKind:       resolution.AgentKind,
+		ConfiguredModel: o.resolveAttemptSettings(cfg, resolution, "").Settings.Model,
+	}
+}
+
+// ruleAgents maps each named rule of cfg that carries a stage label, the rules
+// a stage hop can target, to its [Orchestrator.ruleAgentOf].
+func (o *Orchestrator) ruleAgents(cfg config.ServiceConfig) map[string]RuleAgent {
+	agents := make(map[string]RuleAgent, len(cfg.Dispatch.Rules))
+	for _, rule := range cfg.Dispatch.Rules {
+		if rule.Name == "" || rule.Stage == "" {
+			continue
+		}
+		agents[rule.Name] = o.ruleAgentOf(cfg, rule)
+	}
+	return agents
 }
 
 // drainRunningWorkers cancels all running worker contexts and waits for

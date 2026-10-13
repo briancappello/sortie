@@ -525,8 +525,10 @@ type PendingReaction struct {
 
 	DisplayID string
 
-	// IssueIdentity is the issue as read when the worker exited; restored
-	// from run history it holds the title and link alone, with nil Labels.
+	// IssueIdentity is the issue as the run that created the reaction read
+	// it, with the handoff target as State when that run's exit moved the
+	// issue to it. Restored from run history it holds the title and link
+	// alone, with nil Labels.
 	IssueIdentity IssueIdentity
 
 	// Attempt is the overall run attempt number from the completed worker.
@@ -900,14 +902,23 @@ type BudgetAnnouncement struct {
 type ParkedEntry struct {
 	Identifier string
 	DisplayID  string
-	// IssueIdentity is the issue's title and link as read for the park; the
-	// zero value holds no read.
+	// IssueIdentity is the issue's title, link, issue type, and labels as
+	// read for the park; the zero value holds no read. Its State is never
+	// served: ParkedState is.
 	IssueIdentity IssueIdentity
 	Reason        string // "agent_blocked" or "handoff_absence"
 	ParkedState   string // tracker state observed at park time; empty when unobserved
 	Label         string // parking label the orchestrator applied
 	LabelApplied  bool
 	ParkedAt      time.Time
+
+	// RuleName, StageLineage, AgentKind, and ConfiguredModel describe the
+	// run the park follows. The park records a run exactly when AgentKind
+	// is non-empty.
+	RuleName        string
+	StageLineage    StageLineage
+	AgentKind       string
+	ConfiguredModel string
 }
 
 // IssueIdentity names an issue to a person beside its key: the tracker's
@@ -1041,6 +1052,13 @@ type ContinuationTarget struct {
 	Attempt  int // 0 for a kind that counts no tries
 }
 
+// RuleAgent is the agent kind and configured model a dispatch of one rule
+// resolves to under the configuration in force.
+type RuleAgent struct {
+	AgentKind       string
+	ConfiguredModel string
+}
+
 // StageHopEntry is the runtime view of one issue's stage_hops row.
 type StageHopEntry struct {
 	Identifier       string
@@ -1064,8 +1082,8 @@ type StageHopEntry struct {
 	// empty when Identifier is display-ready.
 	DisplayID string
 
-	// IssueIdentity holds the title and link the hopping run read. The hop
-	// swapped a label, so the run's other facts are stale and stay unset.
+	// IssueIdentity holds the title, issue type, and state the hopping run
+	// read and the labels the hop leaves on the issue.
 	IssueIdentity IssueIdentity
 
 	// DispatchedAt is the start of the first run of the pass ChainID names.
@@ -1132,6 +1150,13 @@ type State struct {
 	// event loop serves a snapshot. Written only on the event-loop goroutine.
 	StageChains [][]string
 	HopCeiling  int
+
+	// RuleAgents maps the name of each rule a stage hop can target to the
+	// agent kind and model a dispatch of it resolves to. It mirrors the
+	// configuration, is refreshed on every poll tick, and is set before the
+	// event loop serves a snapshot. Written only on the event-loop
+	// goroutine.
+	RuleAgents map[string]RuleAgent
 
 	// ReactionMaxAttempts maps a reaction kind to the ceiling its pass
 	// applies to [State.ReactionAttempts]; a kind with none is absent. Set
@@ -1377,19 +1402,30 @@ type SnapshotContinuation struct {
 }
 
 // SnapshotStageHop is a read-only view of one issue between stages: a hop was
-// made and no run of the issue was dispatched since. IssueTitle and IssueURL
-// are masked.
+// made and no run of the issue was dispatched since. IssueTitle, IssueURL,
+// IssueType, IssueLabels, and State are masked. IssueLabels is nil exactly
+// when the record holds no read of the labels. StagePosition is nil when
+// RuleName is on no stage chain, and AgentKind and ConfiguredModel are empty
+// when the configuration names no rule with a stage label for it.
 type SnapshotStageHop struct {
 	IssueID      string    `json:"issue_id"`
 	Identifier   string    `json:"issue_identifier"`
 	DisplayID    string    `json:"display_identifier,omitempty"`
 	IssueTitle   string    `json:"issue_title,omitempty"`
 	IssueURL     string    `json:"issue_url,omitempty"`
+	IssueType    string    `json:"issue_type,omitempty"`
+	IssueLabels  []string  `json:"issue_labels,omitzero"`
+	State        string    `json:"state,omitempty"`
 	SourceRule   string    `json:"source_rule"`
 	TargetRule   string    `json:"target_rule"`
 	TargetLabel  string    `json:"target_label"`
 	HoppedAt     time.Time `json:"hopped_at"`
 	DispatchedAt time.Time `json:"dispatched_at"`
+
+	RuleName        string                 `json:"rule_name,omitempty"`
+	StagePosition   *SnapshotStagePosition `json:"stage_position"`
+	AgentKind       string                 `json:"agent_kind,omitempty"`
+	ConfiguredModel string                 `json:"configured_model,omitempty"`
 }
 
 // SnapshotRunningEntry is a read-only view of a running session, produced
@@ -1475,18 +1511,30 @@ type SnapshotRetryEntry struct {
 }
 
 // SnapshotParkedEntry is a read-only view of one parked issue, produced by
-// [RuntimeSnapshot]. IssueTitle, IssueURL, and ParkedState are masked.
+// [RuntimeSnapshot]. IssueTitle, IssueURL, IssueType, IssueLabels, and
+// ParkedState are masked. IssueLabels is nil exactly when the entry holds no
+// read of the labels. StagePosition is nil when the park follows no run or
+// RuleName is on no stage chain, and DispatchedAt is zero when the park
+// follows no run or that run's pass is undated.
 type SnapshotParkedEntry struct {
 	IssueID      string    `json:"issue_id"`
 	Identifier   string    `json:"issue_identifier"`
 	DisplayID    string    `json:"display_identifier,omitempty"`
 	IssueTitle   string    `json:"issue_title,omitempty"`
 	IssueURL     string    `json:"issue_url,omitempty"`
+	IssueType    string    `json:"issue_type,omitempty"`
+	IssueLabels  []string  `json:"issue_labels,omitzero"`
+	DispatchedAt time.Time `json:"dispatched_at"`
 	Reason       string    `json:"reason"`
 	ParkedState  string    `json:"parked_state,omitempty"`
 	Label        string    `json:"label"`
 	LabelApplied bool      `json:"label_applied"`
 	ParkedAt     time.Time `json:"parked_at"`
+
+	RuleName        string                 `json:"rule_name,omitempty"`
+	StagePosition   *SnapshotStagePosition `json:"stage_position"`
+	AgentKind       string                 `json:"agent_kind,omitempty"`
+	ConfiguredModel string                 `json:"configured_model,omitempty"`
 }
 
 // SnapshotBudgetEntry is a read-only, value-copied view of one issue held
@@ -1521,13 +1569,19 @@ type SnapshotBudgetEntry struct {
 }
 
 // SnapshotPendingReaction is a read-only view of one pending reaction,
-// produced by [RuntimeSnapshot]. Every runtime-derived string is masked.
+// produced by [RuntimeSnapshot]. Every runtime-derived string is masked,
+// IssueType, IssueLabels, and State included. IssueLabels is nil exactly when
+// the reaction holds no read of the labels. StagePosition is nil when
+// RuleName is on no stage chain.
 type SnapshotPendingReaction struct {
 	IssueID      string              `json:"issue_id"`
 	Identifier   string              `json:"issue_identifier"`
 	DisplayID    string              `json:"display_identifier,omitempty"`
 	IssueTitle   string              `json:"issue_title,omitempty"`
 	IssueURL     string              `json:"issue_url,omitempty"`
+	IssueType    string              `json:"issue_type,omitempty"`
+	IssueLabels  []string            `json:"issue_labels,omitzero"`
+	State        string              `json:"state,omitempty"`
 	Kind         string              `json:"kind"`
 	ConfigKey    string              `json:"config_key"`
 	PullRequest  SnapshotPullRequest `json:"pull_request"`
@@ -1539,6 +1593,11 @@ type SnapshotPendingReaction struct {
 	MaxAttempts  *int                `json:"max_attempts"`
 	EscalatedAt  *time.Time          `json:"escalated_at"`
 	LastCheck    *ReactionCheck      `json:"last_check"`
+
+	RuleName        string                 `json:"rule_name,omitempty"`
+	StagePosition   *SnapshotStagePosition `json:"stage_position"`
+	AgentKind       string                 `json:"agent_kind,omitempty"`
+	ConfiguredModel string                 `json:"configured_model,omitempty"`
 }
 
 // SnapshotPullRequest is the pull request a pending reaction watches.
@@ -1865,11 +1924,19 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			DisplayID:    entry.DisplayID,
 			IssueTitle:   identity.Title,
 			IssueURL:     identity.URL,
+			IssueType:    identity.IssueType,
+			IssueLabels:  identity.Labels,
+			DispatchedAt: entry.StageLineage.DispatchedAt,
 			Reason:       entry.Reason,
 			ParkedState:  redact.Mask(entry.ParkedState),
 			Label:        entry.Label,
 			LabelApplied: entry.LabelApplied,
 			ParkedAt:     entry.ParkedAt,
+
+			RuleName:        entry.RuleName,
+			StagePosition:   stagePosition(state, id, entry.RuleName, entry.StageLineage.PreviousRule),
+			AgentKind:       entry.AgentKind,
+			ConfiguredModel: entry.ConfiguredModel,
 		})
 	}
 	slices.SortFunc(parked, func(a, b SnapshotParkedEntry) int {
@@ -1896,13 +1963,16 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 		pr := pullRequestOf(entry)
 		identity := maskedIdentity(entry.IssueIdentity)
 		row := SnapshotPendingReaction{
-			IssueID:    entry.IssueID,
-			Identifier: entry.Identifier,
-			DisplayID:  entry.DisplayID,
-			IssueTitle: identity.Title,
-			IssueURL:   identity.URL,
-			Kind:       entry.Kind,
-			ConfigKey:  ReactionConfigKey(entry.Kind),
+			IssueID:     entry.IssueID,
+			Identifier:  entry.Identifier,
+			DisplayID:   entry.DisplayID,
+			IssueTitle:  identity.Title,
+			IssueURL:    identity.URL,
+			IssueType:   identity.IssueType,
+			IssueLabels: identity.Labels,
+			State:       identity.State,
+			Kind:        entry.Kind,
+			ConfigKey:   ReactionConfigKey(entry.Kind),
 			PullRequest: SnapshotPullRequest{
 				Number:     pr.Number,
 				Repository: redact.Mask(pr.Owner + "/" + pr.Repo),
@@ -1915,6 +1985,11 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 			NextPollAt:   cmp.Or(entry.PendingRetryAt, entry.CreatedAt),
 			Wait:         entry.Wait,
 			LastCheck:    snapshotReactionCheck(entry.LastCheck),
+
+			RuleName:        entry.RuleName,
+			StagePosition:   stagePosition(state, entry.IssueID, entry.RuleName, entry.StageLineage.PreviousRule),
+			AgentKind:       entry.AgentKind,
+			ConfiguredModel: entry.ConfiguredModel,
 		}
 		if reactionKinds[entry.Kind].attempts == countsAttempts {
 			used := state.ReactionAttempts[ReactionKey(entry.IssueID, entry.Kind)]
@@ -1956,17 +2031,26 @@ func snapshotBetweenStages(state *State) []SnapshotStageHop {
 			continue
 		}
 		identity := maskedIdentity(hop.IssueIdentity)
+		agent := state.RuleAgents[hop.TargetRule]
 		rows = append(rows, SnapshotStageHop{
 			IssueID:      id,
 			Identifier:   hop.Identifier,
 			DisplayID:    hop.DisplayID,
 			IssueTitle:   identity.Title,
 			IssueURL:     identity.URL,
+			IssueType:    identity.IssueType,
+			IssueLabels:  identity.Labels,
+			State:        identity.State,
 			SourceRule:   hop.SourceRule,
 			TargetRule:   hop.TargetRule,
 			TargetLabel:  hop.TargetLabel,
 			HoppedAt:     hop.HoppedAt,
 			DispatchedAt: hop.DispatchedAt,
+
+			RuleName:        hop.TargetRule,
+			StagePosition:   stagePosition(state, id, hop.TargetRule, hop.SourceRule),
+			AgentKind:       agent.AgentKind,
+			ConfiguredModel: agent.ConfiguredModel,
 		})
 	}
 	slices.SortFunc(rows, func(a, b SnapshotStageHop) int {

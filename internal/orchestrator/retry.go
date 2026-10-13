@@ -271,6 +271,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 					popped.Identifier,
 					popped.DisplayID,
 					popped.IssueIdentity,
+					parkedRun{
+						RuleName:        popped.RuleName,
+						StageLineage:    popped.StageLineage,
+						AgentKind:       popped.AgentKind,
+						ConfiguredModel: popped.ConfiguredModel,
+					},
 					"",
 					consecutiveAbsences,
 					absenceCeiling,

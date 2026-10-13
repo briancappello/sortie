@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -223,6 +224,8 @@ func advanceStage(ctx context.Context, state *State, entry *RunningEntry, result
 	if declared {
 		previousOutcome = stageOutcomeNoChange
 	}
+	identity := issueIdentityOf(entry.Issue)
+	identity.Labels = labelsAfterHop(entry.Issue.Labels, params.Dispatch.Rules, target.Stage)
 	state.StageHops[issueID] = &StageHopEntry{
 		Identifier:       result.Identifier,
 		Count:            count + 1,
@@ -234,7 +237,7 @@ func advanceStage(ctx context.Context, state *State, entry *RunningEntry, result
 		HoppedAt:         now,
 		ChainID:          entry.StageLineage.ChainID,
 		DisplayID:        entry.Issue.DisplayID,
-		IssueIdentity:    IssueIdentity{Title: entry.Issue.Title, URL: entry.Issue.URL},
+		IssueIdentity:    identity,
 		DispatchedAt:     entry.StageLineage.DispatchedAt,
 	}
 	row := persistence.StageHop{
@@ -251,6 +254,9 @@ func advanceStage(ctx context.Context, state *State, entry *RunningEntry, result
 		DisplayID:        entry.Issue.DisplayID,
 		IssueTitle:       entry.Issue.Title,
 		IssueURL:         entry.Issue.URL,
+		IssueType:        identity.IssueType,
+		IssueLabels:      identity.Labels,
+		IssueState:       identity.State,
 		DispatchedAt:     formatDispatchedAt(entry.StageLineage.DispatchedAt),
 	}
 	if err := params.Store.RecordStageHop(ctx, row); err != nil {
@@ -383,6 +389,27 @@ func carriedStageLabels(rules []config.DispatchRule, labels []string) []string {
 	return carried
 }
 
+// labelsAfterHop returns labels as a hop to targetLabel leaves them: a new
+// non-nil slice without the stage labels the removal loop of [advanceStage]
+// removes, then targetLabel lowercased unless a kept label already matches
+// it. It exists so the hop record does not show the label the hop removed in
+// place of the one it added.
+func labelsAfterHop(labels []string, rules []config.DispatchRule, targetLabel string) []string {
+	removed := slices.DeleteFunc(carriedStageLabels(rules, labels), func(stage string) bool {
+		return config.StageLabelsEqual(stage, targetLabel)
+	})
+	after := make([]string, 0, len(labels)+1)
+	for _, label := range labels {
+		if !carriesLabel(removed, label) {
+			after = append(after, label)
+		}
+	}
+	if !carriesLabel(after, targetLabel) {
+		after = append(after, strings.ToLower(targetLabel))
+	}
+	return after
+}
+
 // holdForStageHop keeps an issue that was just hopped from dispatching on
 // any rule until a read shows the label the hop added. It returns the
 // issue to dispatch, carrying the labels of the direct read when one was
@@ -481,9 +508,15 @@ func PopulateStageHops(state *State, rows []persistence.StageHop, log *slog.Logg
 			HoppedAt:         hoppedAt,
 			ChainID:          row.ChainID,
 			DisplayID:        row.DisplayID,
-			IssueIdentity:    IssueIdentity{Title: row.IssueTitle, URL: row.IssueURL},
-			DispatchedAt:     parseDispatchedAt(row.DispatchedAt),
-			RunDispatched:    row.RunDispatched,
+			IssueIdentity: IssueIdentity{
+				Title:     row.IssueTitle,
+				URL:       row.IssueURL,
+				IssueType: row.IssueType,
+				Labels:    row.IssueLabels,
+				State:     row.IssueState,
+			},
+			DispatchedAt:  parseDispatchedAt(row.DispatchedAt),
+			RunDispatched: row.RunDispatched,
 		}
 	}
 }
