@@ -3137,7 +3137,7 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 
 Pricing uses the `token_rates` the process started with, the same rates `config.token_rates` of `GET /api/v1/state` serves. `sortie stats` reads the workflow file each time it runs, so after an edit of `token_rates` the command and the route price differently until the process restarts.
 
-The report holds no free text, so the route masks nothing in it. The host paths in `workflow_path` and `db_path`, and any in the `by_template` names, are served as the command prints them.
+The report holds no issue titles, error text, or agent output, so the route masks nothing in it. Its strings are names and identifiers, including the rule, template, and model names your workflow defines. The host paths in `workflow_path` and `db_path`, and any in the `by_template` names, are served as the command prints them.
 
 **Errors:**
 
