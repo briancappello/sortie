@@ -145,17 +145,26 @@ func (e *paramError) Error() string {
 
 var runsParams = []string{"issue", "issue_id", "rule", "status", "stage", "since", "until", "ended_since", "ended_until", "cursor", "limit"}
 
+// checkParamNames returns a *paramError for the first name, in sorted order,
+// that is not in allowed or is given more than once.
+func checkParamNames(values url.Values, allowed []string) error {
+	for _, name := range slices.Sorted(maps.Keys(values)) {
+		if !slices.Contains(allowed, name) {
+			return &paramError{name, "is not a parameter of this route"}
+		}
+		if len(values[name]) > 1 {
+			return &paramError{name, "is given more than once"}
+		}
+	}
+	return nil
+}
+
 // parseRunsQuery validates every parameter of GET /api/v1/runs before any
 // read, so a typo never serves unfiltered rows as filtered ones. An empty
 // value reads as absent.
 func parseRunsQuery(values url.Values) (RunHistoryQuery, error) {
-	for _, name := range slices.Sorted(maps.Keys(values)) {
-		if !slices.Contains(runsParams, name) {
-			return RunHistoryQuery{}, &paramError{name, "is not a parameter of this route"}
-		}
-		if len(values[name]) > 1 {
-			return RunHistoryQuery{}, &paramError{name, "is given more than once"}
-		}
+	if err := checkParamNames(values, runsParams); err != nil {
+		return RunHistoryQuery{}, err
 	}
 
 	q := RunHistoryQuery{

@@ -6,7 +6,7 @@
 
 ```
 cmd/sortie → internal/* (wiring only)
-server → domain, orchestrator, config, redact, registry, sentence
+server → domain, orchestrator, config, redact, registry, sentence, runstats
 orchestrator → domain, config, persistence, workspace, workspacekit, registry, prompt, workflow, logging, redact, adapter-family packages that register no kind (scm/scmcore, agent/procutil); kind packages only via registry
 workflow → config, prompt
 workspace → domain, config, persistence, agent/procutil, workspacekit

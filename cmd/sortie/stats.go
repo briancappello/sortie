@@ -47,28 +47,34 @@ func statsPricer(rates server.TokenRates) runstats.Pricer {
 	}
 }
 
-// parseRangeBound parses a --since or --until flag value into a UTC
-// time bound. An empty string returns nil, nil, meaning the bound is
-// absent. raw MUST be an RFC3339 timestamp, a YYYY-MM-DD date (read as
-// 00:00:00Z on that date), or a positive Go duration (read as
-// statsNow() minus that duration); any other input, including a zero
-// or negative duration, is a usage error.
-func parseRangeBound(raw string) (*time.Time, error) {
-	if raw == "" {
-		return nil, nil
+// statsSource is what a stats report is read from and priced with.
+type statsSource struct {
+	dbPath       string
+	workflowPath string
+	rates        server.TokenRates
+	rateWarnings []string
+}
+
+// report opens dbPath read-only and aggregates the runs completed in
+// [since, until). Each call opens its own connection, so concurrent calls
+// share nothing and a long scan never holds the orchestrator's store.
+func (src statsSource) report(ctx context.Context, since, until *time.Time, generatedAt time.Time) (runstats.Report, error) {
+	store, err := persistence.OpenReadOnly(ctx, src.dbPath)
+	if err != nil {
+		return runstats.Report{}, fmt.Errorf("open database %s: %w", src.dbPath, err)
 	}
-	if t, err := time.Parse(time.RFC3339, raw); err == nil {
-		return new(t.UTC()), nil
+	defer store.Close() //nolint:errcheck,gosec // read-only handle; close error is non-actionable
+
+	caps, err := store.RunHistoryCapabilities(ctx)
+	if err != nil {
+		return runstats.Report{}, err
 	}
-	if t, err := time.Parse("2006-01-02", raw); err == nil {
-		return new(t.UTC()), nil
+
+	agg := runstats.New(caps, statsPricer(src.rates))
+	if err := store.ScanRunHistoryRange(ctx, caps, since, until, agg.Add); err != nil {
+		return runstats.Report{}, err
 	}
-	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-		return new(statsNow().UTC().Add(-d)), nil
-	}
-	return nil, fmt.Errorf(
-		"invalid range bound %q: accepts an RFC3339 timestamp (2026-07-01T00:00:00Z), "+
-			"a date (2026-07-01), or a positive duration (24h)", raw)
+	return agg.Report(generatedAt, src.workflowPath, src.dbPath, since, until, src.rateWarnings), nil
 }
 
 // formatShare renders a 0..1 fraction as a one-decimal percentage.
@@ -314,8 +320,8 @@ func renderStatsText(stdout, stderr io.Writer, report runstats.Report) {
 
 	full := report.SchemaTier == "full"
 
-	fmt.Fprintf(stdout, "runs %d   succeeded %d (%s)\n", //nolint:errcheck // stdout write failure is unrecoverable
-		report.Summary.Runs, report.Summary.Succeeded, formatShare(report.Summary.SuccessRate))
+	fmt.Fprintf(stdout, "runs %d   issues %d   succeeded %d (%s)\n", //nolint:errcheck // stdout write failure is unrecoverable
+		report.Summary.Runs, report.Summary.Issues, report.Summary.Succeeded, formatShare(report.Summary.SuccessRate))
 	fmt.Fprintf(stdout, "duration (succeeded)    %s\n", formatStatsDuration(report.Summary.Duration)) //nolint:errcheck // stdout write failure is unrecoverable
 	if full {
 		fmt.Fprintf(stdout, "turns (succeeded)       %s\n", //nolint:errcheck // stdout write failure is unrecoverable
@@ -349,6 +355,10 @@ func renderStatsText(stdout, stderr io.Writer, report runstats.Report) {
 		if len(report.ByChain) > 0 {
 			fmt.Fprintln(stdout) //nolint:errcheck // stdout write failure is unrecoverable
 			renderStatsChainTable(stdout, report.ByChain, full)
+		}
+		if len(report.ByTrigger) > 0 {
+			fmt.Fprintln(stdout) //nolint:errcheck // stdout write failure is unrecoverable
+			renderStatsGroupTable(stdout, "by retry trigger", "trigger", report.ByTrigger, full, false)
 		}
 		fmt.Fprintln(stdout) //nolint:errcheck // stdout write failure is unrecoverable
 		renderStatsSelfReview(stdout, report.SelfReview)
@@ -412,12 +422,13 @@ func runStats(ctx context.Context, args []string, stdout io.Writer, stderr io.Wr
 		return 1
 	}
 
-	since, err := parseRangeBound(*sinceRaw)
+	now := statsNow().UTC()
+	since, err := runstats.ParseRangeBound(*sinceRaw, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "sortie stats: --since: %s\n", err) //nolint:errcheck // stderr write failure is unrecoverable
 		return 1
 	}
-	until, err := parseRangeBound(*untilRaw)
+	until, err := runstats.ParseRangeBound(*untilRaw, now)
 	if err != nil {
 		fmt.Fprintf(stderr, "sortie stats: --until: %s\n", err) //nolint:errcheck // stderr write failure is unrecoverable
 		return 1
@@ -445,29 +456,15 @@ func runStats(ctx context.Context, args []string, stdout io.Writer, stderr io.Wr
 	}
 
 	dbPath := resolveDBPath(cfg.DBPath, filepath.Dir(path))
-	store, err := persistence.OpenReadOnly(ctx, dbPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "sortie stats: open database %s: %s\n", dbPath, err) //nolint:errcheck // stderr write failure is unrecoverable
-		return 1
-	}
-	defer store.Close() //nolint:errcheck,gosec // read-only handle; close error is non-actionable
-
-	caps, err := store.RunHistoryCapabilities(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "sortie stats: %s\n", err) //nolint:errcheck // stderr write failure is unrecoverable
-		return 1
-	}
-
 	rawTokenRates, tokenRatesPresent := cfg.ExtensionValue("token_rates")
 	rates, rateWarnings := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
 
-	agg := runstats.New(caps, statsPricer(rates))
-	if err := store.ScanRunHistoryRange(ctx, caps, since, until, agg.Add); err != nil {
+	src := statsSource{dbPath: dbPath, workflowPath: path, rates: rates, rateWarnings: rateWarnings}
+	report, err := src.report(ctx, since, until, now)
+	if err != nil {
 		fmt.Fprintf(stderr, "sortie stats: %s\n", err) //nolint:errcheck // stderr write failure is unrecoverable
 		return 1
 	}
-
-	report := agg.Report(statsNow().UTC(), path, dbPath, since, until, rateWarnings)
 
 	if *format == "json" {
 		if err := writeJSON(stdout, report); err != nil {

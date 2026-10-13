@@ -629,6 +629,90 @@ Minimum endpoints:
     }
     ```
 
+- `GET /api/v1/stats`
+  - Returns the run statistics report that `sortie stats --format json` prints, over the finished runs of run history in a range. The route serves that report unchanged and computes it through the same aggregation as the command, so no figure is computed twice and no second shape exists.
+  - Query parameters. Each is optional, an empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
+    - `since`: a range bound; selects the runs completed at or after it.
+    - `until`: a range bound; selects the runs completed before it. When both are given, `since` MUST be before `until`.
+    - A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date such as `2026-07-01` (00:00:00 UTC that day), or a positive Go duration such as `24h`, which counts back from the instant of the request. A timestamp without an offset, a zero or negative duration, and any other text are malformed.
+  - `generated_at` is the instant of the request, and relative bounds count from it. `since` and `until` carry the resolved bounds in UTC, `null` when open.
+  - Prices use the rates `config.token_rates` serves, the rates the process started with. After an edit of `token_rates` in WORKFLOW.md the command and the route price differently until the process restarts. `warnings` lists the capability warning of an older database, if any, then the warnings of those rates.
+  - `summary.issues` is the number of distinct issues among the runs `summary.runs` counts, `0` when no run is in range. `by_trigger` groups those runs by the retry trigger that started them, one group per stored value, named by the value. `<none>` names the empty trigger: runs dispatched from the poll tick, runs a reaction started, and recorded CI results. `<unknown>` names a run whose row records no trigger: runs recorded before the trigger was kept, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, carry the figures `by_rule` computes, and sort like every other breakdown. `by_trigger` is `[]` when the database predates the trigger column, and `warnings` says so.
+  - With no run in range the route answers `200` with `summary.runs` and `summary.issues` at `0`, every breakdown `[]`, and `null` for every figure no run supplies.
+  - The route refuses a request it cannot read exactly as asked, as `GET /api/v1/runs` does. A parameter this route does not define, a parameter given more than once, a value that is not a range bound, and a `since` that is not before `until` answer `400` with the error code `invalid_parameter`, whose message names the parameter and the rule, and the route reads nothing. A failed read, or a server without run history, answers `503` with `history_unavailable`. Any method other than `GET` answers `405`. A client that disconnects during the read gets no response, and the read stops.
+  - The report is not masked, because it holds no issue titles, error text, or agent output. Its strings are names and identifiers, including the operator's rule, template, and model names, and host paths: `workflow_path`, `db_path`, and the `by_template` names, served as the command prints them.
+  - Each request reads on its own read-only connection to the database, never through the orchestrator's store, so a long range never delays a write of the orchestrator.
+  - Suggested response shape, abridged to one group per breakdown:
+
+    ```json
+    {
+      "generated_at": "2026-02-24T20:15:30Z",
+      "workflow_path": "/srv/sortie/WORKFLOW.md",
+      "db_path": "/srv/sortie/.sortie.db",
+      "since": "2026-02-23T20:15:30Z",
+      "until": null,
+      "schema_tier": "full",
+      "warnings": [],
+      "summary": {
+        "runs": 6,
+        "issues": 5,
+        "succeeded": 3,
+        "success_rate": 0.5,
+        "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
+        "mean_turns_succeeded": 4,
+        "tokens": {"input": 3900000, "output": 760000, "total": 4660000, "cache_read": 50000, "cache_write": 10000},
+        "cost_usd": 19.52,
+        "cost_per_succeeded_run_usd": 6.51,
+        "zero_duration_runs": 1,
+        "duration_excluded_runs": 1,
+        "cost_unpriced_runs": 1,
+        "tokens_unmeasured_runs": 1
+      },
+      "by_status": [
+        {
+          "name": "succeeded",
+          "runs": 3,
+          "succeeded": 3,
+          "success_rate": 1,
+          "share": 0.5,
+          "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
+          "mean_turns": 4,
+          "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000},
+          "cost_usd": 17.87,
+          "cost_per_succeeded_run_usd": 5.96,
+          "tokens_unmeasured_runs": 0
+        }
+      ],
+      "by_adapter": [],
+      "by_rule": [],
+      "by_template": [],
+      "by_model": [],
+      "by_chain": [],
+      "by_trigger": [
+        {
+          "name": "<unknown>",
+          "runs": 4,
+          "succeeded": 2,
+          "success_rate": 0.5,
+          "share": 0.6667,
+          "duration_seconds": {"p50": 600, "p95": 1800, "mean": 900, "samples": 4},
+          "mean_turns": 3,
+          "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
+          "cost_usd": 12.25,
+          "cost_per_succeeded_run_usd": 6.13,
+          "tokens_unmeasured_runs": 1
+        }
+      ],
+      "self_review": {
+        "runs_with_metadata": 2,
+        "by_final_verdict": [{"verdict": "iterate", "runs": 1}, {"verdict": "pass", "runs": 1}],
+        "cap_reached_runs": 1,
+        "mean_iterations": 2.5,
+        "unparsed_runs": 1
+      }
+    }
+    ```
+
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information tracked that is useful for debugging.
   - Suggested response shape:
@@ -964,7 +1048,7 @@ API design notes:
   - `poll.next_poll_at` is when the poll timer fires next. It changes only where the loop arms or stops the timer: the start of the loop for the first tick, the re-arm time plus the poll interval after each timer tick, and `null` once shutdown stops the timer, so a draining process shows no poll that will not come. A refresh does not move it, and a value at or before `generated_at` means a poll is due or running.
   - `scm` is `null` when no reaction uses a source-control provider, and otherwise holds `provider`, the provider kind every reaction shares, beside the check object. It records the reads the orchestrator makes of the provider: the pull request reviews and bot review comments, the review decision, the CI status of a pull request and of a head commit, the mergeability, the label events, and the auto-merge token-scope verification. A read that returns without an error is a pass. A read that returns an error is a failure with the error's text, a not-found answer included, because it can end the reaction and a provider answers not found to a token that cannot see the repository. A read that shutdown canceled records nothing.
   - `scm` records no write: merging, deleting a branch, and removing a label leave it untouched, whatever they return, because providers word a refused write in their own statuses and the reaction handles it. It runs only when a reaction reads the provider, and it reflects the most recent read across every pull request, so one pull request's read that fails can be reset by another's that passes, and `checked_at` dates that read. The reads made by startup recovery and by the startup token-scope checks are not recorded.
-  - Every `error` is masked as Section 15.3 states, in the snapshot rather than in the record, so a value registered as a secret after the failure is masked too, and the unmasked text is served nowhere. Before masking, the snapshot shortens the workflow file's absolute path in the `workflow` and `preflight` error text to its base name, as `file` names it, so the API does not disclose the directory layout. The snapshot reads the records and the load outcome in memory and performs no I/O.
+  - Every `error` is masked as Section 15.3 states, in the snapshot rather than in the record, so a value registered as a secret after the failure is masked too, and the unmasked text is served nowhere. Before masking, the snapshot shortens the workflow file's absolute path in the `workflow` and `preflight` error text to its base name, as `file` names it. The snapshot reads the records and the load outcome in memory and performs no I/O.
   - The readiness probe's checks, status codes, and draining behavior are unchanged. Its `workflow` check passes while a configuration is in effect, its `preflight` reads the result the poll tick stores where `health.preflight` records it, and its `database` pings per probe.
 - The key is additive; no existing key changes name, type, or meaning: `version` is the Sortie version the readiness probe serves, and `started_at` is the time the process started, in UTC. The process start is taken before the startup work, so `started_at` and the readiness probe's `uptime_seconds` name one instant, and both count the startup duration.
 - Every row of `running`, `retrying`, `budget_exhausted`, `parked`, `pending_reactions`, and `between_stages`, on `GET /api/v1/state` and in the per-issue response, the per-issue response itself, and every `issue_outcome` carry `status_text` and `status_text_full`: a plain English sentence that says what the issue is doing, what it waits on, or how it ended. `status_text` is short, for a row or a lane; `status_text_full` is long, for the issue page. The keys are additive; no existing key changes name, type, or meaning, and every structured field a sentence is built from stays served, so a client that needs data does not parse text.

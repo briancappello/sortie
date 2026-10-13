@@ -598,34 +598,6 @@ func TestStatsTokenReporting(t *testing.T) {
 	})
 }
 
-// TestParseRangeBound covers the date-only and duration success branches,
-// which the RFC3339 branch's CLI-level coverage does not reach.
-func TestParseRangeBound(t *testing.T) {
-	// No t.Parallel: the duration case pins the package-level statsNow.
-	pinStatsNow(t, time.Date(2026, 8, 7, 9, 15, 0, 0, time.UTC))
-
-	tests := []struct {
-		name string
-		raw  string
-		want time.Time
-	}{
-		{name: "date-only", raw: "2026-07-01", want: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
-		{name: "positive duration", raw: "24h", want: time.Date(2026, 8, 6, 9, 15, 0, 0, time.UTC)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseRangeBound(tt.raw)
-			if err != nil {
-				t.Fatalf("parseRangeBound(%q) unexpected error: %v", tt.raw, err)
-			}
-			if got == nil || !got.Equal(tt.want) {
-				t.Errorf("parseRangeBound(%q) = %v, want %v", tt.raw, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRunStatsEmptyRange(t *testing.T) {
 	t.Parallel()
 
@@ -1121,8 +1093,18 @@ func TestStatsByModel_WithoutTheBreakdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if !strings.Contains(string(data), `"by_model":[]`) || !strings.Contains(string(data), `"by_chain":[]`) || strings.Contains(renderText(report), "by configured model") {
-		t.Errorf("JSON = %s, text = %s, want by_model and by_chain as empty lists, never null, and no by configured model table", data, renderText(report))
+	text := renderText(report)
+	emptyLists := []string{`"by_model":[]`, `"by_chain":[]`, `"by_trigger":[]`}
+	absentTables := []string{"by configured model", "by retry trigger"}
+	for _, want := range emptyLists {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("JSON = %s, want %s, never null", data, want)
+		}
+	}
+	for _, table := range absentTables {
+		if strings.Contains(text, table) {
+			t.Errorf("text = %s, want no %q table", text, table)
+		}
 	}
 }
 

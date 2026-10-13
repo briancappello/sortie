@@ -26,6 +26,10 @@ type RunHistoryCapabilities struct {
 	// HasStageChains is outside [RunHistoryCapabilities.Full];
 	// [RunHistoryCapabilities.ChainBreakdown] depends on it.
 	HasStageChains bool
+
+	// HasTrigger is outside [RunHistoryCapabilities.Full];
+	// [RunHistoryCapabilities.TriggerBreakdown] depends on it.
+	HasTrigger bool // migration 028: trigger
 }
 
 // Full reports whether the database carries every optional run_history
@@ -50,9 +54,18 @@ func (c RunHistoryCapabilities) ChainBreakdown() bool {
 	return c.ModelBreakdown() && c.HasStageChains
 }
 
+// TriggerBreakdown reports whether a read can group runs by retry trigger:
+// ChainBreakdown plus the trigger column.
+func (c RunHistoryCapabilities) TriggerBreakdown() bool {
+	return c.ChainBreakdown() && c.HasTrigger
+}
+
 // RunStatsRow is the narrow run_history projection the aggregate read
 // returns. A field the schema does not carry holds its zero value.
 type RunStatsRow struct {
+	// IssueID is filled on every capability tier.
+	IssueID string
+
 	Status           string
 	AgentAdapter     string
 	RuleName         string
@@ -79,21 +92,25 @@ type RunStatsRow struct {
 	ChainID       string
 	StagePrevious string
 	StageResult   string
+
+	// Trigger is nil when the column is NULL or
+	// [RunHistoryCapabilities.TriggerBreakdown] reports false.
+	Trigger *string
 }
 
 // runStatsColumnsFull is the column list when Full reports true and
 // HasCacheWriteTokens false.
-const runStatsColumnsFull = `SELECT status, agent_adapter, rule_name, template_id, started_at, completed_at,
+const runStatsColumnsFull = `SELECT issue_id, status, agent_adapter, rule_name, template_id, started_at, completed_at,
 	turns_completed, review_metadata, input_tokens, output_tokens, total_tokens, cache_read_tokens, tokens_measured`
 
 // runStatsColumnsFullWithCacheWrite is the column list when Full and
 // HasCacheWriteTokens both report true.
-const runStatsColumnsFullWithCacheWrite = `SELECT status, agent_adapter, rule_name, template_id, started_at, completed_at,
+const runStatsColumnsFullWithCacheWrite = `SELECT issue_id, status, agent_adapter, rule_name, template_id, started_at, completed_at,
 	turns_completed, review_metadata, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured`
 
 // runStatsColumnsBase is the column list every schema version carries,
 // used when Full reports false.
-const runStatsColumnsBase = `SELECT status, agent_adapter, started_at, completed_at`
+const runStatsColumnsBase = `SELECT issue_id, status, agent_adapter, started_at, completed_at`
 
 // RunHistoryCapabilities reports which optional run_history column groups
 // this store's database carries, by reading the table's live column set
@@ -141,6 +158,7 @@ func (s *Store) RunHistoryCapabilities(ctx context.Context) (RunHistoryCapabilit
 		HasConfiguredSettings: columns["configured_model"] && columns["configured_effort"] &&
 			columns["reported_model"],
 		HasStageChains: columns["chain_id"] && columns["stage_target"] && columns["stage_result"],
+		HasTrigger:     columns["trigger"],
 	}, nil
 }
 
@@ -167,6 +185,7 @@ func (s *Store) ScanRunHistoryRange(
 	full := caps.Full()
 	breakdown := caps.ModelBreakdown()
 	chains := caps.ChainBreakdown()
+	triggers := caps.TriggerBreakdown()
 	query := runStatsColumnsBase
 	switch {
 	case full && caps.HasCacheWriteTokens:
@@ -179,6 +198,9 @@ func (s *Store) ScanRunHistoryRange(
 	}
 	if chains {
 		query += ", identifier, display_identifier, chain_id, stage_previous, stage_result"
+	}
+	if triggers {
+		query += ", trigger"
 	}
 	query += "\nFROM run_history"
 
@@ -206,30 +228,33 @@ func (s *Store) ScanRunHistoryRange(
 
 	for rows.Next() {
 		var row RunStatsRow
-		var reviewMeta, displayID sql.NullString
+		var reviewMeta, displayID, trigger sql.NullString
 		var dest []any
 		switch {
 		case full && caps.HasCacheWriteTokens:
 			dest = []any{
-				&row.Status, &row.AgentAdapter, &row.RuleName, &row.TemplateID,
+				&row.IssueID, &row.Status, &row.AgentAdapter, &row.RuleName, &row.TemplateID,
 				&row.StartedAt, &row.CompletedAt, &row.TurnsCompleted, &reviewMeta,
 				&row.InputTokens, &row.OutputTokens, &row.TotalTokens, &row.CacheReadTokens, &row.CacheWriteTokens,
 				&row.TokensMeasured,
 			}
 		case full:
 			dest = []any{
-				&row.Status, &row.AgentAdapter, &row.RuleName, &row.TemplateID,
+				&row.IssueID, &row.Status, &row.AgentAdapter, &row.RuleName, &row.TemplateID,
 				&row.StartedAt, &row.CompletedAt, &row.TurnsCompleted, &reviewMeta,
 				&row.InputTokens, &row.OutputTokens, &row.TotalTokens, &row.CacheReadTokens, &row.TokensMeasured,
 			}
 		default:
-			dest = []any{&row.Status, &row.AgentAdapter, &row.StartedAt, &row.CompletedAt}
+			dest = []any{&row.IssueID, &row.Status, &row.AgentAdapter, &row.StartedAt, &row.CompletedAt}
 		}
 		if breakdown {
 			dest = append(dest, &row.ConfiguredModel)
 		}
 		if chains {
 			dest = append(dest, &row.Identifier, &displayID, &row.ChainID, &row.StagePrevious, &row.StageResult)
+		}
+		if triggers {
+			dest = append(dest, &trigger)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return fmt.Errorf("scan run history range: %w", err)
@@ -238,6 +263,9 @@ func (s *Store) ScanRunHistoryRange(
 			row.ReviewMetadata = new(reviewMeta.String)
 		}
 		row.DisplayID = displayID.String
+		if trigger.Valid {
+			row.Trigger = new(trigger.String)
+		}
 
 		if err := visit(row); err != nil {
 			return err

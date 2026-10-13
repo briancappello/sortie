@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// createLegacyRunHistoryTable creates a run_history table carrying only
-// the migration-001 columns, with no schema_migrations tracking and none
-// of the optional column groups.
 func createLegacyRunHistoryTable(t *testing.T, s *Store) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(), `CREATE TABLE run_history (
@@ -30,10 +28,6 @@ func createLegacyRunHistoryTable(t *testing.T, s *Store) {
 	}
 }
 
-// createPartialRunHistoryTable creates a run_history table carrying
-// turns_completed and review_metadata but neither rule_name/template_id
-// nor the four token columns, matching this repository's own .sortie.db
-// shape (schema version 9).
 func createPartialRunHistoryTable(t *testing.T, s *Store) {
 	t.Helper()
 	createLegacyRunHistoryTable(t, s)
@@ -176,19 +170,24 @@ func TestRunHistoryCapabilities_Breakdowns(t *testing.T) {
 	withSettings.HasConfiguredSettings = true
 	withChains := withSettings
 	withChains.HasStageChains = true
+	withTrigger := withChains
+	withTrigger.HasTrigger = true
 	chainsWithoutSettings := full
 	chainsWithoutSettings.HasStageChains = true
 	tests := []struct {
-		name      string
-		caps      RunHistoryCapabilities
-		wantModel bool
-		wantChain bool
+		name        string
+		caps        RunHistoryCapabilities
+		wantModel   bool
+		wantChain   bool
+		wantTrigger bool
 	}{
-		{"full tier with configured settings and stage chains", withChains, true, true},
-		{"full tier with configured settings", withSettings, true, false},
-		{"full tier without configured settings", full, false, false},
-		{"stage chains without configured settings", chainsWithoutSettings, false, false},
-		{"configured settings without the full tier", RunHistoryCapabilities{HasConfiguredSettings: true, HasStageChains: true}, false, false},
+		{"full tier with settings, stage chains and trigger", withTrigger, true, true, true},
+		{"full tier with configured settings and stage chains", withChains, true, true, false},
+		{"full tier with configured settings", withSettings, true, false, false},
+		{"full tier without configured settings", full, false, false, false},
+		{"stage chains without configured settings", chainsWithoutSettings, false, false, false},
+		{"trigger without stage chains", RunHistoryCapabilities{HasTrigger: true}, false, false, false},
+		{"configured settings without the full tier", RunHistoryCapabilities{HasConfiguredSettings: true, HasStageChains: true, HasTrigger: true}, false, false, false},
 	}
 
 	for _, tt := range tests {
@@ -201,13 +200,13 @@ func TestRunHistoryCapabilities_Breakdowns(t *testing.T) {
 			if got := tt.caps.ChainBreakdown(); got != tt.wantChain {
 				t.Errorf("%+v.ChainBreakdown() = %v, want %v", tt.caps, got, tt.wantChain)
 			}
+			if got := tt.caps.TriggerBreakdown(); got != tt.wantTrigger {
+				t.Errorf("%+v.TriggerBreakdown() = %v, want %v", tt.caps, got, tt.wantTrigger)
+			}
 		})
 	}
 }
 
-// runAt returns a minimal RunHistory whose StartedAt and CompletedAt are
-// both completedAt, for tests that only care about the completed_at
-// range filter.
 func runAt(id, completedAt string) RunHistory {
 	return RunHistory{
 		IssueID:      id,
@@ -516,17 +515,29 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 			row := runAt("with-model", "2026-01-01T00:00:00Z")
 			row.ConfiguredModel, row.DisplayID = "provider/cheap", "PROJ-1"
 			row.ChainID, row.StagePrevious, row.StageResult = "chain-1", "specify", "advanced"
+			row.Trigger = new("ci_fix")
 			appendOrFatal(t, s, row)
 			appendOrFatal(t, s, runAt("no-model", "2026-01-02T00:00:00Z"))
-		}, []string{"provider/cheap|with-model|PROJ-1|chain-1|specify|advanced", "|no-model||||"}},
+			empty := runAt("empty-trigger", "2026-01-03T00:00:00Z")
+			empty.Trigger = new("")
+			appendOrFatal(t, s, empty)
+		}, []string{
+			"with-model|provider/cheap|with-model|PROJ-1|chain-1|specify|advanced|\"ci_fix\"",
+			"no-model||no-model|||||<nil>",
+			"empty-trigger||empty-trigger|||||\"\"",
+		}},
+		{"trigger left nil without error on a database before migration 028", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 27)
+			insertBareRun(t, s, "pre-028")
+		}, []string{"pre-028||MT-1|||||<nil>"}},
 		{"left empty without error on a database before migration 021", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 20)
 			insertBareRun(t, s, "old")
-		}, []string{"|||||"}},
+		}, []string{"old|||||||<nil>"}},
 		{"chain columns left empty without error on a database before migration 024", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 23)
 			insertBareRun(t, s, "old")
-		}, []string{"|||||"}},
+		}, []string{"old|||||||<nil>"}},
 		{"a legacy table with only the base columns still scans", createLegacyRunHistoryTable, nil},
 	}
 
@@ -544,7 +555,11 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 
 			var got []string
 			err = s.ScanRunHistoryRange(ctx, caps, nil, nil, func(row RunStatsRow) error {
-				got = append(got, strings.Join([]string{row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult}, "|"))
+				trigger := "<nil>"
+				if row.Trigger != nil {
+					trigger = strconv.Quote(*row.Trigger)
+				}
+				got = append(got, strings.Join([]string{row.IssueID, row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult, trigger}, "|"))
 				return nil
 			})
 
