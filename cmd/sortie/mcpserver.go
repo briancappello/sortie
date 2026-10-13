@@ -219,6 +219,7 @@ func buildBudgetQuery(store *persistence.Store) budget.BudgetQueryFunc {
 		if found && meta.DispatchID == runningDispatchID {
 			usage.RunningTotalTokens = meta.TotalTokens
 			usage.RunningMeasured = true
+			usage.UnaccountedTurns += meta.UnaccountedTurns
 		}
 		return usage, nil
 	}

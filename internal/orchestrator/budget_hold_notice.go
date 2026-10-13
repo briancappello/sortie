@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,6 +116,25 @@ func postBudgetHoldNotice(state *State, params budgetHoldNoticeParams) {
 	})
 }
 
+// budgetHoldTokenSpend words the entry's token sum for the notice: unknown
+// spend is never printed as zero, and a sum that leaves spend out is marked
+// as a lower bound. The entry's UsedTokens must be non-nil.
+func budgetHoldTokenSpend(entry *BudgetExhaustedEntry) string {
+	used := *entry.UsedTokens
+	var unmeasured int
+	if entry.UnmeasuredSessions != nil {
+		unmeasured = *entry.UnmeasuredSessions
+	}
+	switch {
+	case !SpendIncomplete(unmeasured, entry.UnaccountedTurns):
+		return strconv.FormatInt(used, 10)
+	case used == 0:
+		return "not measured"
+	default:
+		return fmt.Sprintf("at least %d", used)
+	}
+}
+
 // releaseBudgetHoldNotice deletes the durable row and the memory entry for
 // one issue. It returns without a store call when the memory holds no
 // reason for the issue. The memory entry is dropped only once the durable
@@ -165,7 +185,7 @@ func buildBudgetHoldComment(entry *BudgetExhaustedEntry) string {
 	}
 
 	if entry.BudgetTokens > 0 && entry.UsedTokens != nil {
-		lines = append(lines, fmt.Sprintf("Tokens: %d of %d", *entry.UsedTokens, entry.BudgetTokens))
+		lines = append(lines, fmt.Sprintf("Tokens: %s of %d", budgetHoldTokenSpend(entry), entry.BudgetTokens))
 	}
 	if entry.BudgetSessions > 0 {
 		lines = append(lines, fmt.Sprintf("Sessions: %d of %d", entry.UsedSessions, entry.BudgetSessions))

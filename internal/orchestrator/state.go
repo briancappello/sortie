@@ -855,6 +855,7 @@ type BudgetExhaustedEntry struct {
 	BudgetTokens       int64  // configured agent.max_tokens; 0 means unlimited
 	UnmeasuredSessions *int   // nil exactly when UsedTokens is nil; else runs whose spend is unknown
 	StoppedInFlight    *int   // nil exactly when UsedTokens is nil; else sessions the token ceiling stopped mid-run
+	UnaccountedTurns   int    // taken from the read that set UsedTokens; 0 while UsedTokens is nil
 	ExhaustedAt        time.Time
 
 	// RuleName, StageLineage, AgentKind, and ConfiguredModel describe the
@@ -864,6 +865,26 @@ type BudgetExhaustedEntry struct {
 	StageLineage    StageLineage
 	AgentKind       string
 	ConfiguredModel string
+}
+
+// setTokenUsage fills the token-axis fields from one read of the issue's
+// run history. It copies the counts, so the entry never aliases the
+// caller's usage value.
+func (e *BudgetExhaustedEntry) setTokenUsage(usage persistence.IssueTokenUsage) {
+	used, unmeasured, stopped := usage.TotalTokens, usage.UnmeasuredSessions, usage.StoppedInFlight
+	e.UsedTokens = &used
+	e.UnmeasuredSessions = &unmeasured
+	e.StoppedInFlight = &stopped
+	e.UnaccountedTurns = usage.UnaccountedTurns
+}
+
+// SpendIncomplete reports whether a token sum carrying the given counts
+// leaves spend out, making the sum a lower bound.
+func SpendIncomplete(unmeasuredSessions, unaccountedTurns int) bool {
+	return persistence.IssueTokenUsage{
+		UnmeasuredSessions: unmeasuredSessions,
+		UnaccountedTurns:   unaccountedTurns,
+	}.SpendIncomplete()
 }
 
 // BudgetAnnouncement remembers what the operator was already told about a
@@ -1489,6 +1510,7 @@ type SnapshotBudgetEntry struct {
 	BudgetTokens       int64     `json:"budget_tokens"`
 	UnmeasuredSessions *int      `json:"unmeasured_sessions"`
 	StoppedInFlight    *int      `json:"stopped_in_flight"`
+	UnaccountedTurns   int       `json:"unaccounted_turns"`
 	ExhaustedAt        time.Time `json:"exhausted_at"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
@@ -1819,6 +1841,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			BudgetTokens:       entry.BudgetTokens,
 			UnmeasuredSessions: entry.UnmeasuredSessions,
 			StoppedInFlight:    entry.StoppedInFlight,
+			UnaccountedTurns:   entry.UnaccountedTurns,
 			ExhaustedAt:        entry.ExhaustedAt,
 			RuleName:           entry.RuleName,
 			StageLineage:       entry.StageLineage,

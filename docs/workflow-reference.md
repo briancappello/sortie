@@ -2069,7 +2069,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "used_sessions": 3,
       "budget_sessions": 3,
       "used_tokens": null,
-      "budget_tokens": 0,
+      "budget_tokens": null,
       "unmeasured_sessions": null,
       "stopped_in_flight": null,
       "exhausted_at": "2026-02-24T20:12:00Z",
@@ -2286,7 +2286,7 @@ Each row of `retrying` and each record of `budget_exhausted` carries these flat 
 
 A retry row carries the read of the issue the retry was scheduled with. Sortie stores the read with the retry and restores it at startup, so a restart serves the title, link, display identifier, type, labels, and state it served before. A retry restored from a row stored by an earlier release holds no read; it takes one from the next poll tick whose candidates list its issue, or from its next fire. A retry restored from a row stored before the type, labels, and state were recorded holds a title and link and no labels; it takes the type, labels, and state of the same next read and keeps its title and link. A title or link already held is never replaced. A `budget_exhausted` record carries the read of the poll tick that last rebuilt the set, or of the retry the hold was found on until the next tick.
 
-Each record of `budget_exhausted` also carries `stopped_in_flight`, an integer or `null`: the number of the issue's completed sessions that the token ceiling stopped mid-run. It is `null` exactly when the record's `used_tokens` is `null`, that is when the token ceiling was not evaluated for the issue. The record's own `budget_tokens` and `budget_sessions` serve `0` when the ceiling is not set, unlike the same keys on a running row.
+Each record of `budget_exhausted` also carries `stopped_in_flight`, an integer or `null`: the number of the issue's completed sessions that the token ceiling stopped mid-run. `stopped_in_flight` and `unmeasured_sessions` are `null` exactly when the token ceiling was not evaluated for the issue. `used_tokens` is `null` then too, and also when its sum is `0` while `unmeasured_sessions` or an unaccounted turn leaves spend out. The record's own `budget_tokens` and `budget_sessions` serve `null` when the ceiling is not set, as do the same keys on a running row.
 
 A `budget_exhausted` record also carries `dispatched_at`, `agent_kind`, `configured_model`, and `stage_position` as the retry fields below describe them, plus `rule_name` and `stage_lineage`. All describe the dispatch the hold blocks, which is the run that would start next. A hold set on a retry takes them from that retry. A hold found at a poll tick keeps the ones a prior record held and otherwise takes them from the stage the issue waits to enter after a stage hop, or failing that from the issue's latest agent run. A record with no such context, because the read failed or the issue has no agent run, omits `rule_name`, `agent_kind`, and `configured_model` and serves `null` for `dispatched_at`, `stage_lineage`, and `stage_position`; the next poll tick reads again.
 

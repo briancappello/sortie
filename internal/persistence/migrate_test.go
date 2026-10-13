@@ -279,6 +279,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"api_requests_measured", "INTEGER", true, 0},
 				{"dispatch_id", "TEXT", true, 0},
 				{"cache_write_tokens", "INTEGER", true, 0},
+				{"unaccounted_turns", "INTEGER", true, 0},
 			},
 		},
 		{

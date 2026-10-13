@@ -1050,6 +1050,7 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 				"reason":             "session_budget",
 				"used_sessions":      float64(3),
 				"budget_sessions":    float64(3),
+				"budget_tokens":      nil,
 				"dispatched_at":      "2026-03-24T09:00:00Z",
 				"rule_name":          "implement",
 				"stage_lineage":      wantLineage,
@@ -1103,9 +1104,42 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 			want: map[string]any{"stopped_in_flight": 1},
 		},
 		{
-			name: "budget exhausted without a token ceiling evaluation",
-			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{}),
-			want: map[string]any{"stopped_in_flight": nil},
+			name: "budget held by tokens serves a null session ceiling",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{BudgetTokens: 500000}),
+			want: map[string]any{"budget_sessions": nil, "budget_tokens": 500000},
+		},
+		{
+			name: "session-held token read failed serves null spend and counts",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{BudgetTokens: 500000}),
+			want: map[string]any{"used_tokens": nil, "unmeasured_sessions": nil, "stopped_in_flight": nil},
+		},
+		{
+			name: "session-held no usage reported serves null spend",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(0)), UnmeasuredSessions: new(3), StoppedInFlight: new(0),
+			}),
+			want: map[string]any{"used_tokens": nil, "unmeasured_sessions": 3, "stopped_in_flight": 0},
+		},
+		{
+			name: "session-held unaccounted turn serves null spend",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(0)), UnmeasuredSessions: new(0), StoppedInFlight: new(0), UnaccountedTurns: 1,
+			}),
+			want: map[string]any{"used_tokens": nil, "unmeasured_sessions": 0, "stopped_in_flight": 0},
+		},
+		{
+			name: "session-held measured zero serves zero spend",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(0)), UnmeasuredSessions: new(0), StoppedInFlight: new(0),
+			}),
+			want: map[string]any{"used_tokens": 0, "unmeasured_sessions": 0, "stopped_in_flight": 0},
+		},
+		{
+			name: "session-held partial sum serves the lower bound",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(1200)), UnmeasuredSessions: new(1), StoppedInFlight: new(0),
+			}),
+			want: map[string]any{"used_tokens": 1200, "unmeasured_sessions": 1, "stopped_in_flight": 0},
 		},
 		{
 			name: "pending reaction merge-conflict with mergeability not computed",
@@ -2258,23 +2292,19 @@ func TestHandleState_Budget(t *testing.T) {
 	t.Run("decodes identifier, reason, and the used and budgeted numbers", func(t *testing.T) {
 		t.Parallel()
 
-		usedTokens := int64(1500)
-		unmeasured := 1
 		snap := orchestrator.RuntimeSnapshotResult{
 			GeneratedAt:          fixedTime,
 			BudgetExhaustedCount: 1,
 			BudgetExhausted: []orchestrator.SnapshotBudgetEntry{
 				{
-					IssueID:            "id-budget-1",
-					Identifier:         "MT-649",
-					DisplayID:          "org/repo#649",
-					Reason:             "session_budget",
-					UsedSessions:       3,
-					BudgetSessions:     3,
-					UsedTokens:         &usedTokens,
-					BudgetTokens:       10000,
-					UnmeasuredSessions: &unmeasured,
-					ExhaustedAt:        fixedTime,
+					IssueID:        "id-budget-1",
+					Identifier:     "MT-649",
+					DisplayID:      "org/repo#649",
+					Reason:         "session_budget",
+					UsedSessions:   3,
+					BudgetSessions: 3,
+					BudgetTokens:   10000,
+					ExhaustedAt:    fixedTime,
 				},
 			},
 		}
@@ -2303,17 +2333,11 @@ func TestHandleState_Budget(t *testing.T) {
 		if entry.Reason != "session_budget" {
 			t.Errorf("Reason = %q, want %q", entry.Reason, "session_budget")
 		}
-		if entry.UsedSessions != 3 || entry.BudgetSessions != 3 {
-			t.Errorf("UsedSessions/BudgetSessions = %d/%d, want 3/3", entry.UsedSessions, entry.BudgetSessions)
+		if entry.UsedSessions != 3 || entry.BudgetSessions == nil || *entry.BudgetSessions != 3 {
+			t.Errorf("UsedSessions/BudgetSessions = %d/%v, want 3/3", entry.UsedSessions, entry.BudgetSessions)
 		}
-		if entry.UsedTokens == nil || *entry.UsedTokens != 1500 {
-			t.Errorf("UsedTokens = %v, want 1500", entry.UsedTokens)
-		}
-		if entry.BudgetTokens != 10000 {
-			t.Errorf("BudgetTokens = %d, want 10000", entry.BudgetTokens)
-		}
-		if entry.UnmeasuredSessions == nil || *entry.UnmeasuredSessions != 1 {
-			t.Errorf("UnmeasuredSessions = %v, want 1", entry.UnmeasuredSessions)
+		if entry.BudgetTokens == nil || *entry.BudgetTokens != 10000 {
+			t.Errorf("BudgetTokens = %v, want 10000", entry.BudgetTokens)
 		}
 	})
 
