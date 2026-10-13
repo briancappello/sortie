@@ -56,7 +56,7 @@ Structured logs are the safety net: when the HTTP server is disabled, when Prome
 
 The embedded HTTP server specified in [architecture Section 13.7](../architecture/18-logging-status-and-observability.md#137-http-server) provides:
 
-- **JSON API** (`/api/v1/*`) for programmatic access to runtime state, per-issue detail, and operational triggers.
+- **JSON API** (`/api/v1/*`) for programmatic access to runtime state, per-issue detail, run history, and operational triggers.
 - **HTML Dashboard** (`/`) for browser-based monitoring with zero external tools.
 
 This tier is enabled by default on port 7678 and serves Sortie-specific data that has no standard metric equivalent: workspace paths, agent event messages, retry queue reasons, `.sortie/status` values, run history context, and per-issue debugging detail. It satisfies the architecture's runtime snapshot requirement (Section 13.3) and the human-readable status surface requirement (Section 13.4).

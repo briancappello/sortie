@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API (`/api/v1/state`) now reports Sortie's own health, so a broken edit of WORKFLOW.md or a failing tracker no longer shows only in the logs: the database, the dispatch preflight with its error, the latest load of WORKFLOW.md with its error while the previous configuration stays in effect, the tracker poll with when it last ran, how it ended, its last error, and when the next one is due, and the pull request provider the reactions use. Each check also says when it last passed and how many times in a row it failed, and the response gives the Sortie version and when the process started. ([#1289](https://github.com/sortie-ai/sortie/issues/1289))
 
+- The JSON API now serves run history. `/api/v1/runs` lists finished runs newest first, page by page, narrowed by issue, dispatch rule, status, stage, and time range, each with its tokens and estimated cost or why it has none, its stage path, error, and self-review verdict, what started it, and the session and SSH worker it ran on. `/api/v1/{identifier}` answers for an issue that is no longer active, with its runs, token and cost totals, and stage hops, instead of reporting it unknown. ([#1291](https://github.com/sortie-ai/sortie/issues/1291))
+
 ### Fixed
 
 - Jira issue links no longer include a user name and password written into `tracker.endpoint`, so the link opens and an agent prompt that shows it no longer exposes them. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
@@ -47,6 +49,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `trigger` to `retry_entries`, and `issue_title` and `issue_url` to `parked_issues`. A retry stored before the upgrade shows no trigger until it next comes due, and an issue parked before the upgrade gets its title and link from the tracker on the first poll after the upgrade. ([#1287](https://github.com/sortie-ai/sortie/issues/1287))
 
 - Add `configured_model`, `issue_type`, `issue_labels`, `issue_state`, and `dispatched_at` to `retry_entries`, `dispatched_at` to `run_history`, and `display_identifier`, `issue_title`, `issue_url`, `dispatched_at`, and `run_dispatched` to `stage_hops`, and fill them from run history for work already under way. Work Sortie picked up before 1.27.0 shows no pick-up time, and a retry queued before the upgrade shows its issue type, labels, and state from the next poll or when it next fires. ([#1311](https://github.com/sortie-ai/sortie/issues/1311))
+
+- Add `trigger`, `reaction_kind`, `session_id`, and `ssh_host` to `run_history`, index `run_history` by issue identifier, and add `origin_trigger` to `retry_entries`, so a queued retry remembers what started it across a restart. A run recorded before the upgrade shows no trigger, reaction, session, or SSH worker, and a run started by a retry queued before the upgrade shows no trigger; the API marks each as not recorded. ([#1291](https://github.com/sortie-ai/sortie/issues/1291))
 
 ## [1.27.0] - 2026-10-11
 
