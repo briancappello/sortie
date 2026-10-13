@@ -261,6 +261,33 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"issue_url", "TEXT", true, 0},
 				{"dispatched_at", "TEXT", true, 0},
 				{"run_dispatched", "INTEGER", true, 0},
+				{"issue_type", "TEXT", true, 0},
+				{"issue_labels", "TEXT", true, 0},
+				{"issue_state", "TEXT", true, 0},
+			},
+		},
+		{
+			table: "parked_issues",
+			cols: []colSpec{
+				{"issue_id", "TEXT", false, 1},
+				{"identifier", "TEXT", true, 0},
+				{"display_id", "TEXT", false, 0},
+				{"reason", "TEXT", true, 0},
+				{"parked_state", "TEXT", true, 0},
+				{"label", "TEXT", true, 0},
+				{"label_applied", "INTEGER", true, 0},
+				{"parked_at", "TEXT", true, 0},
+				{"issue_title", "TEXT", true, 0},
+				{"issue_url", "TEXT", true, 0},
+				{"rule_name", "TEXT", true, 0},
+				{"agent_kind", "TEXT", true, 0},
+				{"configured_model", "TEXT", true, 0},
+				{"stage_previous", "TEXT", true, 0},
+				{"stage_previous_outcome", "TEXT", true, 0},
+				{"chain_id", "TEXT", true, 0},
+				{"dispatched_at", "TEXT", true, 0},
+				{"issue_type", "TEXT", true, 0},
+				{"issue_labels", "TEXT", true, 0},
 			},
 		},
 		{
@@ -564,6 +591,49 @@ func TestMigrate_Migration027_FillsOlderRows(t *testing.T) {
 		var got string
 		if err := s.db.QueryRowContext(context.Background(), tt.query).Scan(&got); err != nil || got != tt.want {
 			t.Errorf("%s after upgrade = %q, %v, want %q, nil", tt.name, got, err, tt.want)
+		}
+	}
+}
+
+func TestMigrate_Migration031_FillsParkedRuns(t *testing.T) {
+	t.Parallel()
+
+	// Attempt 4 sorts before parked_at as text but starts after it.
+	seed := []string{
+		`INSERT INTO parked_issues (issue_id, identifier, reason, label, parked_at)
+			VALUES ('i1', 'MT-1', 'agent_blocked', 'needs-human', '2026-02-01T10:00:00Z'),
+				('i2', 'MT-2', 'agent_blocked', 'needs-human', '2026-02-01T10:00:00Z'),
+				('i3', 'MT-3', 'agent_blocked', 'needs-human', 'not a time')`,
+		`INSERT INTO run_history (issue_id, identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, rule_name, configured_model, stage_previous, stage_previous_outcome, chain_id, dispatched_at)
+			VALUES ('i1', 'MT-1', 1, 'claude-code', '/tmp', '2026-02-01T09:00:00Z', '2026-02-01T09:01:00Z', 'succeeded', 'plan', 'model-p', '', '', 'c1', '2026-02-01T08:00:00Z'),
+				('i1', 'MT-1', 2, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'succeeded', 'implement', 'model-a', 'plan', 'succeeded', 'c1', '2026-02-01T08:00:00Z'),
+				('i1', 'MT-1', 3, '', '/tmp', '2026-02-01T09:45:00Z', '2026-02-01T09:46:00Z', 'succeeded', 'ci_failed', '', '', '', '', ''),
+				('i1', 'MT-1', 4, 'codex', '/tmp', '2026-02-01T09:30:00-01:00', '2026-02-01T09:31:00-01:00', 'succeeded', 'review', 'model-c', '', '', 'c2', '2026-02-01T10:30:00Z'),
+				('i3', 'MT-3', 1, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'succeeded', 'implement', 'model-a', '', '', 'c3', '2026-02-01T09:30:00Z')`,
+	}
+	tests := []struct{ issueID, want string }{
+		{"i1", "implement|claude-code|model-a|plan|succeeded|c1|2026-02-01T08:00:00Z"},
+		{"i2", "||||||"},
+		{"i3", "||||||"},
+	}
+
+	s := openTestStore(t)
+	migrateToVersion(t, s, 30)
+	for _, stmt := range seed {
+		if _, err := s.db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("seed version 30 store: %v", err)
+		}
+	}
+
+	migrateOrFatal(t, s)
+
+	for _, tt := range tests {
+		var got string
+		err := s.db.QueryRowContext(context.Background(),
+			`SELECT rule_name || '|' || agent_kind || '|' || configured_model || '|' || stage_previous || '|' || stage_previous_outcome || '|' || chain_id || '|' || dispatched_at
+			FROM parked_issues WHERE issue_id = ?`, tt.issueID).Scan(&got)
+		if err != nil || got != tt.want {
+			t.Errorf("park of %s after upgrade = %q, %v, want %q, nil", tt.issueID, got, err, tt.want)
 		}
 	}
 }
