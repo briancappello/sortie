@@ -20,6 +20,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 func fixedSnapshot(snap orchestrator.RuntimeSnapshotResult) SnapshotFunc {
@@ -108,14 +109,18 @@ const wantPendingReactionsJSON = `[
    "created_at": "2026-02-24T20:09:30Z", "dispatched_at": "2026-02-24T20:05:00Z", "next_poll_at": "2026-02-24T20:17:40Z", "wait": "poll_interval",
    "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z",
    "last_check": {"observed_at": "2026-02-24T20:12:40Z", "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
-                  "status": "failing", "failing_checks": ["Test"], "failing": 1, "pending": 0, "passing": 4}},
+                  "status": "failing", "failing_checks": ["Test"], "failing": 1, "pending": 0, "passing": 4},
+   "status_text": "CI escalated on #931",
+   "status_text_full": "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."},
   {"issue_id": "mno345", "issue_identifier": "MT-653", "issue_title": "Add the export button",
    "issue_url": "https://tracker.example.com/browse/MT-653", "kind": "review", "config_key": "review_comments",
    "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
                     "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
    "created_at": "2026-02-24T20:09:30Z", "dispatched_at": null, "next_poll_at": "2026-02-24T20:16:05Z", "wait": "debounce",
    "used_attempts": 1, "max_attempts": 3, "escalated_at": null,
-   "last_check": {"observed_at": "2026-02-24T20:15:10Z", "actionable_comments": 3, "new_comments": 1}}
+   "last_check": {"observed_at": "2026-02-24T20:15:10Z", "actionable_comments": 3, "new_comments": 1},
+   "status_text": "1 new review comment on #931; next check in 30s",
+   "status_text_full": "MT-653 has 1 new review comment on PR #931 (3 actionable) and waits for the comments to settle; next check in 30s. Review fix runs used: 1 of 3."}
 ]`
 
 func pendingReactionRows() []orchestrator.SnapshotPendingReaction {
@@ -1255,7 +1260,7 @@ func TestToStateResponse(t *testing.T) {
 			AgentTotals: orchestrator.SnapshotAgentTotals{},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		if got.Running == nil {
 			t.Fatal("Running = nil, want non-nil empty slice")
@@ -1296,7 +1301,7 @@ func TestToStateResponse(t *testing.T) {
 			RateLimits:  nil,
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		if got.RateLimits == nil {
 			t.Fatal("RateLimits = nil, want non-nil empty map")
@@ -1320,7 +1325,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		if got.Counts.Running != 2 {
 			t.Errorf("Counts.Running = %d, want 2", got.Counts.Running)
@@ -1343,7 +1348,7 @@ func TestToStateResponse(t *testing.T) {
 			}},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		if got.Counts.Parked != 1 || len(got.Parked) != 1 {
 			t.Fatalf("Counts.Parked, len(Parked) = %d, %d, want 1, 1", got.Counts.Parked, len(got.Parked))
@@ -1367,7 +1372,7 @@ func TestToStateResponse(t *testing.T) {
 
 		snap := orchestrator.RuntimeSnapshotResult{PendingReactions: pendingReactionRows()}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{Now: time.Date(2026, 2, 24, 20, 15, 35, 0, time.UTC)})
 
 		assertJSONKeys(t, got, map[string]any{
 			"counts": map[string]any{
@@ -1384,14 +1389,16 @@ func TestToStateResponse(t *testing.T) {
 			{IssueID: "id-1", Identifier: "MT-1", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"},
 		}}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		assertJSONKeys(t, got, map[string]any{
 			"counts": map[string]any{
 				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1,
 			},
 			"between_stages": json.RawMessage(`[{"issue_id": "id-1", "issue_identifier": "MT-1", "source_rule": "specify",
-				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null}]`),
+				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null,
+				"status_text": "Between stages: specify to implement",
+				"status_text_full": "MT-1 moved from stage specify to stage implement, and Sortie added \u0060stage:implement\u0060; implement starts when a poll tick reads that label on the issue."}]`),
 		})
 	})
 
@@ -1411,7 +1418,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		if got.ActiveEstimatedCostUSD != nil {
 			t.Errorf("ActiveEstimatedCostUSD = %v, want nil", *got.ActiveEstimatedCostUSD)
@@ -1445,7 +1452,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		if got.ActiveEstimatedCostUSD == nil {
 			t.Fatal("ActiveEstimatedCostUSD = nil, want non-nil")
@@ -1478,7 +1485,7 @@ func TestToStateResponse(t *testing.T) {
 			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		if got.ActiveEstimatedCostUSD != nil {
 			t.Errorf("ActiveEstimatedCostUSD = %v, want nil (no matching kind)", *got.ActiveEstimatedCostUSD)
@@ -1492,7 +1499,7 @@ func TestToStateResponse(t *testing.T) {
 			GeneratedAt: time.Now().UTC(),
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 		data, err := json.Marshal(got)
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
@@ -1531,7 +1538,7 @@ func TestToStateResponse(t *testing.T) {
 			"claude": TokenRateConfig{InputPerMtok: fptr(5.0), OutputPerMtok: fptr(15.0)},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 		data, err := json.Marshal(got)
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
@@ -1562,7 +1569,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 
 		if len(got.Running) != 2 {
 			t.Fatalf("len(Running) = %d, want 2", len(got.Running))
@@ -1618,7 +1625,7 @@ func TestToStateResponse(t *testing.T) {
 			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		// 1M input @ $3/Mtok = $3, from the measured entry alone.
 		if got.ActiveEstimatedCostUSD == nil {
@@ -1645,7 +1652,7 @@ func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 		},
 	}
 
-	got := toStateResponse(snap, nil)
+	got := toStateResponse(snap, nil, sentence.Context{})
 	data, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
@@ -1701,7 +1708,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 1)
 	})
@@ -1719,7 +1726,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, incompleteRates)
+		got := toStateResponse(snap, incompleteRates, sentence.Context{})
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 1)
 		if got.ActiveEstimatedCostUSD != nil {
@@ -1737,7 +1744,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 0)
 	})
@@ -1752,7 +1759,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 0)
 	})
@@ -1771,7 +1778,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 2)
 		var rowCostSum float64
@@ -1803,7 +1810,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		assertJSONKeys(t, got, map[string]any{"cost_unpriced_running": 0})
 	})
@@ -1818,7 +1825,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, nil, sentence.Context{})
 		data, err := json.Marshal(got)
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
@@ -1838,7 +1845,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates)
+		got := toStateResponse(snap, rates, sentence.Context{})
 
 		assertJSONKeys(t, got, map[string]any{"cost_unpriced_running": 1})
 	})
@@ -1997,7 +2004,7 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("running issue", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("MT-100", "", snap, nil)
+		got := buildIssueDetail("MT-100", "", snap, nil, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-100) = nil, want non-nil")
 			return
@@ -2036,7 +2043,7 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("retrying issue", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("MT-200", "", snap, nil)
+		got := buildIssueDetail("MT-200", "", snap, nil, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-200) = nil, want non-nil")
 			return
@@ -2090,7 +2097,7 @@ func TestBuildIssueDetail(t *testing.T) {
 		}
 
 		for _, tt := range tests {
-			got := buildIssueDetail(tt.identifier, "", issueSnap, nil)
+			got := buildIssueDetail(tt.identifier, "", issueSnap, nil, sentence.Context{})
 			if got == nil {
 				t.Fatalf("buildIssueDetail(%q) = nil, want non-nil", tt.identifier)
 			}
@@ -2107,12 +2114,17 @@ func TestBuildIssueDetail(t *testing.T) {
 		t.Parallel()
 		hop := orchestrator.SnapshotStageHop{IssueID: "id-4", Identifier: "MT-4", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"}
 
-		got := buildIssueDetail("MT-4", "", orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{hop}}, nil)
+		got := buildIssueDetail("MT-4", "", orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{hop}}, nil, sentence.Context{})
 
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-4) = nil, want non-nil")
 		}
-		if want := new(toStageHopResponse(hop)); !reflect.DeepEqual(got.BetweenStages, want) {
+		if got.BetweenStages == nil {
+			t.Fatal("buildIssueDetail(MT-4).BetweenStages = nil, want non-nil")
+		}
+		want := toStageHopResponse(hop)
+		want.StatusText, want.StatusTextFull = got.BetweenStages.StatusText, got.BetweenStages.StatusTextFull
+		if !reflect.DeepEqual(*got.BetweenStages, want) {
 			t.Errorf("buildIssueDetail(MT-4).BetweenStages = %+v, want %+v", got.BetweenStages, want)
 		}
 		if got.IssueID != "id-4" || got.Workspace != nil || got.LastError != nil || *got.Attempts != (attemptsInfo{}) {
@@ -2123,7 +2135,7 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("not found", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("NONEXISTENT", "", snap, nil)
+		got := buildIssueDetail("NONEXISTENT", "", snap, nil, sentence.Context{})
 		if got != nil {
 			t.Errorf("buildIssueDetail(NONEXISTENT) = %v, want nil", got)
 		}
@@ -2136,7 +2148,7 @@ func TestBuildIssueDetail(t *testing.T) {
 				{IssueID: "id-3", Identifier: "MT-300", State: "To Do"},
 			},
 		}
-		got := buildIssueDetail("MT-300", "", noWSSnap, nil)
+		got := buildIssueDetail("MT-300", "", noWSSnap, nil, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-300) = nil, want non-nil")
 			return
@@ -2153,7 +2165,7 @@ func TestBuildIssueDetail(t *testing.T) {
 				{IssueID: "id-4", Identifier: "MT-400", Attempt: 1, Error: ""},
 			},
 		}
-		got := buildIssueDetail("MT-400", "", noErrSnap, nil)
+		got := buildIssueDetail("MT-400", "", noErrSnap, nil, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-400) = nil, want non-nil")
 			return
@@ -2222,27 +2234,14 @@ func TestHandleState(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, failingSnapshot("connection refused"), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/state")
-		if err != nil {
-			t.Fatalf("GET /api/v1/state: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
-		}
+		status, body := getJSON[errorResponse](t, ts, "/api/v1/state")
 
-		var body errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode error response: %v", err)
+		if status != http.StatusServiceUnavailable || body.Error.Code != "snapshot_unavailable" {
+			t.Errorf("GET /api/v1/state = %d %q, want %d %q", status, body.Error.Code, http.StatusServiceUnavailable, "snapshot_unavailable")
 		}
-		if body.Error.Code != "snapshot_unavailable" {
-			t.Errorf("error code = %q, want %q", body.Error.Code, "snapshot_unavailable")
-		}
-
-		wantMsg := "orchestrator state snapshot unavailable"
-		if body.Error.Message != wantMsg {
-			t.Errorf("error message = %q, want %q", body.Error.Message, wantMsg)
+		if wantMsg := "orchestrator state snapshot unavailable"; body.Error.Message != wantMsg {
+			t.Errorf("GET /api/v1/state error message = %q, want %q", body.Error.Message, wantMsg)
 		}
 	})
 
@@ -2282,6 +2281,49 @@ func TestHandleState(t *testing.T) {
 			t.Error("rate_limits = null in JSON, want {}")
 		}
 	})
+}
+
+func TestHandleState_EveryRowNamesItsOwnIssue(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	snap := orchestrator.RuntimeSnapshotResult{
+		GeneratedAt: now,
+		Running: []orchestrator.SnapshotRunningEntry{
+			{IssueID: "id-1", Identifier: "MT-11", StartedAt: now, TurnCount: 2},
+			{IssueID: "id-2", Identifier: "MT-22", StartedAt: now, TurnCount: 5},
+		},
+		Retrying:         []orchestrator.SnapshotRetryEntry{{IssueID: "id-3", Identifier: "MT-33", Attempt: 1, Trigger: "error", DueAtMS: now.Add(time.Minute).UnixMilli()}},
+		BudgetExhausted:  []orchestrator.SnapshotBudgetEntry{{IssueID: "id-4", Identifier: "MT-44", Reason: "session_budget"}},
+		Parked:           []orchestrator.SnapshotParkedEntry{{IssueID: "id-5", Identifier: "MT-55", Reason: "agent_blocked", Label: "needs-human"}},
+		PendingReactions: []orchestrator.SnapshotPendingReaction{{IssueID: "id-6", Identifier: "MT-66", Kind: "ci", NextPollAt: now.Add(time.Minute), PullRequest: orchestrator.SnapshotPullRequest{Number: 7}}},
+		BetweenStages:    []orchestrator.SnapshotStageHop{{IssueID: "id-7", Identifier: "MT-77", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"}},
+	}
+	ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
+
+	_, body := getJSON[map[string]json.RawMessage](t, ts, "/api/v1/state")
+
+	lists := []string{"running", "retrying", "budget_exhausted", "parked", "pending_reactions", "between_stages"}
+	served := 0
+	for _, list := range lists {
+		var rows []struct {
+			Identifier string `json:"issue_identifier"`
+			Short      string `json:"status_text"`
+			Long       string `json:"status_text_full"`
+		}
+		if err := json.Unmarshal(body[list], &rows); err != nil {
+			t.Fatalf("GET /api/v1/state %s: %v", list, err)
+		}
+		for _, row := range rows {
+			served++
+			if row.Short == "" || !strings.Contains(row.Long, row.Identifier) {
+				t.Errorf("GET /api/v1/state %s %s status_text, status_text_full = %q, %q, want a short form and a long form naming the issue", list, row.Identifier, row.Short, row.Long)
+			}
+		}
+	}
+	if served != 7 {
+		t.Errorf("GET /api/v1/state served %d rows with a sentence, want 7", served)
+	}
 }
 
 func TestHandleState_Budget(t *testing.T) {
@@ -2414,22 +2456,15 @@ func TestHandleIssueDetail(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/MT-100")
-		if err != nil {
-			t.Fatalf("GET /api/v1/MT-100: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-		}
+		status, body := getJSON[issueDetailResponse](t, ts, "/api/v1/MT-100")
 
-		body := decodeJSON[issueDetailResponse](t, resp)
-		if body.IssueIdentifier != "MT-100" {
-			t.Errorf("IssueIdentifier = %q, want %q", body.IssueIdentifier, "MT-100")
+		if status != http.StatusOK || body.IssueIdentifier != "MT-100" || body.Status != "running" {
+			t.Errorf("GET /api/v1/MT-100 = %d %q %q, want %d %q %q",
+				status, body.IssueIdentifier, body.Status, http.StatusOK, "MT-100", "running")
 		}
-		if body.Status != "running" {
-			t.Errorf("Status = %q, want %q", body.Status, "running")
+		if body.StatusText == "" || body.StatusTextFull == "" || body.StatusText != body.Running.StatusText {
+			t.Errorf("GET /api/v1/MT-100 status_text = %q, want the running row's sentence %q", body.StatusText, body.Running.StatusText)
 		}
 	})
 
@@ -2493,6 +2528,101 @@ func TestHandleIssueDetail(t *testing.T) {
 			}
 			if tt.wantMsg != "" && body.Error.Message != tt.wantMsg {
 				t.Errorf("GET /api/v1/%s error message = %q, want %q", tt.path, body.Error.Message, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestHandleIssueDetail_StatusSentence(t *testing.T) {
+	t.Parallel()
+
+	pending := pendingReactionRows()
+	handedOff := IssueOutcome{Kind: "handed_off", State: "In Review"}
+
+	tests := []struct {
+		name             string
+		snap             orchestrator.RuntimeSnapshotResult
+		history          *fakeRunHistory
+		path             string
+		wantShort        string
+		wantFull         string
+		wantOutcomeShort string
+		wantOutcomeFull  string
+	}{
+		{
+			name: "between stages",
+			snap: orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{
+				{IssueID: "id-1", Identifier: "MT-1", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"},
+			}},
+			history:   &fakeRunHistory{},
+			path:      "MT-1",
+			wantShort: "Between stages: specify to implement",
+			wantFull:  "MT-1 moved from stage specify to stage implement, and Sortie added `stage:implement`; implement starts when a poll tick reads that label on the issue.",
+		},
+		{
+			name:      "escalated pending reaction decides when it is not first",
+			snap:      orchestrator.RuntimeSnapshotResult{PendingReactions: []orchestrator.SnapshotPendingReaction{pending[1], pending[0]}},
+			history:   &fakeRunHistory{},
+			path:      "MT-653",
+			wantShort: "CI escalated on #931",
+			wantFull:  "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2.",
+		},
+		{
+			name: "history only, merged by auto-merge",
+			history: &fakeRunHistory{
+				rows:     []RunHistoryEntry{{ID: 5, IssueID: "id-1", Identifier: "MT-1", Status: "succeeded"}},
+				outcomes: map[string]IssueOutcome{"id-1": {Kind: "merged", MergeReactionKind: orchestrator.ReactionKindAutoMerge, PRNumber: 88}},
+			},
+			path:             "MT-1",
+			wantShort:        "Merged #88",
+			wantFull:         "MT-1 ended merged: auto-merge merged PR #88.",
+			wantOutcomeShort: "Merged #88",
+			wantOutcomeFull:  "MT-1 ended merged: auto-merge merged PR #88.",
+		},
+		{
+			name: "history only, hop ceiling then handoff",
+			history: &fakeRunHistory{
+				rows:     []RunHistoryEntry{{ID: 5, IssueID: "id-2", Identifier: "MT-2", Status: "succeeded", StageTarget: "implement", StageResult: "ceiling"}},
+				outcomes: map[string]IssueOutcome{"id-2": handedOff},
+			},
+			path:             "MT-2",
+			wantShort:        "Handed off to In Review; stage implement not reached",
+			wantFull:         "MT-2 was handed off to In Review because the hop to stage implement was not made: the issue reached its limit of consecutive stage moves (`dispatch.max_consecutive_hops`).",
+			wantOutcomeShort: "Handed off to In Review",
+			wantOutcomeFull:  "MT-2 was handed off: Sortie moved it to In Review.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := historyServer(t, tt.snap, tt.history)
+
+			status, body := getJSON[issueDetailResponse](t, ts, "/api/v1/"+tt.path)
+
+			if status != http.StatusOK {
+				t.Fatalf("GET /api/v1/%s status = %d, want %d", tt.path, status, http.StatusOK)
+			}
+			if body.StatusText != tt.wantShort || body.StatusTextFull != tt.wantFull {
+				t.Errorf("GET /api/v1/%s status_text, status_text_full = %q, %q, want %q, %q",
+					tt.path, body.StatusText, body.StatusTextFull, tt.wantShort, tt.wantFull)
+			}
+			if row := body.BetweenStages; row != nil && (row.StatusText != body.StatusText || row.StatusTextFull != body.StatusTextFull) {
+				t.Errorf("GET /api/v1/%s between_stages pair = %q, %q, want the top-level pair %q, %q",
+					tt.path, row.StatusText, row.StatusTextFull, body.StatusText, body.StatusTextFull)
+			}
+			if tt.wantOutcomeShort == "" {
+				return
+			}
+			if body.History == nil || len(body.History.Runs) == 0 {
+				t.Fatalf("GET /api/v1/%s history = %+v, want a run", tt.path, body.History)
+			}
+			outcomes := []*issueOutcomeResponse{body.History.IssueOutcome, body.History.Runs[0].IssueOutcome}
+			for _, o := range outcomes {
+				if o == nil || o.StatusText != tt.wantOutcomeShort || o.StatusTextFull != tt.wantOutcomeFull {
+					t.Errorf("GET /api/v1/%s issue_outcome = %+v, want pair %q, %q", tt.path, o, tt.wantOutcomeShort, tt.wantOutcomeFull)
+				}
 			}
 		})
 	}
@@ -2696,117 +2826,72 @@ func TestHandleIssueDetail_Budget(t *testing.T) {
 func TestHandleRefresh(t *testing.T) {
 	t.Parallel()
 
-	t.Run("accepted", func(t *testing.T) {
-		t.Parallel()
+	tests := []struct {
+		name          string
+		refreshFn     RefreshFunc
+		draining      bool
+		wantStatus    int
+		wantQueued    bool
+		wantCoalesced bool
+		wantOps       int
+		wantText      string
+	}{
+		{
+			name: "accepted", refreshFn: acceptingRefresh(),
+			wantStatus: http.StatusAccepted, wantQueued: true, wantOps: 2,
+			wantText: "Tracker poll and reconciliation queued.",
+		},
+		{
+			name: "coalesced", refreshFn: coalescingRefresh(),
+			wantStatus: http.StatusAccepted, wantQueued: true, wantCoalesced: true, wantOps: 2,
+			wantText: "A tracker poll and reconciliation was already queued; this request joined it.",
+		},
+		{
+			name: "rejected during drain", refreshFn: coalescingRefresh(), draining: true,
+			wantStatus: http.StatusConflict,
+			wantText:   "Nothing queued: Sortie is shutting down.",
+		},
+		{
+			name: "rejected during drain even when refreshFn accepts", refreshFn: acceptingRefresh(), draining: true,
+			wantStatus: http.StatusConflict,
+			wantText:   "Nothing queued: Sortie is shutting down.",
+		},
+	}
 
-		ts := testServer(t, fixedSnapshot(orchestrator.RuntimeSnapshotResult{}), acceptingRefresh())
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-		if resp.StatusCode != http.StatusAccepted {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusAccepted)
-		}
+			srv := New(Params{
+				SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+				RefreshFn:  tt.refreshFn,
+				Logger:     slog.New(slog.DiscardHandler),
+			})
+			if tt.draining {
+				srv.SetDraining()
+			}
+			ts := httptest.NewServer(srv.Mux())
+			t.Cleanup(ts.Close)
 
-		body := decodeJSON[refreshResponse](t, resp)
-		if !body.Queued {
-			t.Error("Queued = false, want true")
-		}
-		if body.Coalesced {
-			t.Error("Coalesced = true, want false when accepted")
-		}
-		if body.Operations == nil {
-			t.Fatal("Operations = nil, want non-nil")
-		}
-		if len(body.Operations) != 2 {
-			t.Errorf("len(Operations) = %d, want 2", len(body.Operations))
-		}
-	})
+			resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
+			if err != nil {
+				t.Fatalf("POST /api/v1/refresh: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body := decodeJSON[refreshResponse](t, resp)
 
-	t.Run("coalesced", func(t *testing.T) {
-		t.Parallel()
-
-		ts := testServer(t, fixedSnapshot(orchestrator.RuntimeSnapshotResult{}), coalescingRefresh())
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body := decodeJSON[refreshResponse](t, resp)
-		if !body.Coalesced {
-			t.Error("Coalesced = false, want true when coalesced")
-		}
-		if !body.Queued {
-			t.Error("Queued = false, want true even when coalesced")
-		}
-	})
-
-	t.Run("rejected during drain", func(t *testing.T) {
-		t.Parallel()
-
-		srv := New(Params{
-			SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
-			RefreshFn:  func() bool { return false },
-			Logger:     slog.New(slog.DiscardHandler),
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("POST /api/v1/refresh status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if body.Queued != tt.wantQueued || body.Coalesced != tt.wantCoalesced || len(body.Operations) != tt.wantOps {
+				t.Errorf("POST /api/v1/refresh queued, coalesced, operations = %t, %t, %v, want %t, %t, %d operations",
+					body.Queued, body.Coalesced, body.Operations, tt.wantQueued, tt.wantCoalesced, tt.wantOps)
+			}
+			if body.OutcomeText != tt.wantText {
+				t.Errorf("POST /api/v1/refresh outcome_text = %q, want %q", body.OutcomeText, tt.wantText)
+			}
 		})
-		srv.SetDraining()
-
-		ts := httptest.NewServer(srv.Mux())
-		t.Cleanup(ts.Close)
-
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != http.StatusConflict {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
-		}
-
-		body := decodeJSON[refreshResponse](t, resp)
-		if body.Queued {
-			t.Error("Queued = true, want false during drain")
-		}
-		if body.Coalesced {
-			t.Error("Coalesced = true, want false during drain")
-		}
-		if len(body.Operations) != 0 {
-			t.Errorf("len(Operations) = %d, want 0", len(body.Operations))
-		}
-	})
-
-	t.Run("rejected during drain even when refreshFn accepts", func(t *testing.T) {
-		t.Parallel()
-
-		srv := New(Params{
-			SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
-			RefreshFn:  acceptingRefresh(),
-			Logger:     slog.New(slog.DiscardHandler),
-		})
-		srv.SetDraining()
-
-		ts := httptest.NewServer(srv.Mux())
-		t.Cleanup(ts.Close)
-
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != http.StatusConflict {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
-		}
-
-		body := decodeJSON[refreshResponse](t, resp)
-		if body.Queued {
-			t.Error("Queued = true, want false during drain")
-		}
-	})
+	}
 }
 
 func TestMethodNotAllowed(t *testing.T) {

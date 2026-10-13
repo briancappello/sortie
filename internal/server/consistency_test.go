@@ -8,6 +8,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 // leadingCount extracts the leading integer from note, or -1 when note is empty.
@@ -73,7 +74,7 @@ func TestDashboardAndStateAgreeOnCountsAndCost(t *testing.T) {
 		},
 	}
 
-	stateResp := toStateResponse(snap, rates)
+	stateResp := toStateResponse(snap, rates, sentence.Context{})
 	dashData := buildDashboardData(snap, "v1", now.Add(-time.Hour), nil, now, rates)
 
 	if stateResp.AgentTotals.UnmeasuredSessions != snap.AgentTotals.UnmeasuredSessions {
