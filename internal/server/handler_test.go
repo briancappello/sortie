@@ -106,7 +106,7 @@ const wantPendingReactionsJSON = `[
    "issue_url": "https://tracker.example.com/browse/MT-653", "kind": "ci", "config_key": "ci_failure",
    "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
                     "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
-   "created_at": "2026-02-24T20:09:30Z", "dispatched_at": "2026-02-24T20:05:00Z", "next_poll_at": "2026-02-24T20:17:40Z", "wait": "poll_interval",
+   "created_at": "2026-02-24T20:09:30Z", "dispatched_at": "2026-02-24T20:05:00Z", "next_poll_at": "2026-02-24T20:17:40Z", "wait": "poll_interval", "stage_position": null,
    "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z",
    "last_check": {"observed_at": "2026-02-24T20:12:40Z", "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
                   "status": "failing", "failing_checks": ["Test"], "failing": 1, "pending": 0, "passing": 4},
@@ -116,7 +116,7 @@ const wantPendingReactionsJSON = `[
    "issue_url": "https://tracker.example.com/browse/MT-653", "kind": "review", "config_key": "review_comments",
    "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
                     "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
-   "created_at": "2026-02-24T20:09:30Z", "dispatched_at": null, "next_poll_at": "2026-02-24T20:16:05Z", "wait": "debounce",
+   "created_at": "2026-02-24T20:09:30Z", "dispatched_at": null, "next_poll_at": "2026-02-24T20:16:05Z", "wait": "debounce", "stage_position": null,
    "used_attempts": 1, "max_attempts": 3, "escalated_at": null,
    "last_check": {"observed_at": "2026-02-24T20:15:10Z", "actionable_comments": 3, "new_comments": 1},
    "status_text": "1 new review comment on #931; next check in 30s",
@@ -1083,6 +1083,9 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 				TargetLabel:  "stage:implement",
 				HoppedAt:     time.Date(2026, 3, 24, 5, 0, 0, 0, time.FixedZone("EST", -5*60*60)),
 				DispatchedAt: passAt,
+
+				IssueType: "Story", IssueLabels: []string{"backend", "stage:implement"}, State: "In Progress",
+				RuleName: "implement", StagePosition: position, AgentKind: "claude-code", ConfiguredModel: "opus",
 			}),
 			want: map[string]any{
 				"issue_id":           "id-5",
@@ -1095,6 +1098,13 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 				"target_label":       "stage:implement",
 				"hopped_at":          "2026-03-24T10:00:00Z",
 				"dispatched_at":      "2026-03-24T09:00:00Z",
+				"issue_type":         "Story",
+				"issue_labels":       []any{"backend", "stage:implement"},
+				"state":              "In Progress",
+				"rule_name":          "implement",
+				"stage_position":     wantPosition,
+				"agent_kind":         "claude-code",
+				"configured_model":   "opus",
 			},
 		},
 		{
@@ -1102,6 +1112,71 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 			body:   toStageHopResponse(orchestrator.SnapshotStageHop{IssueID: "id-6", Identifier: "PROJ-6"}),
 			want:   map[string]any{"hopped_at": nil, "dispatched_at": nil},
 			absent: []string{"display_identifier", "issue_title", "issue_url"},
+		},
+		{
+			name: "parked record",
+			body: toParkedEntryResponse(orchestrator.SnapshotParkedEntry{
+				IssueID:         "id-7",
+				IssueType:       "Bug",
+				IssueLabels:     []string{"backend"},
+				DispatchedAt:    passAt,
+				Reason:          "agent_blocked",
+				ParkedState:     "In Progress",
+				Label:           "needs-human",
+				ParkedAt:        startedAt,
+				RuleName:        "implement",
+				StagePosition:   position,
+				AgentKind:       "claude-code",
+				ConfiguredModel: "opus",
+			}),
+			want: map[string]any{
+				"issue_id":         "id-7",
+				"reason":           "agent_blocked",
+				"parked_state":     "In Progress",
+				"label":            "needs-human",
+				"parked_at":        "2026-03-24T12:00:00Z",
+				"issue_type":       "Bug",
+				"issue_labels":     []any{"backend"},
+				"state":            "In Progress",
+				"dispatched_at":    "2026-03-24T09:00:00Z",
+				"rule_name":        "implement",
+				"stage_position":   wantPosition,
+				"agent_kind":       "claude-code",
+				"configured_model": "opus",
+			},
+		},
+		{
+			name:   "parked record without a run or a read serves null and omits the rest",
+			body:   toParkedEntryResponse(orchestrator.SnapshotParkedEntry{IssueID: "id-8", Identifier: "PROJ-8"}),
+			want:   map[string]any{"dispatched_at": nil, "stage_position": nil},
+			absent: []string{"issue_type", "issue_labels", "state", "rule_name", "agent_kind", "configured_model"},
+		},
+		{
+			name: "pending reaction",
+			body: toPendingReactionResponse(orchestrator.SnapshotPendingReaction{
+				IssueID:         "id-9",
+				Kind:            "ci",
+				ConfigKey:       "ci_failure",
+				IssueType:       "Task",
+				IssueLabels:     []string{"backend"},
+				State:           "In Review",
+				RuleName:        "implement",
+				StagePosition:   position,
+				AgentKind:       "claude-code",
+				ConfiguredModel: "opus",
+			}),
+			want: map[string]any{
+				"issue_id":         "id-9",
+				"kind":             "ci",
+				"config_key":       "ci_failure",
+				"issue_type":       "Task",
+				"issue_labels":     []any{"backend"},
+				"state":            "In Review",
+				"rule_name":        "implement",
+				"stage_position":   wantPosition,
+				"agent_kind":       "claude-code",
+				"configured_model": "opus",
+			},
 		},
 		{
 			name: "budget exhausted with sessions stopped in flight",
@@ -1396,7 +1471,7 @@ func TestToStateResponse(t *testing.T) {
 				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1,
 			},
 			"between_stages": json.RawMessage(`[{"issue_id": "id-1", "issue_identifier": "MT-1", "source_rule": "specify",
-				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null,
+				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null, "stage_position": null,
 				"status_text": "Between stages: specify to implement",
 				"status_text_full": "MT-1 moved from stage specify to stage implement, and Sortie added \u0060stage:implement\u0060; implement starts when a poll tick reads that label on the issue."}]`),
 		})
@@ -2077,12 +2152,14 @@ func TestBuildIssueDetail(t *testing.T) {
 	t.Run("issue object carries the deciding row's values", func(t *testing.T) {
 		t.Parallel()
 		issueSnap := orchestrator.RuntimeSnapshotResult{
-			Running:         []orchestrator.SnapshotRunningEntry{{Identifier: "MT-1", IssueTitle: "Run", IssueURL: "https://t.example/MT-1", IssueType: "Bug", IssueLabels: []string{"a"}, State: "In Progress"}},
-			Retrying:        []orchestrator.SnapshotRetryEntry{{Identifier: "MT-2", IssueTitle: "Retry", IssueURL: "https://t.example/MT-2", IssueType: "Task", IssueLabels: []string{"b"}, State: "To Do"}},
-			BudgetExhausted: []orchestrator.SnapshotBudgetEntry{{Identifier: "MT-3", IssueTitle: "Held", IssueURL: "https://t.example/MT-3", IssueType: "Story", IssueLabels: []string{"c"}, State: "Backlog"}},
+			Running:          []orchestrator.SnapshotRunningEntry{{Identifier: "MT-1", IssueTitle: "Run", IssueURL: "https://t.example/MT-1", IssueType: "Bug", IssueLabels: []string{"a"}, State: "In Progress"}},
+			Retrying:         []orchestrator.SnapshotRetryEntry{{Identifier: "MT-2", IssueTitle: "Retry", IssueURL: "https://t.example/MT-2", IssueType: "Task", IssueLabels: []string{"b"}, State: "To Do"}},
+			BudgetExhausted:  []orchestrator.SnapshotBudgetEntry{{Identifier: "MT-3", IssueTitle: "Held", IssueURL: "https://t.example/MT-3", IssueType: "Story", IssueLabels: []string{"c"}, State: "Backlog"}},
+			Parked:           []orchestrator.SnapshotParkedEntry{{Identifier: "MT-5", IssueTitle: "Parked", IssueURL: "https://t.example/MT-5", IssueType: "Epic", IssueLabels: []string{"d"}, ParkedState: "Blocked"}},
+			PendingReactions: []orchestrator.SnapshotPendingReaction{{Identifier: "MT-6", IssueTitle: "Waiting", IssueURL: "https://t.example/MT-6", IssueType: "Chore", IssueLabels: []string{"e"}, State: "In Review"}},
 			BetweenStages: []orchestrator.SnapshotStageHop{
 				{IssueID: "id-3", Identifier: "MT-3", IssueTitle: "Hopped", IssueURL: "https://t.example/hop-3"},
-				{IssueID: "id-4", Identifier: "MT-4", IssueTitle: "Between", IssueURL: "https://t.example/MT-4", SourceRule: "specify", TargetRule: "implement"},
+				{IssueID: "id-4", Identifier: "MT-4", IssueTitle: "Between", IssueURL: "https://t.example/MT-4", IssueType: "Spike", IssueLabels: []string{"f"}, State: "Triage", SourceRule: "specify", TargetRule: "implement"},
 			},
 		}
 		tests := []struct {
@@ -2093,7 +2170,9 @@ func TestBuildIssueDetail(t *testing.T) {
 			{"MT-1", "running", issueResponse{Title: "Run", URL: "https://t.example/MT-1", IssueType: "Bug", Labels: []string{"a"}, State: "In Progress"}},
 			{"MT-2", "retrying", issueResponse{Title: "Retry", URL: "https://t.example/MT-2", IssueType: "Task", Labels: []string{"b"}, State: "To Do"}},
 			{"MT-3", "budget_exhausted", issueResponse{Title: "Held", URL: "https://t.example/MT-3", IssueType: "Story", Labels: []string{"c"}, State: "Backlog"}},
-			{"MT-4", "between_stages", issueResponse{Title: "Between", URL: "https://t.example/MT-4"}},
+			{"MT-4", "between_stages", issueResponse{Title: "Between", URL: "https://t.example/MT-4", IssueType: "Spike", Labels: []string{"f"}, State: "Triage"}},
+			{"MT-5", "parked", issueResponse{Title: "Parked", URL: "https://t.example/MT-5", IssueType: "Epic", Labels: []string{"d"}, State: "Blocked"}},
+			{"MT-6", "pending_reactions", issueResponse{Title: "Waiting", URL: "https://t.example/MT-6", IssueType: "Chore", Labels: []string{"e"}, State: "In Review"}},
 		}
 
 		for _, tt := range tests {
@@ -2638,24 +2717,22 @@ func TestHandleIssueDetail_Parked(t *testing.T) {
 	rows := append(pendingReactionRows(), otherIssueRow)
 
 	tests := []struct {
-		name             string
-		snap             orchestrator.RuntimeSnapshotResult
-		identifier       string
-		wantCode         int
-		wantStatus       string
-		wantIssueID      string
-		wantParkedReason string
-		wantKinds        []string
+		name        string
+		snap        orchestrator.RuntimeSnapshotResult
+		identifier  string
+		wantCode    int
+		wantStatus  string
+		wantIssueID string
+		wantKinds   []string
 	}{
 		{
-			name:             "parked issue keeps its record and serves no pending reactions",
-			snap:             orchestrator.RuntimeSnapshotResult{Parked: parked, PendingReactions: rows},
-			identifier:       "MT-9",
-			wantCode:         http.StatusOK,
-			wantStatus:       "parked",
-			wantIssueID:      "id-p",
-			wantParkedReason: "agent_blocked",
-			wantKinds:        []string{},
+			name:        "parked issue serves no pending reactions",
+			snap:        orchestrator.RuntimeSnapshotResult{Parked: parked, PendingReactions: rows},
+			identifier:  "MT-9",
+			wantCode:    http.StatusOK,
+			wantStatus:  "parked",
+			wantIssueID: "id-p",
+			wantKinds:   []string{},
 		},
 		{
 			name:        "issue held only by pending reactions serves its own rows",
@@ -2714,9 +2791,6 @@ func TestHandleIssueDetail_Parked(t *testing.T) {
 			if body.Workspace != nil || body.LastError != nil || body.Attempts == nil || *body.Attempts != (attemptsInfo{}) {
 				t.Errorf("GET /api/v1/%s workspace, attempts, last_error = %+v, %+v, %v, want nil, zero, nil",
 					tt.identifier, body.Workspace, body.Attempts, body.LastError)
-			}
-			if tt.wantParkedReason != "" && (body.Parked == nil || body.Parked.Reason != tt.wantParkedReason) {
-				t.Errorf("GET /api/v1/%s parked = %+v, want reason %q", tt.identifier, body.Parked, tt.wantParkedReason)
 			}
 			if body.PendingReactions == nil {
 				t.Fatalf("GET /api/v1/%s pending_reactions = null, want an array", tt.identifier)
