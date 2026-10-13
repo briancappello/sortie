@@ -125,19 +125,24 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 		labelPresentNow := labelPresent(events, params.LabelFixConfig.FixLabel)
 		commandConfirmed := len(matches) > 0 && labelPresentNow
 
-		running := state.Running[pending.IssueID] != nil
+		running := state.Running[pending.IssueID]
 		incumbent := retrySlotIncumbent(state, pending.IssueID)
 
-		// A foreign incumbent defers before the same-kind collapse check
-		// runs: evaluating the collapse arm first would advance the mark
-		// past the labeling event and swallow the gesture.
+		// A session or retry of another kind defers before the same-kind
+		// collapse check runs: evaluating the collapse arm first would
+		// advance the mark past the labeling event and swallow the gesture.
 		if commandConfirmed && incumbent != nil && incumbent.ReactionKind != ReactionKindLabelFix {
 			logRetrySlotDeferral(entryLog, ReactionKindLabelFix, incumbent)
 			requeueReaction(state, key, pending, waitRetrySlot)
 			continue
 		}
+		if commandConfirmed && running != nil && running.ReactionKind != ReactionKindLabelFix {
+			requeueReaction(state, key, pending, waitRetrySlot)
+			continue
+		}
 
-		sameKindQueuedOrRunning := running || (incumbent != nil && incumbent.ReactionKind == ReactionKindLabelFix)
+		sameKindQueuedOrRunning := (running != nil && running.ReactionKind == ReactionKindLabelFix) ||
+			(incumbent != nil && incumbent.ReactionKind == ReactionKindLabelFix)
 
 		if commandConfirmed && !sameKindQueuedOrRunning {
 			// Advance the mark BEFORE scheduling: at-most-once rests on the

@@ -388,7 +388,7 @@ func TestReconcileLabelFixCommands_DepthOneWhileRunning(t *testing.T) {
 
 	const issueID = "LF-RUN"
 	state := stateWithLabelFixPending(t, issueID, 10, "feature/lf-run")
-	state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident"}
+	state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident", ReactionKind: ReactionKindLabelFix}
 
 	scm := &labelReviewSCMFake{
 		events: []domain.LabelEvent{
