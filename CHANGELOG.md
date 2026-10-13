@@ -24,6 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API now serves run history. `/api/v1/runs` lists finished runs newest first, page by page, narrowed by issue, dispatch rule, status, stage, and time range, each with its tokens and estimated cost or why it has none, its stage path, error, and self-review verdict, what started it, and the session and SSH worker it ran on. `/api/v1/{identifier}` answers for an issue that is no longer active, with its runs, token and cost totals, and stage hops, instead of reporting it unknown. ([#1291](https://github.com/sortie-ai/sortie/issues/1291))
 
+### Changed
+
+- The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
+
 ### Fixed
 
 - Jira issue links no longer include a user name and password written into `tracker.endpoint`, so the link opens and an agent prompt that shows it no longer exposes them. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
@@ -42,6 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A CI or review comment escalation that fires while a fix is running no longer stops Sortie from watching the pull request's CI and review comments afterwards. ([#1288](https://github.com/sortie-ai/sortie/issues/1288))
 
+- `cost_budget` no longer calls the token count complete while the running session has spent tokens its coding agent did not report. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
+
 ### Migrations
 
 - Add `issue_title` and `issue_url` to `run_history` and `retry_entries`, and `display_identifier` to `retry_entries`. A retry or run recorded before the upgrade reads back with no title or link; a queued retry gets one from the first tracker poll or when it next fires. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
@@ -51,6 +57,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `configured_model`, `issue_type`, `issue_labels`, `issue_state`, and `dispatched_at` to `retry_entries`, `dispatched_at` to `run_history`, and `display_identifier`, `issue_title`, `issue_url`, `dispatched_at`, and `run_dispatched` to `stage_hops`, and fill them from run history for work already under way. Work Sortie picked up before 1.27.0 shows no pick-up time, and a retry queued before the upgrade shows its issue type, labels, and state from the next poll or when it next fires. ([#1311](https://github.com/sortie-ai/sortie/issues/1311))
 
 - Add `trigger`, `reaction_kind`, `session_id`, and `ssh_host` to `run_history`, index `run_history` by issue identifier, and add `origin_trigger` to `retry_entries`, so a queued retry remembers what started it across a restart. A run recorded before the upgrade shows no trigger, reaction, session, or SSH worker, and a run started by a retry queued before the upgrade shows no trigger; the API marks each as not recorded. ([#1291](https://github.com/sortie-ai/sortie/issues/1291))
+
+- Add `unaccounted_turns INTEGER NOT NULL DEFAULT 0` to `session_metadata`. An older row reads zero and belongs to no running session. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
 
 ## [1.27.0] - 2026-10-11
 
