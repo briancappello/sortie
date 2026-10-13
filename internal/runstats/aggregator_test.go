@@ -76,6 +76,19 @@ func withModelBreakdown(caps persistence.RunHistoryCapabilities) persistence.Run
 	return caps
 }
 
+func withTriggerBreakdown(caps persistence.RunHistoryCapabilities) persistence.RunHistoryCapabilities {
+	caps = withModelBreakdown(caps)
+	caps.HasStageChains = true
+	caps.HasTrigger = true
+	return caps
+}
+
+func triggerRow(issueID string, trigger *string) persistence.RunStatsRow {
+	row := modelRow("claude-code", "model-a", "succeeded", 0)
+	row.IssueID, row.Trigger = issueID, trigger
+	return row
+}
+
 func modelRow(adapter, model, status string, input int64) persistence.RunStatsRow {
 	return persistence.RunStatsRow{
 		Status: status, AgentAdapter: adapter, ConfiguredModel: model,
@@ -363,6 +376,7 @@ func TestDegradedSchemaWarning(t *testing.T) {
 			caps: persistence.RunHistoryCapabilities{},
 			want: []string{
 				"before sortie recorded turns, self-review results, dispatch-rule routing, tokens and cost",
+				"stage chains, retry triggers",
 				"Run sortie once with this workflow to add them.",
 			},
 			absent: []string{"does carry", "falls back"},
@@ -453,6 +467,43 @@ func TestStatsByModel(t *testing.T) {
 	}
 }
 
+func TestStatsByTrigger(t *testing.T) {
+	t.Parallel()
+
+	noTrigger := withTriggerBreakdown(fullCaps)
+	noTrigger.HasTrigger = false
+	tests := []struct {
+		name string
+		caps persistence.RunHistoryCapabilities
+		want []string
+	}{
+		{"recorded triggers keep unknown apart from none", withTriggerBreakdown(fullCaps), []string{"ci_fix", "<none>", "<unknown>"}},
+		{"column absent leaves the breakdown empty", noTrigger, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agg := New(tt.caps, nil)
+			addRows(t, agg, triggerRow("A", new("ci_fix")), triggerRow("A", nil), triggerRow("B", new("")), triggerRow("C", new("ci_fix")))
+
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+
+			var got []string
+			for _, g := range report.ByTrigger {
+				got = append(got, g.Name)
+			}
+			if !slices.Equal(got, tt.want) || report.Summary.Issues != 3 {
+				t.Errorf("Report(%+v) by_trigger names, issues = %q, %d, want %q, 3", tt.caps, got, report.Summary.Issues, tt.want)
+			}
+			if len(got) > 0 && (sumRuns(report.ByTrigger) != report.Summary.Runs || report.ByTrigger[0].Runs != 2) {
+				t.Errorf("Report(%+v) by_trigger = %+v, want runs summing to %d with ci_fix at 2", tt.caps, report.ByTrigger, report.Summary.Runs)
+			}
+		})
+	}
+}
+
 func TestStatsByChain(t *testing.T) {
 	t.Parallel()
 
@@ -497,6 +548,7 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	modelCaps := withModelBreakdown(fullCaps)
 	chainCaps := modelCaps
 	chainCaps.HasStageChains = true
+	triggerCaps := withTriggerBreakdown(fullCaps)
 	callerWarnings := []string{"token_rates: first", "token_rates: second"}
 
 	tests := []struct {
@@ -505,7 +557,8 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 		extra []string
 		want  []string
 	}{
-		{name: "chain breakdown supported and no caller warnings", caps: chainCaps, want: []string{}},
+		{name: "every breakdown supported and no caller warnings", caps: triggerCaps, want: []string{}},
+		{name: "trigger breakdown missing", caps: chainCaps, extra: callerWarnings, want: append([]string{triggerBreakdownWarning}, callerWarnings...)},
 		{name: "chain breakdown missing", caps: modelCaps, extra: callerWarnings, want: append([]string{chainBreakdownWarning}, callerWarnings...)},
 		{name: "model breakdown missing", caps: fullCaps, extra: callerWarnings, want: append([]string{modelBreakdownWarning}, callerWarnings...)},
 		{name: "schema not full", caps: persistence.RunHistoryCapabilities{}, extra: callerWarnings, want: append([]string{degradedSchemaWarning(persistence.RunHistoryCapabilities{})}, callerWarnings...)},

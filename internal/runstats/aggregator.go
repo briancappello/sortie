@@ -22,12 +22,22 @@ func tier(caps persistence.RunHistoryCapabilities) string {
 }
 
 // label maps an empty dimension value to the sentinel a reader sees for
-// a run that carries no adapter, rule, template, or (in principle) status.
+// a run that carries no adapter, rule, template, trigger, or (in principle)
+// status.
 func label(v string) string {
 	if v == "" {
 		return "<none>"
 	}
 	return v
+}
+
+// triggerLabel names a retry trigger group. A nil trigger was never
+// recorded, which differs from the empty trigger of a run nothing retried.
+func triggerLabel(t *string) string {
+	if t == nil {
+		return "<unknown>"
+	}
+	return label(*t)
 }
 
 // duration computes row's duration in seconds from its stored RFC3339
@@ -219,6 +229,7 @@ func degradedSchemaWarning(caps persistence.RunHistoryCapabilities) string {
 		{caps.HasTokenMeasurement, "which runs the coding agent could measure"},
 		{caps.HasConfiguredSettings, "the model each run was configured with"},
 		{caps.HasStageChains, "stage chains"},
+		{caps.HasTrigger, "retry triggers"},
 	}
 
 	var unrecorded, dropped []string
@@ -253,6 +264,11 @@ const chainBreakdownWarning = "this database was written before sortie recorded 
 	"so the report leaves out the breakdown by stage chain. " +
 	"Run sortie once with this workflow to add it."
 
+// triggerBreakdownWarning explains the missing by_trigger breakdown.
+const triggerBreakdownWarning = "this database was written before sortie recorded the retry trigger of each run, " +
+	"so the report leaves out the breakdown by retry trigger. " +
+	"Run sortie once with this workflow to add it."
+
 // Aggregator folds a stream of [persistence.RunStatsRow] values, via
 // [Aggregator.Add], into the totals and per-dimension groups
 // [Aggregator.Report] renders into a [Report]. It is not safe for concurrent
@@ -271,7 +287,9 @@ type Aggregator struct {
 	byTemplate map[string]*groupAccum
 	byModel    map[string]*groupAccum
 	byChain    map[string]*groupAccum
+	byTrigger  map[string]*groupAccum
 	chains     map[string]*chainAccum
+	issueIDs   map[string]struct{}
 
 	selfReview selfReviewAccum
 }
@@ -291,7 +309,9 @@ func New(caps persistence.RunHistoryCapabilities, price Pricer) *Aggregator {
 		byTemplate:      make(map[string]*groupAccum),
 		byModel:         make(map[string]*groupAccum),
 		byChain:         make(map[string]*groupAccum),
+		byTrigger:       make(map[string]*groupAccum),
 		chains:          make(map[string]*chainAccum),
+		issueIDs:        make(map[string]struct{}),
 		selfReview:      selfReviewAccum{byVerdict: make(map[string]int)},
 	}
 }
@@ -302,6 +322,7 @@ func New(caps persistence.RunHistoryCapabilities, price Pricer) *Aggregator {
 func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 	isSucceeded := row.Status == "succeeded"
 	a.total.runs++
+	a.issueIDs[row.IssueID] = struct{}{}
 	if isSucceeded {
 		a.total.succeeded++
 	}
@@ -323,6 +344,9 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 		if a.caps.ChainBreakdown() && row.ChainID != "" {
 			bumped = append(bumped, bumpGroup(a.byChain, row.ChainID, isSucceeded))
 			a.foldChain(row)
+		}
+		if a.caps.TriggerBreakdown() {
+			bumped = append(bumped, bumpGroup(a.byTrigger, triggerLabel(row.Trigger), isSucceeded))
 		}
 
 		for _, g := range bumped {
@@ -466,6 +490,7 @@ func (a *Aggregator) Report(
 		ByTemplate:   []Group{},
 		ByModel:      []Group{},
 		ByChain:      []ChainGroup{},
+		ByTrigger:    []Group{},
 
 		RatesConfigured: a.ratesConfigured,
 	}
@@ -484,6 +509,9 @@ func (a *Aggregator) Report(
 		if a.caps.ChainBreakdown() {
 			rpt.ByChain = a.chainReport()
 		}
+		if a.caps.TriggerBreakdown() {
+			rpt.ByTrigger = a.groupSlice(a.byTrigger, full)
+		}
 		rpt.SelfReview = a.selfReviewReport()
 	}
 
@@ -501,6 +529,8 @@ func (a *Aggregator) composeWarnings(extra []string) []string {
 		list = append(list, modelBreakdownWarning)
 	case !a.caps.ChainBreakdown():
 		list = append(list, chainBreakdownWarning)
+	case !a.caps.TriggerBreakdown():
+		list = append(list, triggerBreakdownWarning)
 	}
 	return append(list, extra...)
 }
@@ -509,6 +539,7 @@ func (a *Aggregator) composeWarnings(extra []string) []string {
 func (a *Aggregator) summary(full bool) Summary {
 	s := Summary{
 		Runs:                 a.total.runs,
+		Issues:               len(a.issueIDs),
 		Succeeded:            a.total.succeeded,
 		Duration:             durationStats(a.total.succeededSamples),
 		ZeroDurationRuns:     a.total.zeroDurationRuns,

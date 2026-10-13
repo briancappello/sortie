@@ -244,6 +244,10 @@ type Params struct {
 	// rates for cost estimation on the dashboard. When nil or empty,
 	// the dashboard shows raw token counts without cost estimates.
 	TokenRates TokenRates
+
+	// Stats computes the run statistics report. Called on each
+	// GET /api/v1/stats; nil answers 503.
+	Stats StatsFunc
 }
 
 // Server is the embedded HTTP server for JSON API, dashboard, and
@@ -268,6 +272,7 @@ type Server struct {
 	workflowLoadedFn func() bool
 	runHistory       RunHistoryReader
 	tokenRates       TokenRates
+	stats            StatsFunc
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -315,6 +320,7 @@ func New(params Params) *Server {
 		workflowLoadedFn: params.WorkflowLoadedFn,
 		runHistory:       params.RunHistory,
 		tokenRates:       params.TokenRates,
+		stats:            params.Stats,
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -332,6 +338,7 @@ func New(params Params) *Server {
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
 	mux.HandleFunc("/api/v1/runs", s.routeRuns)
+	mux.HandleFunc("/api/v1/stats", s.routeStats)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 

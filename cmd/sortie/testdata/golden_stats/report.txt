@@ -3,7 +3,7 @@ database:  DB_PATH
 covering:  2026-01-01T00:00:00Z until 2026-02-01T00:00:00Z
 generated: 2026-02-01T09:00:00Z
 
-runs 6   succeeded 3 (50.0%)
+runs 6   issues 5   succeeded 3 (50.0%)
 duration (succeeded)    p50 20m 0s   p95 30m 0s   mean 20m 0s   samples 3
 turns (succeeded)       4.0
 tokens (measured runs)  input 3,900,000   output 760,000   total 4,660,000   cache read 50,000   cache write 10,000
@@ -44,6 +44,12 @@ by stage chain
   CHAIN    ISSUE   STAGES               LAST HOP  RUNS  SUCCEEDED  SUCCESS RATE  P50     P95     MEAN    TURNS  TOTAL TOKENS  COST
   chain-1  PROJ-2  implement -> review  advanced  2     2          100.0%        10m 0s  30m 0s  20m 0s  4.0    3,600,000     $17.87
   chain-2  PROJ-3  implement            failed    1     0          0.0%          5m 0s   5m 0s   5m 0s   2.0    350,000       $1.65
+
+by retry trigger
+  TRIGGER    RUNS  SUCCEEDED  SUCCESS RATE  P50     P95     MEAN     TURNS  TOTAL TOKENS  COST
+  <unknown>  4     2          50.0%         10m 0s  20m 0s  11m 40s  2.5    2,150,000     $7.52
+  <none>     1     0          0.0%          0s      0s      0s       0.0    110,000       -
+  ci_fix     1     1          100.0%        30m 0s  30m 0s  30m 0s   5.0    2,400,000     $12.00
 
 self review
   runs reviewed 2   iterate 1   pass 1   hit iteration cap 1   mean iterations 2.50

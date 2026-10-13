@@ -5,13 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/server"
+	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
 const goldenStatsDir = "testdata/golden_stats"
@@ -40,7 +48,7 @@ func goldenStatsRuns() []persistence.RunHistory {
 		},
 		{
 			AgentAdapter: "claude-code", Status: "succeeded", TurnsCompleted: 5, CompletedAt: ranLong,
-			RuleName: "review", TemplateID: "tpl-b", ConfiguredModel: "claude-opus",
+			RuleName: "review", TemplateID: "tpl-b", ConfiguredModel: "claude-opus", Trigger: new("ci_fix"),
 			InputTokens: 2_000_000, OutputTokens: 400_000, TotalTokens: 2_400_000, TokensMeasured: true,
 			ChainID: "chain-1", StagePrevious: "implement", StagePreviousOutcome: "advanced",
 			ReviewMetadata: new(`{"enabled":true,"total_iterations":3,"final_verdict":"iterate","cap_reached":true}`),
@@ -52,7 +60,7 @@ func goldenStatsRuns() []persistence.RunHistory {
 			ChainID: "chain-2", StageResult: "failed",
 		},
 		{
-			AgentAdapter: "claude-code", Status: "ci_failed", CompletedAt: start,
+			AgentAdapter: "claude-code", Status: "ci_failed", CompletedAt: start, Trigger: new(""),
 			InputTokens: 100_000, OutputTokens: 10_000, TotalTokens: 110_000, TokensMeasured: true,
 		},
 		{
@@ -74,6 +82,7 @@ func goldenStatsRuns() []persistence.RunHistory {
 			runs[i].StartedAt = start
 		}
 	}
+	runs[1].IssueID = runs[0].IssueID
 	return runs
 }
 
@@ -143,6 +152,91 @@ func TestRunStatsMatchesGolden(t *testing.T) {
 			}
 			normalized := strings.NewReplacer(tt.wf, "WORKFLOW_PATH", tt.db, "DB_PATH").Replace(stdout.String())
 			checkGoldenStats(t, tt.golden, []byte(normalized))
+		})
+	}
+}
+
+func statsSourceFromWorkflow(t *testing.T, wfPath, dbPath string) statsSource {
+	t.Helper()
+
+	wf, err := workflow.Load(wfPath)
+	if err != nil {
+		t.Fatalf("workflow.Load(%q): %v", wfPath, err)
+	}
+	cfg, err := config.NewServiceConfig(wf.Config)
+	if err != nil {
+		t.Fatalf("NewServiceConfig: %v", err)
+	}
+	rawRates, present := cfg.ExtensionValue("token_rates")
+	rates, rateWarnings := server.ParseTokenRates(rawRates, present)
+	return statsSource{dbPath: dbPath, workflowPath: wfPath, rates: rates, rateWarnings: rateWarnings}
+}
+
+func decodeReportWithoutClock(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+
+	var report map[string]any
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", body, err)
+	}
+	delete(report, "generated_at")
+	return report
+}
+
+func TestStatsRouteEqualsCLIReport(t *testing.T) {
+	t.Parallel()
+
+	const since, until = "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"
+	tests := []struct {
+		name string
+		runs []persistence.RunHistory
+	}{
+		{"golden database", goldenStatsRuns()},
+		{"database without runs", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			wfPath := writeCustomWorkflowFile(t, dir, statsWorkflow(goldenStatsTokenRates))
+			dbPath := filepath.Join(dir, ".sortie.db")
+			createStatsDB(t, dbPath, tt.runs...)
+			srv := server.New(server.Params{
+				SnapshotFn: func() (orchestrator.RuntimeSnapshotResult, error) { return orchestrator.RuntimeSnapshotResult{}, nil },
+				RefreshFn:  func() bool { return true },
+				Stats:      statsSourceFromWorkflow(t, wfPath, dbPath).report,
+			})
+			ts := httptest.NewServer(srv.Mux())
+			t.Cleanup(ts.Close)
+
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), []string{"stats", "--format", "json", "--since", since, "--until", until, wfPath}, &stdout, &stderr)
+			resp, err := http.Get(ts.URL + "/api/v1/stats?since=" + since + "&until=" + until)
+			if err != nil {
+				t.Fatalf("GET /api/v1/stats: %v", err)
+			}
+			defer resp.Body.Close() //nolint:errcheck // test response body
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("reading response body: %v", err)
+			}
+
+			if code != 0 || resp.StatusCode != http.StatusOK {
+				t.Fatalf("CLI exit = %d (stderr %q), route status = %d, want 0 and 200", code, stderr.String(), resp.StatusCode)
+			}
+			cli, route := decodeReportWithoutClock(t, stdout.Bytes()), decodeReportWithoutClock(t, body)
+			if !reflect.DeepEqual(route, cli) {
+				t.Errorf("route report = %v, want the CLI report %v", route, cli)
+			}
+			if len(tt.runs) > 0 {
+				return
+			}
+			summary, _ := route["summary"].(map[string]any)
+			if byTrigger, ok := route["by_trigger"].([]any); summary["runs"] != 0.0 || summary["issues"] != 0.0 || !ok || len(byTrigger) != 0 {
+				t.Errorf("empty report summary = %v, by_trigger = %v, want runs and issues 0 and by_trigger []", summary, route["by_trigger"])
+			}
 		})
 	}
 }

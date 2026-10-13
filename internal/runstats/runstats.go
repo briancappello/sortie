@@ -15,8 +15,8 @@ import "github.com/sortie-ai/sortie/internal/domain"
 type Pricer func(agentKind string, usage domain.TokenUsage) *float64
 
 // Report is the "sortie stats --format json" envelope. Every slice
-// field is never nil; every pointer field is null when the figure it
-// carries is unavailable.
+// field, by_trigger included, is never nil; every pointer field is null
+// when the figure it carries is unavailable.
 type Report struct {
 	GeneratedAt  string       `json:"generated_at"`
 	WorkflowPath string       `json:"workflow_path"`
@@ -32,6 +32,7 @@ type Report struct {
 	ByTemplate   []Group      `json:"by_template"`
 	ByModel      []Group      `json:"by_model"`
 	ByChain      []ChainGroup `json:"by_chain"`
+	ByTrigger    []Group      `json:"by_trigger"`
 	SelfReview   *SelfReview  `json:"self_review"`
 
 	// RatesConfigured lets the text renderer tell "no token_rates" from
@@ -45,6 +46,7 @@ type Report struct {
 // no priced run exists in range.
 type Summary struct {
 	Runs                   int      `json:"runs"`
+	Issues                 int      `json:"issues"`
 	Succeeded              int      `json:"succeeded"`
 	SuccessRate            float64  `json:"success_rate"`
 	Duration               Duration `json:"duration_seconds"`
@@ -76,8 +78,8 @@ type Tokens struct {
 	CacheWrite int64 `json:"cache_write"`
 }
 
-// Group is one row of a by_status, by_adapter, by_rule,
-// by_template, or by_model breakdown. MeanTurns, Tokens, CostUSD, and
+// Group is one row of a by_status, by_adapter, by_rule, by_template,
+// by_model, or by_trigger breakdown. MeanTurns, Tokens, CostUSD, and
 // CostPerSucceededRunUSD are null on the base schema tier; CostUSD and
 // CostPerSucceededRunUSD are also null when the group holds no priced
 // run. In by_status, Succeeded and SuccessRate are structural rather

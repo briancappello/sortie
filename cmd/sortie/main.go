@@ -870,7 +870,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	var srv *server.Server
 	if serverEnabled {
 		rawTokenRates, tokenRatesPresent := br.cfg.ExtensionValue("token_rates")
-		tokenRates, _ := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
+		tokenRates, rateWarnings := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
 
 		addr := net.JoinHostPort(br.serverHost, strconv.Itoa(br.serverPort))
 		srv = server.New(server.Params{
@@ -889,6 +889,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
 			TokenRates:       tokenRates,
 			RunHistory:       runHistoryReader{store: store},
+			Stats:            statsSource{dbPath: dbPath, workflowPath: br.path, rates: tokenRates, rateWarnings: rateWarnings}.report,
 		})
 		o.AddObserver(srv)
 
