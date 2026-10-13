@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -41,6 +42,7 @@ func TestRunsQueryBoundary(t *testing.T) {
 		{name: "malformed since", query: "since=yesterday", wantParam: "since"},
 		{name: "malformed until", query: "until=tomorrow", wantParam: "until"},
 		{name: "since equals until as instants", query: "since=2026-03-24T09:00:00Z&until=2026-03-24T11:00:00%2B02:00", wantParam: "since"},
+		{name: "ended_since equals ended_until", query: "ended_since=2026-03-24T09:00:00Z&ended_until=2026-03-24T09:00:00Z", wantParam: "ended_since"},
 		{name: "empty values read as absent", query: "limit=&cursor=&rule=&since=2026-03-24T09:00:00Z&until=2026-03-24T12:00:00%2B02:00"},
 		{name: "limit at lower bound", query: "limit=1"},
 		{name: "limit at upper bound", query: "limit=200"},
@@ -76,6 +78,21 @@ func TestRunsQueryBoundary(t *testing.T) {
 				t.Errorf("GET /api/v1/runs?%s error message = %q, want it to name parameter %q", tt.query, body.Error.Message, tt.wantParam)
 			}
 		})
+	}
+}
+
+func TestRunsFailedOutcomeReadAnswers503(t *testing.T) {
+	t.Parallel()
+
+	ts := historyServer(t, orchestrator.RuntimeSnapshotResult{}, &fakeRunHistory{
+		rows:        []RunHistoryEntry{{ID: 3, IssueID: "id-1", Identifier: "MT-100", Status: "succeeded"}},
+		outcomesErr: errors.New("db closed"),
+	})
+
+	status, body := getJSON[errorResponse](t, ts, "/api/v1/runs")
+
+	if status != http.StatusServiceUnavailable || body.Error.Code != "history_unavailable" {
+		t.Errorf("GET /api/v1/runs = %d %q, want %d %q", status, body.Error.Code, http.StatusServiceUnavailable, "history_unavailable")
 	}
 }
 

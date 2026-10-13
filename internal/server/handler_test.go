@@ -2473,6 +2473,7 @@ func TestHandleIssueDetail(t *testing.T) {
 		{name: "failed read for a live identifier", history: &fakeRunHistory{err: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
 		{name: "failed read for a non-live identifier", history: &fakeRunHistory{err: dbClosed}, path: "MT-OLD", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
 		{name: "failed totals read", history: &fakeRunHistory{rows: history, totalsErr: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{name: "failed outcome read", history: &fakeRunHistory{rows: history, outcomesErr: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
 		{
 			name: "no live entry and no run", history: &fakeRunHistory{}, path: "MT-OLD", wantStatus: http.StatusNotFound, wantCode: "issue_not_found",
 			wantMsg: `issue identifier "MT-OLD" not found in current state or run history`,
