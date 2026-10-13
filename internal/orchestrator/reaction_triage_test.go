@@ -256,6 +256,7 @@ func inFlightTriageRun(fingerprint string, cancel func()) *ReactionTriageRun {
 // MarkReactionDispatched carries behavior, the rest satisfy the
 // interface but are never expected to be called by the gate.
 type triageGateStore struct {
+	noopOutcomeRecorder
 	unsupportedReactionObservationStore
 
 	markCalls int

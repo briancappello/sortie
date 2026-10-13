@@ -44,6 +44,8 @@ The auto-merge reconcile loop runs as Part G of active run reconciliation (see �
 
 The loop drops an entry whose age, measured from the entry's creation, exceeds the configured `reactions.auto_merge.watch_window_ms` (default `1800000`, thirty minutes; `0` removes the bound), and deletes the `merge`-kind attempt counter with it. The drop logs at WARN and performs no escalation, so an entry that never satisfies its preconditions produces no tracker-visible signal.
 
+The loop also drops an entry whose `GetMergeability` read reports the pull request already merged, whatever its mergeability: a pull request a person or a forge merged first reads `unknown` on some forges, and without this drop the merge call would never run and the entry would live until its watch window ends, or without end under `0`. The drop records the merged outcome with the `merge` path (Section 4.1.8), deletes the `merge`-kind attempt counter and fingerprint, and logs at INFO. It performs no escalation, emits no `auto_merge.merged` event, and deletes no branch.
+
 There is an intentional asymmetry between the YAML configuration key and the runtime kind value. The YAML key the operator sets in `WORKFLOW.md` is `reactions.auto_merge`. The runtime and persisted kind value used in `pending_reactions` map keys and in the `reaction_fingerprints` table's `kind` column is `"merge"`, not `"auto_merge"`. A reader who only sees the YAML key would expect the runtime kind to be `auto_merge`; it is `merge`.
 
 ### 11C.5 Merge precondition state machine
@@ -52,6 +54,7 @@ The auto-merge reconcile loop evaluates the merge preconditions reported by `Get
 
 | From state | Observation | To state | Action |
 |------------|-------------|----------|--------|
+| Pending | `Merged == true` | Done | Record the merged outcome (Section 4.1.8); remove the pending entry; clear the attempt counter and the fingerprint. Emit no event, delete no branch, and increment no metric. |
 | Pending | `Draft == true` | Pending | Re-enqueue with poll interval. |
 | Pending | `Mergeability == dirty` | Pending | Re-enqueue with poll interval. |
 | Pending | `Mergeability == blocked` | Pending | Re-enqueue with poll interval. |
@@ -60,7 +63,7 @@ The auto-merge reconcile loop evaluates the merge preconditions reported by `Get
 | Pending | `ReviewDecision != APPROVED` and `!= NOT_REQUIRED` | Pending | Re-enqueue with poll interval. |
 | Pending | `require_ci == true` and `CI` is neither `success` nor the empty no-checks value | Pending | Re-enqueue with poll interval. |
 | Pending | All preconditions satisfied (`Mergeability` in (`clean`, `unstable`); `!Draft`; review and CI satisfied) | Merging | Call `SCMAdapter.MergePR`. |
-| Merging | Merge succeeded | Done | Emit the `auto_merge.merged` event, whose body is the merge-success comment, to its subscribers (§11C.6); delete branch when `delete_branch == true`; clear fingerprint; increment `sortie_reactions_auto_merge_total{result="merged"}`. |
+| Merging | Merge succeeded | Done | Record the merged outcome (Section 4.1.8); emit the `auto_merge.merged` event, whose body is the merge-success comment, to its subscribers (§11C.6); delete branch when `delete_branch == true`; clear fingerprint; increment `sortie_reactions_auto_merge_total{result="merged"}`. |
 | Merging | `ErrSCMConflict` ("already merged") | Done | Treat as idempotent success; same actions as merge succeeded. |
 | Merging | `ErrSCMConflict` (head SHA mismatch) | Pending | Re-enqueue with poll interval; next tick refreshes fingerprint. |
 | Merging | `ErrSCMAuth` | Escalated | Escalate immediately; do not re-enqueue. |
@@ -95,7 +98,7 @@ Before calling `MergePR`, the reconcile loop computes a merge fingerprint as SHA
 
 The fingerprint's purpose is to let a changed pull request re-arm the merge, not to suppress a retry of an unchanged one. The upsert carries that behavior: a computed value differing from the stored one resets the row's `dispatched` flag, and an unchanged value preserves whatever flag the row already holds, so a new push or a changed review decision produces a new fingerprint and a fresh attempt. The flag is set only after a merge the loop treats as complete, which is a successful `MergePR` return or the already-merged rejection of §11C.3. A failed attempt deliberately leaves the flag clear, so a transient or transport-class failure retries on the next due tick instead of being skipped as a duplicate.
 
-Three exits delete the row, and each one ends this kind's work on the issue: a successful merge, the already-merged idempotent success, and escalation. Each of them also removes the `merge`-kind pending entry in the same tick, so on the ordinary path no later tick holds both a dispatched row and an entry to observe it, and the guard before `MergePR` (stored fingerprint equal to the computed one and `dispatched` set) does not fire. It is reachable only when the row outlives its deletion, because `reaction_fingerprints` is persisted while pending entries are held in memory and re-created after a restart from recovered run metadata: a surviving dispatched row then meets a re-created entry and skips a merge that already completed.
+These exits delete the row, and each one ends this kind's work on the issue: a successful merge, the already-merged idempotent success, the drop of an entry whose pull request reads merged, and escalation. Each of them also removes the `merge`-kind pending entry in the same tick, so on the ordinary path no later tick holds both a dispatched row and an entry to observe it, and the guard before `MergePR` (stored fingerprint equal to the computed one and `dispatched` set) does not fire. It is reachable only when the row outlives its deletion, because `reaction_fingerprints` is persisted while pending entries are held in memory and re-created after a restart from recovered run metadata: a surviving dispatched row then meets a re-created entry and skips a merge that already completed.
 
 ### 11C.8 Adapter registration
 
@@ -126,7 +129,7 @@ For the full preflight algorithm, see §6.3.
 
 ### 11C.10 Cross-kind isolation
 
-`postAutoMergeSuccess` and `escalateAutoMergeFailure` MUST NOT call any function that modifies state owned by a different reaction kind. Specifically, these paths MUST NOT call:
+`postAutoMergeSuccess`, `escalateAutoMergeFailure`, and the drop of an entry whose pull request reads merged MUST NOT call any function that modifies state owned by a different reaction kind. Specifically, these paths MUST NOT call:
 
 - `CancelRetry`
 - `DeleteRetryEntry`

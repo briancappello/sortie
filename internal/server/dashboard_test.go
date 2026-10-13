@@ -34,10 +34,12 @@ func dashboardServer(t *testing.T, snapFn SnapshotFunc, version string, slotFunc
 }
 
 type fakeRunHistory struct {
-	rows      []RunHistoryEntry
-	err       error
-	totalsErr error
-	onQuery   func(RunHistoryQuery)
+	rows        []RunHistoryEntry
+	err         error
+	totalsErr   error
+	outcomes    map[string]IssueOutcome
+	outcomesErr error
+	onQuery     func(RunHistoryQuery)
 }
 
 func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error) {
@@ -49,6 +51,10 @@ func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunH
 
 func (f *fakeRunHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {
 	return IssueRunTotals{}, f.totalsErr
+}
+
+func (f *fakeRunHistory) IssueOutcomes(context.Context, []string) (map[string]IssueOutcome, error) {
+	return f.outcomes, f.outcomesErr
 }
 
 func historyServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader) *httptest.Server {

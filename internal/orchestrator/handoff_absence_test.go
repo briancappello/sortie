@@ -941,7 +941,7 @@ func TestHandleTickAbsenceReleaseOrdering(t *testing.T) {
 		{ID: issueID, Identifier: "PROJ-ORD", Title: "T", State: "Done"},
 	}
 
-	orchestrator.refreshParkedIssues(ctx, candidates)
+	orchestrator.refreshParkedIssues(ctx, candidates, nil)
 	orchestrator.parkExhaustedAbsences(ctx, config.ServiceConfig{}, candidates)
 	state.TrackerOpsWg.Wait()
 
@@ -996,7 +996,7 @@ func TestParkExhaustedAbsencesOffPolicyHoldsExistingParkAndSkipsNewPark(t *testi
 		{ID: freshIssueID, Identifier: "PROJ-FRESH", Title: "T", State: "To Do"},
 	}
 
-	orchestrator.refreshParkedIssues(context.Background(), candidates)
+	orchestrator.refreshParkedIssues(context.Background(), candidates, nil)
 	orchestrator.parkExhaustedAbsences(context.Background(), cfg, candidates)
 	state.TrackerOpsWg.Wait()
 
@@ -1066,7 +1066,7 @@ func TestParkRetryLaneBackfillAndRelease(t *testing.T) {
 		Store:           store,
 	})
 
-	orchestrator.refreshParkedIssues(context.Background(), nil)
+	orchestrator.refreshParkedIssues(context.Background(), nil, nil)
 
 	if entry.ParkedState != "In Progress" {
 		t.Errorf("Parked[%s].ParkedState after backfill = %q, want %q", issueID, entry.ParkedState, "In Progress")
@@ -1078,7 +1078,7 @@ func TestParkRetryLaneBackfillAndRelease(t *testing.T) {
 	tickTracker.fetchStatesFn = func(_ context.Context, _ []string) (map[string]string, error) {
 		return map[string]string{issueID: "Done"}, nil
 	}
-	orchestrator.refreshParkedIssues(context.Background(), nil)
+	orchestrator.refreshParkedIssues(context.Background(), nil, nil)
 
 	if _, ok := state.Parked[issueID]; ok {
 		t.Error("a state change observed after the backfill did not release the park")
@@ -1231,7 +1231,7 @@ func TestHandleWorkerExitAbsenceParkRecordsObservedStateAndReleasesWithoutBackfi
 	})
 	candidates := []domain.Issue{{ID: issueID, Identifier: "PROJ-OBS", Title: "T", State: "Done"}}
 
-	orchestrator.refreshParkedIssues(context.Background(), candidates)
+	orchestrator.refreshParkedIssues(context.Background(), candidates, nil)
 
 	if _, ok := state.Parked[issueID]; ok {
 		t.Error("a state change did not release the worker-exit absence park")

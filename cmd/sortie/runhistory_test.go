@@ -97,6 +97,22 @@ func (h *runsHarness) drain(t *testing.T, query string, afterFirstPage func()) (
 	return nil, nil
 }
 
+func (h *runsHarness) recordOutcome(t *testing.T, outcome persistence.IssueOutcome) {
+	t.Helper()
+	if err := h.store.RecordIssueOutcome(t.Context(), outcome); err != nil {
+		t.Fatalf("RecordIssueOutcome(%q): %v", outcome.IssueID, err)
+	}
+}
+
+func issueOutcomeMember(t *testing.T, where string, row map[string]any) any {
+	t.Helper()
+	member, ok := row["issue_outcome"]
+	if !ok {
+		t.Fatalf("%s has no issue_outcome member, want it always present", where)
+	}
+	return member
+}
+
 func runRow(issueID, identifier string) persistence.RunHistory {
 	return persistence.RunHistory{IssueID: issueID, Identifier: identifier, AgentAdapter: "claude-code", Status: "succeeded", RuleName: "implement", CompletedAt: "2026-03-01T09:00:00Z", TokensMeasured: true}
 }
@@ -138,7 +154,10 @@ func TestRunHistoryFilters(t *testing.T) {
 		{"since includes its bound", "since=" + ten, "CompletedAt", ten, "2026-03-01T09:59:59Z"},
 		{"until excludes its bound", "until=" + twelve, "CompletedAt", "2026-03-01T11:59:59Z", twelve},
 		{"since with until", "since=" + ten + "&until=" + twelve, "CompletedAt", ten, twelve},
+		{"ended_since selects by the ending of the issue", "ended_since=2026-03-02T00:00:00Z", "IssueID", "i-in", "i-none"},
+		{"ended_until excludes a later ending", "ended_until=2026-03-03T00:00:00Z", "IssueID", "i-in", "i-late"},
 	}
+	endedAt := map[string]string{"i-in": "2026-03-02T10:00:00Z", "i-late": "2026-03-04T10:00:00Z"}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,6 +169,11 @@ func TestRunHistoryFilters(t *testing.T) {
 				reflect.ValueOf(&run).Elem().FieldByName(tt.field).SetString(value)
 				return h.append(t, run)
 			}
+			for _, issueID := range []string{tt.hit, tt.miss} {
+				if at, ended := endedAt[issueID]; ended {
+					h.recordOutcome(t, persistence.IssueOutcome{IssueID: issueID, Kind: persistence.IssueOutcomeTerminal, ObservedAt: at, State: "Done"})
+				}
+			}
 			seed(tt.miss)
 			older := seed(tt.hit)
 			newer := seed(tt.hit)
@@ -160,6 +184,85 @@ func TestRunHistoryFilters(t *testing.T) {
 
 			if got, want := fmt.Sprint(ids, moreAfter), fmt.Sprint([]int64{newer, older}, []bool{true, false}); got != want {
 				t.Errorf("GET /api/v1/runs?%s&limit=1 run IDs and next_cursor set per page = %s, want %s", tt.query, got, want)
+			}
+		})
+	}
+}
+
+func TestRunHistoryServesIssueOutcome(t *testing.T) {
+	t.Parallel()
+
+	const at = "2026-03-02T10:00:00Z"
+	tests := []struct {
+		name   string
+		stored *persistence.IssueOutcome
+		want   any
+	}{
+		{name: "none while the issue runs"},
+		{
+			name:   "handed off",
+			stored: &persistence.IssueOutcome{Kind: persistence.IssueOutcomeHandedOff, ObservedAt: at, State: "In Review"},
+			want:   map[string]any{"kind": "handed_off", "observed_at": at, "state": "In Review"},
+		},
+		{
+			name:   "terminal",
+			stored: &persistence.IssueOutcome{Kind: persistence.IssueOutcomeTerminal, ObservedAt: at, State: "Done"},
+			want:   map[string]any{"kind": "terminal", "observed_at": at, "state": "Done"},
+		},
+		{
+			name:   "merged by auto-merge",
+			stored: &persistence.IssueOutcome{Kind: persistence.IssueOutcomeMerged, ObservedAt: at, MergeReactionKind: "merge", PRNumber: 88, PRRepository: "acme/api"},
+			want:   map[string]any{"kind": "merged", "observed_at": at, "merge_path": "auto_merge", "pull_request": map[string]any{"number": 88.0, "repository": "acme/api"}},
+		},
+		{
+			name:   "merged by merge completion",
+			stored: &persistence.IssueOutcome{Kind: persistence.IssueOutcomeMerged, ObservedAt: at, MergeReactionKind: "merge-completion", PRNumber: 89, PRRepository: "acme/web"},
+			want:   map[string]any{"kind": "merged", "observed_at": at, "merge_path": "merge_completion", "pull_request": map[string]any{"number": 89.0, "repository": "acme/web"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newRunsHarness(t, orchestrator.RuntimeSnapshotResult{Running: []orchestrator.SnapshotRunningEntry{{IssueID: "i-1", Identifier: "PROJ-1"}}})
+			h.append(t, runRow("i-1", "PROJ-1"))
+			h.append(t, runRow("i-1", "PROJ-1"))
+			h.append(t, runRow("i-2", "PROJ-2"))
+			if tt.stored != nil {
+				tt.stored.IssueID = "i-1"
+				h.recordOutcome(t, *tt.stored)
+			}
+
+			var list struct{ Runs []map[string]any }
+			h.get(t, "/api/v1/runs", &list)
+			var detail struct{ History map[string]any }
+			h.get(t, "/api/v1/PROJ-1", &detail)
+
+			if len(list.Runs) != 3 || detail.History == nil {
+				t.Fatalf("GET /api/v1/runs and /api/v1/PROJ-1 = %d runs, history %v, want 3 runs and a history", len(list.Runs), detail.History)
+			}
+			for _, run := range list.Runs {
+				want := tt.want
+				if run["issue_id"] == "i-2" {
+					want = nil
+				}
+				if got := issueOutcomeMember(t, "GET /api/v1/runs row", run); !reflect.DeepEqual(got, want) {
+					t.Errorf("GET /api/v1/runs row of %v issue_outcome = %v, want %v", run["issue_id"], got, want)
+				}
+			}
+			if got := issueOutcomeMember(t, "GET /api/v1/PROJ-1 history", detail.History); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("GET /api/v1/PROJ-1 history.issue_outcome = %v, want %v", got, tt.want)
+			}
+			historyRuns, _ := detail.History["runs"].([]any)
+			if len(historyRuns) != 2 {
+				t.Fatalf("GET /api/v1/PROJ-1 history.runs = %d runs, want 2", len(historyRuns))
+			}
+			for _, entry := range historyRuns {
+				row, _ := entry.(map[string]any)
+				if got := issueOutcomeMember(t, "GET /api/v1/PROJ-1 history run", row); !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("GET /api/v1/PROJ-1 history run issue_outcome = %v, want %v", got, tt.want)
+				}
 			}
 		})
 	}

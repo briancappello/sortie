@@ -27,6 +27,7 @@ import (
 )
 
 type mockExitStore struct {
+	noopOutcomeRecorder
 	runHistories    []persistence.RunHistory
 	metrics         []persistence.AggregateMetrics
 	sessionMetadata []persistence.SessionMetadata

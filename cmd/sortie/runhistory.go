@@ -28,6 +28,8 @@ func (r runHistoryReader) QueryRuns(ctx context.Context, q server.RunHistoryQuer
 		StageTarget:     q.StageTarget,
 		CompletedSince:  q.Since,
 		CompletedBefore: q.Until,
+		EndedSince:      q.EndedSince,
+		EndedBefore:     q.EndedUntil,
 		BeforeID:        q.BeforeID,
 		Limit:           q.Limit,
 	})
@@ -57,6 +59,26 @@ func (r runHistoryReader) IssueTotals(ctx context.Context, issueID string) (serv
 			CacheWriteTokens: usage.CacheWriteTokens,
 		},
 	}, nil
+}
+
+// IssueOutcomes returns the outcome of each listed issue that has one.
+func (r runHistoryReader) IssueOutcomes(ctx context.Context, issueIDs []string) (map[string]server.IssueOutcome, error) {
+	stored, err := r.store.IssueOutcomes(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]server.IssueOutcome, len(stored))
+	for id, o := range stored {
+		out[id] = server.IssueOutcome{
+			Kind:              o.Kind,
+			ObservedAt:        o.ObservedAt,
+			State:             o.State,
+			MergeReactionKind: o.MergeReactionKind,
+			PRNumber:          o.PRNumber,
+			PRRepository:      o.PRRepository,
+		}
+	}
+	return out, nil
 }
 
 func runHistoryEntry(r persistence.RunHistory) server.RunHistoryEntry {

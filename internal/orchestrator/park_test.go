@@ -338,7 +338,7 @@ func TestRefreshParkedIssuesNonCandidateStateRead(t *testing.T) {
 		})
 		candidates := []domain.Issue{{ID: candidateID, Identifier: "PROJ-CAND-1", Title: "T", State: "To Do"}}
 
-		orchestrator.refreshParkedIssues(context.Background(), candidates)
+		orchestrator.refreshParkedIssues(context.Background(), candidates, nil)
 
 		// The regression this guards against: a read that fetches every
 		// parked issue on every tick instead of only the ones the
@@ -372,7 +372,7 @@ func TestRefreshParkedIssuesNonCandidateStateRead(t *testing.T) {
 			Store:           store,
 		})
 
-		orchestrator.refreshParkedIssues(context.Background(), nil)
+		orchestrator.refreshParkedIssues(context.Background(), nil, nil)
 
 		if _, ok := state.Parked[parkedID]; !ok {
 			t.Error("issue was unparked despite an unchanged observed state")
@@ -403,7 +403,7 @@ func TestRefreshParkedIssuesNonCandidateStateRead(t *testing.T) {
 			Store:           store,
 		})
 
-		orchestrator.refreshParkedIssues(context.Background(), nil)
+		orchestrator.refreshParkedIssues(context.Background(), nil, nil)
 
 		if _, ok := state.Parked[parkedID]; !ok {
 			t.Error("issue was unparked despite being omitted from the state-read response")
@@ -423,26 +423,22 @@ func TestRefreshParkedIssuesNonCandidateStateRead(t *testing.T) {
 			},
 		}
 		store := &stubStore{}
-		var logs bytes.Buffer
 		orchestrator := NewOrchestrator(OrchestratorParams{
 			State:           state,
-			Logger:          debugLogger(t, &logs),
+			Logger:          discardLogger(),
 			TrackerAdapter:  tracker,
 			AgentAdapter:    &mockAgentAdapter{},
 			WorkflowManager: &stubWorkflowManager{config: config.ServiceConfig{}},
 			Store:           store,
 		})
 
-		orchestrator.refreshParkedIssues(context.Background(), nil)
+		orchestrator.refreshParkedIssues(context.Background(), nil, nil)
 
 		if _, ok := state.Parked[parkedID1]; !ok {
 			t.Error("park released after a failed non-candidate state read")
 		}
 		if _, ok := state.Parked[parkedID2]; !ok {
 			t.Error("park released after a failed non-candidate state read")
-		}
-		if !strings.Contains(logs.String(), "parked issue state read failed, retaining parks") {
-			t.Errorf("missing read-failure warning\nlogs: %s", logs.String())
 		}
 	})
 }
@@ -535,7 +531,7 @@ func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
 				Store:           store,
 			})
 
-			orchestrator.refreshParkedIssues(context.Background(), tt.candidates)
+			orchestrator.refreshParkedIssues(context.Background(), tt.candidates, nil)
 
 			entry, parked := state.Parked[id]
 			if parked != tt.wantParked {

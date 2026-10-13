@@ -126,10 +126,33 @@ type RunHistoryQuery struct {
 	Since *time.Time
 	// Until keeps runs completed before it.
 	Until *time.Time
+	// EndedSince keeps runs of issues whose outcome was observed at or after it.
+	EndedSince *time.Time
+	// EndedUntil keeps runs of issues whose outcome was observed before it.
+	EndedUntil *time.Time
 	// BeforeID keeps runs recorded before this run ID; 0 starts at the newest.
 	BeforeID int64
 	// Limit is the most runs returned.
 	Limit int
+}
+
+// IssueOutcome is how an issue's latest work ended, as the orchestrator
+// observed it. State is empty for a merged outcome; MergeReactionKind,
+// PRNumber, and PRRepository are set only for a merged outcome.
+type IssueOutcome struct {
+	// Kind is "handed_off", "merged", or "terminal".
+	Kind string
+	// ObservedAt is when the outcome was observed, as stored.
+	ObservedAt string
+	// State is the tracker state a handoff wrote or a terminal read found,
+	// unmasked.
+	State string
+	// MergeReactionKind is the reaction kind that observed the merge.
+	MergeReactionKind string
+	// PRNumber is the merged pull request number.
+	PRNumber int
+	// PRRepository is the merged pull request's owner/repo, unmasked.
+	PRRepository string
 }
 
 // IssueRunTotals is one issue's spend over all of its runs.
@@ -145,6 +168,9 @@ type IssueRunTotals struct {
 type RunHistoryReader interface {
 	QueryRuns(ctx context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error)
 	IssueTotals(ctx context.Context, issueID string) (IssueRunTotals, error)
+	// IssueOutcomes returns the outcome of each listed issue that has one,
+	// keyed by issue ID.
+	IssueOutcomes(ctx context.Context, issueIDs []string) (map[string]IssueOutcome, error)
 }
 
 // DBPingFunc checks whether the SQLite database is accessible.

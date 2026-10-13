@@ -111,6 +111,7 @@ const (
 // configurable errors. Parallel to mockReconcileStore but distinct so
 // ci_reconcile_test.go is self-contained.
 type ciReconcileStore struct {
+	noopOutcomeRecorder
 	unsupportedReactionObservationStore
 
 	savedEntries    []persistence.RetryEntry

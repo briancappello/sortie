@@ -35,6 +35,7 @@ type ReconcileStore interface {
 	MarkReactionObservationDispatched(ctx context.Context, issueID, kind, fingerprint string) error
 	CountWorkerRunsCompletedSince(ctx context.Context, issueID string, since time.Time) (int, error)
 	DeleteStageHop(ctx context.Context, issueID string) error
+	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
 }
 
 var _ ReconcileStore = (*persistence.Store)(nil)
@@ -255,7 +256,7 @@ func ReconcileRunningIssues(state *State, params ReconcileParams) {
 
 	// Refresh issue states from the tracker and stop workers for
 	// terminal or non-active issues.
-	reconcileTrackerState(state, params, log, ctx, metrics)
+	reconcileTrackerState(state, params, log, ctx, now, metrics)
 
 	// Poll CI status for issues with pending CI checks.
 	reconcileCIStatus(state, params, log, ctx, metrics)
@@ -576,7 +577,7 @@ func releaseIssueRuntimeState(ctx context.Context, state *State, store retryEntr
 // An issue reported in no state (an empty state name) is acted on only at
 // its second consecutive such reading, because a person's label edit can
 // pass through zero state labels for a moment.
-func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logger, ctx context.Context, metrics domain.Metrics) {
+func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logger, ctx context.Context, now time.Time, metrics domain.Metrics) {
 	if params.TrackerAdapter == nil {
 		return
 	}
@@ -634,6 +635,9 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			if entry != nil && entry.PendingCleanup {
 				continue
 			}
+
+			watch, _ := pendingMergeWatch(state, issueID)
+			recordIssueOutcome(ctx, params.Store, releaseReadOutcome(ctx, params.SCMAdapter, watch, issueID, stateName, now, entryLog), entryLog)
 
 			var counts issueReleaseCounts
 			if entry != nil {

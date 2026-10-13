@@ -14,6 +14,7 @@ import (
 // every other method is a no-op, since classifyHeadChange consults no
 // other store method.
 type headChangeStore struct {
+	noopOutcomeRecorder
 	unsupportedReactionObservationStore
 
 	count int

@@ -19,6 +19,7 @@ import (
 )
 
 type mockRetryStore struct {
+	noopOutcomeRecorder
 	unsupportedReactionObservationStore
 
 	savedEntries   []persistence.RetryEntry

@@ -891,10 +891,19 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 		s.historyReadFailed(w, r, err)
 		return nil, false
 	}
+	outcomes, err := s.runHistory.IssueOutcomes(ctx, []string{issueID})
+	if err != nil {
+		s.historyReadFailed(w, r, err)
+		return nil, false
+	}
 	if detail == nil {
 		detail = historyOnlyDetail(issueID, page[0])
 	}
 	detail.History = issueHistoryOf(page, totals, s.tokenRates)
+	attachIssueOutcomes(detail.History.Runs, outcomes)
+	if o, ok := outcomes[issueID]; ok {
+		detail.History.IssueOutcome = toIssueOutcomeResponse(o)
+	}
 	return detail, true
 }
 

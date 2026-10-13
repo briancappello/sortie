@@ -919,7 +919,7 @@ reactions:
     poll_interval_ms: 60000
 ```
 
-**`watch_window_ms` across `review_comments`, `bot_review`, `merge_conflicts`, and `auto_merge`.** All four default to `1800000` (thirty minutes), the same lifetime these kinds carried before the key existed, so an upgrade with nothing set in `WORKFLOW.md` changes no behavior. A workflow without `auto_merge`, where a person reviews and merges, normally wants a value on the order of `reactions.ci_failure.watch_window_ms`'s default (twenty-four hours) rather than the thirty-minute default: raising it costs one additional poll call per interval for as long as the entry lives, at the same poll rate the kind already uses. Unlike `reactions.ci_failure`, none of these four kinds carries a merged-or-closed drop branch, so setting `watch_window_ms: 0` leaves a `review_comments`, `bot_review`, or `merge_conflicts` entry polling after a person merges the pull request until the tracker issue reaches a terminal state, and leaves an `auto_merge` entry polling until its own merge attempt returns the already-merged disposition. A quoted numeric value (for example `"1800000"`) is rejected for these four keys, although `reactions.ci_failure.watch_window_ms` accepts one.
+**`watch_window_ms` across `review_comments`, `bot_review`, `merge_conflicts`, and `auto_merge`.** All four default to `1800000` (thirty minutes), the same lifetime these kinds carried before the key existed, so an upgrade with nothing set in `WORKFLOW.md` changes no behavior. A workflow without `auto_merge`, where a person reviews and merges, normally wants a value on the order of `reactions.ci_failure.watch_window_ms`'s default (twenty-four hours) rather than the thirty-minute default: raising it costs one additional poll call per interval for as long as the entry lives, at the same poll rate the kind already uses. Unlike `reactions.ci_failure`, `review_comments`, `bot_review`, and `merge_conflicts` carry no merged-or-closed drop branch, so setting `watch_window_ms: 0` leaves one of their entries polling after a person merges the pull request until the tracker issue reaches a terminal state. An `auto_merge` entry ends at its first check after its pull request merges, whoever merges it; under `0` it polls on only while the pull request stays open or closes unmerged, until the tracker issue reaches a terminal state. A quoted numeric value (for example `"1800000"`) is rejected for these four keys, although `reactions.ci_failure.watch_window_ms` accepts one.
 
 #### Reaction kind: `label_commands`
 
@@ -1877,7 +1877,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). |
-| GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, and completion-time range. |
+| GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
@@ -2649,7 +2649,8 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
         "reaction_kind": "",
         "reaction_config_key": "",
         "session_id": "thread-1-turn-1",
-        "ssh_host": ""
+        "ssh_host": "",
+        "issue_outcome": null
       }
     ],
     "next_cursor": null,
@@ -2676,7 +2677,8 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
         "result": "advanced",
         "completed_at": "2026-02-24T20:05:31Z"
       }
-    ]
+    ],
+    "issue_outcome": null
   },
   "recent_events": [],
   "last_error": null,
@@ -2696,11 +2698,11 @@ The `running` object uses the same per-session field schema as `GET /api/v1/stat
 | `between_stages`                                 | `title` and `url` of the issue's row |
 | `history`                                        | `title` and `url` of the issue's newest run, each omitted when empty |
 
-`history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs, so a running issue with earlier runs serves its live detail and its history together. `runs` holds the newest page of the issue's runs, newest first, each in the run shape of [`GET /api/v1/runs`](#get-apiv1runs-run-history). `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the runs the page was cut from. `totals` covers all of the issue's runs: `run_count` counts every run, a recorded CI result included, and `unmeasured_runs` counts the runs that never reported usage. Each member of `totals.tokens` is the sum over the measured runs, except `total_tokens`, which sums every run, and is `null` when its sum is `0` and `tokens_complete` is `false`. `tokens_complete` is `true` exactly when no run is unmeasured and none recorded an unaccounted turn, and when it is `false` the sums are lower bounds. `totals.estimated_cost_usd` and `totals.cost_status` follow the rule of `issue_estimated_cost_usd` and `issue_cost_status` over the issue's runs alone. `hops` holds the stage hop decisions of the runs in `runs`, newest first: `source_rule` is the rule of the deciding run, `target_rule` the rule its exit reached, and `result` is `advanced` or `partial` when the hop was made and `failed` or `ceiling` when it was not. A hop decision older than the page arrives with its run on the pages `next_cursor` continues.
+`history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs, so a running issue with earlier runs serves its live detail and its history together. `runs` holds the newest page of the issue's runs, newest first, each in the run shape of [`GET /api/v1/runs`](#get-apiv1runs-run-history). `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the runs the page was cut from. `totals` covers all of the issue's runs: `run_count` counts every run, a recorded CI result included, and `unmeasured_runs` counts the runs that never reported usage. Each member of `totals.tokens` is the sum over the measured runs, except `total_tokens`, which sums every run, and is `null` when its sum is `0` and `tokens_complete` is `false`. `tokens_complete` is `true` exactly when no run is unmeasured and none recorded an unaccounted turn, and when it is `false` the sums are lower bounds. `totals.estimated_cost_usd` and `totals.cost_status` follow the rule of `issue_estimated_cost_usd` and `issue_cost_status` over the issue's runs alone. `hops` holds the stage hop decisions of the runs in `runs`, newest first: `source_rule` is the rule of the deciding run, `target_rule` the rule its exit reached, and `result` is `advanced` or `partial` when the hop was made and `failed` or `ceiling` when it was not. A hop decision older than the page arrives with its run on the pages `next_cursor` continues. `issue_outcome` is how the issue's latest work ended, or `null` when Sortie observed no ending since it last picked the issue up. It is the object every run in `runs` carries, as the `issue_outcome` row of the run fields describes.
 
 A request by an identifier that no live entry holds is answered through run history. When the newest run recorded under it belongs to an issue that is live under a newer identifier (a tracker move keeps the issue ID), the response is that issue's live detail with `issue_identifier` set to the identifier the issue carries now. The `history` of a response always covers the issue by its ID, so runs recorded under an older identifier stay on its page.
 
-A read of run history that fails answers `503` with `history_unavailable`, for a live and for a non-live identifier, rather than `history` `null` or `404`.
+A read of run history that fails, the read of the issue's outcome included, answers `503` with `history_unavailable`, for a live and for a non-live identifier, rather than `history` `null` or `404`.
 
 #### `GET /api/v1/runs`: run history
 
@@ -2717,6 +2719,8 @@ Returns the finished runs of run history, newest first, one page at a time. Ever
 | `stage`    | A dispatch rule name                          | The runs whose exit reached a stage hop decision targeting that rule, whatever its result. |
 | `since`    | An RFC 3339 timestamp, any offset, fraction allowed | The runs completed at or after it. |
 | `until`    | An RFC 3339 timestamp, as `since`             | The runs completed before it. When both are given, `since` MUST be before `until`. |
+| `ended_since` | An RFC 3339 timestamp, as `since`          | Every run of an issue whose `issue_outcome` was observed at or after it, a run that completed earlier included. A run of an issue with no outcome matches no ending bound. |
+| `ended_until` | An RFC 3339 timestamp, as `since`          | Every run of an issue whose `issue_outcome` was observed before it. When both are given, `ended_since` MUST be before `ended_until`. |
 | `cursor`   | A `next_cursor` value                         | The runs recorded before the last run of the previous page. |
 | `limit`    | An integer from 1 to 200, default 50          | The page size. |
 
@@ -2770,7 +2774,13 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
       "reaction_kind": "ci",
       "reaction_config_key": "ci_failure",
       "session_id": "thread-1-turn-1",
-      "ssh_host": ""
+      "ssh_host": "",
+      "issue_outcome": {
+        "kind": "merged",
+        "observed_at": "2026-02-24T21:02:10Z",
+        "merge_path": "auto_merge",
+        "pull_request": {"number": 936, "repository": "acme/web"}
+      }
     }
   ],
   "next_cursor": "42"
@@ -2815,6 +2825,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `reaction_config_key`    | string or `null`   | The key of the `reactions` section of `WORKFLOW.md` that `reaction_kind` is configured under. `""` or `null` exactly when `reaction_kind` is. |
 | `session_id`             | string or `null`   | The agent session the run used, `""` when it started none, `null` when not recorded. Not masked. |
 | `ssh_host`               | string or `null`   | The SSH worker the run executed on, `""` for a local run, `null` when not recorded. |
+| `issue_outcome`          | object or `null`   | How the issue's latest work ended, as Sortie observed it, or `null` when Sortie observed no ending since it last picked the issue up, or when the issue ended before outcomes were recorded. Always present. It belongs to the issue, so every run of one issue carries the same object, and it is served as recorded whatever the issue's live state. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is when Sortie made or observed the ending, in UTC. `state` is present for `handed_off` and `terminal`: the state the handoff wrote, or the terminal state Sortie read. `merge_path` and `pull_request` are present for `merged`: `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key that observed the merge, and `pull_request` holds `number` and `repository`. `state` and `repository` are masked like `issue_title`. |
 
 The recorded CI result of a failing check is a run with `status` `ci_failed`, no agent kind, and `""` in each origin key, because it records a verdict and nothing started it.
 
@@ -2822,8 +2833,8 @@ The recorded CI result of a failing check is a run with `status` `ci_failed`, no
 
 | Condition | Status | `error.code` |
 | --------- | ------ | ------------ |
-| An unknown parameter, a parameter given more than once, a malformed or out-of-range value, or `since` not before `until` | 400 | `invalid_parameter`; the message names the parameter and the rule, for example `parameter "limit" must be an integer from 1 to 200`. No run is read. |
-| Run history cannot be read, or the server has none | 503 | `history_unavailable` |
+| An unknown parameter, a parameter given more than once, a malformed or out-of-range value, `since` not before `until`, or `ended_since` not before `ended_until` | 400 | `invalid_parameter`; the message names the parameter and the rule, for example `parameter "limit" must be an integer from 1 to 200`. No run is read. |
+| Run history or the outcomes of the served issues cannot be read, or the server has none | 503 | `history_unavailable` |
 | A method other than `GET` | 405 | `method_not_allowed` |
 
 A request whose filters match fewer runs than the page holds reads run history down to its start, and a read waits for the database connection the orchestrator uses, so a narrow filter on a long history takes longer than a page of recent runs.

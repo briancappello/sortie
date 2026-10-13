@@ -74,6 +74,20 @@ type runResponse struct {
 	ReactionConfigKey    *string             `json:"reaction_config_key"`
 	SessionID            *string             `json:"session_id"`
 	SSHHost              *string             `json:"ssh_host"`
+
+	// IssueOutcome is the issue's, the same on every run of the issue.
+	IssueOutcome *issueOutcomeResponse `json:"issue_outcome"`
+}
+
+// issueOutcomeResponse is how an issue's latest work ended. State is present
+// for a handed-off or terminal outcome; MergePath and PullRequest are present
+// for a merged one.
+type issueOutcomeResponse struct {
+	Kind        string               `json:"kind"`
+	ObservedAt  string               `json:"observed_at"`
+	State       *string              `json:"state,omitempty"`
+	MergePath   string               `json:"merge_path,omitempty"`
+	PullRequest *pullRequestResponse `json:"pull_request,omitempty"`
 }
 
 // selfReviewResponse is the self-review outcome of one run.
@@ -91,6 +105,8 @@ type issueHistoryResponse struct {
 	NextCursor *string               `json:"next_cursor"`
 	Totals     historyTotalsResponse `json:"totals"`
 	Hops       []hopDecisionResponse `json:"hops"`
+
+	IssueOutcome *issueOutcomeResponse `json:"issue_outcome"`
 }
 
 // historyTotalsResponse is an issue's spend over all of its runs.
@@ -123,7 +139,7 @@ func (e *paramError) Error() string {
 	return fmt.Sprintf("parameter %q %s", e.param, e.rule)
 }
 
-var runsParams = []string{"issue", "issue_id", "rule", "status", "stage", "since", "until", "cursor", "limit"}
+var runsParams = []string{"issue", "issue_id", "rule", "status", "stage", "since", "until", "ended_since", "ended_until", "cursor", "limit"}
 
 // parseRunsQuery validates every parameter of GET /api/v1/runs before any
 // read, so a typo never serves unfiltered rows as filtered ones. An empty
@@ -163,7 +179,7 @@ func parseRunsQuery(values url.Values) (RunHistoryQuery, error) {
 	for _, bound := range []struct {
 		name string
 		dest **time.Time
-	}{{"since", &q.Since}, {"until", &q.Until}} {
+	}{{"since", &q.Since}, {"until", &q.Until}, {"ended_since", &q.EndedSince}, {"ended_until", &q.EndedUntil}} {
 		v := values.Get(bound.name)
 		if v == "" {
 			continue
@@ -176,6 +192,9 @@ func parseRunsQuery(values url.Values) (RunHistoryQuery, error) {
 	}
 	if q.Since != nil && q.Until != nil && !q.Since.Before(*q.Until) {
 		return RunHistoryQuery{}, &paramError{"since", "must be before until"}
+	}
+	if q.EndedSince != nil && q.EndedUntil != nil && !q.EndedSince.Before(*q.EndedUntil) {
+		return RunHistoryQuery{}, &paramError{"ended_since", "must be before ended_until"}
 	}
 
 	if v := values.Get("rule"); v == noRuleFilter {
@@ -282,6 +301,43 @@ func toRunResponses(rows []RunHistoryEntry, rates TokenRates) []runResponse {
 	return runs
 }
 
+// toIssueOutcomeResponse converts an outcome to its wire format, masking the
+// free-text members at serve time.
+func toIssueOutcomeResponse(o IssueOutcome) *issueOutcomeResponse {
+	resp := &issueOutcomeResponse{Kind: o.Kind, ObservedAt: o.ObservedAt}
+	if o.Kind == "merged" {
+		resp.MergePath = orchestrator.ReactionConfigKey(o.MergeReactionKind)
+		resp.PullRequest = &pullRequestResponse{Number: o.PRNumber, Repository: redact.Mask(o.PRRepository)}
+		return resp
+	}
+	resp.State = new(redact.Mask(o.State))
+	return resp
+}
+
+// attachIssueOutcomes sets each run's issue_outcome from the outcome of its
+// issue; a run whose issue has none keeps null.
+func attachIssueOutcomes(rows []runResponse, outcomes map[string]IssueOutcome) {
+	for i := range rows {
+		if o, ok := outcomes[rows[i].IssueID]; ok {
+			rows[i].IssueOutcome = toIssueOutcomeResponse(o)
+		}
+	}
+}
+
+// distinctIssueIDs lists the issue IDs of rows once each, in first-seen order.
+func distinctIssueIDs(rows []RunHistoryEntry) []string {
+	seen := make(map[string]struct{}, len(rows))
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if _, dup := seen[row.IssueID]; dup {
+			continue
+		}
+		seen[row.IssueID] = struct{}{}
+		ids = append(ids, row.IssueID)
+	}
+	return ids
+}
+
 // historyTotalsOf converts an issue's totals to their wire format. A token
 // sum that is zero while the spend is incomplete serves null, because the
 // zero would stand in for spend Sortie does not know.
@@ -375,10 +431,14 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, next := cutPage(rows, limit)
-	writeJSON(w, s.logger, http.StatusOK, runsResponse{
-		Runs:       toRunResponses(rows, s.tokenRates),
-		NextCursor: next,
-	})
+	outcomes, err := s.runHistory.IssueOutcomes(r.Context(), distinctIssueIDs(rows))
+	if err != nil {
+		s.historyReadFailed(w, r, err)
+		return
+	}
+	runs := toRunResponses(rows, s.tokenRates)
+	attachIssueOutcomes(runs, outcomes)
+	writeJSON(w, s.logger, http.StatusOK, runsResponse{Runs: runs, NextCursor: next})
 
 	s.logger.Debug("request served",
 		slog.String("method", r.Method),

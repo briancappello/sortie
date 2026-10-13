@@ -508,11 +508,12 @@ Minimum endpoints:
     - `status`: the run status.
     - `stage`: a dispatch rule name; selects the runs whose exit reached a hop decision targeting that rule, whatever its result.
     - `since` and `until`: RFC 3339 timestamps in any offset, fractions allowed. `since` selects the runs completed at or after it and `until` the runs completed before it, each compared as an instant. When both are given, `since` MUST be before `until`.
+    - `ended_since` and `ended_until`: RFC 3339 timestamps under the rules of `since` and `until`. `ended_since` selects every run of an issue whose outcome (Section 4.1.8) was observed at or after it and `ended_until` every run of an issue whose outcome was observed before it, each compared as an instant. A run that completed before `ended_since` is selected when its issue's outcome was observed after it, and a run of an issue with no outcome matches neither bound. When both are given, `ended_since` MUST be before `ended_until`. A selected row carries the issue's outcome as the read sees it, so an issue picked up again after the selection serves `null`, which a client reads as not ended.
     - `cursor`: a `next_cursor` value from the previous page.
     - `limit`: the page size, an integer from 1 to 200, default 50.
   - Order is descending `run_id`, the order Sortie recorded the runs. Each run is appended at its completion, so this is completion order; across a wall-clock step back the route promises no order of `completed_at`.
   - `next_cursor` is non-null exactly when a run older than the page's last run matches the filters. It is the last served run ID in decimal, opaque to a client, and valid with any filters. The next page holds smaller run IDs, so a run recorded between two requests never lands on a later page and never displaces a served run; a client sees it by reading the first page again.
-  - A parameter this route does not define, a parameter given more than once, and a value that breaks the rules above answer `400` with the error code `invalid_parameter`, whose message names the parameter and the rule. The route reads nothing in that case, so a client never takes unfiltered rows for filtered ones. A run-history read that fails answers `503` with `history_unavailable`, as does a server without run history. Any method other than `GET` answers `405`.
+  - A parameter this route does not define, a parameter given more than once, and a value that breaks the rules above answer `400` with the error code `invalid_parameter`, whose message names the parameter and the rule. The route reads nothing in that case, so a client never takes unfiltered rows for filtered ones. A run-history read that fails, the read of the served issues' outcomes included, answers `503` with `history_unavailable`, as does a server without run history. Any method other than `GET` answers `405`.
   - Suggested response shape:
 
     ```json
@@ -563,7 +564,13 @@ Minimum endpoints:
           "reaction_kind": "ci",
           "reaction_config_key": "ci_failure",
           "session_id": "thread-1-turn-1",
-          "ssh_host": ""
+          "ssh_host": "",
+          "issue_outcome": {
+            "kind": "merged",
+            "observed_at": "2026-02-24T21:02:10Z",
+            "merge_path": "auto_merge",
+            "pull_request": {"number": 936, "repository": "acme/web"}
+          }
         }
       ],
       "next_cursor": "42"
@@ -687,7 +694,8 @@ Minimum endpoints:
             "reaction_kind": "",
             "reaction_config_key": "",
             "session_id": "thread-1-turn-1",
-            "ssh_host": ""
+            "ssh_host": "",
+            "issue_outcome": null
           }
         ],
         "next_cursor": null,
@@ -714,7 +722,8 @@ Minimum endpoints:
             "result": "advanced",
             "completed_at": "2026-02-24T20:05:31Z"
           }
-        ]
+        ],
+        "issue_outcome": null
       },
       "logs": {
         "agent_session_logs": [
@@ -738,11 +747,11 @@ Minimum endpoints:
     ```
 
   - `status` is `"running"` when the issue has a running session, otherwise `"retrying"` when it has a pending retry, otherwise `"budget_exhausted"` when it is held out of dispatch by a per-issue budget ceiling, otherwise `"parked"` when it is parked, otherwise `"pending_reactions"` when it is known only through a pending reaction, otherwise `"between_stages"` when it is known only through a stage hop whose next stage is not yet dispatched, otherwise `"history"` when it has run history and no live entry; `budget_exhausted` in the response body carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state` and is `null` when the issue is not in that set, and `parked` carries the record shape of the `parked` array and is `null` when the issue is not parked. `between_stages` carries the row shape of the `between_stages` array and is `null` when the issue is not between stages, whatever the status. `pending_reactions` is always present and holds the issue's rows in the record shape and order of the `pending_reactions` array, `[]` when the issue has none, whatever the status. An issue that is only parked, known only through a pending reaction, only between stages, or only through run history answers with a `null` workspace, zero attempts, and a `null` `last_error`, as a budget-held one does. A `history` response carries `[]` for `pending_reactions` and `null` for every other live member. `last_error` is the retry row's error, so after the retry timer reschedules a retry it is the reschedule reason.
-  - `history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs in the row shape of `GET /api/v1/runs`, newest first, beside live detail when the issue is also live. A running issue with earlier runs serves both. It holds `runs`, `next_cursor`, `totals`, and `hops`. `runs` is bounded to a page, because an issue looping on retries has no bound on its runs. `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the rows the page was cut from. `totals` covers all of the issue's runs, not the page. `hops` holds the hop decisions of the runs in `runs`, newest first; an older run's decision arrives with its row on the pages `next_cursor` continues. The API design notes give the keys and how to read them.
+  - `history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs in the row shape of `GET /api/v1/runs`, newest first, beside live detail when the issue is also live. A running issue with earlier runs serves both. It holds `runs`, `next_cursor`, `totals`, `hops`, and `issue_outcome`. `runs` is bounded to a page, because an issue looping on retries has no bound on its runs. `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the rows the page was cut from. `totals` covers all of the issue's runs, not the page. `hops` holds the hop decisions of the runs in `runs`, newest first; an older run's decision arrives with its row on the pages `next_cursor` continues. `issue_outcome` is how the issue's latest work ended, the object every run in `runs` carries, or `null`. The API design notes give the keys and how to read them.
   - Resolution runs in this order. The orchestrator state is read first, then run history, so a run that ends between the two reads can appear both as the running session and as the newest run, where the opposite order could hide it from both. An identifier that no live entry holds resolves through run history: the issue ID of the newest run recorded under that identifier is looked up in live state, so an identifier the issue no longer carries (a tracker move keeps the issue ID) answers with the live detail of the issue under the identifier it carries now. `issue_identifier` is the identifier of the entry that decides `status`, and on a `history` response that of the newest run. History is scoped by issue ID, so runs recorded under an older identifier stay on the issue's page.
   - `issue` is present on every `200` response and holds the issue's tracker facts under the names the prompt template's `issue` variable uses: `title`, `url`, `issue_type`, `labels`, and `state`. It is built from the entry that decides `status`, and each member is omitted when that entry holds none. For `running`, `retrying`, and `budget_exhausted` it carries the row's `issue_title`, `issue_url`, `issue_type`, `issue_labels`, and `state`; `labels` is `[]` when the row holds labels and the issue carries none, and absent while the row holds no read of them. For `parked` it carries the record's title, link, and `parked_state` as `state`. For `pending_reactions` it carries the title and link of the issue's first row, and for `between_stages` the title and link of the issue's row. For `history` it carries the title and link of the issue's newest run, each omitted when empty.
   - If neither the current in-memory state nor run history knows the identifier, return `404` with an error response (for example `{"error":{"code":"issue_not_found","message":"..."}}`); an issue held by a budget ceiling, parked, between stages, known through a pending reaction, or known through run history is not unknown, so this case is distinct from those.
-  - A run-history read that fails answers `503` with `history_unavailable`, for a live and for a non-live identifier alike, never `history` `null` or `404`. A server without run history serves live detail with `history` `null` and answers `404` for an identifier no live entry holds.
+  - A run-history read that fails, the read of the issue's outcome included, answers `503` with `history_unavailable`, for a live and for a non-live identifier alike, never `history` `null` or `404`. A server without run history serves live detail with `history` `null` and answers `404` for an identifier no live entry holds.
 
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations may coalesce repeated requests).
@@ -850,6 +859,8 @@ API design notes:
   - `chain_id`, `stage_previous`, and `stage_previous_outcome` are the stage lineage the run was dispatched with. `stage_target` and `stage_result` are the hop decision the run's exit reached, recorded after the row is appended, so a read between the two serves the run without its decision and the next read serves it.
   - `origin_recorded` is false for a run recorded before the origin columns existed, and `trigger`, `reaction_kind`, `reaction_config_key`, `session_id`, and `ssh_host` are all `null` on such a run. Where `origin_recorded` is true, each key is `""` when the run has none: no retry trigger, no reaction, no session, or a local run. `trigger` alone is `null` on a run dispatched by a retry whose row never stored what started it, as a retry queued before the origin was recorded can be. A client never reads an unrecorded origin as a local poll-tick dispatch.
   - `trigger` is what started the retry whose fire dispatched the run: the `sortie_retries_total` label of the schedule that created that retry (`error`, `continuation`, `stall`, or `ci_fix`), kept through every put-back by the retry timer. The `timer` label stays on the retry row and the metric. It is `""` for a dispatch from the poll tick and for a retry a reaction started, which `reaction_kind` names. `reaction_config_key` is present with the meaning a retry row gives it, and is `""` or `null` exactly when `reaction_kind` is. `session_id` is the agent session the run used, `""` when it started none, and `ssh_host` is the SSH worker the run executed on. The recorded CI result carries `""` in each origin key, because it records a verdict and nothing started it.
+  - `issue_outcome` is how the issue's latest work ended, as Section 4.1.8 defines it, or `null` when Sortie observed no ending since it last picked the issue up. The key is always present. The value is the issue's, so every run of one issue on a page carries the same object, and it is never the outcome of one run. Sortie serves it as recorded, whatever the issue's live state: a handed-off issue that waits on a reaction or runs a reaction continuation serves its handoff beside its live members, and the live entry, not the outcome, says Sortie still holds the issue. A running issue picked up again after an earlier ending, and an issue that ended before outcomes were recorded, serve `null`.
+  - An outcome holds `kind` and `observed_at` always. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is the time Sortie made or observed the ending, RFC 3339 in UTC. `state` is present on `handed_off` and `terminal`: the state the handoff wrote, or the terminal state read. `merge_path` and `pull_request` are present on `merged`. `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key of WORKFLOW.md of the reaction that observed the merge, and `pull_request` holds `number` and `repository` in the shape a pending reaction row serves. `state` and `repository` are masked as Section 15.3 states, when the response is built. A failed read of outcomes answers `503` with `history_unavailable` on both routes and is never served as `null`, which reads as no outcome observed.
 - `history.totals` sums all of the issue's runs, whatever the page holds, so it describes the issue where `history.runs` describes the page. The keys are additive; no existing key changes name, type, or meaning.
   - `run_count` counts every run, a recorded CI result included, which is the count `agent.max_sessions` is compared with. `unmeasured_runs` counts the runs whose usage was never recorded.
   - `tokens` holds the same members as a running row's `tokens`. `total_tokens` sums every run, an unmeasured run holding `0`, and the other members sum the measured runs. A member is `null` when its sum is `0` and `tokens_complete` is false, so unknown spend never reads as zero. `tokens_complete` is true exactly when no run is unmeasured and none recorded an unaccounted turn; when it is false, the sums are lower bounds.
