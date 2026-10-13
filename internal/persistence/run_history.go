@@ -87,6 +87,27 @@ type RunHistory struct {
 	// DispatchedAt is the RFC 3339 start of the first run of the pass
 	// ChainID names; empty when the pass could not be dated.
 	DispatchedAt string
+
+	// Trigger is the sortie_retries_total label of the schedule that
+	// started the retry whose fire dispatched the run; empty for a poll-tick
+	// dispatch and for a retry a reaction started. Nil reads and writes
+	// NULL: the retry never stored what started it, or the row predates
+	// migration 028.
+	Trigger *string
+
+	// ReactionKind is the dispatching retry's reaction kind; empty when none.
+	ReactionKind string
+
+	// SessionID is the agent session the run used; empty when the run
+	// started none.
+	SessionID string
+
+	// SSHHost is the SSH worker the run executed on; empty for a local run.
+	SSHHost string
+
+	// OriginRecorded is false when session_id is NULL, which only a row
+	// written before migration 028 holds. It is ignored on write.
+	OriginRecorded bool
 }
 
 // AppendRunHistory inserts a completed run attempt. The input ID is
@@ -112,10 +133,15 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 		reviewMetaVal = sql.NullString{String: *run.ReviewMetadata, Valid: true}
 	}
 
+	triggerVal := sql.NullString{}
+	if run.Trigger != nil {
+		triggerVal = sql.NullString{String: *run.Trigger, Valid: true}
+	}
+
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
@@ -123,6 +149,7 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 		run.UnaccountedTurns, run.ConfiguredModel, run.ConfiguredEffort, run.ReportedModel,
 		run.StagePrevious, run.StagePreviousOutcome, run.ChainID, run.StageTarget, run.StageResult,
 		run.IssueTitle, run.IssueURL, run.DispatchedAt,
+		triggerVal, run.ReactionKind, run.SessionID, run.SSHHost,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)
@@ -262,55 +289,102 @@ func (s *Store) LoadLatestSuccessfulRunsForReactionRecovery(ctx context.Context,
 	return entries, nil
 }
 
-// QueryRecentRunHistory returns the most recent entries across all issues,
-// ordered by id descending, capped by limit (min 1). For pagination pass
-// the smallest id from the previous page as afterID, or 0 to start from the
-// most recent. Returns an empty non-nil slice when none exist.
-func (s *Store) QueryRecentRunHistory(ctx context.Context, limit int, afterID int64) ([]RunHistory, error) {
-	if limit <= 0 {
-		limit = 1
+// RunHistoryFilter selects run_history rows; a zero field matches every row.
+type RunHistoryFilter struct {
+	IssueID    string
+	Identifier string
+
+	// RuleName nil matches every row; a pointer to "" selects the rows whose
+	// rule_name is empty.
+	RuleName    *string
+	Status      string
+	StageTarget string
+
+	// CompletedSince keeps rows completed at or after it and CompletedBefore
+	// rows completed before it, both compared as instants.
+	CompletedSince  *time.Time
+	CompletedBefore *time.Time
+
+	// BeforeID keeps rows with an id below it; 0 starts at the newest row.
+	BeforeID int64
+
+	// Limit is the most rows returned; below 1 reads as 1.
+	Limit int
+}
+
+// QueryRunHistory returns the rows matching every non-zero field of f,
+// ordered by id descending, or an empty non-nil slice when none match. A row
+// whose completed_at does not parse as a timestamp never matches a time
+// bound.
+func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunHistory, error) {
+	var conds []string
+	var args []any
+	if f.IssueID != "" {
+		conds = append(conds, "issue_id = ?")
+		args = append(args, f.IssueID)
+	}
+	if f.Identifier != "" {
+		conds = append(conds, "identifier = ?")
+		args = append(args, f.Identifier)
+	}
+	if f.RuleName != nil {
+		conds = append(conds, "rule_name = ?")
+		args = append(args, *f.RuleName)
+	}
+	if f.Status != "" {
+		conds = append(conds, "status = ?")
+		args = append(args, f.Status)
+	}
+	if f.StageTarget != "" {
+		conds = append(conds, "stage_target = ?")
+		args = append(args, f.StageTarget)
+	}
+	if f.CompletedSince != nil {
+		conds = append(conds, "unixepoch(completed_at, 'subsec') >= unixepoch(?, 'subsec')")
+		args = append(args, f.CompletedSince.UTC().Format(time.RFC3339Nano))
+	}
+	if f.CompletedBefore != nil {
+		conds = append(conds, "unixepoch(completed_at, 'subsec') < unixepoch(?, 'subsec')")
+		args = append(args, f.CompletedBefore.UTC().Format(time.RFC3339Nano))
+	}
+	if f.BeforeID > 0 {
+		conds = append(conds, "id < ?")
+		args = append(args, f.BeforeID)
 	}
 
-	var rows *sql.Rows
-	var err error
-	if afterID > 0 {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT id, issue_id, identifier, display_identifier, attempt, agent_adapter, workspace,
-				started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
-				input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
-				configured_model, configured_effort, reported_model,
-				chain_id, stage_previous, stage_target, stage_result
-			FROM run_history
-			WHERE id < ?
-			ORDER BY id DESC
-			LIMIT ?`, afterID, limit)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT id, issue_id, identifier, display_identifier, attempt, agent_adapter, workspace,
-				started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
-				input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
-				configured_model, configured_effort, reported_model,
-				chain_id, stage_previous, stage_target, stage_result
-			FROM run_history
-			ORDER BY id DESC
-			LIMIT ?`, limit)
+	query := `SELECT id, issue_id, identifier, display_identifier, attempt, agent_adapter, workspace,
+			started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
+			input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
+			configured_model, configured_effort, reported_model,
+			chain_id, stage_previous, stage_previous_outcome, stage_target, stage_result,
+			issue_title, issue_url, dispatched_at,
+			trigger, reaction_kind, session_id, ssh_host
+		FROM run_history`
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ") //nolint:gosec // conds holds only fixed predicates with ? placeholders; values are bound via args
 	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, max(f.Limit, 1))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query recent run history: %w", err)
+		return nil, fmt.Errorf("query run history: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
 
 	entries := []RunHistory{}
 	for rows.Next() {
 		var r RunHistory
-		var errVal, wfVal, dispIDVal, reviewMetaVal sql.NullString
+		var errVal, wfVal, dispIDVal, reviewMetaVal, triggerVal, reactionVal, sessionVal, hostVal sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.IssueID, &r.Identifier, &dispIDVal, &r.Attempt, &r.AgentAdapter,
 			&r.Workspace, &r.StartedAt, &r.CompletedAt, &r.Status, &errVal, &wfVal,
 			&r.TurnsCompleted, &reviewMetaVal, &r.RuleName, &r.TemplateID,
 			&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.TokensMeasured,
 			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel,
-			&r.ChainID, &r.StagePrevious, &r.StageTarget, &r.StageResult,
+			&r.ChainID, &r.StagePrevious, &r.StagePreviousOutcome, &r.StageTarget, &r.StageResult,
+			&r.IssueTitle, &r.IssueURL, &r.DispatchedAt,
+			&triggerVal, &reactionVal, &sessionVal, &hostVal,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}
@@ -326,10 +400,17 @@ func (s *Store) QueryRecentRunHistory(ctx context.Context, limit int, afterID in
 		if reviewMetaVal.Valid {
 			r.ReviewMetadata = new(reviewMetaVal.String)
 		}
+		if triggerVal.Valid {
+			r.Trigger = new(triggerVal.String)
+		}
+		r.ReactionKind = reactionVal.String
+		r.SessionID = sessionVal.String
+		r.SSHHost = hostVal.String
+		r.OriginRecorded = sessionVal.Valid
 		entries = append(entries, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("query recent run history: %w", err)
+		return nil, fmt.Errorf("query run history: %w", err)
 	}
 	return entries, nil
 }
@@ -570,6 +651,14 @@ type IssueTokenUsage struct {
 	// lower bound even when every row is measured.
 	UnaccountedTurns int
 
+	// InputTokens, OutputTokens, CacheReadTokens, and CacheWriteTokens sum
+	// each raw class over the measured rows. Only [Store.TokenUsageByIssue]
+	// fills them.
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+
 	// ByKind holds the measured spend per agent kind in the classes cost
 	// estimation prices. Only [Store.TokenUsageByIssue] fills it, and it is
 	// nil when no kind spent anything.
@@ -613,7 +702,8 @@ func (s *Store) TokenUsageByIssue(ctx context.Context, issueID string) (IssueTok
 			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN MAX(input_tokens - cache_read_tokens - cache_write_tokens, 0) ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN cache_read_tokens ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN cache_write_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN output_tokens ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN output_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN input_tokens ELSE 0 END), 0)
 		FROM run_history WHERE issue_id = ? GROUP BY agent_adapter`, issueID,
 	)
 	if err != nil {
@@ -628,8 +718,9 @@ func (s *Store) TokenUsageByIssue(ctx context.Context, issueID string) (IssueTok
 		var count int
 		var unmeasured, stoppedInFlight, unaccounted sql.NullInt64
 		var spent KindTokenUsage
+		var rawInput int64
 		if err := rows.Scan(&kind, &total, &count, &unmeasured, &stoppedInFlight, &unaccounted,
-			&spent.FreshInputTokens, &spent.CacheReadTokens, &spent.CacheWriteTokens, &spent.OutputTokens); err != nil {
+			&spent.FreshInputTokens, &spent.CacheReadTokens, &spent.CacheWriteTokens, &spent.OutputTokens, &rawInput); err != nil {
 			return IssueTokenUsage{}, fmt.Errorf("token usage by issue %q: %w", issueID, err)
 		}
 		usage.TotalTokens += total
@@ -637,6 +728,10 @@ func (s *Store) TokenUsageByIssue(ctx context.Context, issueID string) (IssueTok
 		usage.UnmeasuredSessions += int(unmeasured.Int64)
 		usage.StoppedInFlight += int(stoppedInFlight.Int64)
 		usage.UnaccountedTurns += int(unaccounted.Int64)
+		usage.InputTokens += rawInput
+		usage.OutputTokens += spent.OutputTokens
+		usage.CacheReadTokens += spent.CacheReadTokens
+		usage.CacheWriteTokens += spent.CacheWriteTokens
 		if spent == (KindTokenUsage{}) {
 			continue
 		}

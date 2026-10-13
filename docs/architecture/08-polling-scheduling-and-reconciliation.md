@@ -80,7 +80,8 @@ Retry entry creation:
 
 - The caller checks the retry slot first (Section 7.5): a challenger consults the slot and schedules only when it is free. The cancellation the primitive performs internally is a backstop for a call site that skipped the check, not the primitive's own contract.
 - Store `attempt`, `identifier`, `error`, `trigger` (the `sortie_retries_total` label of the schedule, empty for a reaction continuation that records none), `due_at_ms`, `session_id` (continuation retries propagate the session ID from the exiting worker; error and reaction retries leave it null), and new timer handle.
-- A reschedule by the retry timer records the trigger `timer` and its own reason as the error, never the error of the retry it replaces. The reasons are listed in Section 13.7.2.
+- Store `origin_trigger`, what started the retry: the schedule's `trigger` label, or on a reschedule by the retry timer the `origin_trigger` of the retry it replaces. It is persisted with the entry, so it survives a restart. The run the retry dispatches records it as its `trigger`.
+- A reschedule by the retry timer records the trigger `timer` and its own reason as the error, never the error of the retry it replaces. The reasons are listed in Section 13.7.2. Every put-back keeps the `origin_trigger` of the retry it replaces, including the re-arm of an overdue retry.
 
 Backoff formula:
 

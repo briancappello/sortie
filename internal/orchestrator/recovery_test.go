@@ -627,7 +627,7 @@ func TestPopulateRetries_RestartKeepsIssueIdentity(t *testing.T) {
 				Title: "Fix the login redirect", URL: "https://example.test/acme/web/issues/1",
 				IssueType: "Bug", Labels: tt.labels, State: "In Review",
 			}
-			entry.Trigger = triggerTimer
+			entry.Trigger, entry.OriginTrigger = triggerTimer, "error"
 			entry.ConfiguredModel = "model-x"
 			entry.StageLineage = StageLineage{DispatchedAt: passAt}
 			persistRetryEntry(ctx, discardLogger(), store, before, "iss-1")
@@ -642,6 +642,9 @@ func TestPopulateRetries_RestartKeepsIssueIdentity(t *testing.T) {
 			retrying := RuntimeSnapshot(after, recoveryNow).Retrying
 			if len(retrying) != 1 {
 				t.Fatalf("len(Retrying) = %d, want 1", len(retrying))
+			}
+			if got := after.RetryAttempts["iss-1"].OriginTrigger; got != "error" {
+				t.Errorf("RetryAttempts[iss-1].OriginTrigger after restart = %q, want %q", got, "error")
 			}
 			got := retrying[0]
 			gotFacts := [6]string{got.DisplayID, got.IssueTitle, got.IssueURL, got.Trigger, got.IssueType, got.State}

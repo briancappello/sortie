@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 )
 
@@ -32,11 +33,6 @@ type RefreshFunc func() bool
 // Called on each dashboard render to compute available slots.
 // If nil, available slots defaults to 0.
 type SlotFunc func() int
-
-// RunHistoryFunc returns recent run history entries for the dashboard.
-// Called on each dashboard render. If nil, the run history section
-// is omitted.
-type RunHistoryFunc func(ctx context.Context, limit int) ([]RunHistoryEntry, error)
 
 // RunHistoryEntry is a server-layer view of a completed run attempt.
 // Decoupled from persistence types to avoid leaking internal packages.
@@ -75,6 +71,80 @@ type RunHistoryEntry struct {
 	// StageResult is the result of the run's hop decision; empty when
 	// StageTarget is.
 	StageResult string
+	// ID is the run's identifier in run history; it grows with every
+	// recorded run and is the paging key.
+	ID int64
+	// IssueID is the tracker-assigned issue ID.
+	IssueID string
+	// IssueTitle is the title as recorded, unmasked.
+	IssueTitle string
+	// IssueURL is the tracker link as recorded, unmasked.
+	IssueURL string
+	// AgentKind is the agent adapter kind that ran the session.
+	AgentKind string
+	// ConfiguredModel is the model the dispatch rule configured.
+	ConfiguredModel string
+	// ConfiguredEffort is the reasoning effort the dispatch rule configured.
+	ConfiguredEffort string
+	// ReportedModel is the model the agent reported using.
+	ReportedModel string
+	// DispatchedAt is the dispatch timestamp as stored; empty when unrecorded.
+	DispatchedAt string
+	// Tokens holds the run's token figures; meaningful only when
+	// TokensMeasured is true.
+	Tokens domain.TokenUsage
+	// TokensMeasured is false when the agent reported no usage.
+	TokensMeasured bool
+	// UnaccountedTurns counts turns whose usage the agent never reported.
+	UnaccountedTurns int
+	// StagePreviousOutcome is the outcome of the run that led to this one.
+	StagePreviousOutcome string
+	// ReviewMetadata is the self-review JSON as recorded; nil when
+	// self-review did not run.
+	ReviewMetadata *string
+	// OriginRecorded is false for a run recorded before the origin fields
+	// existed; Trigger, ReactionKind, SessionID, and SSHHost are then unknown.
+	OriginRecorded bool
+	// Trigger is what started the retry that dispatched the run; empty for
+	// none, nil when the run's retry never stored it.
+	Trigger *string
+	// ReactionKind is the dispatching retry's reaction kind; empty for none.
+	ReactionKind string
+	// SessionID is the agent session the run used; empty when it started none.
+	SessionID string
+	// SSHHost is the SSH worker the run executed on; empty for a local run.
+	SSHHost string
+}
+
+// RunHistoryQuery selects completed runs; a zero field matches every run.
+type RunHistoryQuery struct {
+	IssueID, Identifier, Status, StageTarget string
+	// RuleName nil matches every run; a pointer to "" selects the runs that
+	// record no rule name.
+	RuleName *string
+	// Since keeps runs completed at or after it.
+	Since *time.Time
+	// Until keeps runs completed before it.
+	Until *time.Time
+	// BeforeID keeps runs recorded before this run ID; 0 starts at the newest.
+	BeforeID int64
+	// Limit is the most runs returned.
+	Limit int
+}
+
+// IssueRunTotals is one issue's spend over all of its runs.
+type IssueRunTotals struct {
+	// Usage counts runs and prices spend per agent kind.
+	Usage orchestrator.SnapshotIssueUsage
+	// Tokens sums each token class over the measured runs.
+	Tokens domain.TokenUsage
+}
+
+// RunHistoryReader reads persisted run history. Runs come newest first, and
+// an implementation is safe for concurrent use.
+type RunHistoryReader interface {
+	QueryRuns(ctx context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error)
+	IssueTotals(ctx context.Context, issueID string) (IssueRunTotals, error)
 }
 
 // DBPingFunc checks whether the SQLite database is accessible.
@@ -139,10 +209,10 @@ type Params struct {
 	// When nil, the workflow check always reports "pass".
 	WorkflowLoadedFn func() bool
 
-	// RunHistoryFn returns recent run history entries for the
-	// dashboard. Called on each dashboard render. When nil, the run
-	// history section is omitted.
-	RunHistoryFn RunHistoryFunc
+	// RunHistory reads persisted run history. When nil, GET /api/v1/runs
+	// answers 503, GET /api/v1/{identifier} serves live detail with a null
+	// history, and the dashboard omits its run table.
+	RunHistory RunHistoryReader
 
 	// TokenRates maps agent adapter kind strings to per-token USD
 	// rates for cost estimation on the dashboard. When nil or empty,
@@ -170,7 +240,7 @@ type Server struct {
 	dbPingFn         DBPingFunc
 	preflightFn      func() bool
 	workflowLoadedFn func() bool
-	runHistoryFn     RunHistoryFunc
+	runHistory       RunHistoryReader
 	tokenRates       TokenRates
 }
 
@@ -217,7 +287,7 @@ func New(params Params) *Server {
 		dbPingFn:         params.DBPingFn,
 		preflightFn:      params.PreflightFn,
 		workflowLoadedFn: params.WorkflowLoadedFn,
-		runHistoryFn:     params.RunHistoryFn,
+		runHistory:       params.RunHistory,
 		tokenRates:       params.TokenRates,
 	}
 
@@ -235,6 +305,7 @@ func New(params Params) *Server {
 	// 405 responses use JSON error envelopes instead of the default
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
+	mux.HandleFunc("/api/v1/runs", s.routeRuns)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 

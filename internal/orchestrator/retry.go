@@ -195,6 +195,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			TemplateID:          popped.TemplateID,
 			Logger:              log,
 			Trigger:             triggerTimer,
+			OriginTrigger:       popped.OriginTrigger,
 		}, params.OnRetryFire)
 		if isKnownReactionKind(popped.ReactionKind) {
 			if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
@@ -752,6 +753,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		entry.TemplateID = templateID
 		entry.ContinuationContext = popped.ContinuationContext
 		entry.ReactionKind = popped.ReactionKind
+		entry.Trigger = popped.OriginTrigger
 		entry.Continuation = popped.Continuation
 		entry.UsageArrival, entry.UsageAttribution = attemptSettings.UsageArrival, attemptSettings.UsageAttribution
 		freezeIssueTokenBaseline(ctx, state, issueID, params.Store, params.Logger)
@@ -819,6 +821,7 @@ func retryEntryRow(entry *RetryEntry) persistence.RetryEntry {
 		AgentKind:   entry.AgentKind,
 		Trigger:     entry.Trigger,
 
+		OriginTrigger:        entry.OriginTrigger,
 		ConfiguredModel:      entry.ConfiguredModel,
 		StagePrevious:        entry.StageLineage.PreviousRule,
 		StagePreviousOutcome: entry.StageLineage.PreviousOutcome,

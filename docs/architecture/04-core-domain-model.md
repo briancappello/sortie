@@ -113,6 +113,16 @@ Fields (logical):
   - The rule the attempt's hop decision targeted. Empty when the attempt reached no hop decision.
 - `stage_result` (string)
   - The decision's result: `advanced`, `partial` (the target's label was added but an old stage label was not removed), `failed`, or `ceiling`. Empty exactly when `stage_target` is empty.
+- `issue_title`, `issue_url` (strings)
+  - The tracker's title and web link of the issue as read when the attempt was dispatched. Empty on a row recorded before they were kept.
+- `trigger` (string or unknown)
+  - What started the retry whose fire dispatched the attempt: the `sortie_retries_total` label of the schedule that created that retry (`error`, `continuation`, `stall`, or `ci_fix`), kept through every put-back. Empty for a dispatch from the poll tick and for a retry a reaction started. Unknown where the row does not record it: a row recorded before the origin was kept, and an attempt dispatched by a retry that never stored what started it.
+- `reaction_kind` (string or unknown)
+  - The reaction kind of the retry that dispatched the attempt. Empty when none. Unknown where the row does not record it.
+- `session_id` (string or unknown)
+  - The agent session the attempt used. Empty when the attempt started none. Unknown where the row does not record it.
+- `ssh_host` (string or unknown)
+  - The SSH worker the attempt executed on. Empty for a local attempt. Unknown where the row does not record it.
 - `error` (optional)
 
 #### 4.1.6 Live Session (Agent Session Metadata)
@@ -152,6 +162,7 @@ Fields:
 - `timer_handle` (runtime-specific timer reference; runtime-only, not persisted to SQLite)
 - `error` (string or null)
 - `trigger` (string; the `sortie_retries_total` label of the schedule that created the entry, empty when that schedule records none; persisted with the entry)
+- `origin_trigger` (string; what started the retry: the `trigger` of the entry, except that an entry the retry timer reschedules keeps the `origin_trigger` of the entry it replaces, so a put-back never replaces what started the retry; empty when no schedule label started it; persisted with the entry, and the attempt the retry dispatches records it as its `trigger`)
 - `issue_title`, `issue_url`, `issue_type`, `issue_labels`, `issue_state` (strings and a list of strings; the issue's title, web link, type, labels, and tracker state as read when the entry was scheduled; persisted with the entry and restored at startup; a read that records no labels leaves `issue_labels` absent, which differs from an empty list, and an entry holding a title or link and no labels takes the type, labels, and state of its next read without replacing the title or link)
 - `configured_model` (string; the `model` the dispatch's resolved settings block carried, frozen with the selection and empty when none was set; persisted with the entry)
 - `dispatched_at` (timestamp; the start of the first run of the pass the entry continues, as on the run attempt (Section 4.1.5); persisted with the entry and empty on an entry the upgrade could not date)

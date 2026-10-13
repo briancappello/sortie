@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -60,6 +61,16 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 		t.Fatalf("failed to decode JSON: %v", err)
 	}
 	return v
+}
+
+func getJSON[T any](t *testing.T, ts *httptest.Server, path string) (int, T) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode, decodeJSON[T](t, resp)
 }
 
 func jsonObject(t *testing.T, v any) map[string]any {
@@ -1952,7 +1963,7 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("running issue", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("MT-100", snap, nil)
+		got := buildIssueDetail("MT-100", "", snap, nil)
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-100) = nil, want non-nil")
 			return
@@ -1991,7 +2002,7 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("retrying issue", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("MT-200", snap, nil)
+		got := buildIssueDetail("MT-200", "", snap, nil)
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-200) = nil, want non-nil")
 			return
@@ -2045,7 +2056,7 @@ func TestBuildIssueDetail(t *testing.T) {
 		}
 
 		for _, tt := range tests {
-			got := buildIssueDetail(tt.identifier, issueSnap, nil)
+			got := buildIssueDetail(tt.identifier, "", issueSnap, nil)
 			if got == nil {
 				t.Fatalf("buildIssueDetail(%q) = nil, want non-nil", tt.identifier)
 			}
@@ -2062,7 +2073,7 @@ func TestBuildIssueDetail(t *testing.T) {
 		t.Parallel()
 		hop := orchestrator.SnapshotStageHop{IssueID: "id-4", Identifier: "MT-4", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"}
 
-		got := buildIssueDetail("MT-4", orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{hop}}, nil)
+		got := buildIssueDetail("MT-4", "", orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{hop}}, nil)
 
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-4) = nil, want non-nil")
@@ -2078,7 +2089,7 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("not found", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("NONEXISTENT", snap, nil)
+		got := buildIssueDetail("NONEXISTENT", "", snap, nil)
 		if got != nil {
 			t.Errorf("buildIssueDetail(NONEXISTENT) = %v, want nil", got)
 		}
@@ -2091,7 +2102,7 @@ func TestBuildIssueDetail(t *testing.T) {
 				{IssueID: "id-3", Identifier: "MT-300", State: "To Do"},
 			},
 		}
-		got := buildIssueDetail("MT-300", noWSSnap, nil)
+		got := buildIssueDetail("MT-300", "", noWSSnap, nil)
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-300) = nil, want non-nil")
 			return
@@ -2108,7 +2119,7 @@ func TestBuildIssueDetail(t *testing.T) {
 				{IssueID: "id-4", Identifier: "MT-400", Attempt: 1, Error: ""},
 			},
 		}
-		got := buildIssueDetail("MT-400", noErrSnap, nil)
+		got := buildIssueDetail("MT-400", "", noErrSnap, nil)
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-400) = nil, want non-nil")
 			return
@@ -2402,22 +2413,11 @@ func TestHandleIssueDetail(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/NONEXISTENT")
-		if err != nil {
-			t.Fatalf("GET /api/v1/NONEXISTENT: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
-		}
+		status, body := getJSON[errorResponse](t, ts, "/api/v1/NONEXISTENT")
 
-		var body errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode error: %v", err)
-		}
-		if body.Error.Code != "issue_not_found" {
-			t.Errorf("error code = %q, want %q", body.Error.Code, "issue_not_found")
+		if status != http.StatusNotFound || body.Error.Code != "issue_not_found" {
+			t.Errorf("GET /api/v1/NONEXISTENT = %d %q, want %d %q", status, body.Error.Code, http.StatusNotFound, "issue_not_found")
 		}
 	})
 
@@ -2425,26 +2425,52 @@ func TestHandleIssueDetail(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, failingSnapshot("connection refused"), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/MT-100")
-		if err != nil {
-			t.Fatalf("GET /api/v1/MT-100: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
-		}
+		status, body := getJSON[errorResponse](t, ts, "/api/v1/MT-100")
 
-		var body errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode error response: %v", err)
+		if status != http.StatusServiceUnavailable {
+			t.Errorf("GET /api/v1/MT-100 status = %d, want %d", status, http.StatusServiceUnavailable)
 		}
-
-		wantMsg := "orchestrator state snapshot unavailable"
-		if body.Error.Message != wantMsg {
-			t.Errorf("error message = %q, want %q", body.Error.Message, wantMsg)
+		if wantMsg := "orchestrator state snapshot unavailable"; body.Error.Message != wantMsg {
+			t.Errorf("GET /api/v1/MT-100 error message = %q, want %q", body.Error.Message, wantMsg)
 		}
 	})
+
+	history := []RunHistoryEntry{{ID: 3, IssueID: "id-1", Identifier: "MT-100", Status: "succeeded"}}
+	dbClosed := errors.New("db closed")
+	historyTests := []struct {
+		name       string
+		history    *fakeRunHistory
+		path       string
+		wantStatus int
+		wantCode   string
+		wantMsg    string
+	}{
+		{name: "failed read for a live identifier", history: &fakeRunHistory{err: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{name: "failed read for a non-live identifier", history: &fakeRunHistory{err: dbClosed}, path: "MT-OLD", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{name: "failed totals read", history: &fakeRunHistory{rows: history, totalsErr: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{
+			name: "no live entry and no run", history: &fakeRunHistory{}, path: "MT-OLD", wantStatus: http.StatusNotFound, wantCode: "issue_not_found",
+			wantMsg: `issue identifier "MT-OLD" not found in current state or run history`,
+		},
+	}
+
+	for _, tt := range historyTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := historyServer(t, snap, tt.history)
+
+			status, body := getJSON[errorResponse](t, ts, "/api/v1/"+tt.path)
+
+			if status != tt.wantStatus || body.Error.Code != tt.wantCode {
+				t.Errorf("GET /api/v1/%s = %d %q, want %d %q", tt.path, status, body.Error.Code, tt.wantStatus, tt.wantCode)
+			}
+			if tt.wantMsg != "" && body.Error.Message != tt.wantMsg {
+				t.Errorf("GET /api/v1/%s error message = %q, want %q", tt.path, body.Error.Message, tt.wantMsg)
+			}
+		})
+	}
 }
 
 func TestHandleIssueDetail_Parked(t *testing.T) {

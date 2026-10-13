@@ -564,6 +564,11 @@ type ScheduleRetryParams struct {
 	// none.
 	Trigger string
 
+	// OriginTrigger is what started the retry. Only a caller that re-queues
+	// an existing retry passes it; [ScheduleRetry] ignores it on every
+	// schedule whose Trigger is not the timer label.
+	OriginTrigger string
+
 	// AgentKind is the adapter kind of the dispatch. Propagated verbatim
 	// into the new [RetryEntry].
 	AgentKind string
@@ -645,6 +650,11 @@ func ScheduleRetry(state *State, params ScheduleRetryParams, onFire func(issueID
 		onFire(params.IssueID)
 	})
 
+	originTrigger := params.Trigger
+	if params.Trigger == triggerTimer {
+		originTrigger = params.OriginTrigger
+	}
+
 	state.RetryAttempts[params.IssueID] = &RetryEntry{
 		IssueID:             params.IssueID,
 		Identifier:          params.Identifier,
@@ -659,6 +669,7 @@ func ScheduleRetry(state *State, params ScheduleRetryParams, onFire func(issueID
 		ContinuationContext: params.ContinuationContext,
 		ReactionKind:        params.ReactionKind,
 		Trigger:             params.Trigger,
+		OriginTrigger:       originTrigger,
 		RuleName:            params.RuleName,
 		StageLineage:        params.StageLineage,
 		RuleSettingsApplied: params.RuleSettingsApplied,

@@ -2007,6 +2007,63 @@ func TestHandleWorkerExit_RunHistoryFields(t *testing.T) {
 	}
 }
 
+func triggerText(trigger *string) string {
+	if trigger == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%q", *trigger)
+}
+
+func TestHandleWorkerExit_RunHistoryOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		retryAttempt *int
+		trigger      string
+		reactionKind string
+		sshHost      string
+		sessionID    string
+		wantTrigger  *string
+	}{
+		{name: "poll-tick dispatch records an empty trigger", wantTrigger: new("")},
+		{name: "retry dispatch records the trigger it carries", retryAttempt: new(1), trigger: "stall", wantTrigger: new("stall")},
+		{name: "retry dispatch holding nothing records an unknown origin", retryAttempt: new(1)},
+		{name: "retry dispatch holding only a reaction kind records an empty trigger", retryAttempt: new(1), reactionKind: "review", wantTrigger: new("")},
+		{name: "remote run records its host and session", sshHost: "worker-1", sessionID: "s-1", wantTrigger: new("")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockExitStore{}
+			state := exitState(t, "ORIGIN-1", tt.retryAttempt)
+			entry := state.Running["ORIGIN-1"]
+			entry.Trigger, entry.ReactionKind, entry.SSHHost, entry.SessionID = tt.trigger, tt.reactionKind, tt.sshHost, tt.sessionID
+
+			HandleWorkerExit(state, WorkerResult{
+				IssueID:      "ORIGIN-1",
+				Identifier:   "ORIGIN-1-ident",
+				ExitKind:     WorkerExitNormal,
+				AgentAdapter: "mock",
+			}, defaultExitParams(t, store))
+
+			if len(store.runHistories) != 1 {
+				t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
+			}
+			rh := store.runHistories[0]
+			if got, want := triggerText(rh.Trigger), triggerText(tt.wantTrigger); got != want {
+				t.Errorf("RunHistory.Trigger = %s, want %s", got, want)
+			}
+			if rh.ReactionKind != tt.reactionKind || rh.SSHHost != tt.sshHost || rh.SessionID != tt.sessionID {
+				t.Errorf("RunHistory reaction kind, host, session = %q, %q, %q, want %q, %q, %q",
+					rh.ReactionKind, rh.SSHHost, rh.SessionID, tt.reactionKind, tt.sshHost, tt.sessionID)
+			}
+		})
+	}
+}
+
 func TestHandleWorkerExit_RunHistoryCompletedAtIsUTC(t *testing.T) {
 	t.Parallel()
 

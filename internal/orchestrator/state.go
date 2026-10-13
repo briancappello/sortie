@@ -207,6 +207,10 @@ type RunningEntry struct {
 	// for first dispatches and non-reaction retries. Runtime-only.
 	ReactionKind string
 
+	// Trigger is the OriginTrigger of the retry whose fire dispatched the
+	// entry; empty for a poll-tick dispatch. Runtime-only.
+	Trigger string
+
 	// Continuation names the pull request and try of a reaction
 	// continuation; the zero value for every other dispatch. Runtime-only.
 	Continuation ContinuationTarget
@@ -352,6 +356,10 @@ type RetryEntry struct {
 	// created the entry recorded; empty when that schedule records none.
 	Trigger string
 
+	// OriginTrigger is what started the retry, kept through every
+	// put-back by the retry timer; empty when the retry never recorded it.
+	OriginTrigger string
+
 	// RuleName is the dispatch rule of the run this retry follows.
 	RuleName string
 
@@ -493,9 +501,9 @@ func reactionKindPinsWorkspace(kind string) bool {
 	return spec.pinsWorkspace
 }
 
-// reactionConfigKey returns the reactions key kind is configured under, or
+// ReactionConfigKey returns the reactions key kind is configured under, or
 // "" for a kind outside the registry, the empty kind included.
-func reactionConfigKey(kind string) string {
+func ReactionConfigKey(kind string) string {
 	return reactionKinds[kind].configKey
 }
 
@@ -1619,10 +1627,10 @@ func turnHasEnded(turnCount int, lastEvent domain.AgentEventType) bool {
 	return turnCount > 1 || isTurnTerminalEvent(lastEvent)
 }
 
-// snapshotIssueUsage copies a running entry's usage read into the shape the
+// SnapshotIssueUsageOf copies a running entry's usage read into the shape the
 // snapshot serves, sharing no map with state. A nil read stays nil so the
 // absence of a successful read is not served as zero usage.
-func snapshotIssueUsage(usage *persistence.IssueTokenUsage) *SnapshotIssueUsage {
+func SnapshotIssueUsageOf(usage *persistence.IssueTokenUsage) *SnapshotIssueUsage {
 	if usage == nil {
 		return nil
 	}
@@ -1726,7 +1734,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			StageLineage:        entry.StageLineage,
 			StagePosition:       stagePosition(state, entry.Issue.ID, entry.RuleName, entry.StageLineage.PreviousRule),
 			ReactionKind:        entry.ReactionKind,
-			ReactionConfigKey:   reactionConfigKey(entry.ReactionKind),
+			ReactionConfigKey:   ReactionConfigKey(entry.ReactionKind),
 			Continuation:        snapshotContinuation(entry.Continuation),
 			ConfiguredModel:     entry.ConfiguredModel,
 			ConfiguredEffort:    entry.ConfiguredEffort,
@@ -1736,7 +1744,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			TokensPending: entry.UsageArrival == registry.UsageArrivalTurnEnd &&
 				entry.UsageMeasured && !isTurnTerminalEvent(entry.LastAgentEvent),
 			TokensAwaited:    tokensAwaited,
-			IssueUsage:       snapshotIssueUsage(entry.IssueUsage),
+			IssueUsage:       SnapshotIssueUsageOf(entry.IssueUsage),
 			UnaccountedTurns: entry.UnaccountedTurns,
 		})
 
@@ -1766,7 +1774,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 
 			Trigger:           entry.Trigger,
 			ReactionKind:      entry.ReactionKind,
-			ReactionConfigKey: reactionConfigKey(entry.ReactionKind),
+			ReactionConfigKey: ReactionConfigKey(entry.ReactionKind),
 			RuleName:          entry.RuleName,
 			AgentKind:         entry.AgentKind,
 			ConfiguredModel:   entry.ConfiguredModel,
@@ -1871,7 +1879,7 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 			IssueTitle: identity.Title,
 			IssueURL:   identity.URL,
 			Kind:       entry.Kind,
-			ConfigKey:  reactionConfigKey(entry.Kind),
+			ConfigKey:  ReactionConfigKey(entry.Kind),
 			PullRequest: SnapshotPullRequest{
 				Number:     pr.Number,
 				Repository: redact.Mask(pr.Owner + "/" + pr.Repo),
