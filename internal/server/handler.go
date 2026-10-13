@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/redact"
 )
 
 // stateResponse is the JSON wire format for GET /api/v1/state.
@@ -331,6 +332,7 @@ type issueDetailResponse struct {
 	RecentEvents     []any                     `json:"recent_events"`
 	LastError        *string                   `json:"last_error"`
 	Tracked          map[string]any            `json:"tracked"`
+	History          *issueHistoryResponse     `json:"history"`
 }
 
 type workspaceInfo struct {
@@ -806,15 +808,23 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := buildIssueDetail(identifier, snap, s.tokenRates)
-	if resp == nil {
+	detail := buildIssueDetail(identifier, "", snap, s.tokenRates)
+	notFoundIn := "current state"
+	if s.runHistory != nil {
+		notFoundIn = "current state or run history"
+		var ok bool
+		if detail, ok = s.withIssueHistory(w, r, identifier, snap, detail); !ok {
+			return
+		}
+	}
+	if detail == nil {
 		writeErrorJSON(w, s.logger, http.StatusNotFound,
 			"issue_not_found",
-			fmt.Sprintf("issue identifier %q not found in current state", identifier))
+			fmt.Sprintf("issue identifier %q not found in %s", identifier, notFoundIn))
 		return
 	}
 
-	writeJSON(w, s.logger, http.StatusOK, resp)
+	writeJSON(w, s.logger, http.StatusOK, detail)
 
 	s.logger.Debug("request served",
 		slog.String("method", r.Method),
@@ -822,6 +832,78 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 		slog.Int("status", http.StatusOK),
 		slog.Duration("duration", time.Since(start)),
 	)
+}
+
+// withIssueHistory resolves identifier through run history and attaches the
+// issue's history to detail, the live detail or nil. It returns a nil detail
+// for an identifier history does not know either, and false after it has
+// answered a failed read itself. The snapshot is read before run history, so
+// a run that ends between the reads can appear in both but never in neither.
+func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identifier string, snap orchestrator.RuntimeSnapshotResult, detail *issueDetailResponse) (*issueDetailResponse, bool) {
+	ctx := r.Context()
+
+	var issueID string
+	if detail != nil {
+		issueID = detail.IssueID
+	} else {
+		newest, err := s.runHistory.QueryRuns(ctx, RunHistoryQuery{Identifier: identifier, Limit: 1})
+		if err != nil {
+			s.historyReadFailed(w, r, err)
+			return nil, false
+		}
+		if len(newest) == 0 {
+			return nil, true
+		}
+		issueID = newest[0].IssueID
+		detail = buildIssueDetail(identifier, issueID, snap, s.tokenRates)
+	}
+
+	page, err := s.runHistory.QueryRuns(ctx, RunHistoryQuery{IssueID: issueID, Limit: issueHistoryPageSize + 1})
+	if err != nil {
+		s.historyReadFailed(w, r, err)
+		return nil, false
+	}
+	if len(page) == 0 {
+		return detail, true
+	}
+
+	totals, err := s.runHistory.IssueTotals(ctx, issueID)
+	if err != nil {
+		s.historyReadFailed(w, r, err)
+		return nil, false
+	}
+	if detail == nil {
+		detail = historyOnlyDetail(issueID, page[0])
+	}
+	detail.History = issueHistoryOf(page, totals, s.tokenRates)
+	return detail, true
+}
+
+// historyOnlyDetail is the response for an issue that only run history
+// knows: no live member, and the title and link of its newest run.
+func historyOnlyDetail(issueID string, newest RunHistoryEntry) *issueDetailResponse {
+	return &issueDetailResponse{
+		IssueIdentifier:  newest.Identifier,
+		IssueID:          issueID,
+		Status:           "history",
+		Issue:            issueResponse{Title: redact.Mask(newest.IssueTitle), URL: redact.Mask(newest.IssueURL)},
+		Attempts:         &attemptsInfo{},
+		PendingReactions: []pendingReactionResponse{},
+		RecentEvents:     []any{},
+		Tracked:          map[string]any{},
+	}
+}
+
+// issueHistoryOf builds the history member from an issue's newest runs, read
+// one past issueHistoryPageSize so a longer history names its continuation.
+func issueHistoryOf(page []RunHistoryEntry, totals IssueRunTotals, rates TokenRates) *issueHistoryResponse {
+	rows, next := cutPage(page, issueHistoryPageSize)
+	return &issueHistoryResponse{
+		Runs:       toRunResponses(rows, rates),
+		NextCursor: next,
+		Totals:     historyTotalsOf(totals, rates),
+		Hops:       hopRowsOf(rows),
+	}
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -877,7 +959,15 @@ func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request, allowe
 		fmt.Sprintf("method %s is not allowed on this endpoint", r.Method))
 }
 
-func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult, rates TokenRates) *issueDetailResponse {
+// buildIssueDetail assembles the live detail of one issue, or nil when no live
+// entry holds it. An entry belongs to the issue when its identifier equals
+// identifier, or when issueID is non-empty and the entry carries it, which
+// finds an issue the tracker has since renamed.
+func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, rates TokenRates) *issueDetailResponse {
+	matches := func(gotIdentifier, gotIssueID string) bool {
+		return gotIdentifier == identifier || (issueID != "" && gotIssueID == issueID)
+	}
+
 	var runEntry *runningEntryResponse
 	var retryEntry *retryEntryResponse
 	var budgetEntry *budgetExhaustedResponse
@@ -885,35 +975,35 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 	var hopEntry *stageHopResponse
 
 	for _, e := range snap.Running {
-		if e.Identifier == identifier {
+		if matches(e.Identifier, e.IssueID) {
 			runEntry = new(toServedRunningEntry(e, snap, rates))
 			break
 		}
 	}
 
 	for _, e := range snap.Retrying {
-		if e.Identifier == identifier {
+		if matches(e.Identifier, e.IssueID) {
 			retryEntry = new(toRetryEntryResponse(e))
 			break
 		}
 	}
 
 	for _, e := range snap.BudgetExhausted {
-		if e.Identifier == identifier {
+		if matches(e.Identifier, e.IssueID) {
 			budgetEntry = new(toBudgetExhaustedResponse(e))
 			break
 		}
 	}
 
 	for _, e := range snap.Parked {
-		if e.Identifier == identifier {
+		if matches(e.Identifier, e.IssueID) {
 			parkedEntry = new(toParkedEntryResponse(e))
 			break
 		}
 	}
 
 	for _, e := range snap.BetweenStages {
-		if e.Identifier == identifier {
+		if matches(e.Identifier, e.IssueID) {
 			hopEntry = new(toStageHopResponse(e))
 			break
 		}
@@ -921,7 +1011,7 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 
 	var pendingRows []orchestrator.SnapshotPendingReaction
 	for _, e := range snap.PendingReactions {
-		if e.Identifier == identifier {
+		if matches(e.Identifier, e.IssueID) {
 			pendingRows = append(pendingRows, e)
 		}
 	}
@@ -931,13 +1021,13 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 	}
 
 	var status string
-	var issueID string
+	var entryIdentifier, entryIssueID string
 	var issue issueResponse
 
 	switch {
 	case runEntry != nil:
 		status = "running"
-		issueID = runEntry.IssueID
+		entryIdentifier, entryIssueID = runEntry.IssueIdentifier, runEntry.IssueID
 		issue = issueResponse{
 			Title:     runEntry.IssueTitle,
 			URL:       runEntry.IssueURL,
@@ -947,7 +1037,7 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 		}
 	case retryEntry != nil:
 		status = "retrying"
-		issueID = retryEntry.IssueID
+		entryIdentifier, entryIssueID = retryEntry.IssueIdentifier, retryEntry.IssueID
 		issue = issueResponse{
 			Title:     retryEntry.IssueTitle,
 			URL:       retryEntry.IssueURL,
@@ -957,7 +1047,7 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 		}
 	case budgetEntry != nil:
 		status = "budget_exhausted"
-		issueID = budgetEntry.IssueID
+		entryIdentifier, entryIssueID = budgetEntry.IssueIdentifier, budgetEntry.IssueID
 		issue = issueResponse{
 			Title:     budgetEntry.IssueTitle,
 			URL:       budgetEntry.IssueURL,
@@ -967,7 +1057,7 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 		}
 	case parkedEntry != nil:
 		status = "parked"
-		issueID = parkedEntry.IssueID
+		entryIdentifier, entryIssueID = parkedEntry.IssueIdentifier, parkedEntry.IssueID
 		issue = issueResponse{
 			Title: parkedEntry.IssueTitle,
 			URL:   parkedEntry.IssueURL,
@@ -975,20 +1065,21 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 		}
 	case len(pendingRows) > 0:
 		status = "pending_reactions"
-		issueID = pendingRows[0].IssueID
+		entryIdentifier, entryIssueID = pendingRows[0].Identifier, pendingRows[0].IssueID
 		issue = issueResponse{
 			Title: pendingRows[0].IssueTitle,
 			URL:   pendingRows[0].IssueURL,
 		}
 	case hopEntry != nil:
 		status = "between_stages"
-		issueID = hopEntry.IssueID
+		entryIdentifier, entryIssueID = hopEntry.IssueIdentifier, hopEntry.IssueID
 		issue = issueResponse{
 			Title: hopEntry.IssueTitle,
 			URL:   hopEntry.IssueURL,
 		}
 	default:
 		status = "unknown"
+		entryIdentifier = identifier
 	}
 
 	var ws *workspaceInfo
@@ -1016,8 +1107,8 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 	}
 
 	return &issueDetailResponse{
-		IssueIdentifier:  identifier,
-		IssueID:          issueID,
+		IssueIdentifier:  entryIdentifier,
+		IssueID:          entryIssueID,
 		Status:           status,
 		Issue:            issue,
 		Workspace:        ws,

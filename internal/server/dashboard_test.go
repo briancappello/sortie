@@ -33,6 +33,38 @@ func dashboardServer(t *testing.T, snapFn SnapshotFunc, version string, slotFunc
 	return ts
 }
 
+type fakeRunHistory struct {
+	rows      []RunHistoryEntry
+	err       error
+	totalsErr error
+	onQuery   func(RunHistoryQuery)
+}
+
+func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error) {
+	if f.onQuery != nil {
+		f.onQuery(q)
+	}
+	return f.rows, f.err
+}
+
+func (f *fakeRunHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {
+	return IssueRunTotals{}, f.totalsErr
+}
+
+func historyServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader) *httptest.Server {
+	t.Helper()
+	srv := New(Params{
+		SnapshotFn: fixedSnapshot(snap),
+		RefreshFn:  acceptingRefresh(),
+		Logger:     slog.New(slog.DiscardHandler),
+		StartedAt:  time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC),
+		RunHistory: history,
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
 func dashboardSnapshot() orchestrator.RuntimeSnapshotResult {
 	now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
 	return orchestrator.RuntimeSnapshotResult{
@@ -1195,26 +1227,14 @@ func TestHandleDashboard_RunHistory(t *testing.T) {
 		GeneratedAt: time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
 	}
 
-	srv := New(Params{
-		SnapshotFn: fixedSnapshot(snap),
-		RefreshFn:  acceptingRefresh(),
-		Logger:     slog.New(slog.DiscardHandler),
-		StartedAt:  time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC),
-		RunHistoryFn: func(_ context.Context, _ int) ([]RunHistoryEntry, error) {
-			return []RunHistoryEntry{
-				{
-					Identifier:   "MT-100",
-					Attempt:      1,
-					Status:       "succeeded",
-					WorkflowFile: "backend.WORKFLOW.md",
-					StartedAt:    "2026-03-24T09:00:00Z",
-					CompletedAt:  "2026-03-24T09:05:00Z",
-				},
-			}, nil
-		},
-	})
-	ts := httptest.NewServer(srv.Mux())
-	t.Cleanup(ts.Close)
+	ts := historyServer(t, snap, &fakeRunHistory{rows: []RunHistoryEntry{{
+		Identifier:   "MT-100",
+		Attempt:      1,
+		Status:       "succeeded",
+		WorkflowFile: "backend.WORKFLOW.md",
+		StartedAt:    "2026-03-24T09:00:00Z",
+		CompletedAt:  "2026-03-24T09:05:00Z",
+	}}})
 
 	dr := getDashboard(t, ts, "/")
 
@@ -1228,7 +1248,7 @@ func TestHandleDashboard_RunHistory(t *testing.T) {
 	}
 }
 
-func TestHandleDashboard_NoRunHistoryFn(t *testing.T) {
+func TestHandleDashboard_NoRunHistoryReader(t *testing.T) {
 	t.Parallel()
 
 	snap := orchestrator.RuntimeSnapshotResult{
@@ -1242,7 +1262,7 @@ func TestHandleDashboard_NoRunHistoryFn(t *testing.T) {
 		t.Fatalf("status = %d, want %d", dr.StatusCode, http.StatusOK)
 	}
 	if strings.Contains(dr.Body, "Run History") {
-		t.Error("body contains 'Run History', want omitted when RunHistoryFn is nil")
+		t.Error("body contains 'Run History', want omitted when no run history reader is set")
 	}
 }
 
@@ -1549,26 +1569,14 @@ func TestDashboard_DetailPanelFields(t *testing.T) {
 		t.Parallel()
 
 		errMsg := "agent timed out"
-		srv := New(Params{
-			SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{GeneratedAt: now}),
-			RefreshFn:  acceptingRefresh(),
-			Logger:     slog.New(slog.DiscardHandler),
-			StartedAt:  now.Add(-1 * time.Hour),
-			RunHistoryFn: func(_ context.Context, _ int) ([]RunHistoryEntry, error) {
-				return []RunHistoryEntry{
-					{
-						Identifier:  "MT-ERR",
-						Attempt:     2,
-						Status:      "failed",
-						StartedAt:   "2026-03-24T09:00:00Z",
-						CompletedAt: "2026-03-24T09:01:00Z",
-						Error:       &errMsg,
-					},
-				}, nil
-			},
-		})
-		ts := httptest.NewServer(srv.Mux())
-		t.Cleanup(ts.Close)
+		ts := historyServer(t, orchestrator.RuntimeSnapshotResult{GeneratedAt: now}, &fakeRunHistory{rows: []RunHistoryEntry{{
+			Identifier:  "MT-ERR",
+			Attempt:     2,
+			Status:      "failed",
+			StartedAt:   "2026-03-24T09:00:00Z",
+			CompletedAt: "2026-03-24T09:01:00Z",
+			Error:       &errMsg,
+		}}})
 
 		dr := getDashboard(t, ts, "/")
 		if !strings.Contains(dr.Body, "agent timed out") {
@@ -1590,21 +1598,11 @@ func TestDashboard_StripingAlternates(t *testing.T) {
 		},
 	}
 
-	srv := New(Params{
-		SnapshotFn: fixedSnapshot(snap),
-		RefreshFn:  acceptingRefresh(),
-		Logger:     slog.New(slog.DiscardHandler),
-		StartedAt:  now.Add(-1 * time.Hour),
-		RunHistoryFn: func(_ context.Context, _ int) ([]RunHistoryEntry, error) {
-			return []RunHistoryEntry{
-				{Identifier: "MT-H1", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:00:00Z", CompletedAt: "2026-03-24T08:01:00Z"},
-				{Identifier: "MT-H2", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:01:00Z", CompletedAt: "2026-03-24T08:02:00Z"},
-				{Identifier: "MT-H3", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:02:00Z", CompletedAt: "2026-03-24T08:03:00Z"},
-			}, nil
-		},
-	})
-	ts := httptest.NewServer(srv.Mux())
-	t.Cleanup(ts.Close)
+	ts := historyServer(t, snap, &fakeRunHistory{rows: []RunHistoryEntry{
+		{Identifier: "MT-H1", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:00:00Z", CompletedAt: "2026-03-24T08:01:00Z"},
+		{Identifier: "MT-H2", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:01:00Z", CompletedAt: "2026-03-24T08:02:00Z"},
+		{Identifier: "MT-H3", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:02:00Z", CompletedAt: "2026-03-24T08:03:00Z"},
+	}})
 
 	dr := getDashboard(t, ts, "/")
 
@@ -1642,19 +1640,9 @@ func TestDashboard_DetailRowColspan(t *testing.T) {
 		},
 	}
 
-	srv := New(Params{
-		SnapshotFn: fixedSnapshot(snap),
-		RefreshFn:  acceptingRefresh(),
-		Logger:     slog.New(slog.DiscardHandler),
-		StartedAt:  now.Add(-1 * time.Hour),
-		RunHistoryFn: func(_ context.Context, _ int) ([]RunHistoryEntry, error) {
-			return []RunHistoryEntry{
-				{Identifier: "MT-CS-H1", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:00:00Z", CompletedAt: "2026-03-24T08:01:00Z"},
-			}, nil
-		},
-	})
-	ts := httptest.NewServer(srv.Mux())
-	t.Cleanup(ts.Close)
+	ts := historyServer(t, snap, &fakeRunHistory{rows: []RunHistoryEntry{
+		{Identifier: "MT-CS-H1", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:00:00Z", CompletedAt: "2026-03-24T08:01:00Z"},
+	}})
 
 	dr := getDashboard(t, ts, "/")
 
@@ -1672,7 +1660,6 @@ func TestHandleDashboard_AccordionToggleRefactor(t *testing.T) {
 	snap := orchestrator.RuntimeSnapshotResult{
 		GeneratedAt: now,
 		Running: []orchestrator.SnapshotRunningEntry{
-			// StartedAt ascending -> MT-R0 is index 0, MT-R1 is index 1 after sort.
 			{IssueID: "id-r0", Identifier: "MT-R0", State: "In Progress", StartedAt: now.Add(-5 * time.Minute)},
 			{IssueID: "id-r1", Identifier: "MT-R1", State: "In Progress", StartedAt: now.Add(-3 * time.Minute)},
 		},
@@ -1681,19 +1668,9 @@ func TestHandleDashboard_AccordionToggleRefactor(t *testing.T) {
 		},
 	}
 
-	srv := New(Params{
-		SnapshotFn: fixedSnapshot(snap),
-		RefreshFn:  acceptingRefresh(),
-		Logger:     slog.New(slog.DiscardHandler),
-		StartedAt:  now.Add(-1 * time.Hour),
-		RunHistoryFn: func(_ context.Context, _ int) ([]RunHistoryEntry, error) {
-			return []RunHistoryEntry{
-				{Identifier: "MT-H0", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:00:00Z", CompletedAt: "2026-03-24T08:01:00Z"},
-			}, nil
-		},
-	})
-	ts := httptest.NewServer(srv.Mux())
-	t.Cleanup(ts.Close)
+	ts := historyServer(t, snap, &fakeRunHistory{rows: []RunHistoryEntry{
+		{Identifier: "MT-H0", Attempt: 1, Status: "succeeded", StartedAt: "2026-03-24T08:00:00Z", CompletedAt: "2026-03-24T08:01:00Z"},
+	}})
 
 	dr := getDashboard(t, ts, "/")
 	if dr.StatusCode != http.StatusOK {
@@ -1713,7 +1690,6 @@ func TestHandleDashboard_AccordionToggleRefactor(t *testing.T) {
 		if !strings.Contains(body, `class="accordion-toggle"`) {
 			t.Error(`body missing class="accordion-toggle"`)
 		}
-		// 2 running + 1 retrying + 1 history = 4 accordion-toggle buttons.
 		const wantCount = 4
 		if got := strings.Count(body, `class="accordion-toggle"`); got != wantCount {
 			t.Errorf("accordion-toggle class count = %d, want %d", got, wantCount)
@@ -1725,8 +1701,6 @@ func TestHandleDashboard_AccordionToggleRefactor(t *testing.T) {
 		if !strings.Contains(body, `aria-expanded="false"`) {
 			t.Error(`body missing aria-expanded="false"`)
 		}
-		// The refactor moved aria-expanded onto the nested button, so an
-		// accordion-header row carrying it is a regression.
 		if strings.Contains(body, `class="accordion-header" aria-expanded="`) ||
 			strings.Contains(body, `aria-expanded="false" class="accordion-header"`) ||
 			strings.Contains(body, `aria-expanded="true" class="accordion-header"`) {
@@ -1754,7 +1728,6 @@ func TestHandleDashboard_AccordionToggleRefactor(t *testing.T) {
 
 	t.Run("no tabindex=0 on tr", func(t *testing.T) {
 		t.Parallel()
-		// tabindex="0" was only ever on accordion <tr> rows.
 		if strings.Contains(body, `tabindex="0"`) {
 			t.Error(`body contains tabindex="0" — must not appear after accordion toggle refactor`)
 		}

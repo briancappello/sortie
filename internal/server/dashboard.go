@@ -679,8 +679,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	data := buildDashboardData(snap, s.version, s.startedAt, s.slotFunc, time.Now(), s.tokenRates)
 
-	if s.runHistoryFn != nil {
-		runs, err := s.runHistoryFn(r.Context(), 25)
+	if s.runHistory != nil {
+		runs, err := s.runHistory.QueryRuns(r.Context(), RunHistoryQuery{Limit: 25})
 		if err != nil {
 			s.logger.Warn("dashboard run history query failed", slog.Any("error", err))
 		} else {

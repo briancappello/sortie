@@ -888,32 +888,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			PreflightFn:      o.PreflightOK,
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
 			TokenRates:       tokenRates,
-			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
-				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
-				if err != nil {
-					return nil, err
-				}
-				out := make([]server.RunHistoryEntry, len(runs))
-				for i, r := range runs {
-					out[i] = server.RunHistoryEntry{
-						Identifier:     r.Identifier,
-						DisplayID:      r.DisplayID,
-						Attempt:        r.Attempt,
-						Status:         r.Status,
-						WorkflowFile:   r.WorkflowFile,
-						StartedAt:      r.StartedAt,
-						CompletedAt:    r.CompletedAt,
-						Error:          r.Error,
-						TurnsCompleted: r.TurnsCompleted,
-						RuleName:       r.RuleName,
-						ChainID:        r.ChainID,
-						StagePrevious:  r.StagePrevious,
-						StageTarget:    r.StageTarget,
-						StageResult:    r.StageResult,
-					}
-				}
-				return out, nil
-			},
+			RunHistory:       runHistoryReader{store: store},
 		})
 		o.AddObserver(srv)
 
