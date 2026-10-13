@@ -168,6 +168,8 @@ func processMergeCompletionEntry(
 	}
 	if _, terminal := terminalSet[strings.ToLower(stateName)]; terminal {
 		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, entryLog, ctx)
+		watch := mergeWatch{ReactionKind: ReactionKindMergeCompletion, PRNumber: data.PRNumber, Owner: data.Owner, Repo: data.Repo}
+		recordIssueOutcome(ctx, params.Store, releaseReadOutcome(ctx, params.SCMAdapter, watch, pending.IssueID, stateName, now, entryLog), entryLog)
 		entryLog.Info("merge_completion issue already terminal, dropping",
 			slog.String("state", stateName),
 		)
@@ -217,6 +219,7 @@ func processMergeCompletionEntry(
 		requeueReaction(state, key, pending, waitPollInterval)
 		return
 	}
+	recordIssueOutcome(ctx, params.Store, mergedOutcome(pending.IssueID, ReactionKindMergeCompletion, data.PRNumber, data.Owner, data.Repo, now), entryLog)
 	if status.MergeCommitSHA == "" {
 		handleMergeCompletionMissingSHA(state, params, key, pending, data, now, pollInterval, entryLog, ctx)
 		return

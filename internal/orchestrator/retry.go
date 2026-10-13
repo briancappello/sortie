@@ -37,6 +37,7 @@ type RetryTimerStore interface {
 	UpsertBudgetHoldNotice(ctx context.Context, notice persistence.BudgetHoldNotice) error
 	MarkStageHopDispatched(ctx context.Context, issueID string) error
 	DeleteStageHop(ctx context.Context, issueID string) error
+	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
 }
 
 // HandleRetryTimerParams holds the dependencies for [HandleRetryTimer]
@@ -535,6 +536,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		log.Info("issue in terminal state, releasing claim",
 			slog.String("issue_state", issue.State),
 		)
+		recordIssueOutcome(ctx, params.Store, terminalOutcome(issueID, issue.State, time.Now()), log)
 		delete(state.Claimed, issueID)
 
 		if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {

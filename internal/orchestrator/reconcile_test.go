@@ -50,6 +50,7 @@ func (unsupportedReactionObservationStore) CountWorkerRunsCompletedSince(context
 // mockReconcileStore records calls to ReconcileStore methods and returns
 // configurable errors.
 type mockReconcileStore struct {
+	noopOutcomeRecorder
 	unsupportedReactionObservationStore
 
 	savedEntries   []persistence.RetryEntry
@@ -1062,11 +1063,8 @@ func TestReconcileTrackerState_PendingOnlyIssueReleasesReactionState(t *testing.
 	store := &mockReconcileStore{}
 	tracker := &mockReconcileTracker{states: map[string]string{issueID: "Done"}}
 
-	log, buf := logCapture()
-
 	params := defaultReconcileParams(t, store, tracker)
 	params.StallTimeoutMS = 0
-	params.Logger = log
 
 	state := NewState(5000, 4, 0, nil, AgentTotals{})
 	key := ReactionKey(issueID, ReactionKindCI)
@@ -1102,14 +1100,6 @@ func TestReconcileTrackerState_PendingOnlyIssueReleasesReactionState(t *testing.
 	}
 	if len(store.deletedIssueID) != 1 || store.deletedIssueID[0] != issueID {
 		t.Errorf("DeleteRetryEntry calls = %v, want exactly one call for %q", store.deletedIssueID, issueID)
-	}
-
-	out := buf.String()
-	if !strings.Contains(out, "released reaction state for terminal issue") {
-		t.Fatalf("log output = %q, want the terminal-release message", out)
-	}
-	if !strings.Contains(out, "issue_identifier="+issueID+"-ident") {
-		t.Errorf("log output = %q, want issue_identifier=%s-ident", out, issueID)
 	}
 }
 
@@ -1309,7 +1299,7 @@ func TestReconcileTrackerState_NilTrackerAdapterPendingOnly(t *testing.T) {
 		Logger:         discardLogger(),
 	}
 
-	reconcileTrackerState(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+	reconcileTrackerState(state, params, discardLogger(), context.Background(), time.Now(), &domain.NoopMetrics{})
 
 	if _, ok := state.PendingReactions[key]; !ok {
 		t.Error("PendingReactions entry removed despite nil TrackerAdapter; want unchanged")

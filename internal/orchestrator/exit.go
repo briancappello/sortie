@@ -49,6 +49,7 @@ type WorkerExitStore interface {
 	RecordStageHop(ctx context.Context, hop persistence.StageHop) error
 	DeleteStageHop(ctx context.Context, issueID string) error
 	RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error
+	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
 }
 
 // HandleWorkerExitParams holds the dependencies for [HandleWorkerExit] that
@@ -674,6 +675,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 			CancelRetry(state, workerResult.IssueID)
 			delete(state.Claimed, workerResult.IssueID)
 			resetStageHop(ctx, state, params.Store, workerResult.IssueID, stageResetTerminal, log)
+			recordIssueOutcome(ctx, params.Store, terminalOutcome(workerResult.IssueID, observation, now), log)
 
 		case handoffPath && evidenceWithheld && absenceParked:
 			// Parking already cancelled the sequence, deleted any persisted
@@ -778,6 +780,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 				// completed. With no terminal states configured the read
 				// cannot suppress the write, so skip it.
 				verifiedTerminal := false
+				var verifiedTerminalState string
 				if len(params.TerminalStates) > 0 {
 					if verified, verifyErr := params.TrackerAdapter.FetchIssueStatesByIDs(ctx, []string{workerResult.IssueID}); verifyErr != nil {
 						log.Warn("handoff verification read failed, proceeding with handoff",
@@ -799,6 +802,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 						}
 						terminalSuppressed = true
 						verifiedTerminal = true
+						verifiedTerminalState = verifiedState
 					}
 				}
 
@@ -814,6 +818,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					CancelRetry(state, workerResult.IssueID)
 					delete(state.Claimed, workerResult.IssueID)
 					resetStageHop(ctx, state, params.Store, workerResult.IssueID, stageResetTerminal, log)
+					recordIssueOutcome(ctx, params.Store, terminalOutcome(workerResult.IssueID, verifiedTerminalState, now), log)
 				} else if hop.made() {
 					hopMade = true
 				} else if err := params.TrackerAdapter.TransitionIssue(ctx, workerResult.IssueID, resolvedTarget); err != nil {
@@ -865,6 +870,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					// during the session is still valid, so the incumbent is
 					// kept rather than cancelled.
 					logRetrySlotDeferral(log, triggerContinuation, incumbent)
+					recordIssueOutcome(ctx, params.Store, handoffOutcome(workerResult.IssueID, resolvedTarget, params.TerminalStates, now), log)
 					metrics.IncHandoffTransitions(handoffSuccess)
 					log.Info("handoff transition succeeded, incumbent preserved",
 						slog.String("handoff_state", params.HandoffState),
@@ -875,6 +881,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					retryDeferred = true
 					claimRetainedForIncumbent = true
 				} else {
+					recordIssueOutcome(ctx, params.Store, handoffOutcome(workerResult.IssueID, resolvedTarget, params.TerminalStates, now), log)
 					log.Info("handoff transition succeeded, releasing claim",
 						slog.String("handoff_state", params.HandoffState),
 						slog.String("target_state", resolvedTarget),

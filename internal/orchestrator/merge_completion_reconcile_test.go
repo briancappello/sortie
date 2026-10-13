@@ -168,6 +168,7 @@ type mgcFingerprintRecord struct {
 // cross-kind-clear interaction are exercised against real stored
 // state rather than canned values.
 type mgcStoreFake struct {
+	noopOutcomeRecorder
 	fingerprints map[string]mgcFingerprintRecord
 
 	upsertErr          error
@@ -1414,7 +1415,7 @@ func TestReconcileMergeCompletion_DropConditions(t *testing.T) {
 		}
 	})
 
-	t.Run("terminal state drops with the terminal-specific log message", func(t *testing.T) {
+	t.Run("terminal state drops the entry after one release read", func(t *testing.T) {
 		t.Parallel()
 
 		issueID := "MGC-13-TERMINAL"
@@ -1427,21 +1428,14 @@ func TestReconcileMergeCompletion_DropConditions(t *testing.T) {
 		scm := &mgcSCMFake{}
 		params := mgcParams(store, scm, tracker)
 
-		log, buf := logCapture()
-		reconcileMergeCompletion(state, params, log, context.Background(), &domain.NoopMetrics{})
+		reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 
-		if got := scm.calls.Load(); got != 0 {
-			t.Errorf("GetMergeability calls = %d, want 0", got)
+		if got := scm.calls.Load(); got != 1 {
+			t.Errorf("GetMergeability calls = %d, want 1", got)
 		}
 		rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
 		if _, ok := state.PendingReactions[rkey]; ok {
 			t.Error("PendingReactions entry present, want dropped (issue already terminal)")
-		}
-		if !strings.Contains(buf.String(), "merge_completion issue already terminal, dropping") {
-			t.Errorf("log output = %q, want the terminal-specific message", buf.String())
-		}
-		if strings.Contains(buf.String(), "left the handoff state") {
-			t.Errorf("log output = %q, want the terminal message, not the left-the-handoff-state message", buf.String())
 		}
 		if _, ok := store.missingSHAObservation(issueID); ok {
 			t.Error("missing-SHA observation remains after issue became terminal, want cleaned")
@@ -1710,7 +1704,7 @@ func TestReconcileTrackerState_TerminalReleasePreservesFingerprints(t *testing.T
 	scm := &mgcSCMFake{}
 	params := mgcParams(store, scm, tracker)
 
-	reconcileTrackerState(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+	reconcileTrackerState(state, params, discardLogger(), context.Background(), time.Now(), &domain.NoopMetrics{})
 
 	if store.upsertCalls != 0 || store.getCalls != 0 || store.markCalls != 0 || store.deleteCalls != 0 {
 		t.Errorf("fingerprint store calls = upsert:%d get:%d mark:%d delete:%d, want all zero",

@@ -129,6 +129,20 @@ func reconcileAutoMerge(state *State, params ReconcileParams, log *slog.Logger, 
 
 		notePullRequestURL(pending, mergeStatus)
 
+		if mergeStatus.Merged {
+			recordIssueOutcome(ctx, params.Store, mergedOutcome(pending.IssueID, ReactionKindAutoMerge, autoMergeData.PRNumber, autoMergeData.Owner, autoMergeData.Repo, now), entryLog)
+			delete(state.ReactionAttempts, rkey)
+			if err := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindAutoMerge); err != nil {
+				entryLog.Warn("auto_merge fingerprint delete failed",
+					slog.Any("error", err),
+				)
+			}
+			entryLog.Info("auto_merge pr found merged, dropping",
+				slog.Int("pr_number", autoMergeData.PRNumber),
+			)
+			continue
+		}
+
 		if mergeStatus.Draft {
 			pending.PendingRetryAt = now.Add(pollInterval)
 			requeueReaction(state, key, pending, waitPollInterval)
@@ -272,6 +286,7 @@ func reconcileAutoMerge(state *State, params ReconcileParams, log *slog.Logger, 
 		)
 		metrics.IncAutoMergeReactions("merged")
 
+		recordIssueOutcome(ctx, params.Store, mergedOutcome(pending.IssueID, ReactionKindAutoMerge, autoMergeData.PRNumber, autoMergeData.Owner, autoMergeData.Repo, now), entryLog)
 		postAutoMergeSuccess(state, params, pending, autoMergeData, mergeResult, entryLog, ctx)
 	}
 }
@@ -406,6 +421,7 @@ func handleMergeError(state *State, params ReconcileParams, key string, pending 
 	case domain.ErrSCMConflict:
 		lower := strings.ToLower(scmErr.Message)
 		if strings.Contains(lower, "already merged") {
+			recordIssueOutcome(ctx, params.Store, mergedOutcome(pending.IssueID, ReactionKindAutoMerge, autoMergeData.PRNumber, autoMergeData.Owner, autoMergeData.Repo, now), log)
 			log.Info("auto_merge pr already merged, treating as success",
 				slog.Int("pr_number", autoMergeData.PRNumber),
 			)

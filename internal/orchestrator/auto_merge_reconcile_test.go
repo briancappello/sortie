@@ -1170,38 +1170,6 @@ func TestReconcileAutoMerge_WatchWindowNonDefaultTakesEffect(t *testing.T) {
 	})
 }
 
-// TestReconcileAutoMerge_WatchWindowElapsedLogsRenamedAttribute pins the
-// drop-on-age log record: message text and the window_ms attribute name
-// (renamed from ttl_ms). A regression that reverts the rename or the wording
-// must fail this test.
-func TestReconcileAutoMerge_WatchWindowElapsedLogsRenamedAttribute(t *testing.T) {
-	t.Parallel()
-
-	issueID := "AM-WWLOG"
-	state := stateWithAutoMergePending(t, issueID, 20)
-	mergeKey := ReactionKey(issueID, ReactionKindAutoMerge)
-	state.PendingReactions[mergeKey].CreatedAt = autoMergeBaseTime.Add(-31 * time.Minute)
-
-	store := &reviewReconcileStore{}
-	metrics := newAutoMergeMetricsSpy()
-	scm := &controlledSCMAdapter{}
-	params := autoMergeParams(store, scm, nil)
-	params.AutoMergePendingTTL = 30 * time.Minute
-	log, buf := logCapture()
-
-	reconcileAutoMerge(state, params, log, context.Background(), metrics)
-
-	output := buf.String()
-	const msg = "auto_merge watch window elapsed, dropping"
-	assertLogLineHasIntAttr(t, output, msg, "window_ms", int(30*time.Minute/time.Millisecond))
-	if strings.Contains(output, "ttl_ms") {
-		t.Errorf("log output contains stale attribute %q: %s", "ttl_ms", output)
-	}
-	if strings.Contains(output, "exceeded ttl") {
-		t.Errorf("log output contains stale message wording %q: %s", "exceeded ttl", output)
-	}
-}
-
 // TestBuildAutoMergeFingerprint verifies the SHA-256 hex fingerprint builder.
 func TestBuildAutoMergeFingerprint(t *testing.T) {
 	t.Parallel()

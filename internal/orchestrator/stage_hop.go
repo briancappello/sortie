@@ -422,6 +422,7 @@ func (o *Orchestrator) holdForStageHop(ctx context.Context, issue domain.Issue, 
 	readState := strings.ToLower(read.State)
 	if _, terminal := terminalSet[readState]; terminal {
 		resetStageHop(ctx, o.state, o.store, issue.ID, stageResetTerminal, log)
+		recordIssueOutcome(ctx, o.store, terminalOutcome(issue.ID, read.State, time.Now()), log)
 		return issue, false
 	}
 	if _, active := activeSet[readState]; !active {

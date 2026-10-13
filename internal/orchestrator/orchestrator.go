@@ -75,6 +75,8 @@ type OrchestratorStore interface {
 	DeleteStageHop(ctx context.Context, issueID string) error
 	ListStageHops(ctx context.Context) ([]persistence.StageHop, error)
 	RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error
+	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
+	DeleteIssueOutcome(ctx context.Context, issueID string) error
 }
 
 var _ OrchestratorStore = (*persistence.Store)(nil)
@@ -898,7 +900,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	o.rebuildBudgetExhausted(ctx, cfg, sorted)
 	o.fillRetryIdentity(sorted)
-	o.refreshParkedIssues(ctx, sorted)
+	o.refreshParkedIssues(ctx, sorted, cfg.Tracker.TerminalStates)
 	o.parkExhaustedAbsences(ctx, cfg, sorted)
 
 	activeSet := stateSet(cfg.Tracker.ActiveStates)
@@ -1014,7 +1016,9 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			entry.RuleName = resolution.RuleName
 			entry.StageLineage = lineage
 			startPass(entry)
-			markStageHopDispatched(ctx, o.state, o.store, issue.ID, logging.WithIssue(o.logger, issue.ID, issue.Identifier))
+			issueLog := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
+			markStageHopDispatched(ctx, o.state, o.store, issue.ID, issueLog)
+			clearIssueOutcome(ctx, o.store, issue.ID, issueLog)
 			entry.RuleSettingsApplied = attemptSettings.Settings.RuleName != ""
 			entry.ConfiguredModel = attemptSettings.Settings.Model
 			entry.ConfiguredEffort = attemptSettings.Settings.Effort
@@ -1390,7 +1394,7 @@ func (o *Orchestrator) fillRetryIdentity(candidates []domain.Issue) {
 // omit the issue and the batched read finds it, one single-issue read. Must
 // run on the event loop after the budget rebuild and before the dispatch
 // loop.
-func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []domain.Issue) {
+func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []domain.Issue, terminalStates []string) {
 	if len(o.state.Parked) == 0 {
 		return
 	}
@@ -1403,6 +1407,7 @@ func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []dom
 		}
 		seen[issue.ID] = struct{}{}
 		if !observeParkedState(ctx, o.state, o.store, o.logger, entry, issue.ID, issue.State) {
+			o.recordParkReleaseOutcome(ctx, issue.ID, entry.Identifier, issue.State, terminalStates)
 			continue
 		}
 		observeParkedLabels(ctx, o.state, o.store, o.logger, entry, issue.ID, issue.Labels)
@@ -1438,6 +1443,7 @@ func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []dom
 			continue
 		}
 		if !observeParkedState(ctx, o.state, o.store, o.logger, entry, id, observed) {
+			o.recordParkReleaseOutcome(ctx, id, entry.Identifier, observed, terminalStates)
 			continue
 		}
 		if !entry.IssueIdentity.isZero() {
@@ -1453,6 +1459,16 @@ func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []dom
 		}
 		o.backfillParkedIdentity(ctx, id, entry, issue)
 	}
+}
+
+// recordParkReleaseOutcome records the terminal outcome of an issue whose
+// park a state change just released, when the state that released it is
+// terminal.
+func (o *Orchestrator) recordParkReleaseOutcome(ctx context.Context, issueID, identifier, observed string, terminalStates []string) {
+	if !isTerminalState(observed, terminalStates) {
+		return
+	}
+	recordIssueOutcome(ctx, o.store, terminalOutcome(issueID, observed, time.Now()), logging.WithIssue(o.logger, issueID, identifier))
 }
 
 // backfillParkedIdentity stores the identity of issue on a park that holds

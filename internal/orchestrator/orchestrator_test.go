@@ -98,6 +98,7 @@ type observerFunc func()
 func (f observerFunc) OnStateChange() { f() }
 
 type stubStore struct {
+	noopOutcomeRecorder
 	unsupportedReactionObservationStore
 
 	mu              sync.Mutex
@@ -148,6 +149,7 @@ type stubStore struct {
 	latestRunsCalls [][]string
 
 	dispatchMarked    []string
+	clearedOutcomeIDs []string
 	markDispatchedErr error
 
 	budgetHoldNotices         []persistence.BudgetHoldNotice
@@ -211,6 +213,13 @@ func (s *stubStore) SaveRetryEntry(_ context.Context, entry persistence.RetryEnt
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.savedRetries = append(s.savedRetries, entry)
+	return nil
+}
+
+func (s *stubStore) DeleteIssueOutcome(_ context.Context, issueID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clearedOutcomeIDs = append(s.clearedOutcomeIDs, issueID)
 	return nil
 }
 
