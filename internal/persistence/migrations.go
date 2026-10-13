@@ -98,6 +98,9 @@ var migration028SQL string
 //go:embed sql/029_session_metadata_unaccounted_turns.sql
 var migration029SQL string
 
+//go:embed sql/030_issue_outcomes.sql
+var migration030SQL string
+
 var migrations = []Migration{
 	{Version: 1, Description: "core persistence tables", SQL: migration001SQL},
 	{Version: 2, Description: "extended token metrics", SQL: migration002SQL},
@@ -128,4 +131,5 @@ var migrations = []Migration{
 	{Version: 27, Description: "dispatch context on retry entries, run history, and stage hops", SQL: migration027SQL},
 	{Version: 28, Description: "run origin on run history and retry entries", SQL: migration028SQL},
 	{Version: 29, Description: "unaccounted_turns column on session_metadata", SQL: migration029SQL},
+	{Version: 30, Description: "issue outcomes", SQL: migration030SQL},
 }

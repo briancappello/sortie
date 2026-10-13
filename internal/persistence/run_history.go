@@ -305,6 +305,13 @@ type RunHistoryFilter struct {
 	CompletedSince  *time.Time
 	CompletedBefore *time.Time
 
+	// EndedSince keeps rows whose issue's outcome was observed at or after it
+	// and EndedBefore rows whose issue's outcome was observed before it, both
+	// compared as instants the way CompletedSince compares completed_at. A
+	// row whose issue has no outcome matches no ending bound.
+	EndedSince  *time.Time
+	EndedBefore *time.Time
+
 	// BeforeID keeps rows with an id below it; 0 starts at the newest row.
 	BeforeID int64
 
@@ -314,8 +321,9 @@ type RunHistoryFilter struct {
 
 // QueryRunHistory returns the rows matching every non-zero field of f,
 // ordered by id descending, or an empty non-nil slice when none match. A row
-// whose completed_at does not parse as a timestamp never matches a time
-// bound.
+// whose completed_at does not parse as a timestamp never matches a completion
+// bound, and an outcome whose observed_at does not parse never matches an
+// ending bound.
 func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunHistory, error) {
 	var conds []string
 	var args []any
@@ -346,6 +354,14 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 	if f.CompletedBefore != nil {
 		conds = append(conds, "unixepoch(completed_at, 'subsec') < unixepoch(?, 'subsec')")
 		args = append(args, f.CompletedBefore.UTC().Format(time.RFC3339Nano))
+	}
+	if f.EndedSince != nil {
+		conds = append(conds, "issue_id IN (SELECT issue_id FROM issue_outcomes WHERE unixepoch(observed_at, 'subsec') >= unixepoch(?, 'subsec'))")
+		args = append(args, f.EndedSince.UTC().Format(time.RFC3339Nano))
+	}
+	if f.EndedBefore != nil {
+		conds = append(conds, "issue_id IN (SELECT issue_id FROM issue_outcomes WHERE unixepoch(observed_at, 'subsec') < unixepoch(?, 'subsec'))")
+		args = append(args, f.EndedBefore.UTC().Format(time.RFC3339Nano))
 	}
 	if f.BeforeID > 0 {
 		conds = append(conds, "id < ?")
