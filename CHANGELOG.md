@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API now serves run history. `/api/v1/runs` lists finished runs newest first, page by page, narrowed by issue, dispatch rule, status, stage, and time range, each with its tokens and estimated cost or why it has none, its stage path, error, and self-review verdict, what started it, and the session and SSH worker it ran on. `/api/v1/{identifier}` answers for an issue that is no longer active, with its runs, token and cost totals, and stage hops, instead of reporting it unknown. ([#1291](https://github.com/sortie-ai/sortie/issues/1291))
 
+- The JSON API now reports how each issue ended, with the time Sortie saw it: handed off, merged with its pull request and whether auto-merge or merge completion saw the merge, or moved to a terminal tracker state. `/api/v1/runs` and `/api/v1/{identifier}` carry it as `issue_outcome`, which is `null` for an issue Sortie has not seen end, and `/api/v1/runs` also lists the runs of the issues that ended in a time range with `ended_since` and `ended_until`. ([#1313](https://github.com/sortie-ai/sortie/issues/1313))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -48,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `cost_budget` no longer calls the token count complete while the running session has spent tokens its coding agent did not report. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
 
+- Auto-merge now stops watching a pull request that was merged without it at its next check, instead of checking it until `reactions.auto_merge.watch_window_ms` ran out (or forever with `0`), and the issue's next handoff gets an auto-merge watch for its new pull request. ([#1313](https://github.com/sortie-ai/sortie/issues/1313))
+
 ### Migrations
 
 - Add `issue_title` and `issue_url` to `run_history` and `retry_entries`, and `display_identifier` to `retry_entries`. A retry or run recorded before the upgrade reads back with no title or link; a queued retry gets one from the first tracker poll or when it next fires. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
@@ -59,6 +63,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `trigger`, `reaction_kind`, `session_id`, and `ssh_host` to `run_history`, index `run_history` by issue identifier, and add `origin_trigger` to `retry_entries`, so a queued retry remembers what started it across a restart. A run recorded before the upgrade shows no trigger, reaction, session, or SSH worker, and a run started by a retry queued before the upgrade shows no trigger; the API marks each as not recorded. ([#1291](https://github.com/sortie-ai/sortie/issues/1291))
 
 - Add `unaccounted_turns INTEGER NOT NULL DEFAULT 0` to `session_metadata`. An older row reads zero and belongs to no running session. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
+
+- Add the `issue_outcomes` table, one row per issue recording how its latest work ended. An issue that ended before the upgrade reports no outcome. ([#1313](https://github.com/sortie-ai/sortie/issues/1313))
 
 ## [1.27.0] - 2026-10-11
 

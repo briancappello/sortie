@@ -229,6 +229,20 @@ One row per issue whose current budget hold has been announced to at least one d
 
 One row per issue, holding current state since the last reset rather than history: the row is deleted when the count resets (a handoff write succeeds, the issue turns terminal or non-active, or the issue is parked or released from a park). A reading of no configured state deletes the row only when it repeats on the next reading of that issue, because a healthy label edit can show an issue with no state label for a moment; the flag that tracks the first reading is runtime-only and the table gains no column for it, so after a restart the next no-state reading counts as the first. The row serves the per-issue ceiling on consecutive hops, the hold that keeps a lagging candidate listing from sending the issue back to the stage it left, the `stage.previous` pair of the target's dispatch, and the issue's listing between stages, which lasts until a dispatch of the issue sets `run_dispatched`. Setting the flag updates that column alone and does nothing for an issue without a row. Recording a hop upserts the row and deletes the issue's `retry_entries` row in one transaction, so a restart cannot restore the retry of the stage the hop left. Recording a second hop with the `source_dispatch_id` already stored keeps the stored `hop_count`, so one source run is counted once. Startup loads every row before the event loop starts, after `parked_issues`.
 
+**`issue_outcomes`**: how each issue's latest work ended, as the orchestrator observed it
+
+| Column                | Type                 | Notes                                                                 |
+| --------------------- | -------------------- | --------------------------------------------------------------------- |
+| `issue_id`            | TEXT PK              | Tracker-internal issue ID                                             |
+| `kind`                | TEXT NOT NULL        | `handed_off`, `merged`, or `terminal`                                 |
+| `observed_at`         | TEXT NOT NULL        | RFC 3339 timestamp in UTC at second precision, the format of `run_history.completed_at`; when the orchestrator made or observed the ending |
+| `state`               | TEXT NOT NULL        | `handed_off`: the state the handoff wrote. `terminal`: the terminal state read, or written by a handoff. `merged`: empty |
+| `merge_reaction_kind` | TEXT NOT NULL        | `merged`: the reaction kind that observed the merge, `merge` or `merge-completion`. Empty otherwise |
+| `pr_number`           | INTEGER NOT NULL     | `merged`: the pull request number. `0` otherwise                       |
+| `pr_repository`       | TEXT NOT NULL        | `merged`: the pull request's `owner/repo`. Empty otherwise             |
+
+One row per issue, holding current state rather than history. The orchestrator writes the row on its event loop at the observation sites and applies the record rule in one statement, so a stored merge survives a later terminal read; the poll tick's dispatch deletes the row when it picks the issue up again (Section 4.1.8). The row is its own table, not a column of `run_history`, because an ending can be observed while a run is in flight, before that run's row exists, and a handoff or a merge belongs to the issue rather than to one run. The table has no index beyond its primary key and no backfill: an issue that ended before the table existed has no row and reports no outcome. `GET /api/v1/runs` selects runs by this table's `observed_at` through the ending bounds (Section 13.7.2).
+
 ### 19.3 Migration Strategy
 
 - Migrations are numbered sequentially and applied in order at startup.

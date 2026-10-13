@@ -169,7 +169,46 @@ Fields:
 
 Note: `timer_handle` is a runtime-only field and is not persisted. On restart, pending retries are reconstructed from the persisted `due_at` timestamps stored in SQLite.
 
-#### 4.1.8 Orchestrator Runtime State
+#### 4.1.8 Issue Outcome
+
+How an issue's latest work ended, as the orchestrator observed it. The record is current state, not a history: one record per issue, backed by SQLite, replaced or kept as observations arrive and deleted when the poll tick picks the issue up again. An issue with no observed ending has no record, and every consumer reads that as "no outcome".
+
+Fields:
+
+- `issue_id`
+- `kind` (`handed_off`, `merged`, or `terminal`)
+- `observed_at` (timestamp, RFC 3339 in UTC at second precision; when the orchestrator made or observed the ending, never a time the tracker or forge reports)
+- `state` (string; for `handed_off`, the state the handoff wrote; for `terminal`, the terminal state the read found or the handoff wrote, as the tracker reported it or the configuration names it; empty for `merged`)
+- `merge_reaction_kind` (string; for `merged`, the reaction kind that observed the merge, `merge` for auto-merge or `merge-completion`; empty otherwise)
+- `pr_number`, `pr_repository` (integer and `owner/repo` string; for `merged`, the pull request as the reaction's data holds it; `0` and empty otherwise)
+
+Observation sites. The orchestrator records an outcome on its event loop, synchronously, in the code path of the observation, and records it nowhere else:
+
+- A successful handoff transition write records `handed_off` with the state written. When the target is a configured terminal state, as a terminal `tracker.no_change_state` can be, it records `terminal` instead, because no person takes that issue over.
+- An auto-merge reaction records `merged` with kind `merge` when its merge call succeeds, when the merge call reports the pull request already merged, and when its check reads the pull request already merged before any merge call (Section 8.5, Part G).
+- Merge completion records `merged` with kind `merge-completion` when it reads the pull request merged, with or without a merge commit identifier (Section 8.5, Part J).
+- Reconciliation records the outcome of the release read when the tracker reports a held issue terminal, whether or not the issue is running.
+- Every other place that lets go of an issue Sortie holds because a read showed a terminal state records `terminal` with that state: a worker exit that finds the issue terminal, the retry timer, the release of a park by a move to a terminal state, the stage hop hold's direct read, and a merge-completion entry dropped because its issue is already terminal. The last one records the outcome of the release read.
+- Startup pending-reaction recovery, startup terminal workspace cleanup, and the periodic sweep record nothing. Sortie no longer holds those issues, so recording there would date an old ending at the restart.
+
+Release read. When a terminal read releases an issue that holds a pending merge-completion or auto-merge entry, the orchestrator reads that entry's pull request once before it deletes the entry, and takes the outcome from the read. A forge that closes the issue on merge, or a tracker automation that moves the issue on merge, makes the tracker report terminal before merge completion reads the merge; without the read the issue would end `terminal` and lose its pull request. A read that reports the pull request merged yields `merged` with the entry's reaction kind and pull request, the merge-completion entry when the issue holds both, because merge completion observes a merge whoever performs it. A read that reports it open, closed unmerged, or fails (one warning is logged) yields `terminal`. With no entry or no configured SCM adapter, the outcome is `terminal` and nothing is read. The read changes only the recorded outcome; the release and its dispositions stay as they are.
+
+Record rule. One store statement applies it, with no read-then-write. "Write" replaces every field with the incoming values; "keep" leaves the record unchanged.
+
+| Stored | Incoming `handed_off` | Incoming `merged` | Incoming `terminal` |
+|---|---|---|---|
+| none | write | write | write |
+| `handed_off` | write | write | write |
+| `merged` | write | keep | keep |
+| `terminal` | write | write | keep |
+
+A handoff always writes, because it ends work newer than anything stored. A stored `merged` keeps against a second merge, so the first observer names the path and the time, and against a terminal read, so a merged issue that then moves to its terminal state still names its pull request. A stored `terminal` keeps against a terminal read, so the first read keeps its time.
+
+Pick-up. The poll tick's dispatch deletes the issue's outcome once it creates the running entry. Retries and reaction continuations fire through the retry timer and never delete it, so a CI or review fix on a handed-off issue keeps its handoff. An issue that has reached no observation site since its pick-up has no outcome, including a running issue and an issue picked up again after an earlier ending.
+
+A failed write is logged and changes nothing else: the site's own work continues, and a later observation the record rule admits writes. A failed pick-up delete is logged, and the earlier outcome stays until the issue's next handoff, which always writes. The outcome is served as recorded, whatever the issue's live state (Section 13.7.2); the table is described in Section 19.2.
+
+#### 4.1.9 Orchestrator Runtime State
 
 Single authoritative state owned by the orchestrator. The running map and active timers are in-memory for performance; retry_attempts, completed set, agent_totals, parked, and stage_hops are backed by SQLite and survive restarts.
 
