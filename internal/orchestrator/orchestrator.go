@@ -616,6 +616,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	startCfg := o.workflowManager.Config()
 	o.applyWorkerConfig(startCfg)
 	o.state.ReactionMaxAttempts = o.reactionMaxAttempts(startCfg)
+	o.state.ReactionWatchWindows = o.reactionWatchWindows(startCfg)
 	o.state.StageChains = startCfg.Dispatch.Chains()
 	o.state.RuleAgents = o.ruleAgents(startCfg)
 	o.state.HopCeiling = startCfg.Dispatch.HopCeiling()
@@ -767,6 +768,25 @@ func (o *Orchestrator) reactionMaxAttempts(cfg config.ServiceConfig) map[string]
 	return ceilings
 }
 
+// reactionWatchWindows returns the watch window each watched reaction kind's
+// pass applies under cfg; a kind with none, or with a window of 0, is absent.
+func (o *Orchestrator) reactionWatchWindows(cfg config.ServiceConfig) map[string]time.Duration {
+	windowsMS := map[string]int{
+		ReactionKindCI:            cfg.CIFeedback.WatchWindowMS,
+		ReactionKindReview:        o.reviewConfig.WatchWindowMS,
+		ReactionKindBotReview:     o.botReviewConfig.WatchWindowMS,
+		ReactionKindMergeConflict: o.mergeConflictConfig.WatchWindowMS,
+		ReactionKindAutoMerge:     o.autoMergeConfig.WatchWindowMS,
+	}
+	windows := make(map[string]time.Duration, len(windowsMS))
+	for kind, ms := range windowsMS {
+		if ms > 0 {
+			windows[kind] = time.Duration(ms) * time.Millisecond
+		}
+	}
+	return windows
+}
+
 // handleTick executes a single poll-and-dispatch cycle: preflight, config
 // read, reconcile, fetch, sort, dispatch.
 //
@@ -802,6 +822,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.RuleAgents = o.ruleAgents(cfg)
 	o.state.HopCeiling = cfg.Dispatch.HopCeiling()
 	o.state.ReactionMaxAttempts = o.reactionMaxAttempts(cfg)
+	o.state.ReactionWatchWindows = o.reactionWatchWindows(cfg)
 	o.state.TokenWarningThreshold = cfg.Agent.TokenWarningThreshold()
 	o.state.MaxConcurrentByState = cfg.Agent.MaxConcurrentByState
 

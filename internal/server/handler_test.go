@@ -107,7 +107,7 @@ const wantPendingReactionsJSON = `[
    "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
                     "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
    "created_at": "2026-02-24T20:09:30Z", "dispatched_at": "2026-02-24T20:05:00Z", "next_poll_at": "2026-02-24T20:17:40Z", "wait": "poll_interval", "stage_position": null,
-   "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z",
+   "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z", "watch_ends_at": null,
    "last_check": {"observed_at": "2026-02-24T20:12:40Z", "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
                   "status": "failing", "failing_checks": ["Test"], "failing": 1, "pending": 0, "passing": 4},
    "status_text": "CI escalated on #931",
@@ -117,7 +117,7 @@ const wantPendingReactionsJSON = `[
    "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
                     "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
    "created_at": "2026-02-24T20:09:30Z", "dispatched_at": null, "next_poll_at": "2026-02-24T20:16:05Z", "wait": "debounce", "stage_position": null,
-   "used_attempts": 1, "max_attempts": 3, "escalated_at": null,
+   "used_attempts": 1, "max_attempts": 3, "escalated_at": null, "watch_ends_at": null,
    "last_check": {"observed_at": "2026-02-24T20:15:10Z", "actionable_comments": 3, "new_comments": 1},
    "status_text": "1 new review comment on #931; next check in 30s",
    "status_text_full": "MT-653 has 1 new review comment on PR #931 (3 actionable) and waits for the comments to settle; next check in 30s. Review fix runs used: 1 of 3."}
@@ -2701,6 +2701,111 @@ func TestHandleIssueDetail_StatusSentence(t *testing.T) {
 			for _, o := range outcomes {
 				if o == nil || o.StatusText != tt.wantOutcomeShort || o.StatusTextFull != tt.wantOutcomeFull {
 					t.Errorf("GET /api/v1/%s issue_outcome = %+v, want pair %q, %q", tt.path, o, tt.wantOutcomeShort, tt.wantOutcomeFull)
+				}
+			}
+		})
+	}
+}
+
+type totalsHistory struct {
+	*fakeRunHistory
+	totals IssueRunTotals
+}
+
+func (h totalsHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {
+	return h.totals, nil
+}
+
+func nextOutcomesServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader) *httptest.Server {
+	t.Helper()
+	srv := New(Params{
+		SnapshotFn: fixedSnapshot(snap),
+		RefreshFn:  acceptingRefresh(),
+		Logger:     slog.New(slog.DiscardHandler),
+		RunHistory: history,
+		WorkflowShapeFn: func() orchestrator.WorkflowShape {
+			return orchestrator.WorkflowShape{Agent: orchestrator.ShapeAgent{MaxSessions: new(3)}}
+		},
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestHandleIssueDetail_NextOutcomes(t *testing.T) {
+	t.Parallel()
+
+	watching := orchestrator.SnapshotPendingReaction{
+		IssueID: "id-1", Identifier: "MT-1", Kind: orchestrator.ReactionKindCI, ConfigKey: "ci_failure",
+		WatchEndsAt: new(time.Date(2026, 3, 24, 7, 30, 0, 0, time.FixedZone("EST", -5*60*60))),
+	}
+	unwatched := orchestrator.SnapshotPendingReaction{
+		IssueID: "id-1", Identifier: "MT-1", Kind: orchestrator.ReactionKindMergeCompletion, ConfigKey: "merge_completion",
+	}
+	oneRunShort := totalsHistory{
+		fakeRunHistory: &fakeRunHistory{rows: []RunHistoryEntry{{ID: 3, IssueID: "id-1", Identifier: "MT-1", Status: "succeeded"}}},
+		totals:         IssueRunTotals{Usage: orchestrator.SnapshotIssueUsage{Sessions: 2}},
+	}
+	held := "Sortie holds MT-1 at its session budget (3 of 3 sessions used)."
+
+	tests := []struct {
+		name          string
+		snap          orchestrator.RuntimeSnapshotResult
+		history       RunHistoryReader
+		wantNext      []nextOutcomeResponse
+		wantWatchEnds map[string]string
+	}{
+		{
+			name:    "work session one run short of the session budget holds on both exits",
+			snap:    orchestrator.RuntimeSnapshotResult{Running: []orchestrator.SnapshotRunningEntry{{IssueID: "id-1", Identifier: "MT-1"}}},
+			history: oneRunShort,
+			wantNext: []nextOutcomeResponse{
+				{Condition: "If the run succeeds", Text: held},
+				{Condition: "If the run fails", Text: held},
+			},
+		},
+		{
+			name:     "history only issue serves an empty list",
+			history:  oneRunShort,
+			wantNext: []nextOutcomeResponse{},
+		},
+		{
+			name:          "watch end is served in UTC and null when the kind has none",
+			snap:          orchestrator.RuntimeSnapshotResult{PendingReactions: []orchestrator.SnapshotPendingReaction{watching, unwatched}},
+			wantWatchEnds: map[string]string{"ci": "2026-03-24T12:30:00Z", "merge-completion": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := nextOutcomesServer(t, tt.snap, tt.history)
+
+			status, body := getJSON[struct {
+				NextOutcomes     *[]nextOutcomeResponse `json:"next_outcomes"`
+				PendingReactions []struct {
+					Kind        string  `json:"kind"`
+					WatchEndsAt *string `json:"watch_ends_at"`
+				} `json:"pending_reactions"`
+			}](t, ts, "/api/v1/MT-1")
+
+			if status != http.StatusOK || body.NextOutcomes == nil {
+				t.Fatalf("GET /api/v1/MT-1 = %d with next_outcomes %v, want %d with a list", status, body.NextOutcomes, http.StatusOK)
+			}
+			if tt.wantNext != nil && !reflect.DeepEqual(*body.NextOutcomes, tt.wantNext) {
+				t.Errorf("GET /api/v1/MT-1 next_outcomes = %+v, want %+v", *body.NextOutcomes, tt.wantNext)
+			}
+			if len(body.PendingReactions) != len(tt.wantWatchEnds) {
+				t.Fatalf("GET /api/v1/MT-1 pending_reactions = %d rows, want %d", len(body.PendingReactions), len(tt.wantWatchEnds))
+			}
+			for _, row := range body.PendingReactions {
+				got := ""
+				if row.WatchEndsAt != nil {
+					got = *row.WatchEndsAt
+				}
+				if got != tt.wantWatchEnds[row.Kind] {
+					t.Errorf("GET /api/v1/MT-1 %s watch_ends_at = %q, want %q", row.Kind, got, tt.wantWatchEnds[row.Kind])
 				}
 			}
 		})

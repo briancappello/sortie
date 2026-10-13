@@ -145,19 +145,24 @@ func reconcileLabelReviewCommands(state *State, params ReconcileParams, log *slo
 		labelPresentNow := labelPresent(events, params.LabelReviewConfig.ReviewLabel)
 		commandConfirmed := len(matches) > 0 && labelPresentNow
 
-		running := state.Running[pending.IssueID] != nil
+		running := state.Running[pending.IssueID]
 		incumbent := retrySlotIncumbent(state, pending.IssueID)
 
-		// A foreign incumbent defers before the same-kind collapse check
-		// runs: evaluating the collapse arm first would advance the mark
-		// past the labeling event and swallow the gesture.
+		// A session or retry of another kind defers before the same-kind
+		// collapse check runs: evaluating the collapse arm first would
+		// advance the mark past the labeling event and swallow the gesture.
 		if commandConfirmed && incumbent != nil && incumbent.ReactionKind != ReactionKindLabelReview {
 			logRetrySlotDeferral(entryLog, ReactionKindLabelReview, incumbent)
 			requeueReaction(state, key, pending, waitRetrySlot)
 			continue
 		}
+		if commandConfirmed && running != nil && running.ReactionKind != ReactionKindLabelReview {
+			requeueReaction(state, key, pending, waitRetrySlot)
+			continue
+		}
 
-		sameKindQueuedOrRunning := running || (incumbent != nil && incumbent.ReactionKind == ReactionKindLabelReview)
+		sameKindQueuedOrRunning := (running != nil && running.ReactionKind == ReactionKindLabelReview) ||
+			(incumbent != nil && incumbent.ReactionKind == ReactionKindLabelReview)
 
 		if commandConfirmed && !sameKindQueuedOrRunning {
 			// Advance the mark BEFORE scheduling: at-most-once rests on the

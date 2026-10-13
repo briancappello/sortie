@@ -114,15 +114,17 @@ type ShapeEscalation struct {
 
 // ShapeCIFailure reports the CI failure reaction.
 type ShapeCIFailure struct {
-	MaxRetries int `json:"max_retries"`
+	MaxRetries int  `json:"max_retries"`
+	Triage     bool `json:"triage"`
 	ShapeEscalation
 }
 
 // ShapeReviewComments reports the review comments reaction.
 type ShapeReviewComments struct {
-	MaxContinuationTurns int `json:"max_continuation_turns"`
-	DebounceMS           int `json:"debounce_ms"`
-	PollIntervalMS       int `json:"poll_interval_ms"`
+	MaxContinuationTurns int  `json:"max_continuation_turns"`
+	DebounceMS           int  `json:"debounce_ms"`
+	PollIntervalMS       int  `json:"poll_interval_ms"`
+	Triage               bool `json:"triage"`
 	ShapeEscalation
 }
 
@@ -131,13 +133,15 @@ type ShapeBotReview struct {
 	MaxContinuationTurns int      `json:"max_continuation_turns"`
 	PollIntervalMS       int      `json:"poll_interval_ms"`
 	BotUsernames         []string `json:"bot_usernames"`
+	Triage               bool     `json:"triage"`
 	ShapeEscalation
 }
 
 // ShapeMergeConflicts reports the merge conflict reaction.
 type ShapeMergeConflicts struct {
-	MaxRetries     int `json:"max_retries"`
-	PollIntervalMS int `json:"poll_interval_ms"`
+	MaxRetries     int  `json:"max_retries"`
+	PollIntervalMS int  `json:"poll_interval_ms"`
+	Triage         bool `json:"triage"`
 	ShapeEscalation
 }
 
@@ -309,6 +313,7 @@ func (o *Orchestrator) shapeReactions(cfg config.ServiceConfig) ShapeReactions {
 	if o.ciProvider != nil && o.scmAdapter != nil {
 		reactions.CIFailure = &ShapeCIFailure{
 			MaxRetries:      cfg.CIFeedback.MaxRetries,
+			Triage:          o.ciTriage.Enabled(),
 			ShapeEscalation: shapeEscalation(cfg.CIFeedback.Escalation, cfg.CIFeedback.EscalationLabel),
 		}
 	}
@@ -318,6 +323,7 @@ func (o *Orchestrator) shapeReactions(cfg config.ServiceConfig) ShapeReactions {
 			MaxContinuationTurns: review.MaxContinuationTurns,
 			DebounceMS:           review.DebounceMS,
 			PollIntervalMS:       review.PollIntervalMS,
+			Triage:               review.Triage.Enabled(),
 			ShapeEscalation:      shapeEscalation(review.Escalation, review.EscalationLabel),
 		}
 	}
@@ -327,6 +333,7 @@ func (o *Orchestrator) shapeReactions(cfg config.ServiceConfig) ShapeReactions {
 			MaxContinuationTurns: bot.MaxContinuationTurns,
 			PollIntervalMS:       bot.PollIntervalMS,
 			BotUsernames:         copyStrings(bot.BotUsernames),
+			Triage:               bot.Triage.Enabled(),
 			ShapeEscalation:      shapeEscalation(bot.Escalation, bot.EscalationLabel),
 		}
 	}
@@ -335,6 +342,7 @@ func (o *Orchestrator) shapeReactions(cfg config.ServiceConfig) ShapeReactions {
 		reactions.MergeConflicts = &ShapeMergeConflicts{
 			MaxRetries:      conflict.MaxRetries,
 			PollIntervalMS:  conflict.PollIntervalMS,
+			Triage:          conflict.Triage.Enabled(),
 			ShapeEscalation: shapeEscalation(conflict.Escalation, conflict.EscalationLabel),
 		}
 	}

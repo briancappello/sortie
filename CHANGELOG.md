@@ -30,6 +30,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API (`/api/v1/state` and `/api/v1/{identifier}`) now shows the dispatch rule, place in the stage chain, agent, model, issue type, labels, and tracker state of parked issues, of issues waiting on a pull request reaction, and of issues waiting for their next stage, and when Sortie picked up each parked issue, so a client can keep every active issue in a stable order. A parked issue keeps all of them across a restart. ([#1321](https://github.com/sortie-ai/sortie/issues/1321))
 
+- `/api/v1/{identifier}` now lists what Sortie will do next for an issue, each as a condition and a plain English sentence, for example what happens if the current stage succeeds, if CI fails again on its pull request, or once the pull request merges. The list follows the workflow in effect, including the fixes left before Sortie calls a person, the escalation label, the session and token budgets, the stage hop limit, and when Sortie stops watching a pull request, which each pending pull request reaction now also reports. The workflow shape also says which pull request reactions run a triage command first. ([#1312](https://github.com/sortie-ai/sortie/issues/1312))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -55,6 +57,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `cost_budget` no longer calls the token count complete while the running session has spent tokens its coding agent did not report. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
 
 - Auto-merge now stops watching a pull request that was merged without it at its next check, instead of checking it until `reactions.auto_merge.watch_window_ms` ran out (or forever with `0`), and the issue's next handoff gets an auto-merge watch for its new pull request. ([#1313](https://github.com/sortie-ai/sortie/issues/1313))
+
+- A fix or review label added to a pull request during another kind of Sortie run for its issue, such as a CI fix, now starts its command once that run ends; Sortie used to ignore the label and leave it on the pull request. ([#1312](https://github.com/sortie-ai/sortie/issues/1312))
 
 ### Migrations
 

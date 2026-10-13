@@ -288,7 +288,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - The `dispatched` flag is not a deduplication input for either label kind, and the review pass's "stored fingerprint matches and dispatched" skip is not adopted
 - A failed mark read backs off without dispatching, while a failed mark upsert proceeds
 - Neither label kind carries a TTL, a drop-on-age branch, an attempt counter, or an escalation posture
-- A foreign-kind retry-slot incumbent defers with the mark unchanged and no label removal, a same-kind incumbent or a running command of the same kind advances the mark and collapses the gesture, and only a free slot dispatches
+- A foreign-kind retry-slot incumbent and a running session of another kind each defer with the mark unchanged and no label removal, a same-kind incumbent or a running command of the same kind advances the mark and collapses the gesture, and only a free slot with no session running dispatches
 - Each label-command pass re-enqueues its own detection entry on dispatch, because neither command's exit satisfies the reaction-enqueue gate and so re-seeds nothing
 - A `label-review` entry seeds and recovers on PR metadata without a branch, while a `label-fix` entry additionally requires a non-empty head branch and seeds none without one
 - A `label-review` dispatch runs the read-only, no-clone posture with the operator hooks skipped and a `label-fix` dispatch takes the normal workspace preparation path with the hooks run; both suppress the dispatch-time transition, the dispatch comment, the per-turn tracker-state refresh, the self-review loop, the handoff transition, and the active-issue continuation retry
@@ -416,6 +416,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - The state route's workflow shape lists the dispatch rules in configuration order with how each is selected, the chains in `next` order, and only the reaction kinds the process applies, and no credential value from any configuration location appears in it
 - The state route's `health` block reports a reload of an invalid workflow file with its masked error while the previous configuration stays in effect, a failed preflight with its error text, and a failed candidate read; a check failing twice reports two consecutive failures and its last success; a clean start reports every check passing
 - Every status sentence template renders from an input built for the state it words and never serves the fallback text; a workflow without stage chains yields no stage wording; a figure Sortie did not measure reads as not measured, and a lower bound reads as at least; every row kind of the state route and the per-issue response carries its sentence, each naming its own issue; and the refresh response carries its outcome sentence
+- The per-issue response lists next outcomes for a running stage with a next stage, the last stage ending on the handoff state, a stage at the hop ceiling, a pending CI reaction with fixes left and with none left, and a workflow without reactions; no outcome names a stage or reaction the configuration lacks; an outcome that a budget would stop names the hold
 
 ### 17.7 CLI and Host Lifecycle
 

@@ -501,7 +501,7 @@ func TestReconcileLabelReviewCommands_DepthOneWhileRunning(t *testing.T) {
 
 	const issueID = "LR-RUN"
 	state := stateWithLabelReviewPending(t, issueID, 10)
-	state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident"}
+	state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident", ReactionKind: ReactionKindLabelReview}
 
 	scm := &labelReviewSCMFake{
 		events: []domain.LabelEvent{
@@ -984,6 +984,67 @@ func TestReconcileLabelCommands_StopPollingAfterTerminal(t *testing.T) {
 	}
 	if _, ok := state.PendingReactions[fixKey]; ok {
 		t.Error("PendingReactions[label-fix] present after terminal release; want removed")
+	}
+}
+
+func TestReconcileLabelCommands_DispatchesOnceOtherKindSessionEnds(t *testing.T) {
+	t.Parallel()
+
+	const issueID = "LBL-DEFER"
+
+	tests := []struct {
+		name      string
+		kind      string
+		label     string
+		state     func(t *testing.T) *State
+		params    func(ReconcileStore, domain.SCMAdapter) ReconcileParams
+		reconcile func(*State, ReconcileParams)
+	}{
+		{
+			name:   "label_review",
+			kind:   ReactionKindLabelReview,
+			label:  "sortie:review",
+			state:  func(t *testing.T) *State { return stateWithLabelReviewPending(t, issueID, 10) },
+			params: labelReviewParams,
+			reconcile: func(s *State, p ReconcileParams) {
+				reconcileLabelReviewCommands(s, p, discardLogger(), context.Background(), &domain.NoopMetrics{})
+			},
+		},
+		{
+			name:   "label_fix",
+			kind:   ReactionKindLabelFix,
+			label:  "sortie:fix",
+			state:  func(t *testing.T) *State { return stateWithLabelFixPending(t, issueID, 10, "feature/lbl-defer") },
+			params: labelFixParams,
+			reconcile: func(s *State, p ReconcileParams) {
+				reconcileLabelFixCommands(s, p, discardLogger(), context.Background(), &domain.NoopMetrics{})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := tt.state(t)
+			state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident", ReactionKind: ReactionKindCI}
+			scm := &labelReviewSCMFake{
+				events: []domain.LabelEvent{
+					labelEvent("1", tt.label, "alice", true, labelReviewBaseTime.Add(-1*time.Minute)),
+				},
+			}
+			params := tt.params(newLabelReviewFingerprintStore(), scm)
+
+			tt.reconcile(state, params)
+			delete(state.Running, issueID)
+			params.NowFunc = func() time.Time { return labelReviewBaseTime.Add(time.Hour) }
+			tt.reconcile(state, params)
+
+			retry := state.RetryAttempts[issueID]
+			if retry == nil || retry.ReactionKind != tt.kind {
+				t.Errorf("RetryAttempts[%q] = %+v, want a retry of kind %q", issueID, retry, tt.kind)
+			}
+		})
 	}
 }
 

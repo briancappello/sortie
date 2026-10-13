@@ -1061,6 +1061,46 @@ func TestRuntimeSnapshot_StagePosition(t *testing.T) {
 	}
 }
 
+func TestRuntimeSnapshot_PendingReactionWatchEndsAt(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := created.Add(d); return &v }
+	windows := map[string]time.Duration{ReactionKindCI: 24 * time.Hour, ReactionKindReview: 30 * time.Minute}
+	tests := []struct {
+		name  string
+		entry PendingReaction
+		want  *time.Time
+	}{
+		{"ci counts from the recorded head", PendingReaction{Kind: ReactionKindCI, HeadRecordedAt: created.Add(10 * time.Minute)}, at(24*time.Hour + 10*time.Minute)},
+		{"ci without a recorded head counts from creation", PendingReaction{Kind: ReactionKindCI}, at(24 * time.Hour)},
+		{"review counts from the restart", PendingReaction{Kind: ReactionKindReview, WatchRestartedAt: created.Add(20 * time.Minute)}, at(50 * time.Minute)},
+		{"kind without a window", PendingReaction{Kind: ReactionKindMergeCompletion}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := NewState(5000, 4, 0, nil, AgentTotals{})
+			state.ReactionWatchWindows = windows
+			entry := tt.entry
+			entry.IssueID, entry.CreatedAt = "ISS-1", created
+			state.PendingReactions[ReactionKey(entry.IssueID, entry.Kind)] = &entry
+
+			rows := RuntimeSnapshot(state, created).PendingReactions
+
+			if len(rows) != 1 {
+				t.Fatalf("len(PendingReactions) = %d, want 1", len(rows))
+			}
+			got := rows[0].WatchEndsAt
+			if (got == nil) != (tt.want == nil) || got != nil && !got.Equal(*tt.want) {
+				t.Errorf("PendingReactions[0].WatchEndsAt for kind %q = %v, want %v", entry.Kind, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeSnapshot_MasksRegisteredValueInIssueIdentity(t *testing.T) {
 	t.Parallel()
 

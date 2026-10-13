@@ -251,6 +251,7 @@ type pendingReactionResponse struct {
 	UsedAttempts      *int                   `json:"used_attempts"`
 	MaxAttempts       *int                   `json:"max_attempts"`
 	EscalatedAt       *time.Time             `json:"escalated_at"`
+	WatchEndsAt       *time.Time             `json:"watch_ends_at"`
 	LastCheck         *reactionCheckResponse `json:"last_check"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
@@ -380,6 +381,16 @@ type issueDetailResponse struct {
 
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
+
+	NextOutcomes []nextOutcomeResponse `json:"next_outcomes"`
+	situation    sentence.Situation    // recorded by buildIssueDetail; never serialized
+}
+
+// nextOutcomeResponse is the JSON wire format for one next outcome: a
+// condition and what Sortie then does.
+type nextOutcomeResponse struct {
+	Condition string `json:"condition"`
+	Text      string `json:"text"`
 }
 
 type workspaceInfo struct {
@@ -668,6 +679,9 @@ func toPendingReactionResponse(e orchestrator.SnapshotPendingReaction) pendingRe
 	if e.EscalatedAt != nil {
 		resp.EscalatedAt = new(e.EscalatedAt.UTC())
 	}
+	if e.WatchEndsAt != nil {
+		resp.WatchEndsAt = new(e.WatchEndsAt.UTC())
+	}
 	return resp
 }
 
@@ -947,6 +961,9 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for _, outcome := range sentence.NextOutcomes(detail.situation, words) {
+		detail.NextOutcomes = append(detail.NextOutcomes, nextOutcomeResponse(outcome))
+	}
 	writeJSON(w, s.logger, http.StatusOK, detail)
 
 	s.logger.Debug("request served",
@@ -987,6 +1004,9 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 		return nil, false
 	}
 	if len(page) == 0 {
+		if detail != nil {
+			detail.situation.Spend = &sentence.Spend{}
+		}
 		return detail, true
 	}
 
@@ -1006,6 +1026,7 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 		detail = historyOnlyDetail(issueID, newest)
 		detail.StatusText, detail.StatusTextFull = sentencesOf(sentence.Entry{Finished: finishedOf(newest, outcome, hasOutcome)}, words)
 	}
+	detail.situation.Spend = &sentence.Spend{Sessions: totals.Usage.Sessions, Tokens: totals.Usage.TotalTokens}
 	detail.History = issueHistoryOf(page, totals, s.tokenRates)
 	attachIssueOutcomes(detail.History.Runs, outcomes)
 	if hasOutcome {
@@ -1026,6 +1047,7 @@ func historyOnlyDetail(issueID string, newest RunHistoryEntry) *issueDetailRespo
 		PendingReactions: []pendingReactionResponse{},
 		RecentEvents:     []any{},
 		Tracked:          map[string]any{},
+		NextOutcomes:     []nextOutcomeResponse{},
 	}
 }
 
@@ -1110,9 +1132,11 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	var budgetEntry *budgetExhaustedResponse
 	var parkedEntry *parkedEntryResponse
 	var hopEntry *stageHopResponse
+	var situation sentence.Situation
 
 	for _, e := range snap.Running {
 		if matches(e.Identifier, e.IssueID) {
+			situation.Running = &e
 			runEntry = new(toServedRunningEntry(e, snap, rates))
 			runEntry.StatusText, runEntry.StatusTextFull = sentencesOf(sentence.Entry{Running: &e}, words)
 			break
@@ -1121,6 +1145,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 
 	for _, e := range snap.Retrying {
 		if matches(e.Identifier, e.IssueID) {
+			situation.Retry = &e
 			retryEntry = new(toRetryEntryResponse(e))
 			retryEntry.StatusText, retryEntry.StatusTextFull = sentencesOf(sentence.Entry{Retry: &e}, words)
 			break
@@ -1145,6 +1170,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 
 	for _, e := range snap.BetweenStages {
 		if matches(e.Identifier, e.IssueID) {
+			situation.BetweenStages = &e
 			hopEntry = new(toStageHopResponse(e))
 			hopEntry.StatusText, hopEntry.StatusTextFull = sentencesOf(sentence.Entry{BetweenStages: &e}, words)
 			break
@@ -1162,6 +1188,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		return nil
 	}
 
+	situation.PendingReactions = pendingRows
 	pending := toPendingReactionResponses(pendingRows, words)
 
 	var status string
@@ -1284,6 +1311,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		Tracked:          map[string]any{},
 		StatusText:       statusText,
 		StatusTextFull:   statusTextFull,
+		NextOutcomes:     []nextOutcomeResponse{},
+		situation:        situation,
 	}
 }
 

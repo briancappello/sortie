@@ -3,9 +3,11 @@
 // issue, or a refresh outcome into text, so every API client shows the same
 // wording instead of reading Sortie state itself.
 //
-// Start with [For] for an issue and [RefreshOutcome] for a refresh request.
-// Both are safe for concurrent use and never fail: a template that cannot
-// render yields a fixed fallback text and one log record.
+// Start with [For] for an issue, [NextOutcomes] for what Sortie does next for
+// an issue, and [RefreshOutcome] for a refresh request. All are safe for
+// concurrent use and never fail: a template that cannot render yields a fixed
+// fallback text, or leaves out the one next outcome it belongs to, and logs
+// one record.
 package sentence
 
 import (
@@ -113,16 +115,23 @@ func status(name string, data map[string]any) Status {
 // render executes one part of a template. The table is fixed at package
 // initialization, so a failure here is a selector that left a key out.
 func render(name, part string, data map[string]any) string {
+	if text, ok := renderMasked(name, part, data); ok {
+		return text
+	}
+	return redact.Mask(fallbackText)
+}
+
+// renderMasked executes one part of a template and masks the result. It
+// reports false, after logging the failure, when the template cannot render.
+func renderMasked(name, part string, data map[string]any) (string, bool) {
 	var out strings.Builder
-	text := fallbackText
 	if err := templates.ExecuteTemplate(&out, name+"."+part, data); err != nil {
 		slog.Default().Error("status sentence render failed",
 			slog.String("template", name),
 			slog.Any("error", err))
-	} else {
-		text = out.String()
+		return "", false
 	}
-	return redact.Mask(text)
+	return redact.Mask(out.String()), true
 }
 
 // continuationTemplates names the running template of each reaction kind a
