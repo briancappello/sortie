@@ -97,11 +97,16 @@ func parkIssue(state *State, params parkIssueParams) {
 	CancelRetry(state, params.IssueID)
 	delete(state.Claimed, params.IssueID)
 
+	// An issue parked again still carries the label of its earlier park,
+	// since an unpark never removes it.
+	identity := params.IssueIdentity
+	identity.Labels = labelsWithout(identity.Labels, params.Label)
+
 	parkedAt := time.Now().UTC()
 	entry := &ParkedEntry{
 		Identifier:    params.Identifier,
 		DisplayID:     params.DisplayID,
-		IssueIdentity: params.IssueIdentity,
+		IssueIdentity: identity,
 		Reason:        params.Reason,
 		ParkedState:   params.ObservedState,
 		Label:         params.Label,

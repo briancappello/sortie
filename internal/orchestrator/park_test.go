@@ -264,7 +264,7 @@ func TestParkSurvivesRestart(t *testing.T) {
 	running.Issue.Title = "Restart title"
 	running.Issue.URL = "https://tracker.test/PROJ-RESTART"
 	running.Issue.IssueType = "Story"
-	running.Issue.Labels = []string{"feature", "stage-implement"}
+	running.Issue.Labels = []string{"feature", "Needs-Human", "stage-implement"}
 	running.RuleName = "implement"
 	running.StageLineage = StageLineage{PreviousRule: "triage", PreviousOutcome: "succeeded", ChainID: "chain-1", DispatchedAt: dispatchedAt}
 	running.AgentKind, running.ConfiguredModel = "claude-code", "sonnet"
