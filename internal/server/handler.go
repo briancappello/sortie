@@ -11,6 +11,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 // stateResponse is the JSON wire format for GET /api/v1/state.
@@ -113,6 +114,9 @@ type runningEntryResponse struct {
 	CostStatus            string   `json:"cost_status"`
 	IssueEstimatedCostUSD *float64 `json:"issue_estimated_cost_usd"`
 	IssueCostStatus       string   `json:"issue_cost_status"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // tokenInfo carries a running row's five token figures. The members
@@ -150,6 +154,9 @@ type retryEntryResponse struct {
 	StageLineage      *stageLineageResponse  `json:"stage_lineage"`
 	StagePosition     *stagePositionResponse `json:"stage_position"`
 	Paused            bool                   `json:"paused"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // stageLineageResponse is the stage hop that reached the run a row
@@ -182,6 +189,9 @@ type stageHopResponse struct {
 	TargetLabel       string     `json:"target_label"`
 	HoppedAt          *time.Time `json:"hopped_at"`
 	DispatchedAt      *time.Time `json:"dispatched_at"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // parkedEntryResponse is the JSON wire format for one issue held out of
@@ -198,6 +208,9 @@ type parkedEntryResponse struct {
 	Label             string    `json:"label"`
 	LabelApplied      bool      `json:"label_applied"`
 	ParkedAt          time.Time `json:"parked_at"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // pendingReactionResponse is the JSON wire format for one pending pull
@@ -219,6 +232,9 @@ type pendingReactionResponse struct {
 	MaxAttempts       *int                   `json:"max_attempts"`
 	EscalatedAt       *time.Time             `json:"escalated_at"`
 	LastCheck         *reactionCheckResponse `json:"last_check"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // pullRequestResponse is the JSON wire format for the pull request a pending
@@ -303,6 +319,9 @@ type budgetExhaustedResponse struct {
 	StagePosition      *stagePositionResponse `json:"stage_position"`
 	AgentKind          string                 `json:"agent_kind,omitempty"`
 	ConfiguredModel    string                 `json:"configured_model,omitempty"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // issueResponse is the tracker's view of one issue, under the names the
@@ -333,6 +352,9 @@ type issueDetailResponse struct {
 	LastError        *string                   `json:"last_error"`
 	Tracked          map[string]any            `json:"tracked"`
 	History          *issueHistoryResponse     `json:"history"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 type workspaceInfo struct {
@@ -349,6 +371,7 @@ type refreshResponse struct {
 	Coalesced   bool      `json:"coalesced"`
 	RequestedAt time.Time `json:"requested_at"`
 	Operations  []string  `json:"operations"`
+	OutcomeText string    `json:"outcome_text"`
 }
 
 type errorResponse struct {
@@ -598,12 +621,20 @@ func toPendingReactionResponse(e orchestrator.SnapshotPendingReaction) pendingRe
 	return resp
 }
 
-func toPendingReactionResponses(rows []orchestrator.SnapshotPendingReaction) []pendingReactionResponse {
+func toPendingReactionResponses(rows []orchestrator.SnapshotPendingReaction, words sentence.Context) []pendingReactionResponse {
 	responses := make([]pendingReactionResponse, 0, len(rows))
 	for _, e := range rows {
-		responses = append(responses, toPendingReactionResponse(e))
+		row := toPendingReactionResponse(e)
+		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{PendingReaction: &e}, words)
+		responses = append(responses, row)
 	}
 	return responses
+}
+
+// sentencesOf returns the short and long status sentence of one entry.
+func sentencesOf(entry sentence.Entry, words sentence.Context) (short, long string) {
+	status := sentence.For(entry, words)
+	return status.Short, status.Long
 }
 
 func toBudgetExhaustedResponse(e orchestrator.SnapshotBudgetEntry) budgetExhaustedResponse {
@@ -658,32 +689,42 @@ func heldUsedTokens(e orchestrator.SnapshotBudgetEntry) *int64 {
 	return e.UsedTokens
 }
 
-func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRates) stateResponse {
+func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRates, words sentence.Context) stateResponse {
 	running := make([]runningEntryResponse, 0, len(snap.Running))
 	for _, e := range snap.Running {
-		running = append(running, toServedRunningEntry(e, snap, tokenRates))
+		row := toServedRunningEntry(e, snap, tokenRates)
+		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Running: &e}, words)
+		running = append(running, row)
 	}
 
 	retrying := make([]retryEntryResponse, 0, len(snap.Retrying))
 	for _, e := range snap.Retrying {
-		retrying = append(retrying, toRetryEntryResponse(e))
+		row := toRetryEntryResponse(e)
+		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Retry: &e}, words)
+		retrying = append(retrying, row)
 	}
 
 	budgetExhausted := make([]budgetExhaustedResponse, 0, len(snap.BudgetExhausted))
 	for _, e := range snap.BudgetExhausted {
-		budgetExhausted = append(budgetExhausted, toBudgetExhaustedResponse(e))
+		row := toBudgetExhaustedResponse(e)
+		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{BudgetHold: &e}, words)
+		budgetExhausted = append(budgetExhausted, row)
 	}
 
 	parked := make([]parkedEntryResponse, 0, len(snap.Parked))
 	for _, e := range snap.Parked {
-		parked = append(parked, toParkedEntryResponse(e))
+		row := toParkedEntryResponse(e)
+		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Parked: &e}, words)
+		parked = append(parked, row)
 	}
 
-	pendingReactions := toPendingReactionResponses(snap.PendingReactions)
+	pendingReactions := toPendingReactionResponses(snap.PendingReactions, words)
 
 	betweenStages := make([]stageHopResponse, 0, len(snap.BetweenStages))
 	for _, e := range snap.BetweenStages {
-		betweenStages = append(betweenStages, toStageHopResponse(e))
+		row := toStageHopResponse(e)
+		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{BetweenStages: &e}, words)
+		betweenStages = append(betweenStages, row)
 	}
 
 	rateLimits := snap.RateLimits
@@ -768,6 +809,17 @@ func (s *Server) routeIssueDetail(w http.ResponseWriter, r *http.Request) {
 	s.handleIssueDetail(w, r)
 }
 
+// sentenceContext reads the workflow shape once for a request, so the
+// sentences and the config the state route serves never disagree.
+func (s *Server) sentenceContext(snap orchestrator.RuntimeSnapshotResult) sentence.Context {
+	words := sentence.Context{Now: snap.GeneratedAt}
+	if s.workflowShapeFn != nil {
+		shape := s.workflowShapeFn()
+		words.Shape = &shape
+	}
+	return words
+}
+
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -784,11 +836,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := toStateResponse(snap, s.tokenRates)
+	words := s.sentenceContext(snap)
+	resp := toStateResponse(snap, s.tokenRates, words)
 	resp.Version = s.version
 	resp.StartedAt = utcOrNil(s.startedAt)
-	if s.workflowShapeFn != nil {
-		resp.Config = toConfigResponse(s.workflowShapeFn(), s.tokenRates)
+	if words.Shape != nil {
+		resp.Config = toConfigResponse(*words.Shape, s.tokenRates)
 	}
 	if s.healthFn != nil {
 		resp.Health = toStateHealthResponse(s.healthFn())
@@ -827,12 +880,13 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	detail := buildIssueDetail(identifier, "", snap, s.tokenRates)
+	words := s.sentenceContext(snap)
+	detail := buildIssueDetail(identifier, "", snap, s.tokenRates, words)
 	notFoundIn := "current state"
 	if s.runHistory != nil {
 		notFoundIn = "current state or run history"
 		var ok bool
-		if detail, ok = s.withIssueHistory(w, r, identifier, snap, detail); !ok {
+		if detail, ok = s.withIssueHistory(w, r, identifier, snap, detail, words); !ok {
 			return
 		}
 	}
@@ -858,7 +912,7 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 // for an identifier history does not know either, and false after it has
 // answered a failed read itself. The snapshot is read before run history, so
 // a run that ends between the reads can appear in both but never in neither.
-func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identifier string, snap orchestrator.RuntimeSnapshotResult, detail *issueDetailResponse) (*issueDetailResponse, bool) {
+func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identifier string, snap orchestrator.RuntimeSnapshotResult, detail *issueDetailResponse, words sentence.Context) (*issueDetailResponse, bool) {
 	ctx := r.Context()
 
 	var issueID string
@@ -874,7 +928,7 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 			return nil, true
 		}
 		issueID = newest[0].IssueID
-		detail = buildIssueDetail(identifier, issueID, snap, s.tokenRates)
+		detail = buildIssueDetail(identifier, issueID, snap, s.tokenRates, words)
 	}
 
 	page, err := s.runHistory.QueryRuns(ctx, RunHistoryQuery{IssueID: issueID, Limit: issueHistoryPageSize + 1})
@@ -896,13 +950,16 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 		s.historyReadFailed(w, r, err)
 		return nil, false
 	}
+	newest := page[0]
+	outcome, hasOutcome := outcomes[issueID]
 	if detail == nil {
-		detail = historyOnlyDetail(issueID, page[0])
+		detail = historyOnlyDetail(issueID, newest)
+		detail.StatusText, detail.StatusTextFull = sentencesOf(sentence.Entry{Finished: finishedOf(newest, outcome, hasOutcome)}, words)
 	}
 	detail.History = issueHistoryOf(page, totals, s.tokenRates)
 	attachIssueOutcomes(detail.History.Runs, outcomes)
-	if o, ok := outcomes[issueID]; ok {
-		detail.History.IssueOutcome = toIssueOutcomeResponse(o)
+	if hasOutcome {
+		detail.History.IssueOutcome = toIssueOutcomeResponse(outcome, newest.Identifier, newest.DisplayID)
 	}
 	return detail, true
 }
@@ -944,6 +1001,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 			RequestedAt: time.Now().UTC(),
 			Operations:  []string{},
 		}
+		resp.OutcomeText = sentence.RefreshOutcome(resp.Queued, resp.Coalesced)
 		writeJSON(w, s.logger, http.StatusConflict, resp)
 
 		s.logger.Debug("request served",
@@ -963,6 +1021,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		RequestedAt: time.Now().UTC(),
 		Operations:  []string{"poll", "reconcile"},
 	}
+	resp.OutcomeText = sentence.RefreshOutcome(resp.Queued, resp.Coalesced)
 
 	writeJSON(w, s.logger, http.StatusAccepted, resp)
 
@@ -991,7 +1050,7 @@ func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request, allowe
 // entry holds it. An entry belongs to the issue when its identifier equals
 // identifier, or when issueID is non-empty and the entry carries it, which
 // finds an issue the tracker has since renamed.
-func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, rates TokenRates) *issueDetailResponse {
+func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, rates TokenRates, words sentence.Context) *issueDetailResponse {
 	matches := func(gotIdentifier, gotIssueID string) bool {
 		return gotIdentifier == identifier || (issueID != "" && gotIssueID == issueID)
 	}
@@ -1005,6 +1064,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.Running {
 		if matches(e.Identifier, e.IssueID) {
 			runEntry = new(toServedRunningEntry(e, snap, rates))
+			runEntry.StatusText, runEntry.StatusTextFull = sentencesOf(sentence.Entry{Running: &e}, words)
 			break
 		}
 	}
@@ -1012,6 +1072,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.Retrying {
 		if matches(e.Identifier, e.IssueID) {
 			retryEntry = new(toRetryEntryResponse(e))
+			retryEntry.StatusText, retryEntry.StatusTextFull = sentencesOf(sentence.Entry{Retry: &e}, words)
 			break
 		}
 	}
@@ -1019,6 +1080,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.BudgetExhausted {
 		if matches(e.Identifier, e.IssueID) {
 			budgetEntry = new(toBudgetExhaustedResponse(e))
+			budgetEntry.StatusText, budgetEntry.StatusTextFull = sentencesOf(sentence.Entry{BudgetHold: &e}, words)
 			break
 		}
 	}
@@ -1026,6 +1088,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.Parked {
 		if matches(e.Identifier, e.IssueID) {
 			parkedEntry = new(toParkedEntryResponse(e))
+			parkedEntry.StatusText, parkedEntry.StatusTextFull = sentencesOf(sentence.Entry{Parked: &e}, words)
 			break
 		}
 	}
@@ -1033,6 +1096,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.BetweenStages {
 		if matches(e.Identifier, e.IssueID) {
 			hopEntry = new(toStageHopResponse(e))
+			hopEntry.StatusText, hopEntry.StatusTextFull = sentencesOf(sentence.Entry{BetweenStages: &e}, words)
 			break
 		}
 	}
@@ -1048,13 +1112,17 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		return nil
 	}
 
+	pending := toPendingReactionResponses(pendingRows, words)
+
 	var status string
+	var statusText, statusTextFull string
 	var entryIdentifier, entryIssueID string
 	var issue issueResponse
 
 	switch {
 	case runEntry != nil:
 		status = "running"
+		statusText, statusTextFull = runEntry.StatusText, runEntry.StatusTextFull
 		entryIdentifier, entryIssueID = runEntry.IssueIdentifier, runEntry.IssueID
 		issue = issueResponse{
 			Title:     runEntry.IssueTitle,
@@ -1065,6 +1133,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		}
 	case retryEntry != nil:
 		status = "retrying"
+		statusText, statusTextFull = retryEntry.StatusText, retryEntry.StatusTextFull
 		entryIdentifier, entryIssueID = retryEntry.IssueIdentifier, retryEntry.IssueID
 		issue = issueResponse{
 			Title:     retryEntry.IssueTitle,
@@ -1075,6 +1144,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		}
 	case budgetEntry != nil:
 		status = "budget_exhausted"
+		statusText, statusTextFull = budgetEntry.StatusText, budgetEntry.StatusTextFull
 		entryIdentifier, entryIssueID = budgetEntry.IssueIdentifier, budgetEntry.IssueID
 		issue = issueResponse{
 			Title:     budgetEntry.IssueTitle,
@@ -1085,6 +1155,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		}
 	case parkedEntry != nil:
 		status = "parked"
+		statusText, statusTextFull = parkedEntry.StatusText, parkedEntry.StatusTextFull
 		entryIdentifier, entryIssueID = parkedEntry.IssueIdentifier, parkedEntry.IssueID
 		issue = issueResponse{
 			Title: parkedEntry.IssueTitle,
@@ -1093,6 +1164,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		}
 	case len(pendingRows) > 0:
 		status = "pending_reactions"
+		deciding := decidingPendingReaction(pending)
+		statusText, statusTextFull = deciding.StatusText, deciding.StatusTextFull
 		entryIdentifier, entryIssueID = pendingRows[0].Identifier, pendingRows[0].IssueID
 		issue = issueResponse{
 			Title: pendingRows[0].IssueTitle,
@@ -1100,6 +1173,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		}
 	case hopEntry != nil:
 		status = "between_stages"
+		statusText, statusTextFull = hopEntry.StatusText, hopEntry.StatusTextFull
 		entryIdentifier, entryIssueID = hopEntry.IssueIdentifier, hopEntry.IssueID
 		issue = issueResponse{
 			Title: hopEntry.IssueTitle,
@@ -1145,12 +1219,26 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		Retry:            retryEntry,
 		BudgetExhausted:  budgetEntry,
 		Parked:           parkedEntry,
-		PendingReactions: toPendingReactionResponses(pendingRows),
+		PendingReactions: pending,
 		BetweenStages:    hopEntry,
 		RecentEvents:     []any{},
 		LastError:        lastError,
 		Tracked:          map[string]any{},
+		StatusText:       statusText,
+		StatusTextFull:   statusTextFull,
 	}
+}
+
+// decidingPendingReaction returns the first escalated row of a non-empty
+// list, else its first row: the row that decides what the issue is waiting
+// on.
+func decidingPendingReaction(rows []pendingReactionResponse) pendingReactionResponse {
+	for _, row := range rows {
+		if row.EscalatedAt != nil {
+			return row
+		}
+	}
+	return rows[0]
 }
 
 // healthResponse is the JSON wire format for GET /livez.

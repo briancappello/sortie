@@ -12,6 +12,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 // renderDashboard renders data through the template [New] serves.
@@ -128,7 +129,7 @@ func TestUsageDeclaration_NoneArrivalDiscardedEndToEnd(t *testing.T) {
 		t.Error("rendered dashboard is missing the incremental session's model name")
 	}
 
-	resp := toStateResponse(snap, rates)
+	resp := toStateResponse(snap, rates, sentence.Context{})
 
 	var noneResp, incResp runningEntryResponse
 	var foundNoneResp, foundIncResp bool

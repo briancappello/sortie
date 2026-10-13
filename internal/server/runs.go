@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 const (
@@ -88,6 +89,9 @@ type issueOutcomeResponse struct {
 	State       *string              `json:"state,omitempty"`
 	MergePath   string               `json:"merge_path,omitempty"`
 	PullRequest *pullRequestResponse `json:"pull_request,omitempty"`
+
+	StatusText     string `json:"status_text"`
+	StatusTextFull string `json:"status_text_full"`
 }
 
 // selfReviewResponse is the self-review outcome of one run.
@@ -302,16 +306,45 @@ func toRunResponses(rows []RunHistoryEntry, rates TokenRates) []runResponse {
 }
 
 // toIssueOutcomeResponse converts an outcome to its wire format, masking the
-// free-text members at serve time.
-func toIssueOutcomeResponse(o IssueOutcome) *issueOutcomeResponse {
+// free-text members at serve time. The identifiers name the issue in the
+// sentence of how it ended.
+func toIssueOutcomeResponse(o IssueOutcome, identifier, displayID string) *issueOutcomeResponse {
+	outcome := sentenceOutcomeOf(o)
 	resp := &issueOutcomeResponse{Kind: o.Kind, ObservedAt: o.ObservedAt}
 	if o.Kind == "merged" {
-		resp.MergePath = orchestrator.ReactionConfigKey(o.MergeReactionKind)
+		resp.MergePath = outcome.MergePath
 		resp.PullRequest = &pullRequestResponse{Number: o.PRNumber, Repository: redact.Mask(o.PRRepository)}
-		return resp
+	} else {
+		resp.State = new(outcome.State)
 	}
-	resp.State = new(redact.Mask(o.State))
+	finished := &sentence.Finished{Identifier: identifier, DisplayIdentifier: displayID, Outcome: &outcome}
+	resp.StatusText, resp.StatusTextFull = sentencesOf(sentence.Entry{Finished: finished}, sentence.Context{})
 	return resp
+}
+
+// sentenceOutcomeOf is the outcome as the sentence table reads it: the
+// members the API serves for the outcome's kind, masked as served.
+func sentenceOutcomeOf(o IssueOutcome) sentence.Outcome {
+	if o.Kind == "merged" {
+		return sentence.Outcome{Kind: o.Kind, MergePath: orchestrator.ReactionConfigKey(o.MergeReactionKind), PRNumber: o.PRNumber}
+	}
+	return sentence.Outcome{Kind: o.Kind, State: redact.Mask(o.State)}
+}
+
+// finishedOf describes an issue no live entry holds by its newest run's hop
+// decision and its outcome; hasOutcome is false when Sortie recorded none.
+func finishedOf(newest RunHistoryEntry, o IssueOutcome, hasOutcome bool) *sentence.Finished {
+	finished := &sentence.Finished{
+		Identifier:        newest.Identifier,
+		DisplayIdentifier: newest.DisplayID,
+		StageTarget:       newest.StageTarget,
+		StageResult:       newest.StageResult,
+	}
+	if hasOutcome {
+		outcome := sentenceOutcomeOf(o)
+		finished.Outcome = &outcome
+	}
+	return finished
 }
 
 // attachIssueOutcomes sets each run's issue_outcome from the outcome of its
@@ -319,7 +352,7 @@ func toIssueOutcomeResponse(o IssueOutcome) *issueOutcomeResponse {
 func attachIssueOutcomes(rows []runResponse, outcomes map[string]IssueOutcome) {
 	for i := range rows {
 		if o, ok := outcomes[rows[i].IssueID]; ok {
-			rows[i].IssueOutcome = toIssueOutcomeResponse(o)
+			rows[i].IssueOutcome = toIssueOutcomeResponse(o, rows[i].IssueIdentifier, rows[i].DisplayIdentifier)
 		}
 	}
 }

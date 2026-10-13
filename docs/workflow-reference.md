@@ -1876,10 +1876,10 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/`                      | HTML dashboard — server-rendered status page with running sessions, retry queue, token totals, timing breakdown, and recent events. Auto-refreshes. |
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
-| GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). |
-| GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. |
-| GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Returns 404 only when neither the current state nor run history knows the identifier. |
-| POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. |
+| GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
+| GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
+| GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue. Returns 404 only when neither the current state nor run history knows the identifier. |
+| POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
 All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints). Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
@@ -2021,7 +2021,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "estimated_cost_usd": 0.014595,
       "cost_status": "estimated",
       "issue_estimated_cost_usd": 0.235095,
-      "issue_cost_status": "estimated"
+      "issue_cost_status": "estimated",
+      "status_text": "Fixing CI on #927, fix 1 of 2",
+      "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2."
     }
   ],
   "retrying": [
@@ -2052,7 +2054,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
         "hop_count": 1,
         "hop_ceiling": 10
       },
-      "paused": false
+      "paused": false,
+      "status_text": "Retry 3 in 30s: no agent slot was free",
+      "status_text_full": "MT-650's retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
     }
   ],
   "budget_exhausted": [
@@ -2077,7 +2081,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "stage_lineage": null,
       "stage_position": null,
       "agent_kind": "claude-code",
-      "configured_model": "claude-sonnet-4-20250514"
+      "configured_model": "claude-sonnet-4-20250514",
+      "status_text": "Held: session budget reached",
+      "status_text_full": "MT-651 is held at its session budget of 3. Sessions used: 3."
     }
   ],
   "parked": [
@@ -2090,7 +2096,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "parked_state": "In Progress",
       "label": "needs-human",
       "label_applied": true,
-      "parked_at": "2026-02-24T20:05:00Z"
+      "parked_at": "2026-02-24T20:05:00Z",
+      "status_text": "Parked: the agent needs a person",
+      "status_text_full": "MT-652 is parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
     }
   ],
   "pending_reactions": [
@@ -2123,7 +2131,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
         "failing": 1,
         "pending": 0,
         "passing": 4
-      }
+      },
+      "status_text": "CI escalated on #931",
+      "status_text_full": "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
     },
     {
       "issue_id": "mno345",
@@ -2150,7 +2160,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
         "observed_at": "2026-02-24T20:15:10Z",
         "actionable_comments": 3,
         "new_comments": 1
-      }
+      },
+      "status_text": "1 new review comment on #931; next check in 35s",
+      "status_text_full": "MT-653 has 1 new review comment on PR #931 (3 actionable) and waits for the comments to settle; next check in 35s. Review fix runs used: 1 of 3."
     }
   ],
   "between_stages": [
@@ -2163,7 +2175,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "target_rule": "implement",
       "target_label": "stage-implement",
       "hopped_at": "2026-02-24T20:13:45Z",
-      "dispatched_at": "2026-02-24T19:47:30Z"
+      "dispatched_at": "2026-02-24T19:47:30Z",
+      "status_text": "Between stages: specify to implement",
+      "status_text_full": "MT-654 moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
     }
   ],
   "agent_totals": {
@@ -2425,6 +2439,24 @@ Each row of `between_stages`, and the `between_stages` object of the per-issue r
 | `hopped_at`          | string or `null` | When the hop was made, as an RFC 3339 timestamp in UTC. Always present. `null` when the record holds no time. |
 | `dispatched_at`      | string or `null` | When Sortie dispatched the first run of the pass of the run that made the hop, in UTC, which the next stage's run continues, as a running row's `dispatched_at` describes it. Always present. `null` when the record holds no pass time. |
 
+**Status sentence fields:**
+
+Every row of `running`, `retrying`, `budget_exhausted`, `parked`, `pending_reactions`, and `between_stages`, on both routes that serve them, carries these two keys. So does the per-issue response itself and every `issue_outcome`. Both are always present and never empty.
+
+| Field              | Type   | Description |
+| ------------------ | ------ | ----------- |
+| `status_text`      | string | The short sentence, for a row or a lane. It ends without a period. |
+| `status_text_full` | string | The long sentence, for the issue page. It ends with a period. |
+
+A sentence says in plain English what the issue is doing, what it waits on, or how it ended. The rules are the same for every row kind:
+
+- Sentences are English. Sortie renders them on each request from the snapshot, the `config` the response serves, and run history, and stores none. A relative time such as "in 40s" is measured from `generated_at`.
+- A sentence states only a fact Sortie records for the row, in `config`, or in run history. A figure Sortie does not have reads as not measured, never as zero, and a figure that is only a lower bound reads as at least.
+- A sentence states no cost and no clock time or date, and uses stage wording only when the workflow has stage chains.
+- A sentence is masked like `issue_title`, so a value registered as a secret after it was stored is masked too.
+- A sentence that fails to render is served as `Status not available`, and Sortie logs the failure.
+- Every structured field a sentence is built from stays served. A client that needs data reads the fields and does not parse the text.
+
 **Aggregate totals:**
 
 | Field               | Type    | Description                                                                                             |
@@ -2531,6 +2563,8 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
   "issue_identifier": "MT-649",
   "issue_id": "abc123",
   "status": "running",
+  "status_text": "Fixing CI on #927, fix 1 of 2",
+  "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2.",
   "issue": {
     "title": "Fix the flaky login test",
     "url": "https://tracker.example.com/browse/MT-649",
@@ -2607,7 +2641,9 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     "estimated_cost_usd": 0.014595,
     "cost_status": "estimated",
     "issue_estimated_cost_usd": 0.235095,
-    "issue_cost_status": "estimated"
+    "issue_cost_status": "estimated",
+    "status_text": "Fixing CI on #927, fix 1 of 2",
+    "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2."
   },
   "retry": null,
   "budget_exhausted": null,
@@ -2687,6 +2723,8 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
 ```
 
 The `running` object uses the same per-session field schema as `GET /api/v1/state` (see the per-session fields table above). `status` is `"running"` when the issue has a running session, `"retrying"` when it does not but has a pending retry, `"budget_exhausted"` when it has neither but is held out of dispatch by a per-issue budget ceiling, `"parked"` when it is none of those but is parked, `"pending_reactions"` when it is none of those but a pending pull request reaction holds it, `"between_stages"` when it is none of those but a stage hop advanced it and its next stage has no run yet, and `"history"` when it is none of those but run history holds runs of it. The fields for whichever cases do not apply are `null`. `budget_exhausted` carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state`, `parked` the record shape of the `parked` array, and `between_stages` the row shape of the `between_stages` array, `null` when the issue is not between stages. `pending_reactions` is always present: the issue's rows in the record shape and order of the `pending_reactions` array on `GET /api/v1/state`, `[]` when the issue has none, whatever the status. A parked-only, pending-reaction-only, between-stages-only, or history-only response carries a `null` `workspace`, zero `attempts`, and a `null` `last_error`, as a budget-exhausted one does. `last_error` is the retry's `error`, so after a reschedule it is the reschedule reason.
+
+`status_text` and `status_text_full` at the top level are the status sentence pair of the row that decides `status`. For `pending_reactions` they are the pair of the first served row whose `escalated_at` is non-null, and of the first served row when none is. For `history` they word how the issue ended from its outcome and the newest run's hop decision, so a handoff that followed a stage hop that was not made names the stage it did not reach, and an issue with no outcome says that Sortie recorded no ending. The pair is present on every `200` response.
 
 `issue` is present on every `200` response, built from the entry that decides `status`. Its members take the names of the prompt template's `issue` variable, and each is omitted when that entry holds none, so the object is `{}` when it holds none of them. All are masked like the running row's `issue_title`. `labels` is `[]` when the entry holds labels and the issue carries none.
 
@@ -2779,7 +2817,9 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
         "kind": "merged",
         "observed_at": "2026-02-24T21:02:10Z",
         "merge_path": "auto_merge",
-        "pull_request": {"number": 936, "repository": "acme/web"}
+        "pull_request": {"number": 936, "repository": "acme/web"},
+        "status_text": "Merged #936",
+        "status_text_full": "MT-649 ended merged: auto-merge merged PR #936."
       }
     }
   ],
@@ -2825,7 +2865,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `reaction_config_key`    | string or `null`   | The key of the `reactions` section of `WORKFLOW.md` that `reaction_kind` is configured under. `""` or `null` exactly when `reaction_kind` is. |
 | `session_id`             | string or `null`   | The agent session the run used, `""` when it started none, `null` when not recorded. Not masked. |
 | `ssh_host`               | string or `null`   | The SSH worker the run executed on, `""` for a local run, `null` when not recorded. |
-| `issue_outcome`          | object or `null`   | How the issue's latest work ended, as Sortie observed it, or `null` when Sortie observed no ending since it last picked the issue up, or when the issue ended before outcomes were recorded. Always present. It belongs to the issue, so every run of one issue carries the same object, and it is served as recorded whatever the issue's live state. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is when Sortie made or observed the ending, in UTC. `state` is present for `handed_off` and `terminal`: the state the handoff wrote, or the terminal state Sortie read. `merge_path` and `pull_request` are present for `merged`: `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key that observed the merge, and `pull_request` holds `number` and `repository`. `state` and `repository` are masked like `issue_title`. |
+| `issue_outcome`          | object or `null`   | How the issue's latest work ended, as Sortie observed it, or `null` when Sortie observed no ending since it last picked the issue up, or when the issue ended before outcomes were recorded. Always present. It belongs to the issue, so every run of one issue carries the same object, and it is served as recorded whatever the issue's live state. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is when Sortie made or observed the ending, in UTC. `state` is present for `handed_off` and `terminal`: the state the handoff wrote, or the terminal state Sortie read. `merge_path` and `pull_request` are present for `merged`: `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key that observed the merge, and `pull_request` holds `number` and `repository`. `state` and `repository` are masked like `issue_title`. `status_text` and `status_text_full` are always present: the sentence of how the issue ended, worded from the outcome alone, so a stage hop that was not made appears only in the top-level pair of a `history` response. |
 
 The recorded CI result of a failing check is a run with `status` `ci_failed`, no agent kind, and `""` in each origin key, because it records a verdict and nothing started it.
 
@@ -2847,24 +2887,26 @@ Triggers an immediate poll+reconciliation cycle. The endpoint is best-effort: re
 
 ```http
 HTTP/1.1 202 Accepted
-{"queued": true, "coalesced": false, "requested_at": "...", "operations": ["poll", "reconcile"]}
+{"queued": true, "coalesced": false, "requested_at": "...", "operations": ["poll", "reconcile"], "outcome_text": "Tracker poll and reconciliation queued."}
 ```
 
 **Coalesced response** — a refresh was already pending:
 
 ```http
 HTTP/1.1 202 Accepted
-{"queued": true, "coalesced": true, "requested_at": "...", "operations": ["poll", "reconcile"]}
+{"queued": true, "coalesced": true, "requested_at": "...", "operations": ["poll", "reconcile"], "outcome_text": "A tracker poll and reconciliation was already queued; this request joined it."}
 ```
 
 **Drain rejection** — orchestrator is shutting down:
 
 ```http
 HTTP/1.1 409 Conflict
-{"queued": false, "coalesced": false, "requested_at": "...", "operations": []}
+{"queued": false, "coalesced": false, "requested_at": "...", "operations": [], "outcome_text": "Nothing queued: Sortie is shutting down."}
 ```
 
 Callers should check the `queued` field or HTTP status to determine whether the refresh will be processed. A `409` response indicates the server is draining and the caller should retry against another instance or wait for the restart.
+
+Every response carries `outcome_text`, one sentence that states what the response confirms: a poll and reconciliation that was queued, one that was already queued and that this request joined, or that nothing was queued. It never states an effect still to come.
 
 **Kubernetes probe configuration.** Sortie's graceful shutdown cancels running agents before closing the HTTP listener. Configure `terminationGracePeriodSeconds` and liveness probe tolerance to exceed the expected drain duration (default: 30 seconds):
 

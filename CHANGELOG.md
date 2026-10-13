@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API now reports how each issue ended, with the time Sortie saw it: handed off, merged with its pull request and whether auto-merge or merge completion saw the merge, or moved to a terminal tracker state. `/api/v1/runs` and `/api/v1/{identifier}` carry it as `issue_outcome`, which is `null` for an issue Sortie has not seen end, and `/api/v1/runs` also lists the runs of the issues that ended in a time range with `ended_since` and `ended_until`. ([#1313](https://github.com/sortie-ai/sortie/issues/1313))
 
+- The JSON API now describes in one plain English sentence what each issue is doing or waiting on, short for lists and long for an issue page: every running, retrying, budget-held, parked, and between-stages issue and every pending pull request reaction on `/api/v1/state`, and the issue itself on `/api/v1/{identifier}`, including how a finished issue ended, which every run on `/api/v1/runs` also carries. `POST /api/v1/refresh` also says what it queued. A figure Sortie does not have reads as not measured rather than zero, and every structured field stays as it was. ([#1310](https://github.com/sortie-ai/sortie/issues/1310))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
