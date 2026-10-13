@@ -223,6 +223,33 @@ func TestStatsGroupDisclosure(t *testing.T) {
 	}
 }
 
+func TestPricerReceivesEveryTokenCounter(t *testing.T) {
+	t.Parallel()
+
+	var got domain.TokenUsage
+	agg := New(fullCaps, func(_ string, usage domain.TokenUsage) *float64 {
+		got = usage
+		return nil
+	})
+	addRows(t, agg, persistence.RunStatsRow{
+		Status:           "succeeded",
+		AgentAdapter:     "mock",
+		StartedAt:        "2026-01-01T00:00:00Z",
+		CompletedAt:      "2026-01-01T00:01:00Z",
+		InputTokens:      100,
+		OutputTokens:     20,
+		TotalTokens:      120,
+		CacheReadTokens:  30,
+		CacheWriteTokens: 10,
+		TokensMeasured:   true,
+	})
+
+	want := domain.TokenUsage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120, CacheReadTokens: 30, CacheWriteTokens: 10}
+	if got != want {
+		t.Errorf("Pricer usage = %+v, want %+v", got, want)
+	}
+}
+
 func TestStatsSelfReview(t *testing.T) {
 	t.Parallel()
 

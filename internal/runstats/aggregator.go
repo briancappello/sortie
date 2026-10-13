@@ -64,6 +64,7 @@ func priceOf(row persistence.RunStatsRow, price Pricer) *float64 {
 	usage := domain.TokenUsage{
 		InputTokens:      row.InputTokens,
 		OutputTokens:     row.OutputTokens,
+		TotalTokens:      row.TotalTokens,
 		CacheReadTokens:  row.CacheReadTokens,
 		CacheWriteTokens: row.CacheWriteTokens,
 	}
