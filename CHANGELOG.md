@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `/api/v1/{identifier}` now lists what Sortie will do next for an issue, each as a condition and a plain English sentence, for example what happens if the current stage succeeds, if CI fails again on its pull request, or once the pull request merges. The list follows the workflow in effect, including the fixes left before Sortie calls a person, the escalation label, the session and token budgets, the stage hop limit, and when Sortie stops watching a pull request, which each pending pull request reaction now also reports. The workflow shape also says which pull request reactions run a triage command first. ([#1312](https://github.com/sortie-ai/sortie/issues/1312))
 
+- The JSON API now serves run statistics at `/api/v1/stats`: the report `sortie stats --format json` prints, for the same `since` and `until` range, so a dashboard can show success rates, durations, tokens, and estimated cost without reading the database file. It prices runs at the `token_rates` Sortie started with and reads the database without holding up the orchestrator. `sortie stats` and the route now also count the issues the runs belong to and break the runs down by retry trigger. ([#1293](https://github.com/sortie-ai/sortie/issues/1293))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))

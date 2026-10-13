@@ -1343,7 +1343,7 @@ dispatch:
         effort: max           # model inherited from the top-level block
 ```
 
-Issues with neither label run on the top-level block. `sortie stats` groups the runs by rule, by configured model, and by stage chain.
+Issues with neither label run on the top-level block. `sortie stats` groups the runs by rule, by configured model, by stage chain, and by retry trigger.
 
 Two work profiles on two kinds fit in one workflow. A rule that introduces a kind other than `agent.kind` and carries that kind's block needs no top-level block for it:
 
@@ -1878,6 +1878,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
+| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger, priced at the `token_rates` the process started with. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
@@ -2972,6 +2973,184 @@ The recorded CI result of a failing check is a run with `status` `ci_failed`, no
 
 A request whose filters match fewer runs than the page holds reads run history down to its start, and a read waits for the database connection the orchestrator uses, so a narrow filter on a long history takes longer than a page of recent runs.
 
+#### `GET /api/v1/stats`: run statistics
+
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, and retry trigger. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+
+**Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
+
+| Parameter | Value                                         | Selects |
+| --------- | --------------------------------------------- | ------- |
+| `since`   | A range bound                                 | The runs completed at or after it. |
+| `until`   | A range bound                                 | The runs completed before it. When both are given, `since` MUST be before `until`. |
+
+A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date such as `2026-07-01` (00:00:00 UTC that day), or a positive Go duration such as `24h` or `168h`, which counts back from the instant of the request. The command takes the same values for `--since` and `--until`. A timestamp without an offset, a zero or negative duration, a duration in days such as `7d`, and any other text are malformed.
+
+```json
+{
+  "generated_at": "2026-02-24T20:15:30Z",
+  "workflow_path": "/srv/sortie/WORKFLOW.md",
+  "db_path": "/srv/sortie/.sortie.db",
+  "since": "2026-02-23T20:15:30Z",
+  "until": null,
+  "schema_tier": "full",
+  "warnings": [],
+  "summary": {
+    "runs": 6,
+    "issues": 5,
+    "succeeded": 3,
+    "success_rate": 0.5,
+    "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
+    "mean_turns_succeeded": 4,
+    "tokens": {"input": 3900000, "output": 760000, "total": 4660000, "cache_read": 50000, "cache_write": 10000},
+    "cost_usd": 19.52,
+    "cost_per_succeeded_run_usd": 6.51,
+    "zero_duration_runs": 1,
+    "duration_excluded_runs": 1,
+    "cost_unpriced_runs": 1,
+    "tokens_unmeasured_runs": 1
+  },
+  "by_status": [
+    {
+      "name": "succeeded",
+      "runs": 3,
+      "succeeded": 3,
+      "success_rate": 1,
+      "share": 0.5,
+      "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
+      "mean_turns": 4,
+      "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000},
+      "cost_usd": 17.87,
+      "cost_per_succeeded_run_usd": 5.96,
+      "tokens_unmeasured_runs": 0
+    }
+  ],
+  "by_adapter": [],
+  "by_rule": [],
+  "by_template": [],
+  "by_model": [],
+  "by_chain": [
+    {
+      "name": "3c8v1n6w0z4y7t2s5r9q8p1mkd",
+      "runs": 2,
+      "succeeded": 2,
+      "success_rate": 1,
+      "share": 0.3333,
+      "duration_seconds": {"p50": 600, "p95": 1800, "mean": 1200, "samples": 2},
+      "mean_turns": 4,
+      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 50000, "cache_write": 10000},
+      "cost_usd": 17.87,
+      "cost_per_succeeded_run_usd": 8.94,
+      "tokens_unmeasured_runs": 0,
+      "issue": "MT-649",
+      "stages": ["implement", "review"],
+      "last_hop": "advanced"
+    }
+  ],
+  "by_trigger": [
+    {
+      "name": "<unknown>",
+      "runs": 4,
+      "succeeded": 2,
+      "success_rate": 0.5,
+      "share": 0.6667,
+      "duration_seconds": {"p50": 600, "p95": 1800, "mean": 900, "samples": 4},
+      "mean_turns": 3,
+      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
+      "cost_usd": 12.25,
+      "cost_per_succeeded_run_usd": 6.13,
+      "tokens_unmeasured_runs": 1
+    }
+  ],
+  "self_review": {
+    "runs_with_metadata": 2,
+    "by_final_verdict": [{"verdict": "iterate", "runs": 1}, {"verdict": "pass", "runs": 1}],
+    "cap_reached_runs": 1,
+    "mean_iterations": 2.5,
+    "unparsed_runs": 1
+  }
+}
+```
+
+The example omits the members of the breakdowns other than `by_status`, `by_chain`, and `by_trigger`; every breakdown is a list of groups of the same shape.
+
+**Envelope fields:**
+
+| Field            | Type              | Description |
+| ---------------- | ----------------- | ----------- |
+| `generated_at`   | string            | The instant of the request, as an RFC 3339 timestamp in UTC. Relative bounds count back from it. |
+| `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
+| `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
+| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, and `by_trigger` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
+| `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. The warnings of the `token_rates` the process started with follow. |
+| `summary`        | object            | The report-wide figures, below. |
+| `by_status`      | array of groups   | One group per run status. |
+| `by_adapter`     | array of groups   | One group per agent kind. `<none>` names the runs that carry no agent kind, a recorded CI result included. |
+| `by_rule`        | array of groups   | One group per dispatch rule name, as in the `rule_name` of a run row. `<none>` names the runs that ran on the workflow-wide fallback. |
+| `by_template`    | array of groups   | One group per prompt template the rule selected, named as the run recorded it, which can be a host path. `<none>` names the runs that recorded none. |
+| `by_model`       | array of groups   | One group per configured model, `<none>` for the runs that configured none. |
+| `by_chain`       | array of chain groups | One entry per stage chain in which a hop was due or made. It is a listing, not a partition: runs outside a chain, and chains without a hop, are absent. |
+| `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
+| `self_review`    | object or `null`  | The self-review results, below. `null` on the `base` tier. |
+
+Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[]` rather than `null` when it holds no group.
+
+**`summary` fields:**
+
+| Field                        | Type             | Description |
+| ---------------------------- | ---------------- | ----------- |
+| `runs`                       | integer          | The runs completed in the range. |
+| `issues`                     | integer          | The distinct issues the counted runs belong to, `0` when no run is in range. A recorded CI result counts its issue like any other run. |
+| `succeeded`                  | integer          | The runs whose status is `succeeded`. |
+| `success_rate`               | number           | `succeeded` divided by `runs`, from `0` to `1`, `0` when no run is in range. |
+| `duration_seconds`           | object           | `p50`, `p95`, `mean`, and `samples` over the succeeded runs. Each of them is `null` when `samples` is `0`. |
+| `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
+| `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage. `null` on the `base` tier and when no run reported usage. |
+| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier and when no run is priced, which includes a workflow without `token_rates`. |
+| `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage. `null` when `cost_usd` is, and when no succeeded run reported usage. |
+| `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |
+| `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
+| `cost_unpriced_runs`         | integer          | The runs that reported usage under an agent kind with no complete `token_rates` entry, when `token_rates` is configured. |
+| `tokens_unmeasured_runs`     | integer          | The runs that reported no usage. They add nothing to `tokens` and `cost_usd`. |
+
+**Group fields.** Each breakdown entry is a group.
+
+| Field                        | Type             | Description |
+| ---------------------------- | ---------------- | ----------- |
+| `name`                       | string           | The value the group collects. |
+| `runs`, `succeeded`          | integer          | The runs in the group and how many succeeded. |
+| `success_rate`               | number           | `succeeded` divided by `runs`. In `by_status` it is structural: the `succeeded` group reports `1`. |
+| `share`                      | number           | `runs` divided by `summary.runs`, from `0` to `1`. |
+| `duration_seconds`           | object           | As in `summary`, over every run in the group rather than the succeeded ones. |
+| `mean_turns`                 | number or `null` | The mean turns of the group's runs. `null` on the `base` tier. |
+| `tokens`                     | object or `null` | As in `summary`, over the group's runs. |
+| `cost_usd`, `cost_per_succeeded_run_usd` | number or `null` | As in `summary`, over the group's runs. |
+| `tokens_unmeasured_runs`     | integer          | The group's runs that reported no usage. |
+
+**`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
+
+**`by_trigger` names.** A group is named by the trigger value the runs stored: `error`, `continuation`, `stall`, or `ci_fix`, as in the `trigger` of a run row. `<none>` names the runs whose trigger is the empty string: runs dispatched from the poll tick, runs a reaction started, and recorded CI results. `<unknown>` names the runs whose row records no trigger: runs recorded before Sortie kept the trigger, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, so their `runs` sum to `summary.runs`. `by_trigger` carries no other names, and is `[]` on a database that lacks the trigger column, which the first `warnings` entry then states.
+
+**`self_review` fields:** `runs_with_metadata`, the runs that carry a self-review record; `by_final_verdict`, a list of `verdict` and `runs` pairs in ascending verdict order, where the verdict is `pass`, `iterate`, or `none` for a record with an empty verdict; `cap_reached_runs`, the runs whose self-review stopped at its iteration cap; `mean_iterations`, `null` when `runs_with_metadata` is `0`; and `unparsed_runs`, the records that could not be read. With no run in range the full tier still serves the object, with zero counts and `mean_iterations` `null`.
+
+**`null` versus `0`.** A count is `0` when nothing matches. A figure that needs a measurement is `null` when no run supplies one: a run that reported no usage adds nothing to `tokens`, `cost_usd`, or their per-run figures, and a run that no `token_rates` entry prices adds nothing to `cost_usd`. Neither is reported as a zero.
+
+Pricing uses the `token_rates` the process started with, the same rates `config.token_rates` of `GET /api/v1/state` serves. `sortie stats` reads the workflow file each time it runs, so after an edit of `token_rates` the command and the route price differently until the process restarts.
+
+The report holds no free text, so the route masks nothing in it. The host paths in `workflow_path` and `db_path`, and any in the `by_template` names, are served as the command prints them.
+
+**Errors:**
+
+| Condition | Status | `error.code` |
+| --------- | ------ | ------------ |
+| A parameter other than `since` and `until`, a parameter given more than once, a value that is not a range bound, or `since` not before `until` | 400 | `invalid_parameter`; the message names the parameter and the rule, for example `parameter "since" must be before until`. No run is read. |
+| The read fails, or the server has no run history to read | 503 | `history_unavailable` |
+| A method other than `GET` | 405 | `method_not_allowed` |
+
+A client that disconnects during the read gets no response, and the read stops.
+
+Each request opens its own read-only connection to the database and closes it when the report is built. It never uses the connection the orchestrator holds, so a report over a long history does not delay the orchestrator's writes.
+
 #### `POST /api/v1/refresh`
 
 Triggers an immediate poll+reconciliation cycle. The endpoint is best-effort: repeated requests while a refresh is already pending are coalesced. During graceful shutdown the endpoint rejects requests with `409 Conflict`.
@@ -3188,13 +3367,13 @@ token_rates:
     cache_read_per_mtok: 0.25
 ```
 
-When `token_rates` is configured, the dashboard displays estimated USD cost for currently running sessions, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, and the `sortie stats` subcommand prices the runs it aggregates from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
+When `token_rates` is configured, the dashboard displays estimated USD cost for currently running sessions, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, and the `sortie stats` subcommand and `GET /api/v1/stats` price the runs they aggregate from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
 
 Every figure Sortie prices is a fresh-input token, a cache-read token, a cache-write token, or an output token, priced once each at its own rate. An unset `cache_read_per_mtok` or `cache_write_per_mtok` prices that class at `input_per_mtok`, so a configuration that sets neither keeps pricing every input token, cached or not, at the input rate. `claude-code`, `copilot-cli`, and `opencode` report a cache-write count; an operator of one of those kinds sets `cache_write_per_mtok` to that provider's cache-write rate to price it separately.
 
 One rate set prices every model of a kind alike: two models of one kind run under different dispatch rules are priced at the same rates, so the savings from routing show in token counts before they show in money.
 
-When `token_rates` is absent or empty, the dashboard shows raw token counts without cost estimates, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` reports no cost figures.
+When `token_rates` is absent or empty, the dashboard shows raw token counts without cost estimates, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
 
 The `config.token_rates` member of `GET /api/v1/state` serves the rates the process started with: an entry per agent kind keyed as written, each rate `null` when not set, and `complete`, `true` exactly when both `input_per_mtok` and `output_per_mtok` are set. It is `null` when `token_rates` is absent or empty.
 
@@ -3217,9 +3396,9 @@ An entry keyed to a kind whose usage-reporting declaration resolves to no token 
 - An entry needs both `input_per_mtok` and `output_per_mtok` to price anything. An entry missing either one, or holding neither, prices nothing: its kind counts as unpriced on the dashboard, the JSON API, and `sortie stats`, the same as a kind `token_rates` never names. This holds even when the incomplete entry is the only one `token_rates` configures.
 - Zero-valued rates are valid and produce `$0.00` for that token type.
 - An entry keyed to the empty string is dropped and produces a warning; it prices no kind.
-- Every warning above is a configuration advisory under check `token_rates` (Section 8): it reaches the run log once per configuration change, `sortie validate`'s diagnostics without affecting `valid` or the exit status, and the dry run. `sortie stats` also lists its own `token_rates` warnings in its report, because they decide which runs it prices.
+- Every warning above is a configuration advisory under check `token_rates` (Section 8): it reaches the run log once per configuration change, `sortie validate`'s diagnostics without affecting `valid` or the exit status, and the dry run. `sortie stats` and `GET /api/v1/stats` also list their own `token_rates` warnings in their report, because they decide which runs they price.
 
-**Reload behavior:** Token rates do not reload dynamically. Changes require a process restart, consistent with `server.port` and `server.host`, so `config.token_rates` keeps serving the rates the process started with until then.
+**Reload behavior:** Token rates do not reload dynamically. Changes require a process restart, consistent with `server.port` and `server.host`, so `config.token_rates` keeps serving the rates the process started with until then. `GET /api/v1/stats` prices at those same rates and lists their warnings, while `sortie stats` reads the workflow file each time it runs, so after an edit of `token_rates` the two price differently until the restart.
 
 ### 4.5 Adapter-Specific Pass-Through Config
 
@@ -4115,7 +4294,7 @@ A `handoff_state` or `in_progress_state` that collides with `active_states` or `
 
 These offline checks never contact Linear and never log the API key value. State-name existence against the team and credential validity are checked by the online preflight at adapter construction, not by `sortie validate`.
 
-**Configuration advisories.** A configuration advisory is recorded once, when the configuration that draws it is built or loaded, and never printed at that point. Every advisory reaches an operator through the same three surfaces: `sortie validate` reports it once as a `warning` diagnostic and never fails the run for it; the running orchestrator logs it once at the tick that first draws it, and again only after a tick whose configuration did not draw it; a dry run logs it once, before it fetches candidate issues. `sortie mcp-server` never prints an advisory. `sortie stats` is the one exception: it lists its own `token_rates` warnings in its report, because they decide which runs it prices.
+**Configuration advisories.** A configuration advisory is recorded once, when the configuration that draws it is built or loaded, and never printed at that point. Every advisory reaches an operator through the same three surfaces: `sortie validate` reports it once as a `warning` diagnostic and never fails the run for it; the running orchestrator logs it once at the tick that first draws it, and again only after a tick whose configuration did not draw it; a dry run logs it once, before it fetches candidate issues. `sortie mcp-server` never prints an advisory. The stats report, from `sortie stats` or `GET /api/v1/stats`, is the one exception: it lists its own `token_rates` warnings, because they decide which runs it prices.
 
 | Check                                                     | Condition                                                                                          |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
