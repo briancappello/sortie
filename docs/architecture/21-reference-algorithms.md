@@ -994,7 +994,9 @@ function advance_stage(state, entry, result, declared) -> decision:
     chain_id: entry.stage_lineage.chain_id,
     dispatched_at: entry.stage_lineage.dispatched_at,
     display_identifier: entry.issue.display_id,
-    issue_title: entry.issue.title, issue_url: entry.issue.url
+    issue_title: entry.issue.title, issue_url: entry.issue.url,
+    issue_type: entry.issue.issue_type, issue_state: entry.issue.state,
+    issue_labels: labels_after_hop(entry.issue.labels, cfg.dispatch.rules, target.stage)
   }
   persist_stage_hop(state.stage_hops[issue_id])        // a failure is logged; the runtime record stands
 
@@ -1022,6 +1024,8 @@ function report_stage_hop(state, entry, run_id, hop):
   event = stage_event(type, entry, hop)                // reason is hop.result on stage.not_advanced only
   deliver_detached(route(event))                       // on a failed tracker_comment send: log_warn("stage event comment failed")
 ```
+
+`labels_after_hop` returns the labels the removal loop below leaves on the issue: the dispatch read's labels in order, without each stage label of the configured rules other than `target.stage`, followed by `target.stage` lowercased when no kept label matches it. The record is written before the removals run, so a removal that fails leaves a stage label on the issue that the record lacks until a run is dispatched.
 
 `advance_stage` returns a decision whose result is `advanced`, `partial`, `failed`, `ceiling`, or empty when no hop was due, and `made` holds for `advanced` and `partial`. The exit calls `report_stage_hop` for every non-empty result: for a hop not made it records the result and routes the event before the handoff write, and for a made hop after the label removals.
 

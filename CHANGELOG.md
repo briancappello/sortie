@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API now describes in one plain English sentence what each issue is doing or waiting on, short for lists and long for an issue page: every running, retrying, budget-held, parked, and between-stages issue and every pending pull request reaction on `/api/v1/state`, and the issue itself on `/api/v1/{identifier}`, including how a finished issue ended, which every run on `/api/v1/runs` also carries. `POST /api/v1/refresh` also says what it queued. A figure Sortie does not have reads as not measured rather than zero, and every structured field stays as it was. ([#1310](https://github.com/sortie-ai/sortie/issues/1310))
 
+- The JSON API (`/api/v1/state` and `/api/v1/{identifier}`) now shows the dispatch rule, place in the stage chain, agent, model, issue type, labels, and tracker state of parked issues, of issues waiting on a pull request reaction, and of issues waiting for their next stage, and when Sortie picked up each parked issue, so a client can keep every active issue in a stable order. A parked issue keeps all of them across a restart. ([#1321](https://github.com/sortie-ai/sortie/issues/1321))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -67,6 +69,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `unaccounted_turns INTEGER NOT NULL DEFAULT 0` to `session_metadata`. An older row reads zero and belongs to no running session. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
 
 - Add the `issue_outcomes` table, one row per issue recording how its latest work ended. An issue that ended before the upgrade reports no outcome. ([#1313](https://github.com/sortie-ai/sortie/issues/1313))
+
+- Add `rule_name`, `agent_kind`, `configured_model`, `stage_previous`, `stage_previous_outcome`, `chain_id`, `dispatched_at`, `issue_type`, and `issue_labels` to `parked_issues`, and `issue_type`, `issue_labels`, and `issue_state` to `stage_hops`. An issue parked before the upgrade takes its rule, stage, agent, model, and pick-up time from its last run before the park, and its issue type and labels from the next poll that lists it; an issue waiting for its next stage at the upgrade shows no issue type, labels, or state while it waits. ([#1321](https://github.com/sortie-ai/sortie/issues/1321))
 
 ## [1.27.0] - 2026-10-11
 
