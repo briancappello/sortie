@@ -1724,6 +1724,46 @@ func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 	})
 }
 
+func TestOrchestrator_UnaccountedTurnsRelayWritesWithoutWorkerExit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a relayed count reaches the in-flight row inside the throttle interval", func(t *testing.T) {
+		t.Parallel()
+
+		issueID := "ISSUE-RELAY-WRITE"
+		state := NewState(60000, 4, 0, nil, AgentTotals{})
+		entry := queuedOrderingIssueEntry(issueID)
+		entry.LastMetadataWrite = time.Now().UTC()
+		state.Running[issueID] = entry
+		store := &stubStore{}
+		o := budgetOrchestrator(state, budgetTickConfig(0), store, &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}})
+		o.drainTimeout = 100 * time.Millisecond
+		written := make(chan persistence.SessionMetadata, 8)
+		store.onUpsertSessionMetadata = func(meta persistence.SessionMetadata) { written <- meta }
+		o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: issueID, UnaccountedTurns: 3}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			o.Run(ctx)
+			close(done)
+		}()
+
+		var got persistence.SessionMetadata
+		select {
+		case got = <-written:
+		case <-time.After(5 * time.Second):
+			t.Error("UpsertSessionMetadata not called within 5 seconds of the relay, want one")
+		}
+		cancel()
+		<-done
+
+		if got.UnaccountedTurns != 3 || got.DispatchID != entry.DispatchID {
+			t.Errorf("SessionMetadata (UnaccountedTurns, DispatchID) = (%d, %q), want (3, %q)", got.UnaccountedTurns, got.DispatchID, entry.DispatchID)
+		}
+	})
+}
+
 // waitForTurnCount polls snapshots until issueID reports want, failing on
 // a larger value or at the deadline. Run applies turn-started messages
 // asynchronously to snapshot requests, so a single read can race ahead.
@@ -6576,6 +6616,7 @@ func incrementalWriteOrchestrator(t *testing.T, store *stubStore) (*Orchestrator
 		CacheWriteTokens:  3,
 		ModelName:         "test-model",
 		APIRequestCount:   2,
+		UnaccountedTurns:  2,
 	}
 	state.Running["id-1"] = entry
 	tracker := &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}}
@@ -6613,6 +6654,9 @@ func TestMaybeWriteIncrementalMetadata(t *testing.T) {
 		}
 		if meta.ModelName != "test-model" {
 			t.Errorf("SessionMetadata.ModelName = %q, want %q", meta.ModelName, "test-model")
+		}
+		if meta.UnaccountedTurns != 2 {
+			t.Errorf("SessionMetadata.UnaccountedTurns = %d, want 2", meta.UnaccountedTurns)
 		}
 		if entry.LastMetadataWrite.IsZero() {
 			t.Error("RunningEntry.LastMetadataWrite still zero after successful write")

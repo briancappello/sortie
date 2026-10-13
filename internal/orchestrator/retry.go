@@ -288,28 +288,29 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	// announcement memory when it already knows this issue under the same
 	// reason, so a hold surviving a gap in candidacy keeps its onset time.
 	blocked := false
-	blockBudget := func(reason string, usedSessions int, usedTokens *int64, unmeasuredSessions *int, stoppedInFlight *int) {
+	blockBudget := func(reason string, usedSessions int, usage *persistence.IssueTokenUsage) {
 		at := time.Now().UTC()
 		if told, wasTold := state.BudgetAnnounced[issueID]; wasTold && told.Reason == reason {
 			at = told.At
 		}
-		state.BudgetExhausted[issueID] = &BudgetExhaustedEntry{
-			Identifier:         popped.Identifier,
-			DisplayID:          popped.DisplayID,
-			IssueIdentity:      popped.IssueIdentity,
-			Reason:             reason,
-			UsedSessions:       usedSessions,
-			BudgetSessions:     params.MaxSessions,
-			UsedTokens:         usedTokens,
-			BudgetTokens:       int64(params.MaxTokens),
-			UnmeasuredSessions: unmeasuredSessions,
-			StoppedInFlight:    stoppedInFlight,
-			ExhaustedAt:        at,
-			RuleName:           popped.RuleName,
-			StageLineage:       popped.StageLineage,
-			AgentKind:          popped.AgentKind,
-			ConfiguredModel:    popped.ConfiguredModel,
+		entry := &BudgetExhaustedEntry{
+			Identifier:      popped.Identifier,
+			DisplayID:       popped.DisplayID,
+			IssueIdentity:   popped.IssueIdentity,
+			Reason:          reason,
+			UsedSessions:    usedSessions,
+			BudgetSessions:  params.MaxSessions,
+			BudgetTokens:    int64(params.MaxTokens),
+			ExhaustedAt:     at,
+			RuleName:        popped.RuleName,
+			StageLineage:    popped.StageLineage,
+			AgentKind:       popped.AgentKind,
+			ConfiguredModel: popped.ConfiguredModel,
 		}
+		if usage != nil {
+			entry.setTokenUsage(*usage)
+		}
+		state.BudgetExhausted[issueID] = entry
 		delete(state.Claimed, issueID)
 		if !blocked {
 			if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
@@ -335,7 +336,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 				slog.Int("count", count),
 				slog.Int("max_sessions", params.MaxSessions),
 			)
-			blockBudget(budgetReasonSession, count, nil, nil, nil)
+			blockBudget(budgetReasonSession, count, nil)
 		}
 	}
 
@@ -357,14 +358,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 				slog.Int("used_sessions", usage.Sessions),
 				slog.Int("budget_sessions", params.MaxSessions),
 			)
-			blockBudget(budgetReasonToken, usage.Sessions, &usage.TotalTokens, &usage.UnmeasuredSessions, &usage.StoppedInFlight)
+			blockBudget(budgetReasonToken, usage.Sessions, &usage)
 		} else {
 			if blocked {
-				// Session gate already blocked; enrich the entry with both
+				// Session gate already blocked; enrich the entry with the
 				// token fields, mirroring the rebuild's enrichment.
-				state.BudgetExhausted[issueID].UsedTokens = &usage.TotalTokens
-				state.BudgetExhausted[issueID].UnmeasuredSessions = &usage.UnmeasuredSessions
-				state.BudgetExhausted[issueID].StoppedInFlight = &usage.StoppedInFlight
+				state.BudgetExhausted[issueID].setTokenUsage(usage)
 			}
 			if usage.SpendIncomplete() {
 				warnTokenBudgetIncomplete(log, usage, params.MaxTokens)

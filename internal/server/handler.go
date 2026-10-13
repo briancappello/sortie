@@ -292,9 +292,9 @@ type budgetExhaustedResponse struct {
 	DispatchedAt       *time.Time             `json:"dispatched_at"`
 	Reason             string                 `json:"reason"`
 	UsedSessions       int                    `json:"used_sessions"`
-	BudgetSessions     int                    `json:"budget_sessions"`
+	BudgetSessions     *int                   `json:"budget_sessions"`
 	UsedTokens         *int64                 `json:"used_tokens"`
-	BudgetTokens       int64                  `json:"budget_tokens"`
+	BudgetTokens       *int64                 `json:"budget_tokens"`
 	UnmeasuredSessions *int                   `json:"unmeasured_sessions"`
 	StoppedInFlight    *int                   `json:"stopped_in_flight"`
 	ExhaustedAt        time.Time              `json:"exhausted_at"`
@@ -445,7 +445,7 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 	var completedIncomplete bool
 	if usage := e.IssueUsage; usage != nil {
 		completed = usage.TotalTokens
-		completedIncomplete = issueSpendIncomplete(usage)
+		completedIncomplete = orchestrator.SpendIncomplete(usage.UnmeasuredSessions, usage.UnaccountedTurns)
 		resp.UsedSessions = new(usage.Sessions)
 		resp.UnmeasuredSessions = new(usage.UnmeasuredSessions)
 	}
@@ -475,12 +475,6 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 	resp.EstimatedCostUSD, resp.CostStatus = sessionCostOf(e, rates)
 	resp.IssueEstimatedCostUSD, resp.IssueCostStatus = issueCostOf(e, resp.UsedTokens, resp.UsedTokensComplete, resp.EstimatedCostUSD, resp.CostStatus, rates)
 	return resp
-}
-
-// issueSpendIncomplete reports whether usage.TotalTokens leaves spend out,
-// by the same condition the persistence layer applies to its own figure.
-func issueSpendIncomplete(usage *orchestrator.SnapshotIssueUsage) bool {
-	return usage.UnmeasuredSessions > 0 || usage.UnaccountedTurns > 0
 }
 
 // utcOrNil returns the UTC value of at, or nil for the zero time, so a time
@@ -613,6 +607,14 @@ func toPendingReactionResponses(rows []orchestrator.SnapshotPendingReaction) []p
 }
 
 func toBudgetExhaustedResponse(e orchestrator.SnapshotBudgetEntry) budgetExhaustedResponse {
+	var budgetSessions *int
+	if e.BudgetSessions > 0 {
+		budgetSessions = new(e.BudgetSessions)
+	}
+	var budgetTokens *int64
+	if e.BudgetTokens > 0 {
+		budgetTokens = new(e.BudgetTokens)
+	}
 	return budgetExhaustedResponse{
 		IssueID:            e.IssueID,
 		IssueIdentifier:    e.Identifier,
@@ -625,9 +627,9 @@ func toBudgetExhaustedResponse(e orchestrator.SnapshotBudgetEntry) budgetExhaust
 		DispatchedAt:       utcOrNil(e.StageLineage.DispatchedAt),
 		Reason:             e.Reason,
 		UsedSessions:       e.UsedSessions,
-		BudgetSessions:     e.BudgetSessions,
-		UsedTokens:         e.UsedTokens,
-		BudgetTokens:       e.BudgetTokens,
+		BudgetSessions:     budgetSessions,
+		UsedTokens:         heldUsedTokens(e),
+		BudgetTokens:       budgetTokens,
 		UnmeasuredSessions: e.UnmeasuredSessions,
 		StoppedInFlight:    e.StoppedInFlight,
 		ExhaustedAt:        e.ExhaustedAt,
@@ -637,6 +639,23 @@ func toBudgetExhaustedResponse(e orchestrator.SnapshotBudgetEntry) budgetExhaust
 		AgentKind:          e.AgentKind,
 		ConfiguredModel:    e.ConfiguredModel,
 	}
+}
+
+// heldUsedTokens returns the held issue's token sum, or nil when the sum is
+// unread or is a zero that leaves spend out: that zero would stand in for
+// spend Sortie does not know.
+func heldUsedTokens(e orchestrator.SnapshotBudgetEntry) *int64 {
+	if e.UsedTokens == nil {
+		return nil
+	}
+	var unmeasured int
+	if e.UnmeasuredSessions != nil {
+		unmeasured = *e.UnmeasuredSessions
+	}
+	if *e.UsedTokens == 0 && orchestrator.SpendIncomplete(unmeasured, e.UnaccountedTurns) {
+		return nil
+	}
+	return e.UsedTokens
 }
 
 func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRates) stateResponse {

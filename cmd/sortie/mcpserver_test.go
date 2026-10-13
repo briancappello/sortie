@@ -267,8 +267,11 @@ func seedBudgetStore(t *testing.T, dispatchID string) *persistence.Store {
 		TotalTokens: 150,
 		UpdatedAt:   "2026-03-19T10:02:00Z",
 	}
-	if err := rw.UpsertSessionMetadata(ctx, meta); err != nil {
-		t.Fatalf("UpsertSessionMetadata: %v", err)
+	for _, unaccounted := range []int{0, 2} {
+		meta.UnaccountedTurns = unaccounted
+		if err := rw.UpsertSessionMetadata(ctx, meta); err != nil {
+			t.Fatalf("UpsertSessionMetadata(unaccounted %d): %v", unaccounted, err)
+		}
 	}
 
 	if err := rw.Close(); err != nil {
@@ -308,6 +311,9 @@ func TestBuildBudgetQuery(t *testing.T) {
 		if usage.RunningTotalTokens != 150 {
 			t.Errorf("RunningTotalTokens = %d, want 150 (dispatch_id matches)", usage.RunningTotalTokens)
 		}
+		if usage.UnaccountedTurns != 2 {
+			t.Errorf("UnaccountedTurns = %d, want 2 (running row's count after the conflict update)", usage.UnaccountedTurns)
+		}
 	})
 
 	t.Run("stale dispatch row with different id is excluded", func(t *testing.T) {
@@ -326,6 +332,9 @@ func TestBuildBudgetQuery(t *testing.T) {
 		}
 		if usage.RunningTotalTokens != 0 {
 			t.Errorf("RunningTotalTokens = %d, want 0 (stale dispatch row)", usage.RunningTotalTokens)
+		}
+		if usage.UnaccountedTurns != 0 {
+			t.Errorf("UnaccountedTurns = %d, want 0 (stale dispatch row)", usage.UnaccountedTurns)
 		}
 	})
 

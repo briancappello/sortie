@@ -516,12 +516,22 @@ func (o *Orchestrator) applyTurnStarted(msg turnStartedMsg) {
 	entry.TurnCount = msg.TurnsStarted
 }
 
-func (o *Orchestrator) applyUnaccountedTurns(msg unaccountedTurnsMsg) {
+// applyUnaccountedTurns records a relayed unaccounted-turn count on the
+// issue's running entry and, once the session's in-flight row exists, writes
+// it at once so the read-only tool server sees the count without waiting for
+// the throttle or the worker exit. Before that row exists the count waits
+// for the first write, which keeps a row existing exactly when the session
+// reported a measurement. A no-op for an unknown issue.
+func (o *Orchestrator) applyUnaccountedTurns(ctx context.Context, msg unaccountedTurnsMsg) {
 	entry, ok := o.state.Running[msg.IssueID]
 	if !ok {
 		return
 	}
 	entry.UnaccountedTurns = msg.UnaccountedTurns
+	if entry.LastMetadataWrite.IsZero() {
+		return
+	}
+	o.writeIncrementalMetadata(ctx, msg.IssueID, entry, time.Now().UTC())
 }
 
 // applyQueuedAheadOfExit applies the messages queued ahead of the
@@ -535,7 +545,9 @@ func (o *Orchestrator) applyQueuedAheadOfExit(ctx context.Context, exitingIssueI
 	})
 	applyQueued(o.selfReviewCh, o.applySelfReviewProgress)
 	applyQueued(o.turnStartedCh, o.applyTurnStarted)
-	applyQueued(o.unaccountedTurnsCh, o.applyUnaccountedTurns)
+	applyQueued(o.unaccountedTurnsCh, func(msg unaccountedTurnsMsg) {
+		o.applyUnaccountedTurns(ctx, msg)
+	})
 }
 
 // handleWorkerExit takes workerExit and every WorkerResult already waiting
@@ -681,6 +693,9 @@ func (o *Orchestrator) Run(ctx context.Context) {
 
 		case msg := <-o.turnStartedCh:
 			o.applyTurnStarted(msg)
+
+		case msg := <-o.unaccountedTurnsCh:
+			o.applyUnaccountedTurns(ctx, msg)
 
 		case req := <-o.snapshotCh:
 			snap := RuntimeSnapshot(o.state, time.Now())
@@ -1272,7 +1287,8 @@ const drainExitMargin = 30 * time.Second
 // incremental write per issue per interval, so the advisory cost reading
 // trails live spend by at most one interval plus whatever accrued since
 // the last token_usage event. A pending write, set when a usage figure
-// reaches [State.TokenWarningThreshold], bypasses this bound.
+// reaches [State.TokenWarningThreshold], and the write a relayed
+// unaccounted-turn count triggers bypass this bound.
 const sessionMetadataWriteInterval = 2 * time.Second
 
 // maybeWriteIncrementalMetadata persists a running session's token totals
@@ -1298,7 +1314,14 @@ func (o *Orchestrator) maybeWriteIncrementalMetadata(ctx context.Context, issueI
 	if !entry.MetadataWritePending && !entry.LastMetadataWrite.IsZero() && now.Sub(entry.LastMetadataWrite) < sessionMetadataWriteInterval {
 		return
 	}
+	o.writeIncrementalMetadata(ctx, issueID, entry, now)
+}
 
+// writeIncrementalMetadata upserts a running session's token totals and
+// unaccounted-turn count under its dispatch ID, then restarts the throttle
+// and clears any owed write. A failed upsert is logged and leaves both
+// untouched. Must run on the single-writer event loop.
+func (o *Orchestrator) writeIncrementalMetadata(ctx context.Context, issueID string, entry *RunningEntry, now time.Time) {
 	// An unmeasured count is stored as zero so a reader cannot find a figure
 	// contradicting the qualifier beside it.
 	requestsMeasured := apiRequestsMeasured(entry.UsageArrival, entry.TurnCount, entry.APIRequestCount)
@@ -1318,6 +1341,7 @@ func (o *Orchestrator) maybeWriteIncrementalMetadata(ctx context.Context, issueI
 		ModelName:           entry.ModelName,
 		APIRequestCount:     requestCount,
 		APIRequestsMeasured: requestsMeasured,
+		UnaccountedTurns:    entry.UnaccountedTurns,
 		UpdatedAt:           now.Format(time.RFC3339),
 	}
 	if entry.AgentPID != "" {
@@ -1603,24 +1627,21 @@ func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.Se
 			for _, id := range candidateIDs {
 				usage := usageByIssue[id]
 				if usage.TotalTokens >= int64(cfg.Agent.MaxTokens) {
-					fresh[id] = &BudgetExhaustedEntry{
-						Identifier:         identifierByID[id],
-						DisplayID:          displayIDByID[id],
-						IssueIdentity:      identityByID[id],
-						Reason:             budgetReasonToken,
-						UsedSessions:       usage.Sessions,
-						BudgetSessions:     cfg.Agent.MaxSessions,
-						UsedTokens:         &usage.TotalTokens,
-						BudgetTokens:       int64(cfg.Agent.MaxTokens),
-						UnmeasuredSessions: &usage.UnmeasuredSessions,
-						StoppedInFlight:    &usage.StoppedInFlight,
+					entry := &BudgetExhaustedEntry{
+						Identifier:     identifierByID[id],
+						DisplayID:      displayIDByID[id],
+						IssueIdentity:  identityByID[id],
+						Reason:         budgetReasonToken,
+						UsedSessions:   usage.Sessions,
+						BudgetSessions: cfg.Agent.MaxSessions,
+						BudgetTokens:   int64(cfg.Agent.MaxTokens),
 					}
+					entry.setTokenUsage(usage)
+					fresh[id] = entry
 					continue
 				}
 				if entry, held := fresh[id]; held {
-					entry.UsedTokens = &usage.TotalTokens
-					entry.UnmeasuredSessions = &usage.UnmeasuredSessions
-					entry.StoppedInFlight = &usage.StoppedInFlight
+					entry.setTokenUsage(usage)
 				}
 				if !usage.SpendIncomplete() {
 					continue
@@ -1813,7 +1834,9 @@ func (o *Orchestrator) drainRunningWorkers() {
 			})
 			applyQueued(o.selfReviewCh, o.applySelfReviewProgress)
 			applyQueued(o.turnStartedCh, o.applyTurnStarted)
-			applyQueued(o.unaccountedTurnsCh, o.applyUnaccountedTurns)
+			applyQueued(o.unaccountedTurnsCh, func(msg unaccountedTurnsMsg) {
+				o.applyUnaccountedTurns(drainCtx, msg)
+			})
 			cfg := o.workflowManager.Config()
 			o.updateRouter(cfg)
 			HandleWorkerExit(o.state, workerExit, HandleWorkerExitParams{
@@ -1857,7 +1880,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 			o.applyTurnStarted(msg)
 
 		case msg := <-o.unaccountedTurnsCh:
-			o.applyUnaccountedTurns(msg)
+			o.applyUnaccountedTurns(drainCtx, msg)
 
 		case req := <-o.snapshotCh:
 			snap := RuntimeSnapshot(o.state, time.Now())
