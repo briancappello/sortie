@@ -72,6 +72,7 @@ func PopulateRetries(state *State, entries []persistence.PendingRetry, log *slog
 			AgentKind:        e.AgentKind,
 			ConfiguredModel:  e.ConfiguredModel,
 			Trigger:          e.Trigger,
+			OriginTrigger:    e.OriginTrigger,
 			scheduledDelayMS: pending.RemainingMs,
 		}
 		state.Claimed[e.IssueID] = struct{}{}

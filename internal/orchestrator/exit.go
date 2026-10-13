@@ -393,6 +393,21 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 	issueIdentity := issueIdentityOf(entry.Issue)
 
+	// Prefer workerResult.SessionID (authoritative from the adapter) over
+	// entry.SessionID, which depends on EventSessionStarted having been
+	// processed before exit.
+	sessionID := workerResult.SessionID
+	if sessionID == "" {
+		sessionID = entry.SessionID
+	}
+
+	// A retry restored from a row that never stored what started it holds
+	// neither a trigger nor a reaction kind; its origin is unknown, not none.
+	var trigger *string
+	if entry.RetryAttempt == nil || entry.Trigger != "" || entry.ReactionKind != "" {
+		trigger = new(entry.Trigger)
+	}
+
 	// RunHistory.Attempt is 1-based for display; normalizeAttempt returns the
 	// 0-based retry counter, so add 1.
 	runHistory := persistence.RunHistory{
@@ -428,6 +443,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		StagePreviousOutcome: entry.StageLineage.PreviousOutcome,
 		ChainID:              entry.StageLineage.ChainID,
 		DispatchedAt:         formatDispatchedAt(entry.StageLineage.DispatchedAt),
+
+		Trigger:      trigger,
+		ReactionKind: entry.ReactionKind,
+		SessionID:    sessionID,
+		SSHHost:      entry.SSHHost,
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
@@ -449,13 +469,6 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		}
 	}
 
-	// Prefer workerResult.SessionID (authoritative from the adapter) over
-	// entry.SessionID, which depends on EventSessionStarted having been
-	// processed before exit.
-	sessionID := workerResult.SessionID
-	if sessionID == "" {
-		sessionID = entry.SessionID
-	}
 	// The entry lags the worker's tally when the context ended before a
 	// turn-started message was delivered; a turn that errored still ran.
 	turnsSeen := max(entry.TurnCount, workerResult.TurnsStarted)

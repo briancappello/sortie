@@ -770,6 +770,10 @@ func TestReconcileCIStatus_Failing_UnderMaxRetries(t *testing.T) {
 	if !store.runHistories[0].TokensMeasured {
 		t.Error("RunHistory.TokensMeasured = false, want true (no agent session ran, so zero spend is exact)")
 	}
+	completedAt := store.runHistories[0].CompletedAt
+	if _, err := time.Parse(time.RFC3339, completedAt); err != nil || !strings.HasSuffix(completedAt, "Z") {
+		t.Errorf("RunHistory.CompletedAt = %q, want an RFC 3339 instant in UTC (suffix %q)", completedAt, "Z")
+	}
 
 	if len(store.savedEntries) != 0 {
 		t.Errorf("SaveRetryEntry called %d times; want 0 (in-memory retry only)", len(store.savedEntries))
@@ -847,32 +851,64 @@ func TestReconcileCIStatus_FailingHeadServesTheContinuationOnTheRunningRow(t *te
 	}
 }
 
-func TestReconcileCIStatus_Failing_RunHistoryCompletedAtIsUTC(t *testing.T) {
+func TestReconcileCIStatus_FailingHead_FixRunRecordsCIFixOrigin(t *testing.T) {
 	t.Parallel()
 
-	state := stateWithPendingReaction(t, "ISS-CI-UTC", "feature/break", 1)
-	store := &ciReconcileStore{getFingerprintResult: ciDefaultHead}
-	metrics := newCIMetricsSpy()
-	ci := &mockCIProvider{result: domain.CIResult{
-		Status:       domain.CIStatusFailing,
-		FailingCount: 1,
-		CheckRuns: []domain.CheckRun{
-			{Name: "lint", Status: domain.CheckRunStatusCompleted, Conclusion: domain.CheckConclusionFailure},
-		},
-	}}
-	params := ciParams(t, store, ci, nil, defaultCISCM())
-
-	reconcileCIStatus(state, params, discardLogger(), context.Background(), metrics)
-
-	if len(store.runHistories) != 1 {
-		t.Fatalf("AppendRunHistory call count = %d, want 1", len(store.runHistories))
+	tests := []struct {
+		name    string
+		putBack bool
+	}{
+		{name: "dispatched on the first fire"},
+		{name: "dispatched after a fire that found no free slot", putBack: true},
 	}
-	completedAt := store.runHistories[0].CompletedAt
-	if !strings.HasSuffix(completedAt, "Z") {
-		t.Errorf("RunHistory.CompletedAt = %q, want suffix %q", completedAt, "Z")
-	}
-	if _, err := time.Parse(time.RFC3339, completedAt); err != nil {
-		t.Errorf("time.Parse(RFC3339, %q): %v", completedAt, err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			const issueID = "ISS-CI-ORIGIN"
+			state := stateWithPendingReaction(t, issueID, "feature/break", 1)
+			ciStore := &ciReconcileStore{getFingerprintResult: ciDefaultHead}
+			ci := &mockCIProvider{result: domain.CIResult{Status: domain.CIStatusFailing, FailingCount: 1}}
+			reconcileCIStatus(state, ciParams(t, ciStore, ci, nil, defaultCISCM()), discardLogger(), context.Background(), newCIMetricsSpy())
+			t.Cleanup(func() { stopRetryTimer(state, issueID) })
+			tracker := &mockRetryTracker{fetchedIssue: candidateIssue(issueID, issueID+"-ident", "In Progress")}
+			retryParams := defaultRetryParams(t, &mockRetryStore{}, tracker)
+
+			if tt.putBack {
+				state.RetryAttempts[issueID].scheduledAt = time.Time{}
+				state.MaxConcurrentAgents = 1
+				state.Running["OTHER-1"] = &RunningEntry{Identifier: "OTHER-1", Issue: candidateIssue("OTHER-1", "OTHER-1", "In Progress")}
+				HandleRetryTimer(state, issueID, retryParams)
+				if got := state.RetryAttempts[issueID]; got == nil || got.Trigger != triggerTimer {
+					t.Fatalf("retry after a fire with no free slot = %+v, want one with Trigger %q", got, triggerTimer)
+				}
+				delete(state.Running, "OTHER-1")
+			}
+			state.RetryAttempts[issueID].scheduledAt = time.Time{}
+			state.RetryAttempts[issueID].scheduledDelayMS = 0
+			HandleRetryTimer(state, issueID, retryParams)
+			exitStore := &mockExitStore{}
+			HandleWorkerExit(state, WorkerResult{
+				IssueID:      issueID,
+				Identifier:   issueID + "-ident",
+				ExitKind:     WorkerExitNormal,
+				AgentAdapter: "mock",
+			}, defaultExitParams(t, exitStore))
+
+			if len(exitStore.runHistories) != 1 {
+				t.Fatalf("AppendRunHistory called %d times by the fix run's exit, want 1", len(exitStore.runHistories))
+			}
+			if rh := exitStore.runHistories[0]; triggerText(rh.Trigger) != `"ci_fix"` || rh.ReactionKind != ReactionKindCI {
+				t.Errorf("fix run history trigger, reaction kind = %s, %q, want %q, %q", triggerText(rh.Trigger), rh.ReactionKind, "ci_fix", ReactionKindCI)
+			}
+			if len(ciStore.runHistories) != 1 {
+				t.Fatalf("AppendRunHistory called %d times by the failing verdict, want 1", len(ciStore.runHistories))
+			}
+			if got := triggerText(ciStore.runHistories[0].Trigger); got != `""` {
+				t.Errorf("ci_failed run history Trigger = %s, want %q", got, "")
+			}
+		})
 	}
 }
 

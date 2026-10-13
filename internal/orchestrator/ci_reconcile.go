@@ -442,6 +442,7 @@ func handleCIFailure(
 			TokensMeasured: true,
 			ChainID:        pending.StageLineage.ChainID,
 			DispatchedAt:   formatDispatchedAt(pending.StageLineage.DispatchedAt),
+			Trigger:        new(""),
 		}
 		if _, err := params.Store.AppendRunHistory(ctx, ciRunHistory); err != nil {
 			log.Error("failed to persist CI failure run history",
