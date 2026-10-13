@@ -410,6 +410,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Removing the retired-kind advisory makes a test fail
 - The state route's workflow shape lists the dispatch rules in configuration order with how each is selected, the chains in `next` order, and only the reaction kinds the process applies, and no credential value from any configuration location appears in it
 - The state route's `health` block reports a reload of an invalid workflow file with its masked error while the previous configuration stays in effect, a failed preflight with its error text, and a failed candidate read; a check failing twice reports two consecutive failures and its last success; a clean start reports every check passing
+- Every status sentence template renders from an input built for the state it words and never serves the fallback text; a workflow without stage chains yields no stage wording; a figure Sortie did not measure reads as not measured, and a lower bound reads as at least; every row kind of the state route and the per-issue response carries its sentence, each naming its own issue; and the refresh response carries its outcome sentence
 
 ### 17.7 CLI and Host Lifecycle
 
