@@ -355,12 +355,16 @@ func TestStateConfig_LimitsAndReactions(t *testing.T) {
 				"token_rates.codex.cache_read_per_mtok":        "null",
 				"token_rates.codex.cache_write_per_mtok":       "null",
 				"reactions.ci_failure.max_retries":             "3",
+				"reactions.ci_failure.triage":                  "true",
 				"reactions.ci_failure.escalation_label":        `"needs-human"`,
+				"reactions.review_comments.triage":             "false",
 				"reactions.review_comments.escalation_label":   `"triage-me"`,
 				"reactions.review_comments.debounce_ms":        "30000",
 				"reactions.review_comments.poll_interval_ms":   "90000",
+				"reactions.bot_review.triage":                  "false",
 				"reactions.bot_review.escalation_label":        pathAbsent,
 				"reactions.bot_review.poll_interval_ms":        "45000",
+				"reactions.merge_conflicts.triage":             "false",
 				"reactions.merge_conflicts.escalation_label":   pathAbsent,
 				"reactions.merge_conflicts.poll_interval_ms":   "75000",
 				"reactions.auto_merge.max_retries":             "null",
@@ -385,6 +389,22 @@ dispatch:
 				"worker.ssh_hosts":                      "[]",
 				"worker.max_concurrent_agents_per_host": "null",
 				"dispatch.rules":                        `[{"name":"silent","selected_by":"catch_all","agent_kind":"claude-code","usage_arrival":"none"}]`,
+			},
+		},
+		{
+			name: "triage scripts on every kind but ci failure",
+			yaml: shapeBaseYAML + `
+reactions:
+  ci_failure: {provider: github}
+  review_comments: {provider: github, triage: {script: echo review}}
+  bot_review: {provider: github, triage: {script: echo bot}}
+  merge_conflicts: {provider: github, triage: {script: echo conflict}}
+`,
+			want: map[string]string{
+				"reactions.ci_failure.triage":      "false",
+				"reactions.review_comments.triage": "true",
+				"reactions.bot_review.triage":      "true",
+				"reactions.merge_conflicts.triage": "true",
 			},
 		},
 	}

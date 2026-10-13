@@ -13,11 +13,12 @@ import (
 const fallbackText = "Status not available"
 
 // parts holds the template sources of one table entry: short and long for a
-// state sentence, text for an outcome.
+// state sentence, text for an outcome, condition and text for a next outcome.
 type parts struct {
-	short string
-	long  string
-	text  string
+	short     string
+	long      string
+	text      string
+	condition string
 }
 
 // Fragments shared by several templates.
@@ -35,6 +36,14 @@ const (
 	newComments  = "{{plural .New \"new review comment\" \"new review comments\"}}"
 	watched      = "{{if .Label}}the `{{.Label}}` label{{else}}a label command{{end}}"
 	parkingLabel = "Parking label: `{{.Label}}`{{if .Unseen}} (not yet seen on the issue){{end}}."
+	inNext       = "{{if .Window}} in the next {{duration .Window}}{{end}}"
+	heldAt       = "{{if .TokenHold}}token budget of {{tokens .Budget}}{{else}}session budget ({{count .Sessions}} of {{count .MaxSessions}} sessions used){{end}}"
+	ofMax        = "{{if .Max}} of {{count .Max}}{{end}}"
+	posture      = "{{if eq .Escalation \"label\"}}applies `{{.EscalationLabel}}` to {{.Key}}" +
+		"{{else if eq .Escalation \"comment\"}}comments on {{.Key}}" +
+		"{{else}}sends `escalation.{{.ConfigKey}}` only to the notification destinations that subscribe to it{{end}}"
+	afterAhead = "{{if eq .Ahead \"retry\"}} after {{retry .AheadTrigger .AheadRunInline .AheadAttempt}} ends" +
+		"{{else if eq .Ahead \"run\"}} after the current run ends{{end}}"
 )
 
 var table = map[string]parts{
@@ -213,6 +222,44 @@ var table = map[string]parts{
 		long:  "{{.Key}} is not active, and Sortie recorded no ending for its latest work.",
 	},
 
+	"next_if_run_succeeds": {condition: "If the run succeeds"},
+	"next_if_run_fails":    {condition: "If the run fails"},
+	"next_if_tokens_reach": {condition: "If {{.Key}}'s token use reaches {{tokens .Budget}}"},
+	"next_when_retry_due":  {condition: "When {{retry .Trigger .RunInline .Attempt}} comes due"},
+	"next_when_label_read": {condition: "When a poll tick reads `{{.Label}}` on {{.Key}}"},
+	"next_if_ci_fails":     {condition: "If a check" + inNext + " finds CI failing on PR #{{.PR}}"},
+	"next_if_review_comments": {condition: "{{if .Settle}}When the new review comments on PR #{{.PR}} settle" + inNext +
+		"{{else}}If a check" + inNext + " finds new review comments on PR #{{.PR}}{{end}}"},
+	"next_if_bot_comments": {condition: "If a check" + inNext + " finds " +
+		"{{if .Spent}}a new review bot comment on the code of PR #{{.PR}}{{else}}new review bot comments on PR #{{.PR}}{{end}}"},
+	"next_if_merge_conflict": {condition: "If a check" + inNext + " finds a new merge conflict on PR #{{.PR}}"},
+	"next_when_merge_ready": {condition: "When a check" + inNext + " finds that PR #{{.PR}} " +
+		"{{if .RequireCI}}passes CI and meets its other merge conditions{{else}}meets its merge conditions{{end}}"},
+	"next_when_pr_merges": {condition: "When PR #{{.PR}} merges"},
+	"next_if_label_added": {condition: "If `{{.Label}}` is added to PR #{{.PR}}"},
+
+	"next_stage":      {text: "Sortie adds `{{.Label}}`, and a poll tick then starts stage {{.Next}} in a new session."},
+	"next_stage_held": {text: "Sortie adds `{{.Label}}`, then holds {{.Key}} at its " + heldAt + " before stage {{.Next}} starts."},
+	"next_handoff": {text: "{{if .AtCeiling}}The hop count is at its ceiling ({{count .Hops}} of {{count .Ceiling}}), so stage {{.Next}} does not start: {{end}}" +
+		"Sortie moves {{.Key}} to {{.Handoff}}" +
+		"{{if .NoChange}}, or to {{.NoChange}} if the agent reports that nothing needed changing{{end}}" +
+		"{{if .Watch}}, and a pull request the run leaves gets the {{series .Watch}} {{if gt (len .Watch) 1}}reactions{{else}}reaction{{end}}{{end}}."},
+	"next_continue":   {text: "Sortie dispatches another session for {{.Key}} if it is still in an active state."},
+	"next_backoff":    {text: "Sortie retries {{.Key}} with exponential backoff."},
+	"next_token_stop": {text: "Sortie stops the session and holds {{.Key}} at its token budget."},
+	"next_dispatch": {text: "Sortie dispatches {{.Key}}" + onStage + " in a new session" +
+		"{{if .ActiveState}} if it is still in an active state{{end}}."},
+	"next_stage_start": {text: "Stage {{.Next}} starts in a new session."},
+	"next_fix": {text: "Sortie dispatches {{.Run}} {{count .N}}" + ofMax +
+		"{{if .Debounce}} once no newer comment arrives for {{duration .Debounce}}{{end}}."},
+	"next_escalate": {text: "{{.Runs}} are used up ({{count .Used}} of {{count .Max}}), so Sortie " + posture + " and {{.After}}." +
+		"{{if .Restart}} A new commit that no Sortie run made can restart the count.{{end}}"},
+	"next_triage":           {text: "Sortie runs the triage command, and its answer decides what follows."},
+	"next_held":             {text: "Sortie holds {{.Key}} at its " + heldAt + "."},
+	"next_auto_merge":       {text: "Auto-merge merges it with the {{.Strategy}} strategy{{if .DeleteBranch}} and deletes its branch{{end}}."},
+	"next_merge_completion": {text: "Sortie moves {{.Key}} to {{.State}}."},
+	"next_label_command":    {text: "Sortie dispatches {{.What}} of the pull request" + afterAhead + "."},
+
 	"ctl_refresh":           {text: "Tracker poll and reconciliation queued."},
 	"ctl_refresh_coalesced": {text: "A tracker poll and reconciliation was already queued; this request joined it."},
 	"ctl_refresh_refused":   {text: "Nothing queued: Sortie is shutting down."},
@@ -230,6 +277,7 @@ func mustParse(entries map[string]parts) *template.Template {
 			{"short", entry.short},
 			{"long", entry.long},
 			{"text", entry.text},
+			{"condition", entry.condition},
 		} {
 			if part.source == "" {
 				continue
@@ -348,4 +396,43 @@ var otherMergePath = mergePhrase{"PR #", " merged"}
 var hopResults = map[string]string{
 	"ceiling": "the issue reached its limit of consecutive stage moves (`dispatch.max_consecutive_hops`)",
 	"failed":  "the next stage's label could not be added to the issue",
+}
+
+// fixWords words what a reaction kind runs when its watch finds its event, and
+// what its pass does once the tries are used up.
+type fixWords struct {
+	run     string
+	runs    string
+	after   string
+	restart bool // a head no Sortie run made resets the count
+}
+
+// fixVocabulary is keyed by the reaction kinds that count tries and run a fix.
+var fixVocabulary = map[string]fixWords{
+	orchestrator.ReactionKindCI:            {run: "CI fix", runs: "CI fixes", after: "keeps watching the pull request", restart: true},
+	orchestrator.ReactionKindReview:        {run: "review fix", runs: "Review fixes", after: "stops watching for review comments"},
+	orchestrator.ReactionKindBotReview:     {run: "bot review fix", runs: "Bot review fixes", after: "stops watching for bot review comments"},
+	orchestrator.ReactionKindMergeConflict: {run: "rebase", runs: "Rebases", after: "stops watching for merge conflicts", restart: true},
+}
+
+// watchNames names, in the order a sentence lists them, what each reactions
+// member watches for.
+var watchNames = []struct {
+	configKey string
+	name      string
+}{
+	{"ci_failure", "CI failure"},
+	{"review_comments", "review comments"},
+	{"bot_review", "bot review"},
+	{"merge_conflicts", "merge conflicts"},
+	{"auto_merge", "auto-merge"},
+	{"merge_completion", "merge completion"},
+	{"label_commands", "label commands"},
+}
+
+// labelCommandWords words what a label command of each reaction kind
+// dispatches.
+var labelCommandWords = map[string]string{
+	orchestrator.ReactionKindLabelReview: "a read-only review",
+	orchestrator.ReactionKindLabelFix:    "a fix",
 }

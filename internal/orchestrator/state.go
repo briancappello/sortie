@@ -1164,6 +1164,12 @@ type State struct {
 	// Written only on the event-loop goroutine.
 	ReactionMaxAttempts map[string]int
 
+	// ReactionWatchWindows maps a reaction kind to the watch window its pass
+	// applies; a kind with none, or with a window of 0, is absent. Set before
+	// the event loop serves a snapshot and replaced every poll tick. Written
+	// only on the event-loop goroutine.
+	ReactionWatchWindows map[string]time.Duration
+
 	// TokenWarningThreshold mirrors config.Agent.TokenWarningThreshold()
 	// for the in-flight token warning, refreshed on every poll tick. 0
 	// disables the warning. Written only on the event-loop goroutine.
@@ -1592,7 +1598,10 @@ type SnapshotPendingReaction struct {
 	UsedAttempts *int                `json:"used_attempts"`
 	MaxAttempts  *int                `json:"max_attempts"`
 	EscalatedAt  *time.Time          `json:"escalated_at"`
-	LastCheck    *ReactionCheck      `json:"last_check"`
+	// WatchEndsAt is when the reaction stops watching unless its watch
+	// restarts first; nil for a kind without a watch window or a window of 0.
+	WatchEndsAt *time.Time     `json:"watch_ends_at"`
+	LastCheck   *ReactionCheck `json:"last_check"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
 	StagePosition   *SnapshotStagePosition `json:"stage_position"`
@@ -2002,6 +2011,10 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 			escalatedAt := entry.EscalatedAt
 			row.EscalatedAt = &escalatedAt
 		}
+		if window, ok := state.ReactionWatchWindows[entry.Kind]; ok {
+			watchEndsAt := watchBasis(entry).Add(window)
+			row.WatchEndsAt = &watchEndsAt
+		}
 		rows = append(rows, row)
 	}
 	slices.SortFunc(rows, func(a, b SnapshotPendingReaction) int {
@@ -2012,6 +2025,19 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 		)
 	})
 	return rows
+}
+
+// watchBasis returns the instant the pass for entry's kind measures its watch
+// window from.
+func watchBasis(entry *PendingReaction) time.Time {
+	switch entry.Kind {
+	case ReactionKindCI:
+		return cmp.Or(entry.HeadRecordedAt, entry.CreatedAt)
+	case ReactionKindAutoMerge:
+		return entry.CreatedAt
+	default:
+		return watchWindowStart(entry)
+	}
 }
 
 // snapshotBetweenStages builds the rows of issues whose hop no dispatched run

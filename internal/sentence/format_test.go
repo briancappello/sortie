@@ -1,6 +1,9 @@
 package sentence
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFormat(t *testing.T) {
 	t.Parallel()
@@ -35,6 +38,9 @@ func TestFormat(t *testing.T) {
 		{"plural(2)", plural(2, "failing check", "failing checks"), "2 failing checks"},
 		{"list(3 names)", list([]string{"a", "b", "c"}), "a, b, c"},
 		{"list(4 names)", list([]string{"a", "b", "c", "d"}), "a, b, c and 1 more"},
+		{"series(1 name)", series(strings.Fields("a")), "a"},
+		{"series(2 names)", series(strings.Fields("a b")), "a and b"},
+		{"series(3 names)", series(strings.Fields("a b c")), "a, b, and c"},
 	}
 
 	for _, tt := range tests {

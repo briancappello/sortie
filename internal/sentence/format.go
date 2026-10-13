@@ -15,6 +15,8 @@ var funcs = template.FuncMap{
 	"count":    count,
 	"plural":   plural,
 	"list":     list,
+	"series":   series,
+	"retry":    retry,
 }
 
 // duration words a span of seconds in at most two units. NaN and infinite
@@ -122,4 +124,33 @@ func list(names []string) string {
 		return strings.Join(names, ", ")
 	}
 	return strings.Join(names[:shown], ", ") + " and " + count(len(names)-shown) + " more"
+}
+
+// series joins names as prose: one as is, two with "and", more with commas and
+// a final ", and".
+func series(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + ", and " + names[len(names)-1]
+}
+
+// retry words a queued retry as what comes due: the run a reaction or
+// continuation retry starts, else its attempt number. runInline is the
+// inline phrase of the run a reaction retry with no trigger starts.
+func retry(trigger, runInline string, attempt int) string {
+	switch {
+	case trigger == "continuation":
+		return "the next run"
+	case trigger == "ci_fix":
+		return "the CI fix run"
+	case runInline != "":
+		return "the " + runInline
+	}
+	return "retry " + count(attempt)
 }
