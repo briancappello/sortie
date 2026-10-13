@@ -6,11 +6,12 @@
 
 ```
 cmd/sortie → internal/* (wiring only)
-server → domain, orchestrator
+server → domain, orchestrator, config, redact, registry, sentence
 orchestrator → domain, config, persistence, workspace, workspacekit, registry, prompt, workflow, logging, redact, adapter-family packages that register no kind (scm/scmcore, agent/procutil); kind packages only via registry
 workflow → config, prompt
 workspace → domain, config, persistence, agent/procutil, workspacekit
 persistence → domain, config
+runstats → domain, persistence
 registry → domain, typeutil
 tracker/*, scm/*, agent/*, notify/* → domain, registry, logging, redact, trackermetrics, *kit/*util, packages under their own family root that register no kind; no cross-adapter imports
 blockers → domain, registry
