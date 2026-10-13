@@ -6,6 +6,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -733,149 +734,74 @@ func TestQueryRunHistoryByIssue_Empty(t *testing.T) {
 	}
 }
 
-func TestQueryRecentRunHistory_FirstPage(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
+func readBackByEveryReader(t *testing.T, s *Store, issueID string) map[string]RunHistory {
+	t.Helper()
 	ctx := context.Background()
 
-	var allIDs [5]int64
-	for i := range allIDs {
-		got := appendOrFatal(t, s, newTestRun(i+1))
-		allIDs[i] = got.ID
-	}
-
-	entries, err := s.QueryRecentRunHistory(ctx, 3, 0)
+	byIssue, err := s.QueryRunHistoryByIssue(ctx, issueID)
 	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
+		t.Fatalf("QueryRunHistoryByIssue(%q): %v", issueID, err)
 	}
-	if len(entries) != 3 {
-		t.Fatalf("got %d entries, want 3", len(entries))
+	filtered, err := s.QueryRunHistory(ctx, RunHistoryFilter{IssueID: issueID, Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryRunHistory(%q): %v", issueID, err)
 	}
-	// Most recent first: ids[4], ids[3], ids[2].
-	if entries[0].ID != allIDs[4] {
-		t.Errorf("entries[0].ID = %d, want %d", entries[0].ID, allIDs[4])
+	if len(byIssue) != 1 || len(filtered) != 1 {
+		t.Fatalf("rows for %q = %d by issue, %d filtered, want 1 each", issueID, len(byIssue), len(filtered))
 	}
-	if entries[1].ID != allIDs[3] {
-		t.Errorf("entries[1].ID = %d, want %d", entries[1].ID, allIDs[3])
-	}
-	if entries[2].ID != allIDs[2] {
-		t.Errorf("entries[2].ID = %d, want %d", entries[2].ID, allIDs[2])
-	}
+	return map[string]RunHistory{"QueryRunHistoryByIssue": byIssue[0], "QueryRunHistory": filtered[0]}
 }
 
-func TestQueryRecentRunHistory_Pagination(t *testing.T) {
+func TestQueryRunHistory_Paging(t *testing.T) {
 	t.Parallel()
 
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	var allIDs [5]int64
-	for i := range allIDs {
-		got := appendOrFatal(t, s, newTestRun(i+1))
-		allIDs[i] = got.ID
+	tests := []struct {
+		name   string
+		rows   int
+		limit  int
+		before int
+		want   []int
+	}{
+		{name: "newest first", rows: 5, limit: 3, want: []int{5, 4, 3}},
+		{name: "cursor row is excluded", rows: 5, limit: 2, before: 4, want: []int{3, 2}},
+		{name: "last page is short", rows: 5, limit: 2, before: 2, want: []int{1}},
+		{name: "limit above the row count", rows: 2, limit: 10, want: []int{2, 1}},
+		{name: "zero limit reads as one", rows: 3, limit: 0, want: []int{3}},
+		{name: "negative limit reads as one", rows: 3, limit: -100, want: []int{3}},
+		{name: "no rows", rows: 0, limit: 10, want: []int{}},
 	}
 
-	// First page: 2 most recent.
-	page1, err := s.QueryRecentRunHistory(ctx, 2, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory page1: %v", err)
-	}
-	if len(page1) != 2 {
-		t.Fatalf("page1: got %d entries, want 2", len(page1))
-	}
-	if page1[0].ID != allIDs[4] || page1[1].ID != allIDs[3] {
-		t.Errorf("page1 IDs = [%d, %d], want [%d, %d]",
-			page1[0].ID, page1[1].ID, allIDs[4], allIDs[3])
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Second page: use smallest ID from page1 as cursor.
-	cursor := page1[len(page1)-1].ID
-	page2, err := s.QueryRecentRunHistory(ctx, 2, cursor)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory page2: %v", err)
-	}
-	if len(page2) != 2 {
-		t.Fatalf("page2: got %d entries, want 2", len(page2))
-	}
-	if page2[0].ID != allIDs[2] || page2[1].ID != allIDs[1] {
-		t.Errorf("page2 IDs = [%d, %d], want [%d, %d]",
-			page2[0].ID, page2[1].ID, allIDs[2], allIDs[1])
-	}
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			ids := make([]int64, tt.rows)
+			for i := range ids {
+				ids[i] = appendOrFatal(t, s, newTestRun(i+1)).ID
+			}
+			var beforeID int64
+			if tt.before > 0 {
+				beforeID = ids[tt.before-1]
+			}
 
-	// Third page: one remaining.
-	cursor = page2[len(page2)-1].ID
-	page3, err := s.QueryRecentRunHistory(ctx, 2, cursor)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory page3: %v", err)
-	}
-	if len(page3) != 1 {
-		t.Fatalf("page3: got %d entries, want 1", len(page3))
-	}
-	if page3[0].ID != allIDs[0] {
-		t.Errorf("page3[0].ID = %d, want %d", page3[0].ID, allIDs[0])
-	}
-}
+			got, err := s.QueryRunHistory(context.Background(), RunHistoryFilter{BeforeID: beforeID, Limit: tt.limit})
+			if err != nil {
+				t.Fatalf("QueryRunHistory(before=%d, limit=%d): %v", tt.before, tt.limit, err)
+			}
 
-func TestQueryRecentRunHistory_Empty(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	entries, err := s.QueryRecentRunHistory(ctx, 10, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if entries == nil {
-		t.Fatal("returned nil slice, want non-nil empty slice")
-	}
-	if len(entries) != 0 {
-		t.Fatalf("got %d entries, want 0", len(entries))
-	}
-}
-
-func TestQueryRecentRunHistory_LimitExceedsRows(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	appendOrFatal(t, s, newTestRun(1))
-	appendOrFatal(t, s, newTestRun(2))
-
-	entries, err := s.QueryRecentRunHistory(ctx, 10, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("got %d entries, want 2", len(entries))
-	}
-}
-
-func TestQueryRecentRunHistory_NonPositiveLimit(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	appendOrFatal(t, s, newTestRun(1))
-	appendOrFatal(t, s, newTestRun(2))
-	appendOrFatal(t, s, newTestRun(3))
-
-	for _, limit := range []int{0, -1, -100} {
-		entries, err := s.QueryRecentRunHistory(ctx, limit, 0)
-		if err != nil {
-			t.Fatalf("QueryRecentRunHistory(limit=%d): %v", limit, err)
-		}
-		if len(entries) != 1 {
-			t.Errorf("QueryRecentRunHistory(limit=%d): got %d entries, want 1", limit, len(entries))
-		}
+			if got == nil {
+				t.Fatalf("QueryRunHistory(before=%d, limit=%d) = nil, want a non-nil slice", tt.before, tt.limit)
+			}
+			gotRows := []int{}
+			for _, r := range got {
+				gotRows = append(gotRows, slices.Index(ids, r.ID)+1)
+			}
+			if !slices.Equal(gotRows, tt.want) {
+				t.Errorf("QueryRunHistory(before=%d, limit=%d) rows = %v, want %v", tt.before, tt.limit, gotRows, tt.want)
+			}
+		})
 	}
 }
 
@@ -900,21 +826,15 @@ func TestAppendRunHistory_WorkflowFile(t *testing.T) {
 
 	s := openTestStore(t)
 	migrateOrFatal(t, s)
-	ctx := context.Background()
 
 	run := newTestRun(1)
 	run.WorkflowFile = "backend.WORKFLOW.md"
 	appendOrFatal(t, s, run)
 
-	entries, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].WorkflowFile != "backend.WORKFLOW.md" {
-		t.Errorf("WorkflowFile = %q, want %q", entries[0].WorkflowFile, "backend.WORKFLOW.md")
+	for reader, row := range readBackByEveryReader(t, s, run.IssueID) {
+		if row.WorkflowFile != "backend.WORKFLOW.md" {
+			t.Errorf("%s WorkflowFile = %q, want %q", reader, row.WorkflowFile, "backend.WORKFLOW.md")
+		}
 	}
 }
 
@@ -942,35 +862,11 @@ func TestAppendRunHistory_WorkflowFile_EmptyStoredAsNull(t *testing.T) {
 	}
 }
 
-func TestQueryRecentRunHistory_WorkflowFileRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	run := newTestRun(1)
-	run.WorkflowFile = "infra.WORKFLOW.md"
-	appendOrFatal(t, s, run)
-
-	entries, err := s.QueryRecentRunHistory(ctx, 1, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].WorkflowFile != "infra.WORKFLOW.md" {
-		t.Errorf("WorkflowFile = %q, want %q", entries[0].WorkflowFile, "infra.WORKFLOW.md")
-	}
-}
-
 func TestAppendRunHistory_TurnsCompleted(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
 	migrateOrFatal(t, s)
-	ctx := context.Background()
 
 	run := newTestRun(1)
 	run.TurnsCompleted = 7
@@ -979,16 +875,10 @@ func TestAppendRunHistory_TurnsCompleted(t *testing.T) {
 	if got.TurnsCompleted != 7 {
 		t.Errorf("AppendRunHistory returned TurnsCompleted = %d, want 7", got.TurnsCompleted)
 	}
-
-	entries, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].TurnsCompleted != 7 {
-		t.Errorf("QueryRunHistoryByIssue TurnsCompleted = %d, want 7", entries[0].TurnsCompleted)
+	for reader, row := range readBackByEveryReader(t, s, run.IssueID) {
+		if row.TurnsCompleted != 7 {
+			t.Errorf("%s TurnsCompleted = %d, want 7", reader, row.TurnsCompleted)
+		}
 	}
 }
 
@@ -1017,35 +907,11 @@ func TestAppendRunHistory_TurnsCompleted_Zero(t *testing.T) {
 	}
 }
 
-func TestQueryRecentRunHistory_TurnsCompleted(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	run := newTestRun(1)
-	run.TurnsCompleted = 12
-	appendOrFatal(t, s, run)
-
-	entries, err := s.QueryRecentRunHistory(ctx, 1, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].TurnsCompleted != 12 {
-		t.Errorf("QueryRecentRunHistory TurnsCompleted = %d, want 12", entries[0].TurnsCompleted)
-	}
-}
-
 func TestAppendRunHistory_DisplayIDRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
 	migrateOrFatal(t, s)
-	ctx := context.Background()
 
 	run := newTestRun(1)
 	run.DisplayID = "owner/repo#1"
@@ -1054,16 +920,10 @@ func TestAppendRunHistory_DisplayIDRoundTrip(t *testing.T) {
 	if got.DisplayID != "owner/repo#1" {
 		t.Errorf("AppendRunHistory returned DisplayID = %q, want %q", got.DisplayID, "owner/repo#1")
 	}
-
-	entries, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].DisplayID != "owner/repo#1" {
-		t.Errorf("QueryRunHistoryByIssue DisplayID = %q, want %q", entries[0].DisplayID, "owner/repo#1")
+	for reader, row := range readBackByEveryReader(t, s, run.IssueID) {
+		if row.DisplayID != "owner/repo#1" {
+			t.Errorf("%s DisplayID = %q, want %q", reader, row.DisplayID, "owner/repo#1")
+		}
 	}
 }
 
@@ -1091,29 +951,6 @@ func TestAppendRunHistory_EmptyDisplayIDRoundTrip(t *testing.T) {
 	}
 	if entries[0].DisplayID != "" {
 		t.Errorf("QueryRunHistoryByIssue DisplayID = %q, want empty string for NULL column", entries[0].DisplayID)
-	}
-}
-
-func TestQueryRecentRunHistory_DisplayIDRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	run := newTestRun(1)
-	run.DisplayID = "sortie-ai/sortie#42"
-	appendOrFatal(t, s, run)
-
-	entries, err := s.QueryRecentRunHistory(ctx, 1, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(entries))
-	}
-	if entries[0].DisplayID != "sortie-ai/sortie#42" {
-		t.Errorf("QueryRecentRunHistory DisplayID = %q, want %q", entries[0].DisplayID, "sortie-ai/sortie#42")
 	}
 }
 

@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -195,6 +196,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"issue_labels", "TEXT", true, 0},
 				{"issue_state", "TEXT", true, 0},
 				{"dispatched_at", "TEXT", true, 0},
+				{"origin_trigger", "TEXT", true, 0},
 			},
 		},
 		{
@@ -234,6 +236,10 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"issue_title", "TEXT", true, 0},
 				{"issue_url", "TEXT", true, 0},
 				{"dispatched_at", "TEXT", true, 0},
+				{"trigger", "TEXT", false, 0},
+				{"reaction_kind", "TEXT", false, 0},
+				{"session_id", "TEXT", false, 0},
+				{"ssh_host", "TEXT", false, 0},
 			},
 		},
 		{
@@ -558,6 +564,47 @@ func TestMigrate_Migration027_FillsOlderRows(t *testing.T) {
 		if err := s.db.QueryRowContext(context.Background(), tt.query).Scan(&got); err != nil || got != tt.want {
 			t.Errorf("%s after upgrade = %q, %v, want %q, nil", tt.name, got, err, tt.want)
 		}
+	}
+}
+
+func TestMigrate_Migration028_OlderRowsKeepNoOrigin(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := openTestStore(t)
+	migrateToVersion(t, s, 27)
+	insertBareRun(t, s, "old")
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO retry_entries (issue_id, identifier, attempt, due_at_ms, trigger)
+			VALUES ('r-stall', 'MT-1', 2, 1000, 'stall'), ('r-timer', 'MT-2', 2, 1000, 'timer'), ('r-none', 'MT-3', 2, 1000, '')`); err != nil {
+		t.Fatalf("seed version 27 store: %v", err)
+	}
+
+	migrateOrFatal(t, s)
+	appendOrFatal(t, s, newTestRun(1))
+
+	runs := map[string]RunHistory{}
+	for _, r := range queryAllRuns(t, s, 10) {
+		runs[r.IssueID] = r
+	}
+	if r := runs["old"]; r.OriginRecorded || r.Trigger != nil {
+		t.Errorf("run recorded before the upgrade: origin recorded = %v, trigger = %s, want false, <nil>", r.OriginRecorded, triggerText(r.Trigger))
+	}
+	if r := runs["ISS-1"]; !r.OriginRecorded || r.Trigger != nil {
+		t.Errorf("run appended after the upgrade with a nil trigger: origin recorded = %v, trigger = %s, want true, <nil>", r.OriginRecorded, triggerText(r.Trigger))
+	}
+
+	retries, err := s.LoadRetryEntries(ctx)
+	if err != nil {
+		t.Fatalf("LoadRetryEntries: %v", err)
+	}
+	gotOrigin := map[string]string{}
+	for _, e := range retries {
+		gotOrigin[e.IssueID] = e.OriginTrigger
+	}
+	wantOrigin := map[string]string{"r-stall": "stall", "r-timer": "", "r-none": ""}
+	if !reflect.DeepEqual(gotOrigin, wantOrigin) {
+		t.Errorf("OriginTrigger by retry after upgrade = %v, want %v", gotOrigin, wantOrigin)
 	}
 }
 
