@@ -4718,6 +4718,9 @@ func TestHandleWorkerExit_HandoffTransitionSucceeds_PopulatesCIPendingReaction(t
 	if ciData.SHA != "cafebabe" {
 		t.Errorf("CIReactionData.SHA = %q, want %q", ciData.SHA, "cafebabe")
 	}
+	if ci.IssueIdentity.State != "In Review" {
+		t.Errorf("PendingReactions[HO-C1:ci].IssueIdentity.State = %q, want the handoff target %q", ci.IssueIdentity.State, "In Review")
+	}
 }
 
 func TestHandleWorkerExit_HandoffTransitionFails_PopulatesCIPendingReaction(t *testing.T) {
@@ -4775,6 +4778,9 @@ func TestHandleWorkerExit_HandoffTransitionFails_PopulatesCIPendingReaction(t *t
 	}
 	if ciData.SHA != "cafebabe" {
 		t.Errorf("CIReactionData.SHA = %q, want %q", ciData.SHA, "cafebabe")
+	}
+	if ci.IssueIdentity.State != "In Progress" {
+		t.Errorf("PendingReactions[HO-C2:ci].IssueIdentity.State = %q, want the run's read %q", ci.IssueIdentity.State, "In Progress")
 	}
 }
 
@@ -10282,9 +10288,10 @@ func TestHandleWorkerExit_StageHopOnlyForSuccessfulRun(t *testing.T) {
 			}
 			want := SnapshotStageHop{
 				IssueID: hopExitIssueID, Identifier: "HOP-1-ident", DisplayID: "acme/web#1", IssueTitle: "Add search", IssueURL: "https://example.test/acme/web/issues/1",
+				IssueLabels: []string{"feature", hopExitTargetLabel}, State: "In Progress", RuleName: "implement",
 				SourceRule: "specify", TargetRule: "implement", TargetLabel: hopExitTargetLabel, HoppedAt: between[0].HoppedAt, DispatchedAt: hopExitPassAt,
 			}
-			if between[0] != want || between[0].HoppedAt.IsZero() {
+			if !reflect.DeepEqual(between[0], want) || between[0].HoppedAt.IsZero() {
 				t.Errorf("BetweenStages[0] = %+v, want %+v with a hop time", between[0], want)
 			}
 		})

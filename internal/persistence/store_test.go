@@ -216,15 +216,17 @@ func TestRecordStageHop_ChainFollowsLatestHop(t *testing.T) {
 	first := StageHop{
 		IssueID: "ISS-1", Identifier: "PROJ-1", HopCount: 1, SourceRule: "specify", TargetRule: "plan", SourceDispatchID: "d1", ChainID: "chain-1",
 		DisplayID: "owner/repo#1", IssueTitle: "Old title", IssueURL: "https://example.test/old", DispatchedAt: "2026-03-19T10:00:00Z",
+		IssueType: "Bug", IssueLabels: []string{"stage-specify"}, IssueState: "To Do",
 	}
 	latest := first
 	latest.SourceDispatchID, latest.ChainID = "d2", "chain-2"
 	latest.DisplayID, latest.IssueTitle, latest.IssueURL = "owner/repo#2", "New title", "https://example.test/new"
 	latest.DispatchedAt = "2026-03-19T11:00:00Z"
+	latest.IssueType, latest.IssueLabels, latest.IssueState = "Story", []string{"feature", "plan"}, "In Review"
 	other := latest
-	other.IssueID = "ISS-2"
+	other.IssueID, other.IssueLabels = "ISS-2", []string{}
 	recorded := other
-	recorded.IssueID, recorded.RunDispatched = "ISS-3", true
+	recorded.IssueID, recorded.IssueLabels, recorded.RunDispatched = "ISS-3", nil, true
 	for _, hop := range []StageHop{first, latest, other, recorded} {
 		if err := s.RecordStageHop(ctx, hop); err != nil {
 			t.Fatalf("RecordStageHop(%+v): %v", hop, err)

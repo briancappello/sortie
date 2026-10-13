@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -256,9 +257,17 @@ func TestParkSurvivesRestart(t *testing.T) {
 		t.Fatalf("store.Migrate: %v", err)
 	}
 
+	dispatchedAt := baseTime.Add(-time.Hour)
 	state := exitStateWithIssue(t, issueID, "In Progress")
-	state.Running[issueID].Issue.Title = "Restart title"
-	state.Running[issueID].Issue.URL = "https://tracker.test/PROJ-RESTART"
+	state.StageChains, state.HopCeiling = [][]string{{"triage", "implement"}}, 4
+	running := state.Running[issueID]
+	running.Issue.Title = "Restart title"
+	running.Issue.URL = "https://tracker.test/PROJ-RESTART"
+	running.Issue.IssueType = "Story"
+	running.Issue.Labels = []string{"feature", "Needs-Human", "stage-implement"}
+	running.RuleName = "implement"
+	running.StageLineage = StageLineage{PreviousRule: "triage", PreviousOutcome: "succeeded", ChainID: "chain-1", DispatchedAt: dispatchedAt}
+	running.AgentKind, running.ConfiguredModel = "claude-code", "sonnet"
 	params := HandleWorkerExitParams{
 		Store:               store,
 		MaxRetryBackoffMS:   300_000,
@@ -281,6 +290,10 @@ func TestParkSurvivesRestart(t *testing.T) {
 	if _, ok := state.Parked[issueID]; !ok {
 		t.Fatal("issue not parked before the simulated restart")
 	}
+	state.Parked[issueID].LabelApplied = true
+	if err := store.MarkParkedIssueLabelApplied(ctx, issueID); err != nil {
+		t.Fatalf("MarkParkedIssueLabelApplied: %v", err)
+	}
 
 	rows, err := store.ListParkedIssues(ctx)
 	if err != nil {
@@ -293,8 +306,27 @@ func TestParkSurvivesRestart(t *testing.T) {
 	if _, ok := fresh.Parked[issueID]; !ok {
 		t.Fatal("PopulateParked did not restore the park after the restart")
 	}
-	if got := RuntimeSnapshot(fresh, baseTime).Parked; len(got) != 1 || got[0].IssueTitle != "Restart title" || got[0].IssueURL != "https://tracker.test/PROJ-RESTART" {
-		t.Errorf("restored park snapshot = %+v, want title %q and link %q", got, "Restart title", "https://tracker.test/PROJ-RESTART")
+	fresh.StageChains, fresh.HopCeiling = state.StageChains, state.HopCeiling
+
+	want := SnapshotParkedEntry{
+		IssueID: issueID, Identifier: "PROJ-RESTART", IssueTitle: "Restart title", IssueURL: "https://tracker.test/PROJ-RESTART",
+		IssueType: "Story", IssueLabels: []string{"feature", "stage-implement"}, DispatchedAt: dispatchedAt,
+		Reason: parkReasonAgentBlocked, ParkedState: "In Progress", Label: "needs-human", LabelApplied: true,
+		RuleName: "implement", AgentKind: "claude-code", ConfiguredModel: "sonnet",
+		StagePosition: &SnapshotStagePosition{Chain: []string{"triage", "implement"}, Current: "implement", HopCeiling: 4},
+	}
+	parkedAt := state.Parked[issueID].ParkedAt
+	for name, snapshot := range map[string]struct {
+		state    *State
+		parkedAt time.Time
+	}{
+		"before the restart": {state, parkedAt},
+		"after the restart":  {fresh, parkedAt.UTC().Truncate(time.Second)},
+	} {
+		want.ParkedAt = snapshot.parkedAt
+		if got := RuntimeSnapshot(snapshot.state, baseTime).Parked; len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+			t.Errorf("park snapshot %s = %+v, want %+v", name, got, want)
+		}
 	}
 
 	candidate := domain.Issue{ID: issueID, Identifier: "PROJ-RESTART", Title: "T", State: "In Progress"}
@@ -443,8 +475,8 @@ func TestRefreshParkedIssuesNonCandidateStateRead(t *testing.T) {
 	})
 }
 
-func sameTitleAndURL(a, b IssueIdentity) bool {
-	return a.Title == b.Title && a.URL == b.URL
+func sameStoredIdentity(a, b IssueIdentity) bool {
+	return a.Title == b.Title && a.URL == b.URL && a.IssueType == b.IssueType && slices.Equal(a.Labels, b.Labels)
 }
 
 func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
@@ -458,6 +490,7 @@ func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
 	tests := []struct {
 		name         string
 		held         IssueIdentity
+		parkLabel    string
 		candidates   []domain.Issue
 		observed     string
 		readErr      error
@@ -473,6 +506,16 @@ func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
 			wantIdentity: readIdentity,
 			wantParked:   true,
 			wantRows:     []IssueIdentity{readIdentity},
+		},
+		{
+			name:         "partial read takes the candidate's type and labels without the parking label",
+			held:         held,
+			parkLabel:    "Needs-Human",
+			candidates:   []domain.Issue{{ID: id, Title: read.Title, URL: read.URL, State: "In Progress", IssueType: "Story", Labels: []string{"feature", "needs-human"}}},
+			observed:     "In Progress",
+			wantIdentity: IssueIdentity{Title: held.Title, URL: held.URL, IssueType: "Story", Labels: []string{"feature"}},
+			wantParked:   true,
+			wantRows:     []IssueIdentity{{Title: held.Title, URL: held.URL, IssueType: "Story", Labels: []string{"feature"}}},
 		},
 		{
 			name:         "issue the candidates omit takes one single-issue read",
@@ -511,6 +554,7 @@ func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
 				Identifier:    "PROJ-BACKFILL-1",
 				Reason:        parkReasonAgentBlocked,
 				ParkedState:   "In Progress",
+				Label:         tt.parkLabel,
 				IssueIdentity: tt.held,
 			}
 			tracker := &mockTrackerAdapter{
@@ -537,7 +581,7 @@ func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
 			if parked != tt.wantParked {
 				t.Fatalf("parked after refreshParkedIssues = %v, want %v", parked, tt.wantParked)
 			}
-			if parked && !sameTitleAndURL(entry.IssueIdentity, tt.wantIdentity) {
+			if parked && !sameStoredIdentity(entry.IssueIdentity, tt.wantIdentity) {
 				t.Errorf("parked IssueIdentity = %+v, want %+v", entry.IssueIdentity, tt.wantIdentity)
 			}
 			if !slices.Equal(tracker.fetchIssueByIDCalls, tt.wantReads) {
@@ -545,9 +589,9 @@ func TestRefreshParkedIssuesIdentityBackfill(t *testing.T) {
 			}
 			var rows []IssueIdentity
 			for _, row := range store.parkedIssues {
-				rows = append(rows, IssueIdentity{Title: row.IssueTitle, URL: row.IssueURL})
+				rows = append(rows, IssueIdentity{Title: row.IssueTitle, URL: row.IssueURL, IssueType: row.IssueType, Labels: row.IssueLabels})
 			}
-			if !slices.EqualFunc(rows, tt.wantRows, sameTitleAndURL) {
+			if !slices.EqualFunc(rows, tt.wantRows, sameStoredIdentity) {
 				t.Errorf("upserted park identities = %+v, want %+v", rows, tt.wantRows)
 			}
 		})

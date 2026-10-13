@@ -538,6 +538,13 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		}
 	}
 
+	followedRun := parkedRun{
+		RuleName:        entry.RuleName,
+		StageLineage:    entry.StageLineage,
+		AgentKind:       entry.AgentKind,
+		ConfiguredModel: entry.ConfiguredModel,
+	}
+
 	consecutiveAbsences := 0
 	absenceCeiling := handoffAbsenceCeiling(params.MaxConsecutiveAbsences)
 	absenceParked := false
@@ -581,6 +588,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 				workerResult.Identifier,
 				entry.Issue.DisplayID,
 				issueIdentityOf(entry.Issue),
+				followedRun,
 				observation,
 				consecutiveAbsences,
 				absenceCeiling,
@@ -633,6 +641,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		terminalSuppressed := false
 		hopMade := false
 
+		// A successful handoff replaces the state the run read, and a
+		// reaction waits hours or days, so it records the state the exit
+		// wrote.
+		reactionIdentity := issueIdentityOf(entry.Issue)
+
 		switch {
 		case blockedSoftStop:
 			// Blocked agents have no further work; suppress continuation and
@@ -646,6 +659,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					Identifier:     workerResult.Identifier,
 					DisplayID:      entry.Issue.DisplayID,
 					IssueIdentity:  issueIdentityOf(entry.Issue),
+					Run:            followedRun,
 					ObservedState:  observation,
 					Reason:         parkReasonAgentBlocked,
 					Label:          params.HandoffParkingLabel,
@@ -872,6 +886,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					logRetrySlotDeferral(log, triggerContinuation, incumbent)
 					recordIssueOutcome(ctx, params.Store, handoffOutcome(workerResult.IssueID, resolvedTarget, params.TerminalStates, now), log)
 					metrics.IncHandoffTransitions(handoffSuccess)
+					reactionIdentity.State = resolvedTarget
 					log.Info("handoff transition succeeded, incumbent preserved",
 						slog.String("handoff_state", params.HandoffState),
 						slog.String("target_state", resolvedTarget),
@@ -882,6 +897,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					claimRetainedForIncumbent = true
 				} else {
 					recordIssueOutcome(ctx, params.Store, handoffOutcome(workerResult.IssueID, resolvedTarget, params.TerminalStates, now), log)
+					reactionIdentity.State = resolvedTarget
 					log.Info("handoff transition succeeded, releasing claim",
 						slog.String("handoff_state", params.HandoffState),
 						slog.String("target_state", resolvedTarget),
@@ -1006,7 +1022,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 						RuleSettingsApplied: entry.RuleSettingsApplied,
 						TemplateID:          entry.TemplateID,
 
-						IssueIdentity: issueIdentityOf(entry.Issue),
+						IssueIdentity: reactionIdentity,
 					}
 				} else if scm.Branch != "" {
 					log.Debug("ci watch not seeded: workspace metadata missing pull request identity",
@@ -1056,7 +1072,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}
@@ -1098,7 +1114,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}
@@ -1139,7 +1155,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}
@@ -1181,7 +1197,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}
@@ -1224,7 +1240,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}
@@ -1267,7 +1283,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}
@@ -1307,7 +1323,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 							RuleSettingsApplied: entry.RuleSettingsApplied,
 							TemplateID:          entry.TemplateID,
 
-							IssueIdentity: issueIdentityOf(entry.Issue),
+							IssueIdentity: reactionIdentity,
 						}
 					}
 				}

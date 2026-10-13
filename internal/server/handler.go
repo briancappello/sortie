@@ -184,11 +184,19 @@ type stageHopResponse struct {
 	DisplayIdentifier string     `json:"display_identifier,omitempty"`
 	IssueTitle        string     `json:"issue_title,omitempty"`
 	IssueURL          string     `json:"issue_url,omitempty"`
+	IssueType         string     `json:"issue_type,omitempty"`
+	IssueLabels       []string   `json:"issue_labels,omitzero"`
+	State             string     `json:"state,omitempty"`
 	SourceRule        string     `json:"source_rule"`
 	TargetRule        string     `json:"target_rule"`
 	TargetLabel       string     `json:"target_label"`
 	HoppedAt          *time.Time `json:"hopped_at"`
 	DispatchedAt      *time.Time `json:"dispatched_at"`
+
+	RuleName        string                 `json:"rule_name,omitempty"`
+	StagePosition   *stagePositionResponse `json:"stage_position"`
+	AgentKind       string                 `json:"agent_kind,omitempty"`
+	ConfiguredModel string                 `json:"configured_model,omitempty"`
 
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
@@ -198,16 +206,25 @@ type stageHopResponse struct {
 // primary dispatch until a person acts on it. Used by GET /api/v1/state and
 // GET /api/v1/{identifier}.
 type parkedEntryResponse struct {
-	IssueID           string    `json:"issue_id"`
-	IssueIdentifier   string    `json:"issue_identifier"`
-	DisplayIdentifier string    `json:"display_identifier,omitempty"`
-	IssueTitle        string    `json:"issue_title,omitempty"`
-	IssueURL          string    `json:"issue_url,omitempty"`
-	Reason            string    `json:"reason"`
-	ParkedState       string    `json:"parked_state,omitempty"`
-	Label             string    `json:"label"`
-	LabelApplied      bool      `json:"label_applied"`
-	ParkedAt          time.Time `json:"parked_at"`
+	IssueID           string     `json:"issue_id"`
+	IssueIdentifier   string     `json:"issue_identifier"`
+	DisplayIdentifier string     `json:"display_identifier,omitempty"`
+	IssueTitle        string     `json:"issue_title,omitempty"`
+	IssueURL          string     `json:"issue_url,omitempty"`
+	IssueType         string     `json:"issue_type,omitempty"`
+	IssueLabels       []string   `json:"issue_labels,omitzero"`
+	State             string     `json:"state,omitempty"`
+	DispatchedAt      *time.Time `json:"dispatched_at"`
+	Reason            string     `json:"reason"`
+	ParkedState       string     `json:"parked_state,omitempty"`
+	Label             string     `json:"label"`
+	LabelApplied      bool       `json:"label_applied"`
+	ParkedAt          time.Time  `json:"parked_at"`
+
+	RuleName        string                 `json:"rule_name,omitempty"`
+	StagePosition   *stagePositionResponse `json:"stage_position"`
+	AgentKind       string                 `json:"agent_kind,omitempty"`
+	ConfiguredModel string                 `json:"configured_model,omitempty"`
 
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
@@ -221,6 +238,9 @@ type pendingReactionResponse struct {
 	DisplayIdentifier string                 `json:"display_identifier,omitempty"`
 	IssueTitle        string                 `json:"issue_title,omitempty"`
 	IssueURL          string                 `json:"issue_url,omitempty"`
+	IssueType         string                 `json:"issue_type,omitempty"`
+	IssueLabels       []string               `json:"issue_labels,omitzero"`
+	State             string                 `json:"state,omitempty"`
 	Kind              string                 `json:"kind"`
 	ConfigKey         string                 `json:"config_key"`
 	PullRequest       pullRequestResponse    `json:"pull_request"`
@@ -232,6 +252,11 @@ type pendingReactionResponse struct {
 	MaxAttempts       *int                   `json:"max_attempts"`
 	EscalatedAt       *time.Time             `json:"escalated_at"`
 	LastCheck         *reactionCheckResponse `json:"last_check"`
+
+	RuleName        string                 `json:"rule_name,omitempty"`
+	StagePosition   *stagePositionResponse `json:"stage_position"`
+	AgentKind       string                 `json:"agent_kind,omitempty"`
+	ConfiguredModel string                 `json:"configured_model,omitempty"`
 
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
@@ -541,11 +566,19 @@ func toStageHopResponse(e orchestrator.SnapshotStageHop) stageHopResponse {
 		DisplayIdentifier: e.DisplayID,
 		IssueTitle:        e.IssueTitle,
 		IssueURL:          e.IssueURL,
+		IssueType:         e.IssueType,
+		IssueLabels:       e.IssueLabels,
+		State:             e.State,
 		SourceRule:        e.SourceRule,
 		TargetRule:        e.TargetRule,
 		TargetLabel:       e.TargetLabel,
 		HoppedAt:          utcOrNil(e.HoppedAt),
 		DispatchedAt:      utcOrNil(e.DispatchedAt),
+
+		RuleName:        e.RuleName,
+		StagePosition:   toStagePositionResponse(e.StagePosition),
+		AgentKind:       e.AgentKind,
+		ConfiguredModel: e.ConfiguredModel,
 	}
 }
 
@@ -583,11 +616,20 @@ func toParkedEntryResponse(e orchestrator.SnapshotParkedEntry) parkedEntryRespon
 		DisplayIdentifier: e.DisplayID,
 		IssueTitle:        e.IssueTitle,
 		IssueURL:          e.IssueURL,
+		IssueType:         e.IssueType,
+		IssueLabels:       e.IssueLabels,
+		State:             e.ParkedState,
+		DispatchedAt:      utcOrNil(e.DispatchedAt),
 		Reason:            e.Reason,
 		ParkedState:       e.ParkedState,
 		Label:             e.Label,
 		LabelApplied:      e.LabelApplied,
 		ParkedAt:          e.ParkedAt.UTC(),
+
+		RuleName:        e.RuleName,
+		StagePosition:   toStagePositionResponse(e.StagePosition),
+		AgentKind:       e.AgentKind,
+		ConfiguredModel: e.ConfiguredModel,
 	}
 }
 
@@ -598,6 +640,9 @@ func toPendingReactionResponse(e orchestrator.SnapshotPendingReaction) pendingRe
 		DisplayIdentifier: e.DisplayID,
 		IssueTitle:        e.IssueTitle,
 		IssueURL:          e.IssueURL,
+		IssueType:         e.IssueType,
+		IssueLabels:       e.IssueLabels,
+		State:             e.State,
 		Kind:              e.Kind,
 		ConfigKey:         e.ConfigKey,
 		PullRequest: pullRequestResponse{
@@ -614,6 +659,11 @@ func toPendingReactionResponse(e orchestrator.SnapshotPendingReaction) pendingRe
 		UsedAttempts: e.UsedAttempts,
 		MaxAttempts:  e.MaxAttempts,
 		LastCheck:    (*reactionCheckResponse)(e.LastCheck),
+
+		RuleName:        e.RuleName,
+		StagePosition:   toStagePositionResponse(e.StagePosition),
+		AgentKind:       e.AgentKind,
+		ConfiguredModel: e.ConfiguredModel,
 	}
 	if e.EscalatedAt != nil {
 		resp.EscalatedAt = new(e.EscalatedAt.UTC())
@@ -1158,9 +1208,11 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		statusText, statusTextFull = parkedEntry.StatusText, parkedEntry.StatusTextFull
 		entryIdentifier, entryIssueID = parkedEntry.IssueIdentifier, parkedEntry.IssueID
 		issue = issueResponse{
-			Title: parkedEntry.IssueTitle,
-			URL:   parkedEntry.IssueURL,
-			State: parkedEntry.ParkedState,
+			Title:     parkedEntry.IssueTitle,
+			URL:       parkedEntry.IssueURL,
+			IssueType: parkedEntry.IssueType,
+			Labels:    parkedEntry.IssueLabels,
+			State:     parkedEntry.ParkedState,
 		}
 	case len(pendingRows) > 0:
 		status = "pending_reactions"
@@ -1168,16 +1220,22 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		statusText, statusTextFull = deciding.StatusText, deciding.StatusTextFull
 		entryIdentifier, entryIssueID = pendingRows[0].Identifier, pendingRows[0].IssueID
 		issue = issueResponse{
-			Title: pendingRows[0].IssueTitle,
-			URL:   pendingRows[0].IssueURL,
+			Title:     pendingRows[0].IssueTitle,
+			URL:       pendingRows[0].IssueURL,
+			IssueType: pendingRows[0].IssueType,
+			Labels:    pendingRows[0].IssueLabels,
+			State:     pendingRows[0].State,
 		}
 	case hopEntry != nil:
 		status = "between_stages"
 		statusText, statusTextFull = hopEntry.StatusText, hopEntry.StatusTextFull
 		entryIdentifier, entryIssueID = hopEntry.IssueIdentifier, hopEntry.IssueID
 		issue = issueResponse{
-			Title: hopEntry.IssueTitle,
-			URL:   hopEntry.IssueURL,
+			Title:     hopEntry.IssueTitle,
+			URL:       hopEntry.IssueURL,
+			IssueType: hopEntry.IssueType,
+			Labels:    hopEntry.IssueLabels,
+			State:     hopEntry.State,
 		}
 	default:
 		status = "unknown"

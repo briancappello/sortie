@@ -1019,25 +1019,39 @@ func TestRuntimeSnapshot_StagePosition(t *testing.T) {
 			state := NewState(5000, 4, 0, nil, AgentTotals{})
 			state.StageChains, state.HopCeiling = tt.chains, 4
 			lineage := StageLineage{PreviousRule: tt.previous}
+			agent := RuleAgent{AgentKind: "claude-code", ConfiguredModel: "sonnet"}
+			state.RuleAgents = map[string]RuleAgent{tt.rule: agent}
 			state.Running["run"] = &RunningEntry{Issue: domain.Issue{ID: "run"}, RuleName: tt.rule, StageLineage: lineage}
 			state.RetryAttempts["retry"] = &RetryEntry{IssueID: "retry", RuleName: tt.rule, StageLineage: lineage}
 			state.BudgetExhausted["budget"] = &BudgetExhaustedEntry{RuleName: tt.rule, StageLineage: lineage}
+			state.Parked["parked"] = &ParkedEntry{RuleName: tt.rule, StageLineage: lineage}
+			state.PendingReactions[ReactionKey("pending", ReactionKindCI)] = &PendingReaction{IssueID: "pending", Kind: ReactionKindCI, RuleName: tt.rule, StageLineage: lineage}
+			state.StageHops["hop"] = &StageHopEntry{SourceRule: tt.previous, TargetRule: tt.rule, Count: tt.hops}
 			if tt.hops > 0 {
-				for _, id := range []string{"run", "retry", "budget"} {
+				for _, id := range []string{"run", "retry", "budget", "parked", "pending"} {
 					state.StageHops[id] = &StageHopEntry{Count: tt.hops}
 				}
 			}
 
 			result := RuntimeSnapshot(state, time.Time{})
 
-			if len(result.Running) != 1 || len(result.Retrying) != 1 || len(result.BudgetExhausted) != 1 {
-				t.Fatalf("RuntimeSnapshot rows = %d running, %d retrying, %d budget, want 1, 1, 1",
-					len(result.Running), len(result.Retrying), len(result.BudgetExhausted))
+			hopIndex := slices.IndexFunc(result.BetweenStages, func(row SnapshotStageHop) bool { return row.IssueID == "hop" })
+			if len(result.Running) != 1 || len(result.Retrying) != 1 || len(result.BudgetExhausted) != 1 || len(result.Parked) != 1 || len(result.PendingReactions) != 1 || hopIndex < 0 {
+				t.Fatalf("RuntimeSnapshot rows = %d running, %d retrying, %d budget, %d parked, %d pending, between stages %+v, want 1 of each and the hop row",
+					len(result.Running), len(result.Retrying), len(result.BudgetExhausted), len(result.Parked), len(result.PendingReactions), result.BetweenStages)
+			}
+			hop := result.BetweenStages[hopIndex]
+			if hop.RuleName != tt.rule || hop.AgentKind != agent.AgentKind || hop.ConfiguredModel != agent.ConfiguredModel {
+				t.Errorf("BetweenStages hop rule, agent kind, model = %q, %q, %q, want %q, %q, %q",
+					hop.RuleName, hop.AgentKind, hop.ConfiguredModel, tt.rule, agent.AgentKind, agent.ConfiguredModel)
 			}
 			for kind, got := range map[string]*SnapshotStagePosition{
-				"Running":         result.Running[0].StagePosition,
-				"Retrying":        result.Retrying[0].StagePosition,
-				"BudgetExhausted": result.BudgetExhausted[0].StagePosition,
+				"Running":          result.Running[0].StagePosition,
+				"Retrying":         result.Retrying[0].StagePosition,
+				"BudgetExhausted":  result.BudgetExhausted[0].StagePosition,
+				"Parked":           result.Parked[0].StagePosition,
+				"PendingReactions": result.PendingReactions[0].StagePosition,
+				"BetweenStages":    hop.StagePosition,
 			} {
 				if !reflect.DeepEqual(got, tt.want) {
 					t.Errorf("%s[0].StagePosition (chains %v, rule %q, previous %q) = %+v, want %+v", kind, tt.chains, tt.rule, tt.previous, got, tt.want)
@@ -1072,14 +1086,21 @@ func TestRuntimeSnapshot_MasksRegisteredValueInIssueIdentity(t *testing.T) {
 		Identifier: "PROJ-5", IssueIdentity: IssueIdentity{State: "state-" + value},
 	}
 	state.Parked["ISS-3"] = &ParkedEntry{
-		Identifier: "PROJ-3", IssueIdentity: IssueIdentity{Title: "rotate " + value},
+		Identifier: "PROJ-3", IssueIdentity: IssueIdentity{Title: "rotate " + value, IssueType: "type-" + value, Labels: []string{"ops", "leak-" + value}},
 	}
 	state.StageHops["ISS-6"] = &StageHopEntry{
-		Identifier: "PROJ-6", IssueIdentity: IssueIdentity{Title: "rotate " + value, URL: "https://forge.example.com/" + value},
+		Identifier: "PROJ-6",
+		IssueIdentity: IssueIdentity{
+			Title: "rotate " + value, URL: "https://forge.example.com/" + value,
+			IssueType: "type-" + value, Labels: []string{"ops", "leak-" + value}, State: "state-" + value,
+		},
 	}
 	state.PendingReactions[ReactionKey("ISS-4", ReactionKindCI)] = &PendingReaction{
-		IssueID:        "ISS-4",
-		Identifier:     "PROJ-4",
+		IssueID:    "ISS-4",
+		Identifier: "PROJ-4",
+		IssueIdentity: IssueIdentity{
+			IssueType: "type-" + value, Labels: []string{"ops", "leak-" + value}, State: "state-" + value,
+		},
 		Kind:           ReactionKindCI,
 		PullRequestURL: "https://forge.example.com/" + value,
 		KindData:       &CIReactionData{PRNumber: 7, Owner: "acme", Repo: "widgets", Branch: "feature/" + value},
@@ -1129,11 +1150,31 @@ func TestRuntimeSnapshot_MasksRegisteredValueInIssueIdentity(t *testing.T) {
 	if len(result.BetweenStages) != 1 {
 		t.Fatalf("len(BetweenStages) = %d, want 1", len(result.BetweenStages))
 	}
-	if hop, wantTitle, wantURL := result.BetweenStages[0], "rotate "+redact.Marker, "https://forge.example.com/"+redact.Marker; hop.IssueTitle != wantTitle || hop.IssueURL != wantURL {
-		t.Errorf("BetweenStages[0] title, url = %q, %q, want %q, %q", hop.IssueTitle, hop.IssueURL, wantTitle, wantURL)
-	}
 	if len(result.PendingReactions) != 1 {
 		t.Fatalf("len(PendingReactions) = %d, want 1", len(result.PendingReactions))
+	}
+	type issueFacts struct {
+		IssueType string
+		Labels    []string
+	}
+	wantFacts := issueFacts{"type-" + redact.Marker, []string{"ops", "leak-" + redact.Marker}}
+	parked, hopRow, reaction := result.Parked[0], result.BetweenStages[0], result.PendingReactions[0]
+	for name, got := range map[string]issueFacts{
+		"Parked[0]":           {parked.IssueType, parked.IssueLabels},
+		"BetweenStages[0]":    {hopRow.IssueType, hopRow.IssueLabels},
+		"PendingReactions[0]": {reaction.IssueType, reaction.IssueLabels},
+	} {
+		if !reflect.DeepEqual(got, wantFacts) {
+			t.Errorf("%s issue type, labels = %+v, want %+v", name, got, wantFacts)
+		}
+	}
+	for name, got := range map[string]string{"BetweenStages[0]": hopRow.State, "PendingReactions[0]": reaction.State} {
+		if want := "state-" + redact.Marker; got != want {
+			t.Errorf("%s.State = %q, want %q", name, got, want)
+		}
+	}
+	if hop, wantTitle, wantURL := result.BetweenStages[0], "rotate "+redact.Marker, "https://forge.example.com/"+redact.Marker; hop.IssueTitle != wantTitle || hop.IssueURL != wantURL {
+		t.Errorf("BetweenStages[0] title, url = %q, %q, want %q, %q", hop.IssueTitle, hop.IssueURL, wantTitle, wantURL)
 	}
 	row := result.PendingReactions[0]
 	if want := "feature/" + redact.Marker; row.PullRequest.Branch != want {
@@ -2173,58 +2214,18 @@ func TestBuildLabelFixReactionConfig(t *testing.T) {
 func TestPopulateParked(t *testing.T) {
 	t.Parallel()
 
-	t.Run("loads rows into state.Parked", func(t *testing.T) {
+	t.Run("loads a row with an empty parked_state", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(5000, 4, 0, nil, AgentTotals{})
 		rows := []persistence.ParkedIssue{
-			{
-				IssueID:      "id-1",
-				Identifier:   "PROJ-1",
-				DisplayID:    "PROJ-1-display",
-				Reason:       parkReasonAgentBlocked,
-				ParkedState:  "In Progress",
-				Label:        "needs-human",
-				LabelApplied: true,
-				ParkedAt:     "2026-08-17T00:00:00Z",
-			},
-			{
-				IssueID:     "id-2",
-				Identifier:  "PROJ-2",
-				Reason:      parkReasonHandoffAbsence,
-				ParkedState: "",
-				Label:       "needs-human",
-				ParkedAt:    "2026-08-17T01:00:00Z",
-			},
+			{IssueID: "id-2", Identifier: "PROJ-2", Reason: parkReasonHandoffAbsence, Label: "needs-human", ParkedAt: "2026-08-17T01:00:00Z"},
 		}
 
 		PopulateParked(state, rows, nil)
 
-		if len(state.Parked) != 2 {
-			t.Fatalf("len(state.Parked) = %d, want 2", len(state.Parked))
-		}
-
-		entry1, ok := state.Parked["id-1"]
-		if !ok {
-			t.Fatal("state.Parked missing id-1")
-		}
-		if entry1.Identifier != "PROJ-1" || entry1.DisplayID != "PROJ-1-display" ||
-			entry1.Reason != parkReasonAgentBlocked || entry1.ParkedState != "In Progress" ||
-			entry1.Label != "needs-human" || !entry1.LabelApplied {
-			t.Errorf("state.Parked[id-1] = %+v, want fields to match the persisted row", entry1)
-		}
-		if !entry1.ParkedAt.Equal(time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)) {
-			t.Errorf("state.Parked[id-1].ParkedAt = %v, want 2026-08-17T00:00:00Z", entry1.ParkedAt)
-		}
-
-		// Only an empty issue_id makes a row malformed; an empty
-		// parked_state is loaded, not skipped.
-		entry2, ok := state.Parked["id-2"]
-		if !ok {
-			t.Fatal("state.Parked missing id-2")
-		}
-		if entry2.ParkedState != "" {
-			t.Errorf("state.Parked[id-2].ParkedState = %q, want empty", entry2.ParkedState)
+		if entry, ok := state.Parked["id-2"]; !ok || entry.ParkedState != "" {
+			t.Errorf("state.Parked[id-2] = %+v, want the row loaded with an empty ParkedState", entry)
 		}
 	})
 
