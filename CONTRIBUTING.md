@@ -36,6 +36,25 @@ All commands go through the Makefile. If `make test` passes, the change is safe 
 
 The SQLite dependency is [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) -a pure-Go driver. No C compiler needed.
 
+### Dashboard
+
+The dashboard application lives in `web/`. Go-only changes need none of this: `make build` and `make test` never call Node, and `go install` builds the full binary from committed files.
+
+A change under `web/` needs Node 24.15.0 or later and npm 11.10.0 or later; older versions are refused. CI uses Node 24.22.0. `make ui-install` comes first:
+
+```bash
+make ui-install    # npm ci in web/
+make ui-build      # writes internal/server/ui/dist
+make ui-lint       # Oxlint and the TypeScript check
+make ui-fmt        # Oxfmt, rewrites files
+make ui-fmt-check  # fails on any formatting difference
+make ui-check      # lint, format check, and the build output check
+```
+
+A change under `web/` passes `make ui-check`, which `make check` also runs. `internal/server/ui/dist` is the build output the binary embeds. It comes from `make ui-build`, is committed with the sources it was built from, and is never edited by hand. A conflict in it is resolved by rebuilding. The Dashboard CI job runs on every pull request and fails when the committed output differs from a fresh build.
+
+If `make ui-install` or `make ui-build` reports a missing native binding, delete `web/node_modules` and `web/package-lock.json` and run `npm install` in `web/`.
+
 ### Integration tests
 
 Integration tests are gated by environment variables and skip cleanly without them:

@@ -1334,6 +1334,26 @@ Defined metrics (label sets and buckets are specified here; see ADR-0008 for his
 | `sortie_self_review_verification_duration_seconds{command}` | Histogram | Per-command verification duration during self-review; buckets via `ExponentialBuckets(10, 2, 12)` (10 s–5.7 h). The `command` label is truncated to the first 64 characters. |
 | `sortie_build_info{version,go_version}` | Gauge | Always `1`; carries build metadata as labels. |
 
+#### 13.7.4 Dashboard application (`/ui/`)
+
+The server serves a client-side application that is compiled into the binary, under `/ui/` with path routing. The server-rendered page at `/` stays until the application replaces it. The application document and its files are read only from the compiled-in output, never from the filesystem.
+
+The route answers `GET` and `HEAD`. Any other method on a path under `/ui/` answers `405 Method Not Allowed` with `Allow: GET, HEAD`, and `GET /ui` redirects to `/ui/`. No path outside `/ui/` answers the application document, and the route does not overlap `/api/v1/*`, `/metrics`, `/livez`, or `/readyz`.
+
+| Request path | Status | Body | Headers |
+|---|---|---|---|
+| `/ui/assets/{name}` naming a regular file whose extension is in the fixed content-type table | 200 | the file | `Content-Type` from the table; `Cache-Control: public, max-age=31536000, immutable`; `X-Content-Type-Options: nosniff`; `Content-Security-Policy` |
+| `/ui/assets/{name}` naming nothing, a directory (`/ui/assets/` included), or a file whose extension is outside the table | 404 | `404 page not found` | those of a plain-text 404 |
+| any other path under `/ui/`, such as `/ui/`, `/ui/index.html`, `/ui/assets`, `/ui/issues/BP-1` | 200 | the application document | `Content-Type: text/html; charset=utf-8`; `Cache-Control: no-cache`; `ETag`; `X-Content-Type-Options: nosniff`; `Content-Security-Policy` |
+| the same, with `If-None-Match` matching the `ETag` | 304 | empty | `Cache-Control`, `ETag`, `X-Content-Type-Options`, `Content-Security-Policy` |
+
+The document answers every path under `/ui/` that is not an asset, so a deep link renders the application, which resolves the path itself.
+
+- Every response that carries application bytes carries `X-Content-Type-Options: nosniff` and a `Content-Security-Policy` header with this policy: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`.
+- The `ETag` is the quoted lowercase hexadecimal SHA-256 digest of the application document, a strong validator computed once at startup. Assets carry no validator, and no response carries `Last-Modified`. Conditional requests, ranges, and `HEAD` follow standard content-serving semantics.
+- The content type of an asset comes from a fixed table, never from the host's media type registry: `.js` is `text/javascript; charset=utf-8` and `.css` is `text/css; charset=utf-8`. A host registry can override its built-in types, and a browser refuses a stylesheet or module script served under a wrong type. An extension outside the table answers `404`, and a later output that emits another type adds a row.
+- The application document loads only files under `/ui/assets/` and carries no inline script, `style` element, or `style` attribute, so the policy applies without `'unsafe-inline'`.
+
 ### 13.8 Self-Review Observability on an Admitting Status Signal
 
 A run that ends on the `needs-human-review` status signal, or on a `no-change-needed` declaration, and passes through the self-review phase records review metadata on `run_history` exactly as a run that reached the phase by exhausting the turn budget does: the JSON document under `review_metadata`, described in Section 19, carries a value rather than null for this population.
