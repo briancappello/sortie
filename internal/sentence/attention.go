@@ -2,11 +2,7 @@ package sentence
 
 import (
 	"cmp"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,13 +12,14 @@ import (
 // AttentionItem is one thing that needs a person, worded and ready to serve.
 // Kind is parked, budget_held, reaction_escalated, workflow_reload_failed, or
 // preflight_failed; Severity is critical or warning. Since is nil only for a
-// park whose stored time did not parse. The issue fields are empty on a
-// process-wide item.
+// park whose stored time did not parse. AcknowledgedAt is nil while no person
+// has acknowledged the item. The issue fields are empty on a process-wide item.
 type AttentionItem struct {
 	ID                string
 	Kind              string
 	Severity          string
 	Since             *time.Time
+	AcknowledgedAt    *time.Time
 	IssueID           string
 	IssueIdentifier   string
 	DisplayIdentifier string
@@ -65,14 +62,6 @@ type AttentionEvidence struct {
 }
 
 const (
-	kindParked               = "parked"
-	kindBudgetHeld           = "budget_held"
-	kindReactionEscalated    = "reaction_escalated"
-	kindWorkflowReloadFailed = "workflow_reload_failed"
-	kindPreflightFailed      = "preflight_failed"
-)
-
-const (
 	severityCritical = "critical"
 	severityWarning  = "warning"
 )
@@ -102,35 +91,44 @@ var escalatedTemplates = map[string]string{
 }
 
 // Attention returns the items that need a person, ordered by severity, then
-// since with unknown times first, then id; the list is never nil. A nil health
-// leaves out the process-wide items. It reads only its arguments and is safe
-// for concurrent use.
+// since with unknown times first, then id; the list is never nil. It words the
+// causes [orchestrator.AttentionCauses] derives and attaches the time a person
+// acknowledged each one. A nil health leaves out the process-wide items. It
+// reads only its arguments and is safe for concurrent use.
 func Attention(snap orchestrator.RuntimeSnapshotResult, health *orchestrator.SnapshotHealth, c Context) []AttentionItem {
-	items := make([]AttentionItem, 0, len(snap.Parked)+len(snap.BudgetExhausted)+len(snap.PendingReactions)+2)
-	for _, e := range snap.Parked {
-		items = append(items, parkedItem(e))
-	}
-	for _, e := range snap.BudgetExhausted {
-		items = append(items, budgetItem(e))
-	}
-	for _, e := range snap.PendingReactions {
-		if e.EscalatedAt != nil {
-			items = append(items, escalatedReactionItem(e, c))
+	causes := orchestrator.AttentionCauses(snap, health)
+	items := make([]AttentionItem, 0, len(causes))
+	for _, cause := range causes {
+		item := attentionItem(cause, c)
+		if at, found := snap.AttentionAcknowledgements[item.ID]; found {
+			item.AcknowledgedAt = new(at)
 		}
-	}
-	if health != nil {
-		if health.Workflow.ConsecutiveFailures > 0 {
-			items = append(items, workflowReloadItem(health.Workflow))
-		}
-		if health.Preflight.ConsecutiveFailures > 0 && !health.Preflight.WorkflowLoadFailed {
-			items = append(items, preflightItem(health.Preflight.SnapshotHealthCheck))
-		}
+		items = append(items, item)
 	}
 	slices.SortFunc(items, compareAttention)
 	return items
 }
 
-func parkedItem(e orchestrator.SnapshotParkedEntry) AttentionItem {
+// attentionItem words one cause. A kind it does not know yields an item with
+// the cause's identity and no wording.
+func attentionItem(cause orchestrator.AttentionCause, c Context) AttentionItem {
+	switch cause.Kind {
+	case orchestrator.AttentionKindParked:
+		return parkedItem(cause)
+	case orchestrator.AttentionKindBudgetHeld:
+		return budgetItem(cause)
+	case orchestrator.AttentionKindReactionEscalated:
+		return escalatedReactionItem(cause, c)
+	case orchestrator.AttentionKindWorkflowReloadFailed:
+		return workflowReloadItem(cause)
+	case orchestrator.AttentionKindPreflightFailed:
+		return preflightItem(cause)
+	}
+	return AttentionItem{ID: cause.ID, Kind: cause.Kind, Since: cause.Since}
+}
+
+func parkedItem(cause orchestrator.AttentionCause) AttentionItem {
+	e := cause.Parked
 	template := "attn_parked_agent_blocked"
 	if e.Reason == parkReasonHandoffAbsence {
 		template = "attn_parked_handoff_absence"
@@ -141,20 +139,11 @@ func parkedItem(e orchestrator.SnapshotParkedEntry) AttentionItem {
 		"Unseen": !e.LabelApplied,
 		"State":  strings.TrimSpace(e.ParkedState),
 	})
-
-	// A restart restores the park at whole seconds, so both sides of it must
-	// hash and report the same precision.
-	var since *time.Time
-	var parkedAt string
-	if !e.ParkedAt.IsZero() {
-		since = new(e.ParkedAt.UTC().Truncate(time.Second))
-		parkedAt = since.Format(time.RFC3339)
-	}
 	return AttentionItem{
-		ID:                attentionID(kindParked, e.IssueID, parkedAt),
-		Kind:              kindParked,
+		ID:                cause.ID,
+		Kind:              cause.Kind,
 		Severity:          severityWarning,
-		Since:             since,
+		Since:             cause.Since,
 		IssueID:           e.IssueID,
 		IssueIdentifier:   e.Identifier,
 		DisplayIdentifier: e.DisplayID,
@@ -168,18 +157,19 @@ func parkedItem(e orchestrator.SnapshotParkedEntry) AttentionItem {
 	}
 }
 
-func budgetItem(e orchestrator.SnapshotBudgetEntry) AttentionItem {
+func budgetItem(cause orchestrator.AttentionCause) AttentionItem {
+	e := cause.Budget
 	key := issueKey(e.DisplayID, e.Identifier)
 	evidence := AttentionEvidence{Reason: e.Reason}
-	var template, ceiling string
+	var template string
 	var data map[string]any
 	if e.Reason == budgetReasonTokens {
-		used, atLeast := heldTokenSpend(&e)
+		used, atLeast := heldTokenSpend(e)
 		stopped := 0
 		if e.StoppedInFlight != nil {
 			stopped = *e.StoppedInFlight
 		}
-		template, ceiling = "attn_budget_tokens", strconv.FormatInt(e.BudgetTokens, 10)
+		template = "attn_budget_tokens"
 		data = map[string]any{
 			"Key":     key,
 			"Used":    used,
@@ -191,7 +181,7 @@ func budgetItem(e orchestrator.SnapshotBudgetEntry) AttentionItem {
 		evidence.UsedTokensComplete = new(!atLeast)
 		evidence.BudgetTokens = new(e.BudgetTokens)
 	} else {
-		template, ceiling = "attn_budget_sessions", strconv.Itoa(e.BudgetSessions)
+		template = "attn_budget_sessions"
 		data = map[string]any{
 			"Key":            key,
 			"UsedSessions":   e.UsedSessions,
@@ -202,10 +192,10 @@ func budgetItem(e orchestrator.SnapshotBudgetEntry) AttentionItem {
 	}
 	reason, why, clears := attentionTexts(template, data)
 	return AttentionItem{
-		ID:                attentionID(kindBudgetHeld, e.IssueID, e.Reason, ceiling),
-		Kind:              kindBudgetHeld,
+		ID:                cause.ID,
+		Kind:              cause.Kind,
 		Severity:          severityWarning,
-		Since:             new(e.ExhaustedAt.UTC()),
+		Since:             cause.Since,
 		IssueID:           e.IssueID,
 		IssueIdentifier:   e.Identifier,
 		DisplayIdentifier: e.DisplayID,
@@ -219,7 +209,8 @@ func budgetItem(e orchestrator.SnapshotBudgetEntry) AttentionItem {
 	}
 }
 
-func escalatedReactionItem(e orchestrator.SnapshotPendingReaction, c Context) AttentionItem {
+func escalatedReactionItem(cause orchestrator.AttentionCause, c Context) AttentionItem {
+	e := cause.Reaction
 	data := map[string]any{
 		"Key":           issueKey(e.DisplayID, e.Identifier),
 		"PR":            e.PullRequest.Number,
@@ -252,10 +243,10 @@ func escalatedReactionItem(e orchestrator.SnapshotPendingReaction, c Context) At
 	reason, why, clears := attentionTexts(escalatedTemplates[e.Kind], data)
 	pullRequest := e.PullRequest
 	return AttentionItem{
-		ID:                attentionID(kindReactionEscalated, e.IssueID, e.Kind, e.EscalatedAt.UTC().Format(time.RFC3339Nano)),
-		Kind:              kindReactionEscalated,
+		ID:                cause.ID,
+		Kind:              cause.Kind,
 		Severity:          severityWarning,
-		Since:             new(e.EscalatedAt.UTC()),
+		Since:             cause.Since,
 		IssueID:           e.IssueID,
 		IssueIdentifier:   e.Identifier,
 		DisplayIdentifier: e.DisplayID,
@@ -264,7 +255,7 @@ func escalatedReactionItem(e orchestrator.SnapshotPendingReaction, c Context) At
 		ReasonText:        reason,
 		WhyText:           why,
 		ClearsText:        clears,
-		Action:            escalationAction(e),
+		Action:            escalationAction(*e),
 		Evidence: AttentionEvidence{
 			ReactionKind:      e.Kind,
 			ConfigKey:         e.ConfigKey,
@@ -277,29 +268,30 @@ func escalatedReactionItem(e orchestrator.SnapshotPendingReaction, c Context) At
 	}
 }
 
-func workflowReloadItem(w orchestrator.SnapshotWorkflowHealth) AttentionItem {
-	return failingCheckItem(kindWorkflowReloadFailed, "attn_reload", w.SnapshotHealthCheck,
+func workflowReloadItem(cause orchestrator.AttentionCause) AttentionItem {
+	w := cause.Workflow
+	return failingCheckItem(cause, "attn_reload",
 		map[string]any{"File": w.File, "Error": strings.TrimSpace(w.Error)},
 		AttentionEvidence{File: w.File, Error: w.Error})
 }
 
-func preflightItem(check orchestrator.SnapshotHealthCheck) AttentionItem {
+func preflightItem(cause orchestrator.AttentionCause) AttentionItem {
+	check := cause.Preflight
 	leadless := strings.TrimSpace(strings.TrimPrefix(check.Error, orchestrator.PreflightFailedPrefix))
-	return failingCheckItem(kindPreflightFailed, "attn_preflight", check,
+	return failingCheckItem(cause, "attn_preflight",
 		map[string]any{"Error": leadless},
 		AttentionEvidence{Error: check.Error})
 }
 
 // failingCheckItem builds a process-wide item, which no issue owns and only an
 // acknowledgement answers.
-func failingCheckItem(kind, template string, check orchestrator.SnapshotHealthCheck, data map[string]any, evidence AttentionEvidence) AttentionItem {
-	failingSince := check.FailingSince.UTC()
+func failingCheckItem(cause orchestrator.AttentionCause, template string, data map[string]any, evidence AttentionEvidence) AttentionItem {
 	reason, why, clears := attentionTexts(template, data)
 	return AttentionItem{
-		ID:         attentionID(kind, failingSince.Format(time.RFC3339Nano)),
-		Kind:       kind,
+		ID:         cause.ID,
+		Kind:       cause.Kind,
 		Severity:   severityCritical,
-		Since:      &failingSince,
+		Since:      cause.Since,
 		ReasonText: reason,
 		WhyText:    why,
 		ClearsText: clears,
@@ -331,14 +323,6 @@ func escalationAction(e orchestrator.SnapshotPendingReaction) AttentionAction {
 		return AttentionAction{Kind: actionOpenPullRequest, URL: e.PullRequest.URL}
 	}
 	return issueAction(e.IssueURL)
-}
-
-// attentionID hashes the kind and its identity parts into the item id. The
-// encoding is part of the contract: clients store acknowledgements by id.
-func attentionID(kind string, parts ...string) string {
-	encoded, _ := json.Marshal(append([]string{kind}, parts...))
-	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:16])
 }
 
 func severityRank(severity string) int {

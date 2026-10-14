@@ -162,6 +162,16 @@ type stubStore struct {
 	listBudgetHoldNotices     []persistence.BudgetHoldNotice
 	listBudgetHoldNoticesErr  error
 
+	storedAcknowledgements    map[string]persistence.AttentionAcknowledgement
+	savedAcknowledgements     []persistence.AttentionAcknowledgement
+	deletedAcknowledgementIDs []string
+	saveAcknowledgementErr    error
+	deleteAcknowledgementsErr error
+
+	// scopeBudgetToCandidates makes QueryBudgetExhaustedIssues answer only
+	// for the candidate IDs it receives, as persistence.Store does.
+	scopeBudgetToCandidates bool
+
 	// onAppendRunHistory and onUpsertSessionMetadata, when set, run
 	// synchronously after the write so a test can capture single-writer
 	// state at the moment a record is persisted rather than by polling.
@@ -248,7 +258,7 @@ func (s *stubStore) TokenUsageByIssue(_ context.Context, _ string) (persistence.
 	}, nil
 }
 
-func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, _ []string, _ int) (map[string]int, error) {
+func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, candidateIDs []string, _ int) (map[string]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.budgetExhaustedErr != nil {
@@ -256,6 +266,9 @@ func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, _ []string, _ 
 	}
 	result := make(map[string]int, len(s.budgetExhaustedIDs))
 	maps.Copy(result, s.budgetExhaustedIDs)
+	if s.scopeBudgetToCandidates {
+		maps.DeleteFunc(result, func(id string, _ int) bool { return !slices.Contains(candidateIDs, id) })
+	}
 	return result, nil
 }
 
@@ -393,6 +406,39 @@ func (s *stubStore) ListBudgetHoldNotices(_ context.Context) ([]persistence.Budg
 	out := make([]persistence.BudgetHoldNotice, len(s.listBudgetHoldNotices))
 	copy(out, s.listBudgetHoldNotices)
 	return out, nil
+}
+
+func (s *stubStore) SaveAttentionAcknowledgement(_ context.Context, ack persistence.AttentionAcknowledgement) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.saveAcknowledgementErr != nil {
+		return s.saveAcknowledgementErr
+	}
+	if s.storedAcknowledgements == nil {
+		s.storedAcknowledgements = make(map[string]persistence.AttentionAcknowledgement)
+	}
+	s.storedAcknowledgements[ack.ItemID] = ack
+	s.savedAcknowledgements = append(s.savedAcknowledgements, ack)
+	return nil
+}
+
+func (s *stubStore) DeleteAttentionAcknowledgements(_ context.Context, itemIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleteAcknowledgementsErr != nil {
+		return s.deleteAcknowledgementsErr
+	}
+	for _, id := range itemIDs {
+		delete(s.storedAcknowledgements, id)
+	}
+	s.deletedAcknowledgementIDs = append(s.deletedAcknowledgementIDs, itemIDs...)
+	return nil
+}
+
+func (s *stubStore) ListAttentionAcknowledgements(_ context.Context) ([]persistence.AttentionAcknowledgement, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Collect(maps.Values(s.storedAcknowledgements)), nil
 }
 
 type stubObserver struct {
@@ -5559,7 +5605,7 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 
 	issue := domain.Issue{ID: "iss-1", Identifier: "TEST-1", Title: "title", State: "To Do"}
 
-	t.Run("store returns exhausted IDs state populated", func(t *testing.T) {
+	t.Run("store returns exhausted IDs state populated and the issue is not dispatched", func(t *testing.T) {
 		t.Parallel()
 
 		wm := budgetTickConfig(3)
@@ -5575,21 +5621,6 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 		if _, ok := state.BudgetExhausted[issue.ID]; !ok {
 			t.Errorf("BudgetExhausted[%s] missing after tick, want present", issue.ID)
 		}
-	})
-
-	t.Run("exhausted issue not dispatched", func(t *testing.T) {
-		t.Parallel()
-
-		wm := budgetTickConfig(3)
-		store := &stubStore{budgetExhaustedIDs: map[string]int{issue.ID: 1}}
-		state := NewState(60000, 10, 0, nil, AgentTotals{})
-		tracker := &candidateTrackerAdapter{
-			mockTrackerAdapter: &mockTrackerAdapter{},
-			fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return []domain.Issue{issue}, nil },
-		}
-
-		budgetOrchestrator(state, wm, store, tracker).handleTick(context.Background())
-
 		if _, running := state.Running[issue.ID]; running {
 			t.Errorf("Running[%s] present, want absent (budget exhausted)", issue.ID)
 		}

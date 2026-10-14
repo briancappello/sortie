@@ -34,6 +34,10 @@ type RefreshFunc func() bool
 // identifier due now; ctx is the request's context.
 type RetryNowFunc func(ctx context.Context, identifier string) orchestrator.RetryNowResult
 
+// AcknowledgeFunc records that a person has seen the attention item with the
+// given ID; ctx is the request's context.
+type AcknowledgeFunc func(ctx context.Context, itemID string) orchestrator.AcknowledgeResult
+
 // SlotFunc returns the current maximum concurrent agent count.
 // Called on each dashboard render to compute available slots.
 // If nil, available slots defaults to 0.
@@ -205,6 +209,10 @@ type Params struct {
 	// POST /api/v1/retries/{identifier}/run; nil answers 503.
 	RetryNowFn RetryNowFunc
 
+	// AcknowledgeFn records that a person has seen an attention item. Called
+	// on POST /api/v1/attention/{id}/acknowledge; nil answers 503.
+	AcknowledgeFn AcknowledgeFunc
+
 	// Logger is the structured logger for request and error logging.
 	Logger *slog.Logger
 
@@ -269,6 +277,7 @@ type Server struct {
 	snapshotFn      SnapshotFunc
 	refreshFn       RefreshFunc
 	retryNowFn      RetryNowFunc
+	acknowledgeFn   AcknowledgeFunc
 	workflowShapeFn func() orchestrator.WorkflowShape
 	healthFn        func() orchestrator.SnapshotHealth
 	dashboardTmpl   *template.Template
@@ -323,6 +332,7 @@ func New(params Params) *Server {
 		snapshotFn:       params.SnapshotFn,
 		refreshFn:        params.RefreshFn,
 		retryNowFn:       params.RetryNowFn,
+		acknowledgeFn:    params.AcknowledgeFn,
 		workflowShapeFn:  params.WorkflowShapeFn,
 		healthFn:         params.HealthFn,
 		dashboardTmpl:    tmpl,
@@ -362,6 +372,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/stats", s.routeStats)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
 	mux.HandleFunc("/api/v1/retries/{identifier}/run", s.routeRetryNow)
+	mux.HandleFunc("/api/v1/attention/{id}/acknowledge", s.routeAcknowledge)
 	mux.HandleFunc("/api/v1/events", s.routeEvents)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 
