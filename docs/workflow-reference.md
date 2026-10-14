@@ -1904,6 +1904,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger and by what started them, priced at the `token_rates` the process started with. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
+| POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
 | GET    | `/api/v1/events`         | Server-sent event stream of change signals: one `change` event each time anything the JSON API serves changes, at most one a second, and a `heartbeat` event every 15 seconds. Carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals](#get-apiv1events-change-signals). |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
@@ -3418,6 +3419,39 @@ readinessProbe:
 terminationGracePeriodSeconds: 90
 ```
 
+#### `POST /api/v1/retries/{identifier}/run`
+
+Makes the scheduled retry of an issue due now, so the retry runs without waiting out its delay. `{identifier}` is the `issue_identifier` of the retry row, one path segment that a client percent-encodes, and it is matched exactly. The endpoint ignores the request body and the query string.
+
+The retry then takes the path of a retry whose time came: it passes the same checks, among them the limit on agents running at once, the session and token budgets, and the issue's tracker state, and a retry the issue's state pauses stays paused. A retry that still cannot start keeps the attempt number and the due time it had before the request, so asking for it early never makes it wait longer. A retry whose row Sortie stores has the row saved with the new due time, so a restart before the retry runs does not undo the request.
+
+The response arrives once Sortie has taken the request: at once while it is idle, and at the end of the work in progress otherwise. The wait has no fixed bound. A client that disconnects while it waits, or a shutdown that begins, withdraws the request and changes nothing.
+
+**Normal response**: the retry is due now:
+
+```http
+HTTP/1.1 202 Accepted
+{"queued": true, "requested_at": "2026-02-24T20:15:30Z", "issue_id": "def456", "issue_identifier": "MT-650", "attempt": 3, "outcome_text": "Retry 3 of MT-650 is due now."}
+```
+
+**Unknown retry**: no retry is scheduled for the identifier, because the issue is unknown, has no queued retry, or its retry ran or was released before Sortie took the request:
+
+```http
+HTTP/1.1 404 Not Found
+{"error": {"code": "retry_not_found", "message": "no retry is scheduled for issue \"MT-999\""}}
+```
+
+**Drain rejection**: Sortie is shutting down:
+
+```http
+HTTP/1.1 409 Conflict
+{"queued": false, "requested_at": "...", "outcome_text": "Nothing queued: Sortie is shutting down."}
+```
+
+A `202` also carries `display_identifier` when the issue has one. `issue_id`, `issue_identifier`, `display_identifier`, and `attempt` are the facts `outcome_text` is built from. Every `202` and `409` response carries `outcome_text`, one sentence that states what the response confirms: a retry due now, or that nothing was queued. It never states an effect still to come, because whether the retry starts is decided after the response.
+
+> **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can run a retry early. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
+
 #### `GET /api/v1/events`: change signals
 
 Streams a signal each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. The response is a server-sent event stream (`text/event-stream`) that stays open until the client leaves or Sortie shuts down. A signal carries no data of its own: it names no issue and no agent message, and the stream shows nothing that `GET /api/v1/state` does not. The route takes no parameters and ignores the query string. A method other than `GET` answers `405`.
@@ -3435,7 +3469,7 @@ data: {}
 
 The `id` is a counter that rises with every change. A client keeps the last one it saw for the reconnect rule below.
 
-**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every retry made due on request, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
 
 **Reconnect.** A client reconnecting sends the `id` of its last signal in the `Last-Event-ID` header; a browser's `EventSource` does this on its own. When that value equals the current counter exactly, Sortie sends nothing until the next change. Any other value, an absent header, or a value from before a restart gets one change signal at once, so the client refetches.
 

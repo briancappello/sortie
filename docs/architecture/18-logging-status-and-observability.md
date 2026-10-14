@@ -22,6 +22,8 @@ A configuration advisory is recorded once, at construction or at workflow load, 
 
 A retry whose selection the configuration in force changes emits one `Info` record, message `"retry dispatching on the selection the configuration in force gives it"`, carrying `agent_kind`, `template_id`, and `rule_name` of the frozen selection and `dispatch_agent_kind`, `dispatch_template_id`, and `dispatch_rule_name` of the selection it dispatches on. A retry that finds the adapter of its selected kind unavailable emits one `Error` record, message `"retry agent kind unavailable"`, carrying `rule_name`, `agent_kind`, `attempt`, `delay_ms`, and `error`, and is rescheduled (Section 8.4).
 
+A request that makes a retry due (`POST /api/v1/retries/{identifier}/run`, §13.7.2) emits one `Info` record, message `"retry made due on request"`, through the issue-scoped logger, carrying `attempt` and `replaced_due_at_ms`, the due time the request replaced.
+
 An issue that carries the stage labels of two or more dispatch rules emits one `Warn` record, message `"several stage labels found"`, through the issue-scoped logger, carrying `stage_labels` (every stage label the issue carries, as written in the workflow, in rule list order) and `rule_name` (the rule the evaluation selected). The record is emitted once per evaluation of the rules, on the poll tick and on a retry that is routed afresh, and never for a retry whose frozen selection stands.
 
 A stage hop (§7.3) records its decision result on the run's `run_history` row and emits `stage.advanced` or `stage.not_advanced` (§10.4.7), and it emits its log records through the issue-scoped logger. The attributes `source_rule`, `target_rule`, `target_label`, `hop_count`, `hop_ceiling`, and `chain_path` recur: `hop_ceiling` is the per-issue ceiling in force, and `chain_path` is the rule chain through the source rule, rule names joined with ` -> `.
@@ -1021,6 +1023,30 @@ Minimum endpoints:
 
   - Every response, a refusal during shutdown included, carries `outcome_text`: one sentence that states what the response confirms, a poll and reconciliation that was queued, one that was already queued and that this request joined, or that nothing was queued because Sortie is shutting down. It never states an effect still to come.
 
+- `POST /api/v1/retries/{identifier}/run`
+  - Makes the scheduled retry of an issue due now, so the retry runs without waiting out its delay. `{identifier}` is the retry row's `issue_identifier`, one path segment that a client percent-encodes, matched exactly. The route ignores the request body and the query string.
+  - The retry takes the path of a timer that fired. The event loop re-arms the retry's entry in place with a zero delay and changes nothing outside its schedule, and the fire passes every check a timer's fire passes: the budget gates, the park and absence gates, the tracker re-read, the paused-retry rules, and the capacity checks. A retry the issue's state pauses stays paused. When the fire cannot start the retry, the put-back keeps the retry's attempt number and the due time it had before the request, or makes it due at once when that time has passed, under the put-back's own reason (§8.4). A request never leaves a retry due later, or at a higher attempt number, than before it.
+  - A retry whose row the store keeps has the row saved with the new due time, so a restart before the fire restores the retry past due and fires it at startup. A reaction retry keeps no row. A failed save is logged and does not change the answer.
+  - The response waits for the event loop to take the request, with no fixed bound: it arrives at once while the loop is idle, and at the end of the iteration in progress otherwise. The wait ends when the loop takes the request, when the client disconnects, or when shutdown begins. A request withdrawn by a disconnect or by shutdown changes nothing.
+  - Response (`202 Accepted`) shape:
+
+    ```json
+    {
+      "queued": true,
+      "requested_at": "2026-02-24T20:15:30Z",
+      "issue_id": "def456",
+      "issue_identifier": "MT-650",
+      "attempt": 3,
+      "outcome_text": "Retry 3 of MT-650 is due now."
+    }
+    ```
+
+  - The `202` also carries `display_identifier` when the issue has one. `issue_id`, `issue_identifier`, `display_identifier`, and `attempt` are the facts `outcome_text` is built from.
+  - `404 Not Found` with code `retry_not_found` answers an identifier that no scheduled retry carries: an unknown issue, an issue with no queued retry, and a retry that ran or was released before the loop took the request.
+  - `409 Conflict` answers a request made while Sortie shuts down, or one the loop had not yet taken when shutdown began. Its body holds `queued` false, `requested_at`, and `outcome_text`, and nothing changed.
+  - Every `202` and `409` response carries `outcome_text`: one sentence that states what the response confirms, a retry due now, or that nothing was queued because Sortie is shutting down. It never states an effect still to come, because whether the retry starts is decided by the fire after the response.
+  - Sortie's HTTP server has no authentication, so anyone who can reach it can run a retry early. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
+
 - `GET /api/v1/events`
   - Opens a server-sent event stream that signals each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. A signal is never a payload: it names no issue, agent message, or figure, and the stream exposes nothing that `GET /api/v1/state` does not.
   - Answers `200` with `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` so a default nginx does not buffer. The route takes no parameters and ignores the query string. A method other than `GET` answers `405` with `Allow: GET` and the JSON error envelope.
@@ -1034,7 +1060,7 @@ Minimum endpoints:
     ```
 
     `<revision>` is an unsigned decimal counter that rises with every change. It starts from the wall-clock time at server start in nanoseconds, so a restarted process does not repeat the revisions of the previous one. `data` is the empty JSON object, because a browser dispatches no event whose data is empty; a client ignores members it does not know.
-  - A signal follows each change after the change is applied, so a refetch made after a signal sees every change the signal counted. Signals come from every event-loop iteration that ends a tick, a refresh, a worker exit, or a retry; from every message of a running agent session (an agent event, a turn start, a self-review progress report, or an unaccounted-turn count); from the start of shutdown; and from every load of the workflow file by the watcher, whether it succeeds or fails. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, the elapsed times a client computes from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+  - A signal follows each change after the change is applied, so a refetch made after a signal sees every change the signal counted. Signals come from every event-loop iteration that ends a tick, a refresh, a worker exit, a retry, or a request that makes a retry due; from every message of a running agent session (an agent event, a turn start, a self-review progress report, or an unaccounted-turn count); from the start of shutdown; and from every load of the workflow file by the watcher, whether it succeeds or fails. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, the elapsed times a client computes from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
   - A stream writes at most one change signal per second. The first change after a quiet second is written at once; the changes made during a second are written together as one signal when it ends, and none is dropped. Two consecutive signals on one stream never carry the same `id`.
   - Reconnect is decided by exact string equality of the `Last-Event-ID` request header with the current revision, never by ordering. An equal value opens a stream with no signal until the next change. An absent header, an earlier revision, a revision of an earlier process, or any other string gets one signal at once.
   - A heartbeat is written every 15 seconds, counted from the stream's start.
@@ -1253,7 +1279,7 @@ API design notes:
   - An outcome that starts a session names the budget hold, the session budget or the token budget, when a budget gate would stop it. An outcome that a configured triage command replaces says that the triage command runs, and an outcome that a spent count replaces says that the reaction escalates, in the order the kind's pass decides them.
   - The list is not exhaustive. It leaves out what the configuration does not decide: a stop the agent requests, a person's tracker or pull request edit other than a label command, a failed tracker, forge, or store call, a withheld handoff and the park it leads to, and a wait for a free agent slot. A client does not read a missing branch as one that cannot happen.
   - A pair whose condition or text fails to render is left out of the list and the failure is logged. The route answers as it would otherwise.
-- Endpoints should be read-only except for operational triggers like `/refresh`.
+- Endpoints should be read-only except for operational triggers like `/refresh` and `/retries/{identifier}/run`.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state logic.

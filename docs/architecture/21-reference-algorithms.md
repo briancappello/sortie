@@ -1099,6 +1099,7 @@ The hop leaves the issue in its active tracker state with the target's stage lab
 ```text
 on_retry_timer(issue_id, state):
   // every schedule_retry here records the trigger "timer"
+  // a fire an operator request brought forward puts the retry back at retry_entry.attempt and the due time the request replaced (§8.4), in place of the attempt number and delay each put-back below sets
   retry_entry = state.retry_attempts.pop(issue_id)
   if missing:
     return state
