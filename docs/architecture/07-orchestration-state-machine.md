@@ -144,7 +144,7 @@ A verdict that withholds the write is, immediately before any of its effects, ch
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are required before launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery uses persisted state from SQLite for retry queues, session metadata, parked issues, and budget-hold notice records (the durable record that a `budget.held` notice reached at least one destination; a hold with no destination records nothing and is routed again on a later pass), supplemented by tracker polling for current issue states and filesystem inspection for workspace existence.
+- Restart recovery uses persisted state from SQLite for retry queues, session metadata, parked issues, budget-hold notice records (the durable record that a `budget.held` notice reached at least one destination; a hold with no destination records nothing and is routed again on a later pass), and attention acknowledgements (the durable record that a person has seen an attention item), supplemented by tracker polling for current issue states and filesystem inspection for workspace existence.
 - Startup pending reaction recovery uses `run_history`, tracker state, and `.sortie/scm.json` to reconstruct runtime `pending_reactions` for recent handoff-stage runs before the first poll tick. The scan is bounded by `PendingReactionRecoveryLookback` and a fixed candidate cap.
 - Startup terminal cleanup maps existing workspace directories to issue identifiers, queries the tracker for the states of those specific issues, and removes the ones in terminal states. An issue that reaches a terminal state through the merge-completion transition (§11G) becomes eligible for this same cleanup without a human relabeling it first.
 
@@ -156,10 +156,11 @@ A verdict that withholds the write is, immediately before any of its effects, ch
 4. Load persisted park records from SQLite and reconstruct the runtime park set before the event loop starts, so a parked issue stays out of dispatch across the restart.
    Then load persisted stage hop records and reconstruct each issue's hop count, latest hop, and hold flag, so the count and the hold survive the restart. A record with an empty issue ID is skipped with a warning, and a failed load starts with none.
 5. Load persisted budget-hold notice records from SQLite and reconstruct the runtime notice memory before the event loop starts, so a hold already announced to its destinations before the restart is not announced again after it. A record exists only for a notice that had at least one destination.
-6. Map existing workspace directories to issue identifiers, query the tracker for the states of those specific issues, and clean the ones in terminal states.
-7. Construct reaction providers and call `RecoverPendingReactions` to restore eligible CI and review pending entries for handoff-stage issues.
-8. Query tracker for active issues and reconcile with persisted state.
-9. Begin normal polling loop.
+6. Load persisted attention acknowledgements from SQLite before the event loop starts, so an attention item whose `id` survives the restart keeps its acknowledgement (§13.7.2). A record that does not parse is skipped with a warning, and a failed load starts with none.
+7. Map existing workspace directories to issue identifiers, query the tracker for the states of those specific issues, and clean the ones in terminal states.
+8. Construct reaction providers and call `RecoverPendingReactions` to restore eligible CI and review pending entries for handoff-stage issues.
+9. Query tracker for active issues and reconcile with persisted state.
+10. Begin normal polling loop.
 
 ### 7.5 Retry-Slot Arbitration
 

@@ -1905,6 +1905,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
+| POST   | `/api/v1/attention/{id}/acknowledge` | Record that a person has seen an item that needs a person: it leaves the attention count and stays listed with the time it was acknowledged until its cause clears, and a new cause shows as a new item. Changes nothing in the tracker or the pull request. Returns 200 OK, 404 when no current item has the ID, and 409 Conflict during graceful shutdown. Every 200 and 409 response says in one sentence what it did. |
 | GET    | `/api/v1/events`         | Server-sent event stream of change signals: one `change` event each time anything the JSON API serves changes, at most one a second, and a `heartbeat` event every 15 seconds. Carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals](#get-apiv1events-change-signals). |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
@@ -1962,7 +1963,7 @@ The readiness checks keep their meaning. `workflow` passes while a configuration
 
 #### `GET /api/v1/state` — Runtime Snapshot
 
-Returns the system-wide runtime state including running sessions, retry queue, budget-exhausted and parked issues, pending pull request reactions, issues between stages, the list of what needs a person (`attention`), aggregate token/runtime totals, rate limits, and the effective workflow shape (`config`). It also names the Sortie version and the time the process started, and carries the `health` block, the health of Sortie's own checks.
+Returns the system-wide runtime state including running sessions, retry queue, budget-exhausted and parked issues, pending pull request reactions, issues between stages, the list of what needs a person (`attention`) with the time a person acknowledged each item, aggregate token/runtime totals, rate limits, and the effective workflow shape (`config`). It also names the Sortie version and the time the process started, and carries the `health` block, the health of Sortie's own checks.
 
 ```json
 {
@@ -1976,7 +1977,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
     "parked": 1,
     "pending_reactions": 2,
     "between_stages": 1,
-    "attention": 4
+    "attention": 3
   },
   "running": [
     {
@@ -2250,6 +2251,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "kind": "workflow_reload_failed",
       "severity": "critical",
       "since": "2026-02-24T20:14:51Z",
+      "acknowledged_at": null,
       "reason_text": "WORKFLOW.md failed to load",
       "why_text": "WORKFLOW.md failed to load (config: agent.turn_timeout_ms: must be greater than 0), so poll ticks dispatch nothing until it loads, and the configuration that last loaded stays in effect.",
       "clears_text": "Clears when WORKFLOW.md loads again, which Sortie tries each time the file is saved and on every poll tick.",
@@ -2264,6 +2266,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "kind": "parked",
       "severity": "warning",
       "since": "2026-02-24T20:05:00Z",
+      "acknowledged_at": null,
       "issue_id": "jkl012",
       "issue_identifier": "MT-652",
       "issue_title": "Rotate the signing keys",
@@ -2282,6 +2285,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "kind": "budget_held",
       "severity": "warning",
       "since": "2026-02-24T20:12:00Z",
+      "acknowledged_at": "2026-02-24T20:13:05Z",
       "issue_id": "ghi789",
       "issue_identifier": "MT-651",
       "issue_title": "Migrate the billing tables",
@@ -2301,6 +2305,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "kind": "reaction_escalated",
       "severity": "warning",
       "since": "2026-02-24T20:12:40Z",
+      "acknowledged_at": null,
       "issue_id": "mno345",
       "issue_identifier": "MT-653",
       "issue_title": "Add the export button",
@@ -2621,14 +2626,15 @@ A hop record stores the type, labels, and state with the hop, and Sortie restore
 
 **Attention (`attention`):**
 
-Each element of `attention` describes one thing that needs a person. Sortie derives the list on each request from the rows above and the `health` block and stores it nowhere, so an item exists exactly while its cause holds and disappears on the first request after the cause clears. The list is always present, `[]` when nothing needs a person, and `counts.attention` equals its length. A client that shows the list counts, orders, and words nothing itself.
+Each element of `attention` describes one thing that needs a person. Sortie derives the list on each request from the rows above and the `health` block and stores it nowhere, so an item exists exactly while its cause holds and disappears on the first request after the cause clears. The one thing Sortie stores is the acknowledgement of an item, which `POST /api/v1/attention/{id}/acknowledge` records. The list is always present, `[]` when nothing needs a person, and `counts.attention` counts the items whose `acknowledged_at` is `null`, so it is `0` when nothing needs a person and an acknowledged item stays listed without being counted. A client that shows the list counts, orders, and words nothing itself.
 
 | Field                | Type             | Description |
 | -------------------- | ---------------- | ----------- |
-| `id`                 | string           | A stable identifier of 32 lowercase hexadecimal characters. It stays the same while the cause holds, across requests and, for `parked` and `reaction_escalated`, across a restart, and a recurrence of the cause gets a new one. A client keys stored state by it. |
+| `id`                 | string           | A stable identifier of 32 lowercase hexadecimal characters. It stays the same while the cause holds, across requests and, for `parked` and `reaction_escalated`, across a restart, and a recurrence of the cause gets a new one, except a hold that returns under the same reason and ceiling. Sortie keys stored acknowledgements by it, so the encoding below never changes. |
 | `kind`               | string           | What the item is about (table below). |
 | `severity`           | string           | `critical` marks a cause under which poll ticks dispatch nothing for any issue. `warning` marks a cause about one issue. The severity belongs to the kind and never grows with age. |
 | `since`              | string or `null` | When the cause began, in UTC. `null` only for a park whose stored time cannot be read. |
+| `acknowledged_at`    | string or `null` | When a person acknowledged the item, in UTC, or `null` while nobody has. Always present. An acknowledged item stays in the list and leaves `counts.attention`. |
 | `issue_id`, `issue_identifier` | string or absent | The tracker-internal issue ID and the human-readable key, copied from the source row. Absent on an item about the process. |
 | `display_identifier`, `issue_title`, `issue_url` | string or absent | Copied from the source row as that row serves them. Omitted when empty and absent on an item about the process. Masked. |
 | `reason_text`        | string           | A short phrase that says what needs a person, without a final period. |
@@ -2647,7 +2653,7 @@ Each element of `attention` describes one thing that needs a person. Sortie deri
 | `workflow_reload_failed` | `health.workflow.consecutive_failures` above `0` | `health.workflow.failing_since` | `critical` | `acknowledge` |
 | `preflight_failed`       | `health.preflight.consecutive_failures` above `0`, unless the latest failed run failed because the workflow file did not load | `health.preflight.failing_since` | `critical` | `acknowledge` |
 
-`action` keys: `kind` is `open_issue`, `open_pull_request`, or `acknowledge`. `url` is present exactly for `open_issue` (the issue's link) and `open_pull_request` (the pull request's link). `acknowledge` is the action of an item with nothing to open.
+`action` keys: `kind` is `open_issue`, `open_pull_request`, or `acknowledge`. `url` is present exactly for `open_issue` (the issue's link) and `open_pull_request` (the pull request's link). `acknowledge` is the action of an item with nothing to open. Every item can be acknowledged, whatever its `action`.
 
 A preflight that fails because the workflow file did not load yields no `preflight_failed` item, because the `workflow_reload_failed` item already names the cause. A `preflight_failed` item's `since` is when the preflight began failing, which can be earlier than the item's first appearance when the failing streak began on the workflow load.
 
@@ -2675,7 +2681,9 @@ A preflight that fails because the workflow file did not load yields no `preflig
 | `workflow_reload_failed` | `failing_since` in RFC 3339 with nanoseconds. |
 | `preflight_failed`       | `failing_since` in RFC 3339 with nanoseconds. |
 
-The park time enters at whole seconds because Sortie stores a park at that precision, so a park keeps its `id` and `since` across a restart. A hold keeps its `id` across a restart too, but its `since` becomes the first poll tick after the restart, because Sortie keeps the moment a hold began only in memory. A reaction escalation keeps its `id` and `since` across a restart, because the restored escalation carries its stored time. A workflow reload or preflight failure cannot span a restart, because startup exits when the first load or the startup preflight fails. A recurrence changes a part, so an acknowledgement keyed by `id` never hides a new cause: a new park has a new time, a hold reached again after a raise or under an edited ceiling has a new ceiling, a different budget reason is a new reason, an escalation that ended and began again has a new time, and a failure after a pass has a new `failing_since`.
+The park time enters at whole seconds because Sortie stores a park at that precision, so a park keeps its `id` and `since` across a restart. A hold keeps its `id` across a restart too, but its `since` becomes the first poll tick after the restart, because Sortie keeps the moment a hold began only in memory. A reaction escalation keeps its `id` and `since` across a restart, because the restored escalation carries its stored time. A workflow reload or preflight failure cannot span a restart, because startup exits when the first load or the startup preflight fails. A recurrence changes a part, so an acknowledgement never hides a new cause: a new park has a new time, a hold reached again after a raise or under an edited ceiling has a new ceiling, a different budget reason is a new reason, an escalation that ended and began again has a new time, and a failure after a pass has a new `failing_since`. A hold that clears and returns under the same reason and ceiling, for example after its issue left the active states and came back or after the ceiling was raised and restored, gets its old `id` back. No acknowledgement carries over to it, because Sortie deletes an acknowledgement once a poll tick that reads the candidate issues no longer finds its item.
+
+An acknowledgement lasts as long as its item's cause holds. The first poll tick that reads the candidate issues and no longer finds the item deletes the acknowledgement, so the same reason coming back after it cleared shows as a new, unacknowledged item. A tick that cannot read the candidate issues, because its preflight or its tracker fetch failed, deletes none. Sortie stores each acknowledgement and loads it at startup. A park and a reaction escalation keep theirs across a restart, and a hold keeps its own once the first poll tick that reads the candidate issues rebuilds the hold. A failed reload or preflight cannot span a restart, so its acknowledgement goes at the first such tick. A hold whose issue left the active states and came back returns unacknowledged with its earlier `since`. An acknowledgement changes no item's place in the order.
 
 Items are ordered by `severity` (`critical` before `warning`), then by `since` (`null` first, then ascending), then by `id` ascending. The order is total, so the same state serves the same list.
 
@@ -2691,7 +2699,7 @@ Items are ordered by `severity` (`critical` before `warning`), then by `since` (
 
 What clears each cause is the source's own rule, and `clears_text` words it. A park is released when a person removes its label after Sortie has seen it there, or moves the issue to another tracker state. A hold leaves the set when a poll tick finds the issue no longer at a ceiling or among the candidates, for example after the ceiling is raised or removed. A reaction escalation ends on the facts listed under Escalation recurrence in the reaction settings. A reload failure ends with the next load that succeeds, and a preflight failure with the next preflight that passes.
 
-The `attention` array of the example above holds the failed reload first, because it is `critical`, and then the park, the hold, and the CI escalation in the order of their `since`. It holds no `preflight_failed` item, because the preflight error is the load error.
+The `attention` array of the example above holds the failed reload first, because it is `critical`, and then the park, the hold, and the CI escalation in the order of their `since`. It holds no `preflight_failed` item, because the preflight error is the load error. The hold of MT-651 is acknowledged, so it carries its time and `counts.attention` is `3`.
 
 **Status sentence fields:**
 
@@ -3452,6 +3460,60 @@ A `202` also carries `display_identifier` when the issue has one. `issue_id`, `i
 
 > **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can run a retry early. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
 
+#### `POST /api/v1/attention/{id}/acknowledge`
+
+Records that a person has seen an item that needs a person. `{id}` is the `id` of an element of `attention` on `GET /api/v1/state`, one path segment, and it is matched exactly against the items Sortie derives when it takes the request. The endpoint ignores the request body and the query string. Every item can be acknowledged, whatever its `action`.
+
+The item leaves `counts.attention` and stays in the list with `acknowledged_at` set, until its cause clears. Sortie saves the acknowledgement before it answers, so a `200` survives a restart. A different reason on the issue, or the same reason returning after it cleared, shows as a new item with `acknowledged_at` set to `null`; the Attention block of `GET /api/v1/state` states how long an acknowledgement lasts. A repeat request changes nothing: it answers `200` with `already_acknowledged` true and the time of the first acknowledgement.
+
+The request changes nothing in the tracker or the pull request, and nothing about the park, hold, escalation, or retry behind the item. Acknowledging a park releases nothing, acknowledging a hold lifts nothing, and acknowledging an escalation ends nothing.
+
+The response arrives once Sortie has taken the request: at once while it is idle, and at the end of the work in progress otherwise. The wait has no fixed bound. A client that disconnects while it waits withdraws the request and changes nothing, and so does a shutdown that begins, which answers `409`.
+
+**Normal response**: the item is acknowledged now:
+
+```http
+HTTP/1.1 200 OK
+{
+  "acknowledged": true,
+  "already_acknowledged": false,
+  "requested_at": "2026-02-24T20:13:05Z",
+  "id": "464f9ff8ea54c4c6cfb43af394234d57",
+  "kind": "budget_held",
+  "issue_id": "ghi789",
+  "issue_identifier": "MT-651",
+  "acknowledged_at": "2026-02-24T20:13:05Z",
+  "outcome_text": "Acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears."
+}
+```
+
+**Repeat response**: the item was acknowledged before, and `acknowledged_at` is the first time:
+
+```http
+HTTP/1.1 200 OK
+{"acknowledged": true, "already_acknowledged": true, "requested_at": "2026-02-24T20:15:30Z", "id": "464f9ff8ea54c4c6cfb43af394234d57", "kind": "budget_held", "issue_id": "ghi789", "issue_identifier": "MT-651", "acknowledged_at": "2026-02-24T20:13:05Z", "outcome_text": "Already acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears."}
+```
+
+**Unknown item**: no current item has the ID, because the ID is unknown or the item cleared before Sortie took the request. The client refetches `GET /api/v1/state`, where the item is gone:
+
+```http
+HTTP/1.1 404 Not Found
+{"error": {"code": "attention_item_not_found", "message": "no current attention item has ID \"0f1e2d3c4b5a69788796a5b4c3d2e1f0\""}}
+```
+
+**Drain rejection**: Sortie is shutting down:
+
+```http
+HTTP/1.1 409 Conflict
+{"acknowledged": false, "already_acknowledged": false, "requested_at": "...", "outcome_text": "Nothing acknowledged: Sortie is shutting down."}
+```
+
+A `200` also carries `display_identifier` when the item concerns an issue that has one. The issue keys are omitted when empty and absent for an item about the process, such as a failed load of `WORKFLOW.md`. `id`, `kind`, and the issue keys are the facts `outcome_text` is built from. Every `200` and `409` response carries `outcome_text`, one sentence that states what the response confirms: that the item is acknowledged, that it already was, or that nothing was acknowledged.
+
+When Sortie cannot save the acknowledgement, it answers `500` with the error code `acknowledgement_not_saved` and the message `Sortie could not save the acknowledgement; nothing changed`. The item stays unacknowledged, and the client can acknowledge it again.
+
+> **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can acknowledge an attention item and take it out of the attention count. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
+
 #### `GET /api/v1/events`: change signals
 
 Streams a signal each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. The response is a server-sent event stream (`text/event-stream`) that stays open until the client leaves or Sortie shuts down. A signal carries no data of its own: it names no issue and no agent message, and the stream shows nothing that `GET /api/v1/state` does not. The route takes no parameters and ignores the query string. A method other than `GET` answers `405`.
@@ -3469,7 +3531,7 @@ data: {}
 
 The `id` is a counter that rises with every change. A client keeps the last one it saw for the reconnect rule below.
 
-**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every retry made due on request, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every retry made due on request, every acknowledgement recorded on request, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
 
 **Reconnect.** A client reconnecting sends the `id` of its last signal in the `Last-Event-ID` header; a browser's `EventSource` does this on its own. When that value equals the current counter exactly, Sortie sends nothing until the next change. Any other value, an absent header, or a value from before a restart gets one change signal at once, so the client refetches.
 
