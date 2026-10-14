@@ -103,7 +103,7 @@ The dashboard CI job is not a required check for now. `make build`, `make test`,
 
 ### Supply chain
 
-`web/.npmrc` sets `ignore-scripts=true`, so no dependency runs install scripts; `min-release-age=3`, so no version published less than three days ago is installed; and `allow-git=none`, so no dependency resolves from a git reference. npm older than 11.10 skips the last two settings with only a warning, so the Node pin in `.tool-versions` is 24.15.0 or later (bundled npm 11.12.1), and CI reads the Node version from that file. Dependencies are pinned to exact versions, `package-lock.json` is committed, and CI installs with `npm ci`. Dependabot covers the npm ecosystem in `web/` with grouped updates. Build-time plugins still execute during `vite build`, so a compromised plugin is not stopped by these settings; exact pins and reviewed updates are the remaining defense.
+`web/.npmrc` sets `ignore-scripts=true`, so no dependency runs install scripts; `min-release-age=3`, so no version published less than three days ago is installed; and `allow-git=none`, so no dependency resolves from a git reference. npm older than 11.10 skips the last two settings with only a warning, so the Node version CI installs for the dashboard is 24.15.0 or later (bundled npm 11.12.1). Dependencies are pinned to exact versions, `package-lock.json` is committed, and CI installs with `npm ci`. Dependabot covers the npm ecosystem in `web/` with grouped updates. Build-time plugins still execute during `vite build`, so a compromised plugin is not stopped by these settings; exact pins and reviewed updates are the remaining defense.
 
 ### Structure for later surfaces
 

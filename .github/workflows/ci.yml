@@ -272,3 +272,32 @@ jobs:
 
       - name: Build binary
         run: make build
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: make ui-install
+
+      - name: Lint
+        run: make ui-lint
+
+      - name: Format
+        run: make ui-fmt-check
+
+      - name: Output drift
+        run: make ui-build-check

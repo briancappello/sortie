@@ -17,6 +17,7 @@ An agent orchestrator that ships as one statically-linked binary with no runtime
 - **Integration tests are env-gated** by a per-adapter `SORTIE_<ADAPTER>_TEST=1`. Without the gate set they must skip cleanly — never fail.
 - **`workflow.Manager.Reload()` is fail-safe.** On parse or validation error the previous `currentConfig` and `currentPrompt` are retained and `LastLoadError()` reports the failure. Preserve that invariant; never `os.Exit` on a bad WORKFLOW.md.
 - **Prompt templates render with `Option("missingkey=error")`.** Adding a template variable without wiring its data field is a runtime error, not an empty string.
+- **The dashboard's build output under `internal/server/ui/dist` is committed.** `make ui-build` regenerates it from `web/`; commit it with the sources it was built from, and resolve a conflict in it by rebuilding, never by hand.
 
 ## Boundaries
 

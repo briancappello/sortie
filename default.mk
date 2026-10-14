@@ -29,6 +29,7 @@ LINTER  ?= golangci-lint
 SHELLCHECK ?= shellcheck
 GOPLS   ?= gopls
 LYCHEE  ?= lychee
+NPM     ?= npm
 
 # --offline checks links between tracked files and their anchors without the
 # network, so an unreachable external site cannot fail a pull request.  The
