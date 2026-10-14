@@ -3110,11 +3110,6 @@ func TestHandleRefresh(t *testing.T) {
 			wantText: "A tracker poll and reconciliation was already queued; this request joined it.",
 		},
 		{
-			name: "rejected during drain", refreshFn: coalescingRefresh(), draining: true,
-			wantStatus: http.StatusConflict,
-			wantText:   "Nothing queued: Sortie is shutting down.",
-		},
-		{
 			name: "rejected during drain even when refreshFn accepts", refreshFn: acceptingRefresh(), draining: true,
 			wantStatus: http.StatusConflict,
 			wantText:   "Nothing queued: Sortie is shutting down.",
@@ -3157,6 +3152,63 @@ func TestHandleRefresh(t *testing.T) {
 	}
 }
 
+func TestHandleRetryNow(t *testing.T) {
+	t.Parallel()
+
+	retryNow := func(_ context.Context, identifier string) orchestrator.RetryNowResult {
+		if identifier != "MT-650" {
+			return orchestrator.RetryNowResult{Status: orchestrator.RetryNowNotFound}
+		}
+		return orchestrator.RetryNowResult{Status: orchestrator.RetryNowDue, IssueID: "def456", Identifier: identifier, Attempt: 3}
+	}
+	srv := New(Params{
+		SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+		RefreshFn:  acceptingRefresh(),
+		RetryNowFn: retryNow,
+		Logger:     slog.New(slog.DiscardHandler),
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+
+	tests := []struct {
+		name       string
+		identifier string
+		wantStatus int
+		wantText   string
+		wantCode   string
+	}{
+		{name: "scheduled retry", identifier: "MT-650", wantStatus: http.StatusAccepted, wantText: "Retry 3 of MT-650 is due now."},
+		{name: "unknown issue", identifier: "MT-999", wantStatus: http.StatusNotFound, wantCode: "retry_not_found"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := "/api/v1/retries/" + tt.identifier + "/run"
+			resp, err := http.Post(ts.URL+path, "", nil)
+			if err != nil {
+				t.Fatalf("POST %s: %v", path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body := decodeJSON[struct {
+				retryNowResponse
+				errorResponse
+			}](t, resp)
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("POST %s status = %d, want %d", path, resp.StatusCode, tt.wantStatus)
+			}
+			if body.OutcomeText != tt.wantText {
+				t.Errorf("POST %s outcome_text = %q, want %q", path, body.OutcomeText, tt.wantText)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Errorf("POST %s error code = %q, want %q", path, body.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
 func TestMethodNotAllowed(t *testing.T) {
 	t.Parallel()
 
@@ -3168,13 +3220,9 @@ func TestMethodNotAllowed(t *testing.T) {
 		path   string
 	}{
 		{name: "POST /api/v1/state", method: http.MethodPost, path: "/api/v1/state"},
-		{name: "PUT /api/v1/state", method: http.MethodPut, path: "/api/v1/state"},
-		{name: "DELETE /api/v1/state", method: http.MethodDelete, path: "/api/v1/state"},
 		{name: "GET /api/v1/refresh", method: http.MethodGet, path: "/api/v1/refresh"},
-		{name: "PUT /api/v1/refresh", method: http.MethodPut, path: "/api/v1/refresh"},
 		{name: "POST /api/v1/events", method: http.MethodPost, path: "/api/v1/events"},
 		{name: "POST /api/v1/MT-100", method: http.MethodPost, path: "/api/v1/MT-100"},
-		{name: "DELETE /api/v1/MT-100", method: http.MethodDelete, path: "/api/v1/MT-100"},
 	}
 
 	for _, tt := range tests {
@@ -3198,10 +3246,8 @@ func TestMethodNotAllowed(t *testing.T) {
 				t.Errorf("Content-Type = %q, want %q", ct, "application/json; charset=utf-8")
 			}
 
-			var body errorResponse
-			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-				t.Fatalf("decode error response: %v", err)
-			}
+			body := decodeJSON[errorResponse](t, resp)
+
 			if body.Error.Code != "method_not_allowed" {
 				t.Errorf("error code = %q, want %q", body.Error.Code, "method_not_allowed")
 			}

@@ -4,10 +4,11 @@
 // wording instead of reading Sortie state itself.
 //
 // Start with [For] for an issue, [NextOutcomes] for what Sortie does next for
-// an issue, [Attention] for what needs a person, and [RefreshOutcome] for a
-// refresh request. All are safe for concurrent use and never fail: a template
-// that cannot render yields a fixed fallback text, or leaves out the one next
-// outcome it belongs to, and logs one record.
+// an issue, [Attention] for what needs a person, and [RefreshOutcome] and
+// [RetryNowOutcome] for a refresh and a retry-now request. All are safe for
+// concurrent use and never fail: a template that cannot render yields a fixed
+// fallback text, or leaves out the one next outcome it belongs to, and logs
+// one record.
 package sentence
 
 import (
@@ -101,11 +102,24 @@ func RefreshOutcome(queued, coalesced bool) string {
 	name := "ctl_refresh"
 	switch {
 	case !queued:
-		name = "ctl_refresh_refused"
+		name = "ctl_refused"
 	case coalesced:
 		name = "ctl_refresh_coalesced"
 	}
 	return render(name, "text", nil)
+}
+
+// RetryNowOutcome returns the outcome sentence of a request to run a
+// scheduled retry now. queued is false for a request refused because
+// Sortie is shutting down, which ignores the other arguments.
+func RetryNowOutcome(queued bool, displayID, identifier string, attempt int) string {
+	if !queued {
+		return render("ctl_refused", "text", nil)
+	}
+	return render("ctl_retry_now", "text", map[string]any{
+		"Key":     issueKey(displayID, identifier),
+		"Attempt": attempt,
+	})
 }
 
 func status(name string, data map[string]any) Status {

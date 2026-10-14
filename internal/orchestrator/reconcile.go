@@ -332,6 +332,7 @@ func reconcileOverdueRetries(state *State, params ReconcileParams, log *slog.Log
 
 		overdueMS := now.UnixMilli() - entry.DueAtMS
 		pausedSinceMS := entry.pausedSinceMS
+		dueBeforeRequestMS := entry.dueBeforeRequestMS
 		entryLog := logging.WithIssue(log, issueID, entry.Identifier)
 
 		CancelRetry(state, issueID)
@@ -360,6 +361,7 @@ func reconcileOverdueRetries(state *State, params ReconcileParams, log *slog.Log
 
 		if rearmed, ok := state.RetryAttempts[issueID]; ok {
 			rearmed.pausedSinceMS = pausedSinceMS
+			rearmed.dueBeforeRequestMS = dueBeforeRequestMS
 		}
 
 		entryLog.Warn("overdue retry re-armed",

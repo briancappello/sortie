@@ -396,6 +396,10 @@ type RetryEntry struct {
 	// of HandleRetryTimer's paused-by-issue-state arms. Zero means not
 	// paused. Runtime-only: never persisted, never on ScheduleRetryParams.
 	pausedSinceMS int64
+
+	// dueBeforeRequestMS is the DueAtMS the entry had before the first request
+	// that made it due now; zero when no request did. Runtime-only.
+	dueBeforeRequestMS int64
 }
 
 // ReactionKindCI is the reaction kind for CI failure reactions.

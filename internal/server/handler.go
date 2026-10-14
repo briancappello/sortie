@@ -458,6 +458,16 @@ type refreshResponse struct {
 	OutcomeText string    `json:"outcome_text"`
 }
 
+type retryNowResponse struct {
+	Queued            bool      `json:"queued"`
+	RequestedAt       time.Time `json:"requested_at"`
+	IssueID           string    `json:"issue_id,omitempty"`
+	IssueIdentifier   string    `json:"issue_identifier,omitempty"`
+	DisplayIdentifier string    `json:"display_identifier,omitempty"`
+	Attempt           int       `json:"attempt,omitempty"`
+	OutcomeText       string    `json:"outcome_text"`
+}
+
 type errorResponse struct {
 	Error errorDetail `json:"error"`
 }
@@ -969,6 +979,14 @@ func (s *Server) routeRefresh(w http.ResponseWriter, r *http.Request) {
 	s.handleRefresh(w, r)
 }
 
+func (s *Server) routeRetryNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, r, http.MethodPost)
+		return
+	}
+	s.handleRetryNow(w, r)
+}
+
 func (s *Server) routeIssueDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.methodNotAllowed(w, r, http.MethodGet)
@@ -1212,6 +1230,68 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		slog.Int("status", http.StatusAccepted),
 		slog.Duration("duration", time.Since(start)),
 	)
+}
+
+func (s *Server) handleRetryNow(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	status, body := s.retryNowAnswer(w, r, start.UTC())
+	writeJSON(w, s.logger, status, body)
+
+	s.logger.Debug("request served",
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.Int("status", status),
+		slog.Duration("duration", time.Since(start)),
+	)
+}
+
+// retryNowAnswer runs the request and returns the status and body to write.
+func (s *Server) retryNowAnswer(w http.ResponseWriter, r *http.Request, requestedAt time.Time) (int, any) {
+	refused := retryNowResponse{
+		RequestedAt: requestedAt,
+		OutcomeText: sentence.RetryNowOutcome(false, "", "", 0),
+	}
+	unavailable := errorResponse{Error: errorDetail{
+		Code:    "retry_now_unavailable",
+		Message: "Sortie did not take the request; nothing changed",
+	}}
+
+	if s.drainingFlag.Load() {
+		return http.StatusConflict, refused
+	}
+	if s.retryNowFn == nil {
+		return http.StatusServiceUnavailable, unavailable
+	}
+
+	identifier := r.PathValue("identifier")
+	result := s.retryNowFn(r.Context(), identifier)
+
+	// The wait for the event loop is unbounded, so the server's own deadline
+	// may have lapsed by now.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.httpServer.WriteTimeout))
+
+	switch result.Status {
+	case orchestrator.RetryNowDue:
+		return http.StatusAccepted, retryNowResponse{
+			Queued:            true,
+			RequestedAt:       requestedAt,
+			IssueID:           result.IssueID,
+			IssueIdentifier:   result.Identifier,
+			DisplayIdentifier: result.DisplayID,
+			Attempt:           result.Attempt,
+			OutcomeText:       sentence.RetryNowOutcome(true, result.DisplayID, result.Identifier, result.Attempt),
+		}
+	case orchestrator.RetryNowNotFound:
+		return http.StatusNotFound, errorResponse{Error: errorDetail{
+			Code:    "retry_not_found",
+			Message: fmt.Sprintf("no retry is scheduled for issue %q", identifier),
+		}}
+	case orchestrator.RetryNowDraining:
+		return http.StatusConflict, refused
+	default:
+		return http.StatusServiceUnavailable, unavailable
+	}
 }
 
 func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {

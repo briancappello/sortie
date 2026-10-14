@@ -382,7 +382,8 @@ var table = map[string]parts{
 
 	"ctl_refresh":           {text: "Tracker poll and reconciliation queued."},
 	"ctl_refresh_coalesced": {text: "A tracker poll and reconciliation was already queued; this request joined it."},
-	"ctl_refresh_refused":   {text: "Nothing queued: Sortie is shutting down."},
+	"ctl_refused":           {text: "Nothing queued: Sortie is shutting down."},
+	"ctl_retry_now":         {text: "Retry {{count .Attempt}} of {{.Key}} is due now."},
 }
 
 // templates is the parsed table. A source that does not parse panics at

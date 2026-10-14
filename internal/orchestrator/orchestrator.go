@@ -102,6 +102,29 @@ type snapshotRequest struct {
 	ReplyCh chan<- RuntimeSnapshotResult
 }
 
+// loopAction is work a caller asks the event loop to run. state decides who
+// owns the action: the loop takes it or the caller withdraws it, never both.
+type loopAction struct {
+	apply func(ctx context.Context)
+	state atomic.Int32
+	done  chan struct{}
+}
+
+const (
+	loopActionPending int32 = iota
+	loopActionTaken
+	loopActionWithdrawn
+)
+
+// loopOutcome is what [Orchestrator.runOnLoop] did with a request.
+type loopOutcome int
+
+const (
+	loopRan loopOutcome = iota + 1
+	loopDraining
+	loopWithdrawn
+)
+
 // agentEventMsg pairs an issue ID with an agent event for delivery through
 // agentEventCh.
 type agentEventMsg struct {
@@ -266,6 +289,11 @@ type Orchestrator struct {
 	snapshotCh         chan snapshotRequest
 	refreshCh          chan struct{}
 
+	// actionCh carries work for the event loop; only Run reads it. stopping
+	// closes once, when shutdown begins and before workers drain.
+	actionCh chan *loopAction
+	stopping chan struct{}
+
 	preflightParams PreflightParams
 	observers       []Observer
 
@@ -425,6 +453,8 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		unaccountedTurnsCh:                make(chan unaccountedTurnsMsg, eventBuf),
 		snapshotCh:                        make(chan snapshotRequest, 4),
 		refreshCh:                         make(chan struct{}, 1),
+		actionCh:                          make(chan *loopAction, 4),
+		stopping:                          make(chan struct{}),
 		preflightParams:                   params.PreflightParams,
 		observers:                         observers,
 		toolRegistry:                      params.ToolRegistry,
@@ -637,6 +667,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			o.draining.Store(true)
+			close(o.stopping)
 			tickTimer.Stop()
 			o.pollHealth.schedule(time.Time{})
 			o.notifyObservers()
@@ -717,10 +748,54 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			snap := RuntimeSnapshot(o.state, time.Now())
 			req.ReplyCh <- snap
 
+		case action := <-o.actionCh:
+			if action.state.CompareAndSwap(loopActionPending, loopActionTaken) {
+				action.apply(ctx)
+				close(action.done)
+			}
+
 		case <-o.refreshCh:
 			o.handleTick(ctx)
 		}
 	}
+}
+
+// runOnLoop runs apply on the event loop and waits for it. It reports
+// loopDraining when shutdown began first and loopWithdrawn when ctx ended
+// first; in both cases apply never ran. The wait has no fixed bound.
+func (o *Orchestrator) runOnLoop(ctx context.Context, apply func(loopCtx context.Context)) loopOutcome {
+	select {
+	case <-o.stopping:
+		return loopDraining
+	default:
+	}
+
+	action := &loopAction{apply: apply, done: make(chan struct{})}
+	select {
+	case o.actionCh <- action:
+	case <-ctx.Done():
+		return loopWithdrawn
+	case <-o.stopping:
+		return loopDraining
+	}
+
+	select {
+	case <-action.done:
+		return loopRan
+	case <-ctx.Done():
+	case <-o.stopping:
+	}
+
+	if action.state.CompareAndSwap(loopActionPending, loopActionWithdrawn) {
+		select {
+		case <-o.stopping:
+			return loopDraining
+		default:
+			return loopWithdrawn
+		}
+	}
+	<-action.done
+	return loopRan
 }
 
 // updateGauges recomputes point-in-time gauges from current state and

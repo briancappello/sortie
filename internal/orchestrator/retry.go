@@ -130,6 +130,18 @@ type HandleRetryTimerParams struct {
 	ResolveAttemptSettings func(selection DispatchResolution, sshHost string) AttemptSettings
 }
 
+// putBackSchedule returns the Attempt and delay in milliseconds for putting
+// back a retry that could not start. A fire that an operator request brought
+// forward keeps the retry's Attempt and the due time it had before the
+// request, so a request never leaves a retry later than it was; any other
+// fire takes the arm's attempt and its backoff.
+func putBackSchedule(popped *RetryEntry, attempt int, maxRetryBackoffMS int) (int, int64) {
+	if popped.dueBeforeRequestMS != 0 {
+		return popped.Attempt, max(0, popped.dueBeforeRequestMS-time.Now().UnixMilli())
+	}
+	return attempt, computeBackoffDelay(attempt, maxRetryBackoffMS)
+}
+
 // HandleRetryTimer processes a retry timer event for the given issue: it
 // removes the retry entry, re-fetches and validates the issue, checks slot
 // availability, and either dispatches, reschedules, or releases the claim.
@@ -222,11 +234,11 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	// Running; re-dispatching would overwrite the entry and spawn a
 	// duplicate. Reschedule at the same attempt to fire after the exit.
 	if _, running := state.Running[issueID]; running {
-		delayMS := computeBackoffDelay(popped.Attempt, params.MaxRetryBackoffMS)
+		attempt, delayMS := putBackSchedule(popped, popped.Attempt, params.MaxRetryBackoffMS)
 		log.Debug("worker still running, rescheduling retry",
-			slog.Int("attempt", popped.Attempt),
+			slog.Int("attempt", attempt),
 		)
-		reschedule(popped.Attempt, delayMS, "worker still running")
+		reschedule(attempt, delayMS, "worker still running")
 		setNoStateObserved(popped.noStateObserved)
 		return
 	}
@@ -421,8 +433,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		}
 
 		// Transient error (transport, API, payload): reschedule the retry.
-		nextAttempt := popped.Attempt + 1
-		delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 		log.Error("retry issue fetch failed, rescheduling",
 			slog.Int("attempt", nextAttempt),
@@ -448,12 +459,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	// The stage hop record stays: reconcile decides on it.
 	if issue.State == "" {
 		if !confirmNoState(&popped.noStateObserved) {
-			delayMS := computeBackoffDelay(popped.Attempt, params.MaxRetryBackoffMS)
+			attempt, delayMS := putBackSchedule(popped, popped.Attempt, params.MaxRetryBackoffMS)
 			log.Info("deferred retry for issue without a state label",
-				slog.Int("attempt", popped.Attempt),
+				slog.Int("attempt", attempt),
 				slog.Int64("delay_ms", delayMS),
 			)
-			reschedule(popped.Attempt, delayMS, "issue without a state label")
+			reschedule(attempt, delayMS, "issue without a state label")
 			setNoStateObserved(true)
 			return
 		}
@@ -556,8 +567,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	if isActive {
 		if isBlockedByNonTerminalSet(issue, terminalSet) {
 			if isKnownReaction {
-				nextAttempt := popped.Attempt + 1
-				delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+				nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 				pausedReschedule(nextAttempt, delayMS, "reaction retry paused by an open blocking issue", func() {
 					log.Info("issue blocked, rescheduling reaction retry",
@@ -595,8 +605,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		}
 		return
 	} else if !isHandoff {
-		nextAttempt := popped.Attempt + 1
-		delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 		pausedReschedule(nextAttempt, delayMS, "reaction retry paused by issue state", func() {
 			log.Info("reaction retry paused by issue state, rescheduling",
@@ -610,8 +619,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	}
 
 	if !HasAvailableSlots(state, issue.State) {
-		nextAttempt := popped.Attempt + 1
-		delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 		log.Warn("no available orchestrator slots, rescheduling retry",
 			slog.String("issue_state", issue.State),
@@ -628,8 +636,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		var ok bool
 		host, ok = params.HostPool.AcquireHost(issueID, popped.LastSSHHost)
 		if !ok {
-			nextAttempt := popped.Attempt + 1
-			delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+			nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 			log.Warn("no available SSH hosts, rescheduling retry",
 				slog.Int("attempt", nextAttempt),
@@ -684,8 +691,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 
 	adapter, adapterErr := params.AgentAdapterByKind(agentKind)
 	if adapterErr != nil {
-		nextAttempt := popped.Attempt + 1
-		delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 		log.Error("retry agent kind unavailable",
 			slog.String("rule_name", ruleName),
@@ -703,8 +709,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 
 	attemptSettings := params.ResolveAttemptSettings(DispatchResolution{AgentKind: agentKind, TemplateID: templateID, RuleName: ruleName}, host)
 	if len(attemptSettings.Refusals) > 0 {
-		nextAttempt := popped.Attempt + 1
-		delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 		log.Error("retry agent settings refused",
 			slog.Any("error", PreflightResult{Errors: attemptSettings.Refusals}),
