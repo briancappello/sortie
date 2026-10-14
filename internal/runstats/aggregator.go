@@ -62,6 +62,32 @@ func originLabel(row persistence.RunStatsRow) string {
 	}
 }
 
+// outcome names the one report-wide count a run with the given status
+// belongs to. A status no count names is a failure, as the orchestrator
+// records an unknown exit kind as failed too.
+type outcome int
+
+const (
+	outcomeSucceeded outcome = iota
+	outcomeFailed
+	outcomeStopped
+	outcomeCancelled
+)
+
+// outcomeOf maps a run status to its outcome.
+func outcomeOf(status string) outcome {
+	switch status {
+	case "succeeded":
+		return outcomeSucceeded
+	case "needs_person", "budget_stopped":
+		return outcomeStopped
+	case "cancelled":
+		return outcomeCancelled
+	default:
+		return outcomeFailed
+	}
+}
+
 // duration computes row's duration in seconds from its stored RFC3339
 // timestamps. ok is false when either timestamp fails to parse or the
 // resulting difference is negative.
@@ -165,6 +191,9 @@ type chainAccum struct {
 type totalAccum struct {
 	runs                 int
 	succeeded            int
+	failed               int
+	stopped              int
+	cancelled            int
 	succeededTurns       int
 	tokens               Tokens
 	costUSD              float64
@@ -355,8 +384,15 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 	isSucceeded := row.Status == "succeeded"
 	a.total.runs++
 	a.issueIDs[row.IssueID] = struct{}{}
-	if isSucceeded {
+	switch outcomeOf(row.Status) {
+	case outcomeSucceeded:
 		a.total.succeeded++
+	case outcomeStopped:
+		a.total.stopped++
+	case outcomeCancelled:
+		a.total.cancelled++
+	default:
+		a.total.failed++
 	}
 
 	bumped := []*groupAccum{
@@ -582,6 +618,9 @@ func (a *Aggregator) summary(full bool) Summary {
 		Runs:                 a.total.runs,
 		Issues:               len(a.issueIDs),
 		Succeeded:            a.total.succeeded,
+		Failed:               a.total.failed,
+		Stopped:              a.total.stopped,
+		Cancelled:            a.total.cancelled,
 		Duration:             durationStats(a.total.succeededSamples),
 		ZeroDurationRuns:     a.total.zeroDurationRuns,
 		DurationExcludedRuns: a.total.durationExcludedRuns,

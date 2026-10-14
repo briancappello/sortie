@@ -44,11 +44,15 @@ type Report struct {
 // Summary reports the report-wide figures. MeanTurnsSucceeded,
 // Tokens, CostUSD, and CostPerSucceededRunUSD are null on the base
 // schema tier; CostUSD and CostPerSucceededRunUSD are also null when
-// no priced run exists in range.
+// no priced run exists in range. Succeeded, Failed, Stopped, and Cancelled
+// add up to Runs.
 type Summary struct {
 	Runs                   int      `json:"runs"`
 	Issues                 int      `json:"issues"`
 	Succeeded              int      `json:"succeeded"`
+	Failed                 int      `json:"failed"`
+	Stopped                int      `json:"stopped"`
+	Cancelled              int      `json:"cancelled"`
 	SuccessRate            float64  `json:"success_rate"`
 	Duration               Duration `json:"duration_seconds"`
 	MeanTurnsSucceeded     *float64 `json:"mean_turns_succeeded"`

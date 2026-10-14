@@ -349,6 +349,42 @@ func TestStatsStatusOrdering(t *testing.T) {
 	}
 }
 
+func TestStatsOutcomeCounts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		status string
+		want   [4]int
+	}{
+		{status: "succeeded", want: [4]int{1, 0, 0, 0}},
+		{status: "failed", want: [4]int{0, 1, 0, 0}},
+		{status: "ci_failed", want: [4]int{0, 1, 0, 0}},
+		{status: "needs_person", want: [4]int{0, 0, 1, 0}},
+		{status: "budget_stopped", want: [4]int{0, 0, 1, 0}},
+		{status: "cancelled", want: [4]int{0, 0, 0, 1}},
+		{status: "weird_status", want: [4]int{0, 1, 0, 0}},
+		{status: "", want: [4]int{0, 1, 0, 0}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			t.Parallel()
+
+			for _, caps := range []persistence.RunHistoryCapabilities{{}, fullCaps} {
+				agg := New(caps, nil)
+				addRows(t, agg, persistence.RunStatsRow{Status: tt.status})
+
+				s := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil).Summary
+
+				got := [4]int{s.Succeeded, s.Failed, s.Stopped, s.Cancelled}
+				if got != tt.want || s.Runs != 1 {
+					t.Errorf("Summary counts for status %q (caps %+v) = %v over %d runs, want %v over 1", tt.status, caps, got, s.Runs, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestStatsAggregatorReport_UntilBound(t *testing.T) {
 	t.Parallel()
 
