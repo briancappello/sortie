@@ -51,6 +51,8 @@ make ui-fmt-check  # fails on any formatting difference
 make ui-check      # lint, format check, and the build output check
 ```
 
+The response types of the JSON API reach the application through two generated files, `web/src/api/types.gen.ts` and `docs/api.schema.json`. A change to a JSON response type fails `go test ./internal/server` until both are regenerated with `go test ./internal/server -run TestAPIContract -update`. The command needs no Node, and neither file is edited by hand.
+
 A change under `web/` passes `make ui-check`, which `make check` also runs. `internal/server/ui/dist` is the build output the binary embeds. It comes from `make ui-build`, is committed with the sources it was built from, and is never edited by hand. A conflict in it is resolved by rebuilding. The Dashboard CI job runs on every pull request and fails when the committed output differs from a fresh build.
 
 If `make ui-install` or `make ui-build` reports a missing native binding, run `make ui-install` again: it replaces `web/node_modules` with a clean install from the committed `web/package-lock.json`. If the binding is still missing, the lockfile lacks your platform: run `npm install` in `web/`, then review the lockfile change and commit it with the rebuilt output.

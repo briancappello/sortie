@@ -904,7 +904,6 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			Addr:             addr,
 			Version:          Version,
 			StartedAt:        startedAt,
-			SlotFunc:         func() int { return br.mgr.Config().Agent.MaxConcurrentAgents },
 			MetricsRegistry:  promMetrics.Registry(),
 			DBPingFn:         func(ctx context.Context) error { return store.Ping(ctx) },
 			PreflightFn:      o.PreflightOK,

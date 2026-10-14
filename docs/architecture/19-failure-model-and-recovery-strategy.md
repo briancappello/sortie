@@ -31,7 +31,7 @@
 
 5. `Observability Failures`
    - Snapshot timeout
-   - Dashboard render errors
+   - Dashboard request errors
    - Log sink configuration failure
    - Delivery of an orchestrator event to a Slack or webhook destination
 
