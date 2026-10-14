@@ -342,7 +342,7 @@ func handleMergeCompletionMissingSHA(
 	if observation.Dispatched {
 		beginEscalation(ctx, state, params.Store, pending, EscalationTriggerMissingMergeCommit, identity, now, log)
 		requeueMergeCompletionAtPollInterval(state, key, pending, now, pollInterval)
-		log.Error("merge_completion missing-SHA escalation already delivered, stopping",
+		log.Error("merge_completion missing-SHA escalation already delivered, still watching",
 			slog.String("repository", data.Owner+"/"+data.Repo),
 			slog.Int("pr_number", data.PRNumber),
 			slog.Duration("waited", waited),
@@ -362,7 +362,7 @@ func handleMergeCompletionMissingSHA(
 		return
 	}
 
-	log.Error("merge_completion stopped after merge commit identifier remained missing",
+	log.Error("merge_completion escalated after merge commit identifier remained missing, still watching",
 		slog.String("repository", data.Owner+"/"+data.Repo),
 		slog.Int("pr_number", data.PRNumber),
 		slog.Duration("waited", waited),
@@ -701,19 +701,19 @@ func buildMergeCompletionEscalationComment(data *MergeCompletionReactionData, ta
 
 // buildMergeCompletionMissingSHAEscalationComment returns the operator-facing
 // explanation used after the missing-SHA grace period. It includes the
-// affected repository and pull request, elapsed wait, stop reason, and the
-// required manual follow-up.
+// affected repository and pull request, elapsed wait, escalation reason, and
+// the manual follow-up.
 func buildMergeCompletionMissingSHAEscalationComment(
 	data *MergeCompletionReactionData,
 	targetState string,
 	waited time.Duration,
 ) string {
 	return fmt.Sprintf(
-		"Sortie stopped monitoring %s/%s PR #%d after waiting %s because the pull request is reported merged but no merge commit identifier was provided. Verify the merge in the forge and transition this issue to %q manually if appropriate.",
+		"Sortie waited %s for %s/%s PR #%d: the pull request is reported merged but no merge commit identifier was provided. Sortie keeps watching and transitions this issue to %q if the forge reports the commit. Verify the merge in the forge and transition this issue manually if appropriate.",
+		waited.Round(time.Second),
 		data.Owner,
 		data.Repo,
 		data.PRNumber,
-		waited.Round(time.Second),
 		targetState,
 	)
 }

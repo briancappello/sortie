@@ -872,8 +872,8 @@ func TestReconcileMergeCompletion_MissingSHAExpiryEscalatesOnceAndKeepsWatching(
 		t.Errorf("missing-SHA observation = %+v, ok=%v, want dispatched=true after escalation delivery", observation, ok)
 	}
 	if !strings.Contains(buf.String(), "level=ERROR") ||
-		!strings.Contains(buf.String(), "merge_completion stopped after merge commit identifier remained missing") {
-		t.Errorf("log output = %q, want an ERROR naming the permanent polling stop", buf.String())
+		!strings.Contains(buf.String(), "merge_completion escalated after merge commit identifier remained missing, still watching") {
+		t.Errorf("log output = %q, want an ERROR naming the escalation that keeps watching", buf.String())
 	}
 	for _, want := range []string{"repository=owner/repo", "pr_number=34", "waited=31m0s", "manual_action="} {
 		if !strings.Contains(buf.String(), want) {
