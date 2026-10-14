@@ -228,6 +228,39 @@ func TestManager_Reload(t *testing.T) {
 	}
 }
 
+func TestManager_LoadNotifierSeesOutcome(t *testing.T) {
+	t.Parallel()
+
+	type seen struct {
+		intervalMS int
+		failures   int
+	}
+	path := filepath.Join(t.TempDir(), "WORKFLOW.md")
+	mustWriteFile(t, path, validWorkflow(5000))
+	mgr, err := NewManager(path, testLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	var notified []seen
+	mgr.SetLoadNotifier(func() {
+		notified = append(notified, seen{mgr.Config().Polling.IntervalMS, mgr.LoadStatus().ConsecutiveFailures})
+	})
+
+	mustWriteFile(t, path, validWorkflow(9999))
+	mgr.reload()
+	mustWriteFile(t, path, []byte("---\n[[[invalid\n---\nprompt\n"))
+	mgr.reload()
+	mustWriteFile(t, path, validWorkflow(7777))
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	want := []seen{{intervalMS: 9999}, {intervalMS: 9999, failures: 1}}
+	if !slices.Equal(notified, want) {
+		t.Errorf("notifier saw (interval_ms, failures) %v after a valid edit, an invalid edit and a Reload, want %v", notified, want)
+	}
+}
+
 const partialsWorkflow = "---\npolling:\n  interval_ms: 5000\nagent:\n  kind: mock\ndispatch:\n  partials: [\"*.part\"]\n  rules:\n    - name: bug\n      match:\n        labels: [bug]\n      template: rule.tmpl\n---\n{{ template \"greet\" . }}\n"
 
 func TestManager_ReloadFailSafe(t *testing.T) {

@@ -892,6 +892,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			Stats:            statsSource{dbPath: dbPath, workflowPath: br.path, rates: tokenRates, rateWarnings: rateWarnings}.report,
 		})
 		o.AddObserver(srv)
+		br.mgr.SetLoadNotifier(srv.OnStateChange)
 
 		br.logger.Info("http server listening",
 			slog.String("addr", ln.Addr().String()),
