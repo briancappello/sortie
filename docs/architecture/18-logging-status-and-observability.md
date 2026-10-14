@@ -928,6 +928,38 @@ Minimum endpoints:
 
   - Every response, a refusal during shutdown included, carries `outcome_text`: one sentence that states what the response confirms, a poll and reconciliation that was queued, one that was already queued and that this request joined, or that nothing was queued because Sortie is shutting down. It never states an effect still to come.
 
+- `GET /api/v1/events`
+  - Opens a server-sent event stream that signals each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. A signal is never a payload: it names no issue, agent message, or figure, and the stream exposes nothing that `GET /api/v1/state` does not.
+  - Answers `200` with `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` so a default nginx does not buffer. The route takes no parameters and ignores the query string. A method other than `GET` answers `405` with `Allow: GET` and the JSON error envelope.
+  - The change signal is one frame:
+
+    ```
+    id: <revision>
+    event: change
+    data: {}
+
+    ```
+
+    `<revision>` is an unsigned decimal counter that rises with every change. It starts from the wall-clock time at server start in nanoseconds, so a restarted process does not repeat the revisions of the previous one. `data` is the empty JSON object, because a browser dispatches no event whose data is empty; a client ignores members it does not know.
+  - A signal follows each change after the change is applied, so a refetch made after a signal sees every change the signal counted. Signals come from every event-loop iteration that ends a tick, a refresh, a worker exit, or a retry; from every message of a running agent session (an agent event, a turn start, a self-review progress report, or an unaccounted-turn count); from the start of shutdown; and from every load of the workflow file by the watcher, whether it succeeds or fails. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, the elapsed times a client computes from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+  - A stream writes at most one change signal per second. The first change after a quiet second is written at once; the changes made during a second are written together as one signal when it ends, and none is dropped. Two consecutive signals on one stream never carry the same `id`.
+  - Reconnect is decided by exact string equality of the `Last-Event-ID` request header with the current revision, never by ordering. An equal value opens a stream with no signal until the next change. An absent header, an earlier revision, a revision of an earlier process, or any other string gets one signal at once.
+  - A heartbeat is written every 15 seconds, counted from the stream's start.
+  - The server's per-request write timeout does not end a stream. Each frame carries its own write deadline of 2 seconds, set before the write and cleared after it, so an idle stream holds none. A client that stops reading is dropped once a frame cannot be written within 2 seconds; until then it holds one pending change at most and slows no other client and not the event loop.
+  - Shutdown ends every open stream as soon as it begins, and the connection stops counting as active, so graceful shutdown does not wait for a stream. A stream opened during shutdown answers `200` with headers only and ends. The route never answers `503`, because a browser does not reconnect after a non-`200` answer. Browser reconnects to the restarting process reach a closed listener and are refused until the restarted process listens; behind a reverse proxy they get `502`, which closes the stream for good.
+  - Reconnect with backoff: a client whose stream is closed (`EventSource.readyState` is `CLOSED` after an `error` event, as a non-`200` answer or a wrong `Content-Type` leaves it) opens a new stream after a delay that doubles from 1 second up to 30 seconds while new streams keep failing, and returns to 1 second once one opens. A new stream carries no `Last-Event-ID`, so its opening change signal makes the client refetch.
+  - The heartbeat is an event frame:
+
+    ```
+    id: <last>
+    event: heartbeat
+    data: {}
+
+    ```
+
+    `<last>` is the `id` of the last change signal the stream wrote or, when it wrote none, the `Last-Event-ID` it opened with. A heartbeat without an `id` line would clear the cursor the reconnect rule reads. `data` is the empty JSON object. A browser dispatches the heartbeat only to `heartbeat` listeners, never to `message` or `change` listeners. On a healthy stream at most 16 seconds pass between two frames.
+  - Idle timeout: a client whose open stream delivers no event, change signal or heartbeat, for 45 seconds closes it and opens a new one with the same backoff. This recovers a stream that died without the browser receiving a FIN or RST, for example a laptop that wakes holding a connection the server dropped while it slept.
+
 API design notes:
 
 - The JSON shapes above are the recommended baseline for interoperability and debugging ergonomics.

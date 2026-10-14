@@ -421,6 +421,13 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - The state route's `health` block reports a reload of an invalid workflow file with its masked error while the previous configuration stays in effect, a failed preflight with its error text, and a failed candidate read; a check failing twice reports two consecutive failures and its last success; a clean start reports every check passing
 - Every status sentence template renders from an input built for the state it words and never serves the fallback text; a workflow without stage chains yields no stage wording; a figure Sortie did not measure reads as not measured, and a lower bound reads as at least; every row kind of the state route and the per-issue response carries its sentence, each naming its own issue; and the refresh response carries its outcome sentence
 - The per-issue response lists next outcomes for a running stage with a next stage, the last stage ending on the handoff state, a stage at the hop ceiling, a pending CI reaction with fixes left and with none left, and a workflow without reactions; no outcome names a stage or reaction the configuration lacks; an outcome that a budget would stop names the hold
+- A change-signal stream whose client stopped reading never blocks the observer notification: with the stream's handler held inside a frame write, a burst of at least 1000 notifications returns before the write is released, and the revision advances by the burst's length
+- A state change reaches a connected client: after the opening signal, one notification delivers a change signal with a greater `id`
+- A message of a running agent session signals the observers without a tick in between, for an agent event, a turn start, a self-review progress report, and an unaccounted-turn count; a burst of notifications right after a signal yields exactly one further signal, written no sooner than the signal interval after the previous one
+- Shutdown with a client reading an open stream returns without error inside its 5 second deadline, and the client's stream ends
+- A stream outlives the server's per-request write timeout and keeps delivering heartbeats for at least three times that timeout; removing the per-frame write deadline makes the check fail
+- A reconnect with a `Last-Event-ID` equal to the current revision gets no change signal within three signal intervals, and every heartbeat carries that value as its `id`; a stale or absent value gets a change signal first
+- A workflow load notifier that runs after a valid edit sees the reloaded configuration, one that runs after an invalid edit sees the retained configuration and the failed load status, and `Reload` does not run it
 
 ### 17.7 CLI and Host Lifecycle
 

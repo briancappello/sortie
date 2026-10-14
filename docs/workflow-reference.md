@@ -1881,9 +1881,10 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger and by what started them, priced at the `token_rates` the process started with. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
+| GET    | `/api/v1/events`         | Server-sent event stream of change signals: one `change` event each time anything the JSON API serves changes, at most one a second, and a `heartbeat` event every 15 seconds. Carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals](#get-apiv1events-change-signals). |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
-All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints). Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
+All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints), except `GET /api/v1/events`, which uses `text/event-stream`. Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
 
 #### Health Endpoints
 
@@ -3226,6 +3227,50 @@ readinessProbe:
   failureThreshold: 1
 terminationGracePeriodSeconds: 90
 ```
+
+#### `GET /api/v1/events`: change signals
+
+Streams a signal each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. The response is a server-sent event stream (`text/event-stream`) that stays open until the client leaves or Sortie shuts down. A signal carries no data of its own: it names no issue and no agent message, and the stream shows nothing that `GET /api/v1/state` does not. The route takes no parameters and ignores the query string. A method other than `GET` answers `405`.
+
+```bash
+curl -N http://127.0.0.1:7678/api/v1/events
+```
+
+```
+id: 1792000000000000000
+event: change
+data: {}
+
+```
+
+The `id` is a counter that rises with every change. A client keeps the last one it saw for the reconnect rule below.
+
+**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+
+**Reconnect.** A client reconnecting sends the `id` of its last signal in the `Last-Event-ID` header; a browser's `EventSource` does this on its own. When that value equals the current counter exactly, Sortie sends nothing until the next change. Any other value, an absent header, or a value from before a restart gets one change signal at once, so the client refetches.
+
+**Heartbeat.** Every 15 seconds Sortie writes a heartbeat frame so that a proxy does not close an idle stream:
+
+```
+id: 1792000000000000000
+event: heartbeat
+data: {}
+
+```
+
+The heartbeat carries the `id` of the last change signal on the stream, or the `Last-Event-ID` the stream opened with when it has sent none. A browser delivers it only to `heartbeat` listeners, not to `message` or `change` listeners.
+
+**Reconnecting.** When a stream closes for good (`EventSource.readyState` is `CLOSED` after an `error` event, as a non-`200` answer or a wrong `Content-Type` leaves it), open a new one after a delay that doubles from 1 second up to 30 seconds while new streams keep failing, and go back to 1 second once one opens. A new stream carries no `Last-Event-ID`, so its opening change signal makes the client refetch.
+
+**Idle timeout.** When an open stream delivers no event, change signal or heartbeat, for 45 seconds, close it and open a new one the same way. This recovers a stream that died without the browser being told, for example after a laptop wakes holding a connection Sortie dropped while it slept.
+
+**Shutdown.** When shutdown begins, Sortie ends every open stream, so a connected client does not delay it. A stream opened during shutdown answers `200` and ends at once. The route never answers `503`, because a browser does not reconnect after a non-`200` answer. Behind a reverse proxy, a client reconnecting while Sortie restarts gets the proxy's `502`, which closes its stream; the client's reconnect with backoff reopens it.
+
+**Slow clients.** The 10 second write timeout of the HTTP server does not end a stream. A client that stops reading is dropped once Sortie cannot write a frame to it within 2 seconds, and it delays no other client.
+
+**Browser connection limit.** Over plain HTTP a browser allows six connections per origin across all its tabs, and every open stream holds one. Open one stream per browser and share it across tabs instead of one stream per tab.
+
+**Reverse proxies.** Sortie sends `X-Accel-Buffering: no`, which nginx honors, so the stream is not buffered. Set the proxy's read timeout above 15 seconds; nginx's `proxy_read_timeout` defaults to 60 seconds.
 
 #### `GET /metrics` — Prometheus Scrape Endpoint
 
