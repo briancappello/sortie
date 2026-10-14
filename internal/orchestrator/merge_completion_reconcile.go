@@ -86,6 +86,7 @@ func reconcileMergeCompletion(state *State, params ReconcileParams, log *slog.Lo
 			state.PendingReactions[key] = pending
 			continue
 		}
+		retryEscalationSave(ctx, state, params.Store, pending, logging.WithIssue(log, pending.IssueID, pending.Identifier))
 
 		due = append(due, mergeCompletionDueEntry{key: key, pending: pending, data: data})
 	}
@@ -162,12 +163,18 @@ func processMergeCompletionEntry(
 
 	stateName, known := statesByID[pending.IssueID]
 	if !known {
+		if pending.escalationStands() {
+			confirmMergeCompletionExit(state, params, key, pending, stateName, now, pollInterval, entryLog, ctx)
+			return
+		}
 		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, entryLog, ctx)
+		endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
 		entryLog.Warn("merge_completion issue not found in tracker state response, dropping")
 		return
 	}
 	if _, terminal := terminalSet[strings.ToLower(stateName)]; terminal {
 		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, entryLog, ctx)
+		endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
 		watch := mergeWatch{ReactionKind: ReactionKindMergeCompletion, PRNumber: data.PRNumber, Owner: data.Owner, Repo: data.Repo}
 		recordIssueOutcome(ctx, params.Store, releaseReadOutcome(ctx, params.SCMAdapter, watch, pending.IssueID, stateName, now, entryLog), entryLog)
 		entryLog.Info("merge_completion issue already terminal, dropping",
@@ -181,7 +188,12 @@ func processMergeCompletionEntry(
 		return
 	}
 	if !strings.EqualFold(stateName, params.HandoffState) {
+		if pending.escalationStands() {
+			confirmMergeCompletionExit(state, params, key, pending, stateName, now, pollInterval, entryLog, ctx)
+			return
+		}
 		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, entryLog, ctx)
+		endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
 		entryLog.Info("merge_completion stopped: issue left the handoff state",
 			slog.String("state", stateName),
 		)
@@ -193,6 +205,7 @@ func processMergeCompletionEntry(
 		var scmErr *domain.SCMError
 		if errors.As(mergeErr, &scmErr) && scmErr.Kind == domain.ErrSCMNotFound {
 			clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, entryLog, ctx)
+			endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
 			entryLog.Warn("merge_completion pull request not found, dropping",
 				slog.Int("pr_number", data.PRNumber),
 			)
@@ -220,6 +233,21 @@ func processMergeCompletionEntry(
 		return
 	}
 	recordIssueOutcome(ctx, params.Store, mergedOutcome(pending.IssueID, ReactionKindMergeCompletion, data.PRNumber, data.Owner, data.Repo, now), entryLog)
+
+	rkey := ReactionKey(pending.IssueID, ReactionKindMergeCompletion)
+	endLiftedBudgetEscalation(ctx, params.Store, pending, state.ReactionAttempts[rkey] > params.MergeCompletionConfig.MaxRetries, entryLog)
+	if pending.EscalationTrigger == EscalationTriggerMissingMergeCommit && status.MergeCommitSHA != "" {
+		endEscalation(ctx, params.Store, pending, entryLog)
+	}
+	// A standing escalation makes no transition call. One restored at
+	// startup runs the normal path once, because the undispatched
+	// fingerprint row is what lets a restart resume the attempt.
+	if pending.escalationStands() && !pending.resumeAfterRestart {
+		requeueMergeCompletionAtPollInterval(state, key, pending, now, pollInterval)
+		return
+	}
+	pending.resumeAfterRestart = false
+
 	if status.MergeCommitSHA == "" {
 		handleMergeCompletionMissingSHA(state, params, key, pending, data, now, pollInterval, entryLog, ctx)
 		return
@@ -242,23 +270,24 @@ func processMergeCompletionEntry(
 	}
 	if storedFP == status.MergeCommitSHA && dispatched {
 		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, entryLog, ctx)
+		endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
 		entryLog.Debug("merge_completion already transitioned for this merge",
 			slog.String("merge_commit_sha", status.MergeCommitSHA),
 		)
 		return
 	}
 
-	rkey := ReactionKey(pending.IssueID, ReactionKindMergeCompletion)
 	transitionErr := params.TrackerAdapter.TransitionIssue(ctx, pending.IssueID, params.MergeCompletionConfig.TargetState)
 	state.ReactionAttempts[rkey]++
 
 	if transitionErr != nil {
-		routeTransitionFailure(state, params, key, pending, data, transitionErr, now, pollInterval, entryLog, ctx)
+		routeTransitionFailure(state, params, key, pending, data, status.MergeCommitSHA, transitionErr, now, pollInterval, entryLog, ctx)
 		return
 	}
 
 	markErr := params.Store.MarkReactionDispatched(ctx, pending.IssueID, ReactionKindMergeCompletion)
 	delete(state.ReactionAttempts, rkey)
+	endEscalation(ctx, params.Store, pending, entryLog)
 	if markErr != nil {
 		entryLog.Warn("merge_completion dispatched mark failed",
 			slog.String("merge_commit_sha", status.MergeCommitSHA),
@@ -276,10 +305,10 @@ func processMergeCompletionEntry(
 
 // handleMergeCompletionMissingSHA persists the first time a specific pull
 // request is reported merged without a commit identifier. It retries with the
-// pending-entry backoff during the fixed grace period, then drops the entry
-// and issues the configured operator notification. A successful notification
-// marks the observation dispatched; a failed one remains eligible for a later
-// fresh pending entry to retry without reopening the current polling loop.
+// pending-entry backoff during the fixed grace period, then escalates and
+// issues the configured operator notification. A successful notification
+// marks the observation dispatched; a failed one remains eligible for the
+// retry a restart makes.
 func handleMergeCompletionMissingSHA(
 	state *State,
 	params ReconcileParams,
@@ -311,7 +340,8 @@ func handleMergeCompletionMissingSHA(
 
 	waited := max(now.Sub(observation.FirstObservedAt), time.Duration(0))
 	if observation.Dispatched {
-		delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindMergeCompletion))
+		beginEscalation(ctx, state, params.Store, pending, EscalationTriggerMissingMergeCommit, identity, now, log)
+		requeueMergeCompletionAtPollInterval(state, key, pending, now, pollInterval)
 		log.Error("merge_completion missing-SHA escalation already delivered, stopping",
 			slog.String("repository", data.Owner+"/"+data.Repo),
 			slog.Int("pr_number", data.PRNumber),
@@ -332,7 +362,6 @@ func handleMergeCompletionMissingSHA(
 		return
 	}
 
-	delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindMergeCompletion))
 	log.Error("merge_completion stopped after merge commit identifier remained missing",
 		slog.String("repository", data.Owner+"/"+data.Repo),
 		slog.Int("pr_number", data.PRNumber),
@@ -340,7 +369,7 @@ func handleMergeCompletionMissingSHA(
 		slog.String("reason", "pull request is merged but the forge did not provide a merge commit identifier"),
 		slog.String("manual_action", "verify the merge and transition the tracker issue manually if appropriate"),
 	)
-	escalateMergeCompletionMissingSHA(state, params, pending, data, waited, log, ctx)
+	escalateMergeCompletionMissingSHA(state, params, key, pending, data, waited, now, pollInterval, log, ctx)
 }
 
 // mergeCompletionPRIdentity returns the normalized identity used only by the
@@ -414,6 +443,7 @@ func routeTransitionFailure(
 	key string,
 	pending *PendingReaction,
 	data *MergeCompletionReactionData,
+	mergeCommit string,
 	err error,
 	now time.Time,
 	pollInterval time.Duration,
@@ -436,6 +466,7 @@ func routeTransitionFailure(
 		}
 		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, log, ctx)
 		delete(state.ReactionAttempts, rkey)
+		endEscalation(ctx, params.Store, pending, log)
 		log.Warn("merge_completion issue not found, stopping",
 			slog.Any("error", err),
 		)
@@ -444,7 +475,7 @@ func routeTransitionFailure(
 		log.Error("merge_completion transition failed, escalating",
 			slog.Any("error", err),
 		)
-		escalateMergeCompletion(state, params, pending, data, state.ReactionAttempts[rkey], log, ctx)
+		escalateMergeCompletion(state, params, key, pending, data, state.ReactionAttempts[rkey], EscalationTriggerRefused, mergeCommit, now, pollInterval, log, ctx)
 
 	default:
 		attempts := state.ReactionAttempts[rkey]
@@ -453,7 +484,7 @@ func routeTransitionFailure(
 				slog.Int("attempts", attempts),
 				slog.Int("max_retries", params.MergeCompletionConfig.MaxRetries),
 			)
-			escalateMergeCompletion(state, params, pending, data, attempts, log, ctx)
+			escalateMergeCompletion(state, params, key, pending, data, attempts, EscalationTriggerBudget, mergeCommit, now, pollInterval, log, ctx)
 			return
 		}
 		backoffMergeCompletionReenqueue(state, key, pending, now, pollInterval)
@@ -464,12 +495,36 @@ func routeTransitionFailure(
 	}
 }
 
-// escalateMergeCompletion dispatches the configured escalation action
-// (label, comment, or none) asynchronously through [State.TrackerOpsWg] and
-// clears the transition call counter. The pending entry is already
-// removed by the caller; the fingerprint row is left undispatched, the
-// accepted residue of an escalated merge-completion attempt.
+// escalateMergeCompletion begins the escalation on the merge commit and
+// dispatches the configured escalation action (label, comment, or none)
+// asynchronously through [State.TrackerOpsWg] unless that merge commit was
+// escalated before. The entry stays and re-enqueues at the poll interval
+// until the escalation ends; so does the transition call counter. The
+// fingerprint row is left undispatched, so a restart resumes the attempt.
 func escalateMergeCompletion(
+	state *State,
+	params ReconcileParams,
+	key string,
+	pending *PendingReaction,
+	data *MergeCompletionReactionData,
+	attempts int,
+	trigger ReactionEscalationTrigger,
+	mergeCommit string,
+	now time.Time,
+	pollInterval time.Duration,
+	log *slog.Logger,
+	ctx context.Context,
+) {
+	if beginEscalation(ctx, state, params.Store, pending, trigger, mergeCommit, now, log) {
+		applyMergeCompletionEscalation(state, params, pending, data, attempts, log, ctx)
+	}
+	requeueMergeCompletionAtPollInterval(state, key, pending, now, pollInterval)
+}
+
+// applyMergeCompletionEscalation applies the configured escalation action
+// of the merge-completion reaction: the event, and the label when so
+// configured.
+func applyMergeCompletionEscalation(
 	state *State,
 	params ReconcileParams,
 	pending *PendingReaction,
@@ -501,15 +556,44 @@ func escalateMergeCompletion(
 	publishEscalation(ctx, &state.TrackerOpsWg, delivery, log, nil, func(err error) {
 		log.Warn("merge_completion escalation comment failed", slog.Any("error", err))
 	})
-
-	delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindMergeCompletion))
 }
 
-// escalateMergeCompletionMissingSHA sends the configured operator signal for
-// an expired missing-SHA observation. The pending entry is already absent. A
-// successful write durably marks the observation dispatched; a failed write
-// leaves it undispatched so only delivery can be retried by a later fresh
-// pending entry, without reopening this process's polling loop.
+// confirmMergeCompletionExit ends the standing escalation of an entry whose
+// batched state read shows the issue missing or outside the handoff state,
+// but only through the direct read the shared rule makes: the batched read
+// is a search and can trail Sortie's own handoff write. The entry returns
+// to the queue first because that rule finds escalations there; it leaves
+// it again when the rule ends them.
+func confirmMergeCompletionExit(
+	state *State,
+	params ReconcileParams,
+	key string,
+	pending *PendingReaction,
+	listed string,
+	now time.Time,
+	pollInterval time.Duration,
+	log *slog.Logger,
+	ctx context.Context,
+) {
+	requeueMergeCompletionAtPollInterval(state, key, pending, now, pollInterval)
+	endOutsideHandoff(ctx, state, params.Store, params.TrackerAdapter, pending.IssueID, listed, params.HandoffState, params.TerminalStates, log)
+	if state.PendingReactions[key] != pending {
+		clearMergeCompletionMissingSHAObservation(params.Store, pending.IssueID, log, ctx)
+	}
+}
+
+// requeueMergeCompletionAtPollInterval keeps the entry pending until the
+// next poll, for the paths that hold an escalated entry without a call.
+func requeueMergeCompletionAtPollInterval(state *State, key string, pending *PendingReaction, now time.Time, pollInterval time.Duration) {
+	pending.PendingRetryAt = now.Add(pollInterval)
+	requeueReaction(state, key, pending, waitPollInterval)
+}
+
+// escalateMergeCompletionMissingSHA begins the escalation on the pull
+// request identity and sends the configured operator signal for an expired
+// missing-SHA observation. The entry stays and re-enqueues at the poll
+// interval. A successful write durably marks the observation dispatched; a
+// failed write leaves it undispatched so a restart can retry the delivery.
 //
 // The tracker write and the marker write share one 30-second deadline
 // instead of each getting its own, so the goroutine as a whole stays
@@ -518,12 +602,20 @@ func escalateMergeCompletion(
 func escalateMergeCompletionMissingSHA(
 	state *State,
 	params ReconcileParams,
+	key string,
 	pending *PendingReaction,
 	data *MergeCompletionReactionData,
 	waited time.Duration,
+	now time.Time,
+	pollInterval time.Duration,
 	log *slog.Logger,
 	ctx context.Context,
 ) {
+	// Whether the signal goes out is decided by the observation row the
+	// caller consulted, not by the subject latch.
+	beginEscalation(ctx, state, params.Store, pending, EscalationTriggerMissingMergeCommit, mergeCompletionPRIdentity(data), now, log)
+	requeueMergeCompletionAtPollInterval(state, key, pending, now, pollInterval)
+
 	issueID := pending.IssueID
 	tracker := params.TrackerAdapter
 	escalLog := log
@@ -534,7 +626,7 @@ func escalateMergeCompletionMissingSHA(
 			mergeCompletionMissingSHAObservationKind,
 			mergeCompletionPRIdentity(data),
 		); err != nil {
-			escalLog.Error("merge_completion missing-SHA escalation delivered but marker write failed; a fresh pending entry may repeat delivery",
+			escalLog.Error("merge_completion missing-SHA escalation delivered but marker write failed; a restart may repeat delivery",
 				slog.Any("error", err),
 				slog.String("repository", data.Owner+"/"+data.Repo),
 				slog.Int("pr_number", data.PRNumber),
@@ -557,7 +649,7 @@ func escalateMergeCompletionMissingSHA(
 
 		if labels {
 			if err := tracker.AddLabel(dctx, issueID, label); err != nil {
-				escalLog.Error("merge_completion missing-SHA escalation label failed; polling remains stopped and a fresh pending entry can retry delivery",
+				escalLog.Error("merge_completion missing-SHA escalation label failed; the escalation stands and a restart can retry delivery",
 					slog.Any("error", err),
 					slog.String("repository", data.Owner+"/"+data.Repo),
 					slog.Int("pr_number", data.PRNumber),
@@ -580,7 +672,7 @@ func escalateMergeCompletionMissingSHA(
 
 		received, err := deliverEvent(dctx, trackerDelivery, escalLog).TrackerComment()
 		if received && err != nil {
-			escalLog.Error("merge_completion missing-SHA escalation comment failed; polling remains stopped and a fresh pending entry can retry delivery",
+			escalLog.Error("merge_completion missing-SHA escalation comment failed; the escalation stands and a restart can retry delivery",
 				slog.Any("error", err),
 				slog.String("repository", data.Owner+"/"+data.Repo),
 				slog.Int("pr_number", data.PRNumber),

@@ -194,7 +194,7 @@ func escalationKinds() []escalationKind {
 			escalate: func(state *State, p ReconcileParams, pending *PendingReaction, m domain.Metrics) {
 				pending.Kind = ReactionKindReview
 				data := &ReviewReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
-				escalateReviewFailure(state, p, pending, 3, trigger, data, log, ctx, m)
+				escalateReviewFailure(state, p, pending, 3, trigger, data, "fp", goldenNow, time.Second, log, ctx, m)
 			},
 		},
 		{
@@ -207,7 +207,7 @@ func escalationKinds() []escalationKind {
 			escalate: func(state *State, p ReconcileParams, pending *PendingReaction, m domain.Metrics) {
 				pending.Kind = ReactionKindBotReview
 				data := &BotReviewReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
-				escalateBotReviewFailure(state, p, pending, 3, trigger, data, log, ctx, m)
+				escalateBotReviewFailure(state, p, pending, 3, trigger, data, "fp", goldenNow, time.Second, log, ctx, m)
 			},
 		},
 		{
@@ -220,7 +220,7 @@ func escalationKinds() []escalationKind {
 			escalate: func(state *State, p ReconcileParams, pending *PendingReaction, m domain.Metrics) {
 				pending.Kind = ReactionKindMergeConflict
 				data := &MergeConflictReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
-				escalateMergeConflictFailure(state, p, pending, 2, trigger, data, log, ctx, m)
+				escalateMergeConflictFailure(state, p, pending, 2, trigger, data, "fp", goldenNow, time.Second, log, ctx, m)
 			},
 		},
 	}
@@ -337,7 +337,7 @@ func TestNotifyEvents_AutoMergeEscalationCountsOnce(t *testing.T) {
 			pending := &PendingReaction{IssueID: goldenIssueID, Identifier: goldenIssueID, Kind: ReactionKindAutoMerge, CreatedAt: goldenNow}
 			data := &AutoMergeReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
 
-			escalateAutoMergeFailure(state, params, pending, 3, data, discardLogger(), context.Background(), counters)
+			escalateAutoMergeFailure(state, params, pending, 3, EscalationTriggerBudget, "", data, goldenNow, time.Second, discardLogger(), context.Background(), counters)
 			state.TrackerOpsWg.Wait()
 
 			if got := counters.recorded("auto_merge"); !slices.Equal(got, []string{"escalated"}) {

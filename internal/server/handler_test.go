@@ -107,7 +107,7 @@ const wantPendingReactionsJSON = `[
    "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
                     "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
    "created_at": "2026-02-24T20:09:30Z", "dispatched_at": "2026-02-24T20:05:00Z", "next_poll_at": "2026-02-24T20:17:40Z", "wait": "poll_interval", "stage_position": null,
-   "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z", "watch_ends_at": null,
+   "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z", "escalation_trigger": "budget_exhausted", "watch_ends_at": null,
    "last_check": {"observed_at": "2026-02-24T20:12:40Z", "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
                   "status": "failing", "failing_checks": ["Test"], "failing": 1, "pending": 0, "passing": 4},
    "status_text": "CI escalated on #931",
@@ -140,6 +140,7 @@ func pendingReactionRows() []orchestrator.SnapshotPendingReaction {
 	ci.NextPollAt = time.Date(2026, 2, 24, 20, 17, 40, 0, time.UTC)
 	ci.UsedAttempts, ci.MaxAttempts = new(2), new(2)
 	ci.EscalatedAt = new(time.Date(2026, 2, 24, 20, 12, 40, 0, time.UTC))
+	ci.EscalationTrigger = "budget_exhausted"
 	ci.LastCheck = &orchestrator.ReactionCheck{
 		ObservedAt: time.Date(2026, 2, 24, 20, 12, 40, 0, time.UTC),
 		HeadSHA:    "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
@@ -1335,7 +1336,7 @@ func TestToStateResponse(t *testing.T) {
 			AgentTotals: orchestrator.SnapshotAgentTotals{},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		if got.Running == nil {
 			t.Fatal("Running = nil, want non-nil empty slice")
@@ -1376,7 +1377,7 @@ func TestToStateResponse(t *testing.T) {
 			RateLimits:  nil,
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		if got.RateLimits == nil {
 			t.Fatal("RateLimits = nil, want non-nil empty map")
@@ -1400,7 +1401,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		if got.Counts.Running != 2 {
 			t.Errorf("Counts.Running = %d, want 2", got.Counts.Running)
@@ -1423,7 +1424,7 @@ func TestToStateResponse(t *testing.T) {
 			}},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		if got.Counts.Parked != 1 || len(got.Parked) != 1 {
 			t.Fatalf("Counts.Parked, len(Parked) = %d, %d, want 1, 1", got.Counts.Parked, len(got.Parked))
@@ -1447,11 +1448,11 @@ func TestToStateResponse(t *testing.T) {
 
 		snap := orchestrator.RuntimeSnapshotResult{PendingReactions: pendingReactionRows()}
 
-		got := toStateResponse(snap, nil, sentence.Context{Now: time.Date(2026, 2, 24, 20, 15, 35, 0, time.UTC)})
+		got := toStateResponse(snap, nil, sentence.Context{Now: time.Date(2026, 2, 24, 20, 15, 35, 0, time.UTC)}, nil)
 
 		assertJSONKeys(t, got, map[string]any{
 			"counts": map[string]any{
-				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 2, "between_stages": 0,
+				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 2, "between_stages": 0, "attention": 1,
 			},
 			"pending_reactions": json.RawMessage(wantPendingReactionsJSON),
 		})
@@ -1464,11 +1465,11 @@ func TestToStateResponse(t *testing.T) {
 			{IssueID: "id-1", Identifier: "MT-1", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"},
 		}}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		assertJSONKeys(t, got, map[string]any{
 			"counts": map[string]any{
-				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1,
+				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1, "attention": 0,
 			},
 			"between_stages": json.RawMessage(`[{"issue_id": "id-1", "issue_identifier": "MT-1", "source_rule": "specify",
 				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null, "stage_position": null,
@@ -1493,7 +1494,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		if got.ActiveEstimatedCostUSD != nil {
 			t.Errorf("ActiveEstimatedCostUSD = %v, want nil", *got.ActiveEstimatedCostUSD)
@@ -1527,7 +1528,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		if got.ActiveEstimatedCostUSD == nil {
 			t.Fatal("ActiveEstimatedCostUSD = nil, want non-nil")
@@ -1560,7 +1561,7 @@ func TestToStateResponse(t *testing.T) {
 			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		if got.ActiveEstimatedCostUSD != nil {
 			t.Errorf("ActiveEstimatedCostUSD = %v, want nil (no matching kind)", *got.ActiveEstimatedCostUSD)
@@ -1574,7 +1575,7 @@ func TestToStateResponse(t *testing.T) {
 			GeneratedAt: time.Now().UTC(),
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 		data, err := json.Marshal(got)
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
@@ -1613,7 +1614,7 @@ func TestToStateResponse(t *testing.T) {
 			"claude": TokenRateConfig{InputPerMtok: fptr(5.0), OutputPerMtok: fptr(15.0)},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 		data, err := json.Marshal(got)
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
@@ -1644,7 +1645,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 
 		if len(got.Running) != 2 {
 			t.Fatalf("len(Running) = %d, want 2", len(got.Running))
@@ -1700,7 +1701,7 @@ func TestToStateResponse(t *testing.T) {
 			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		// 1M input @ $3/Mtok = $3, from the measured entry alone.
 		if got.ActiveEstimatedCostUSD == nil {
@@ -1712,9 +1713,6 @@ func TestToStateResponse(t *testing.T) {
 	})
 }
 
-// TestToStateResponse_AgentTotalsExclusionFieldsJSON binds the
-// unmeasured_sessions, running_unreported, and running_non_reporting
-// members of the nested agent_totals object to their JSON key names.
 func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 	t.Parallel()
 
@@ -1727,7 +1725,7 @@ func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 		},
 	}
 
-	got := toStateResponse(snap, nil, sentence.Context{})
+	got := toStateResponse(snap, nil, sentence.Context{}, nil)
 	data, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
@@ -1783,7 +1781,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 1)
 	})
@@ -1801,7 +1799,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, incompleteRates, sentence.Context{})
+		got := toStateResponse(snap, incompleteRates, sentence.Context{}, nil)
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 1)
 		if got.ActiveEstimatedCostUSD != nil {
@@ -1819,7 +1817,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 0)
 	})
@@ -1834,7 +1832,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 0)
 	})
@@ -1853,7 +1851,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 2)
 		var rowCostSum float64
@@ -1885,7 +1883,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		assertJSONKeys(t, got, map[string]any{"cost_unpriced_running": 0})
 	})
@@ -1900,7 +1898,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{})
+		got := toStateResponse(snap, nil, sentence.Context{}, nil)
 		data, err := json.Marshal(got)
 		if err != nil {
 			t.Fatalf("json.Marshal: %v", err)
@@ -1920,7 +1918,7 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, rates, sentence.Context{})
+		got := toStateResponse(snap, rates, sentence.Context{}, nil)
 
 		assertJSONKeys(t, got, map[string]any{"cost_unpriced_running": 1})
 	})
@@ -2309,6 +2307,89 @@ func TestHandleState(t *testing.T) {
 		}
 	})
 
+	t.Run("attention", func(t *testing.T) {
+		t.Parallel()
+
+		parkedAt := time.Date(2026, 3, 24, 11, 0, 0, 0, time.UTC)
+		tests := []struct {
+			name      string
+			snap      orchestrator.RuntimeSnapshotResult
+			wantCount int
+			wantItem  map[string]any
+		}{
+			{
+				name:      "clean state serves an empty list",
+				snap:      orchestrator.RuntimeSnapshotResult{GeneratedAt: fixedTime},
+				wantCount: 0,
+			},
+			{
+				name: "parked issue serves tagged keys and omits empty issue keys",
+				snap: orchestrator.RuntimeSnapshotResult{
+					GeneratedAt: fixedTime,
+					Parked: []orchestrator.SnapshotParkedEntry{
+						{IssueID: "id-1", Identifier: "MT-652", Reason: "agent_blocked", Label: "needs-human", LabelApplied: true, ParkedAt: parkedAt},
+					},
+				},
+				wantCount: 1,
+				wantItem: map[string]any{
+					"kind":             "parked",
+					"severity":         "warning",
+					"since":            "2026-03-24T11:00:00Z",
+					"issue_id":         "id-1",
+					"issue_identifier": "MT-652",
+					"reason_text":      "Parked: the agent needs a person",
+					"action":           map[string]any{"kind": "acknowledge"},
+					"evidence":         map[string]any{"reason": "agent_blocked", "label": "needs-human"},
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				ts := testServer(t, fixedSnapshot(tt.snap), acceptingRefresh())
+				resp, err := http.Get(ts.URL + "/api/v1/state")
+				if err != nil {
+					t.Fatalf("GET /api/v1/state: %v", err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+				var body struct {
+					Attention []map[string]any `json:"attention"`
+					Counts    struct {
+						Attention int `json:"attention"`
+					} `json:"counts"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+
+				if body.Attention == nil || len(body.Attention) != tt.wantCount || body.Counts.Attention != tt.wantCount {
+					t.Fatalf("GET /api/v1/state attention = %v with counts.attention %d, want a non-null list of %d", body.Attention, body.Counts.Attention, tt.wantCount)
+				}
+				if tt.wantItem == nil {
+					return
+				}
+				item := body.Attention[0]
+				for key, want := range tt.wantItem {
+					if !reflect.DeepEqual(item[key], want) {
+						t.Errorf("attention[0].%s = %v, want %v", key, item[key], want)
+					}
+				}
+				for _, key := range []string{"id", "why_text", "clears_text"} {
+					if text, _ := item[key].(string); text == "" {
+						t.Errorf("attention[0].%s = %q, want non-empty", key, text)
+					}
+				}
+				for _, key := range []string{"display_identifier", "issue_title", "issue_url"} {
+					if _, ok := item[key]; ok {
+						t.Errorf("attention[0] carries %q, want it omitted when empty", key)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("snapshot error returns 503 with generic message", func(t *testing.T) {
 		t.Parallel()
 
@@ -2502,13 +2583,16 @@ func TestHandleState_Budget(t *testing.T) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
+		var rawMap map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&rawMap); err != nil {
+			t.Fatalf("decode body: %v", err)
 		}
-		for _, forbidden := range []string{"max_sessions", "max_tokens", "max_consecutive_absences"} {
-			if strings.Contains(string(raw), forbidden) {
-				t.Errorf("response body contains %q, want absent", forbidden)
+		delete(rawMap, "attention")
+		for key, raw := range rawMap {
+			for _, forbidden := range []string{"max_sessions", "max_tokens", "max_consecutive_absences"} {
+				if strings.Contains(string(raw), forbidden) {
+					t.Errorf("response member %q contains %q, want absent", key, forbidden)
+				}
 			}
 		}
 	})

@@ -112,6 +112,7 @@ const (
 // ci_reconcile_test.go is self-contained.
 type ciReconcileStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	savedEntries    []persistence.RetryEntry
@@ -1042,6 +1043,7 @@ func TestReconcileCIStatus_EscalationSoftStop_SameHeadDoesNotReescalate(t *testi
 	entry.PendingRetryAt = time.Time{}
 	state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident", ReactionKind: ReactionKindReview}
 	state.Claimed[issueID] = struct{}{}
+	params.NowFunc = func() time.Time { return ciBaseTime.Add(time.Hour) }
 
 	reconcileCIStatus(state, params, discardLogger(), context.Background(), metrics)
 	state.TrackerOpsWg.Wait()
@@ -1063,6 +1065,72 @@ func TestReconcileCIStatus_EscalationSoftStop_SameHeadDoesNotReescalate(t *testi
 	}
 	if len(store.runHistories) != 1 {
 		t.Errorf("AppendRunHistory call count after second pass = %d, want 1 (only the escalating pass records)", len(store.runHistories))
+	}
+}
+
+func TestReconcileCIStatus_PassingVerdictEndsEscalation_NextFailureEscalatesOnceMore(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		maxRetries int
+		triage     bool
+	}{
+		{name: "budget escalation at max_retries 0", maxRetries: 0},
+		{name: "triage escalate answer", maxRetries: 2, triage: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			const issueID = "ISS-CI-ENDPASS"
+			key := ReactionKey(issueID, ReactionKindCI)
+			state := stateWithPendingReaction(t, issueID, "main", 1)
+			metrics := newCIMetricsSpy()
+			tracker := &ciTrackerStub{}
+			ci := &mockCIProvider{}
+			params := ciParams(t, &ciReconcileStore{}, ci, tracker, defaultCISCM())
+			if tt.triage {
+				params = ciTriageParams(t, &ciReconcileStore{}, ci, tracker, defaultCISCM(), mustTriageWorkspace(t, issueID+"-ident"), escalateTriageScript)
+			}
+			params.Store = openInMemoryStore(t)
+			params.CIFeedback.MaxRetries = tt.maxRetries
+
+			passAt := func(at time.Time, result domain.CIResult) {
+				t.Helper()
+				ci.result = result
+				params.NowFunc = func() time.Time { return at }
+				state.PendingReactions[key].PendingRetryAt = time.Time{}
+				reconcileCIStatus(state, params, discardLogger(), context.Background(), metrics)
+				if run := state.PendingReactions[key].Triage; run != nil && !run.Applied {
+					waitTriageRunDone(t, run)
+					state.PendingReactions[key].PendingRetryAt = time.Time{}
+					reconcileCIStatus(state, params, discardLogger(), context.Background(), metrics)
+				}
+				state.TrackerOpsWg.Wait()
+			}
+			failing := domain.CIResult{Status: domain.CIStatusFailing, FailingCount: 1}
+
+			passAt(ciBaseTime, failing)
+			if got := state.PendingReactions[key].EscalatedAt; !got.Equal(ciBaseTime) {
+				t.Fatalf("EscalatedAt after the first failing verdict = %v, want %v", got, ciBaseTime)
+			}
+
+			passAt(ciBaseTime.Add(time.Minute), domain.CIResult{Status: domain.CIStatusPassing})
+			if got := pendingRow(t, state, issueID, ReactionKindCI).EscalatedAt; got != nil {
+				t.Errorf("row EscalatedAt after a passing verdict = %v, want nil", got)
+			}
+
+			later := ciBaseTime.Add(2 * time.Minute)
+			passAt(later, failing)
+			if got := state.PendingReactions[key].EscalatedAt; !got.Equal(later) {
+				t.Errorf("EscalatedAt after the next failing verdict = %v, want %v", got, later)
+			}
+			if tracker.addLabelCalled != 1 {
+				t.Errorf("AddLabel calls across both escalations of one head = %d, want 1", tracker.addLabelCalled)
+			}
+		})
 	}
 }
 

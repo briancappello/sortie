@@ -77,6 +77,10 @@ type OrchestratorStore interface {
 	RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error
 	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
 	DeleteIssueOutcome(ctx context.Context, issueID string) error
+	GetReactionEscalation(ctx context.Context, issueID, kind string) (persistence.ReactionEscalation, bool, error)
+	SaveReactionEscalation(ctx context.Context, rec persistence.ReactionEscalation) error
+	EndReactionEscalation(ctx context.Context, issueID, kind string) error
+	DeleteReactionEscalations(ctx context.Context, issueID string) error
 }
 
 var _ OrchestratorStore = (*persistence.Store)(nil)
@@ -1039,6 +1043,10 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			Previous:        lineage.PreviousRule,
 			PreviousOutcome: lineage.PreviousOutcome,
 		})
+		// A park released on this tick reaches the dispatch with no refresh
+		// in between, so a person's answer to a standing escalation is
+		// recognized here, before the claim makes the issue Sortie's own.
+		endOutsideHandoff(ctx, o.state, o.store, o.trackerAdapter, issue.ID, issue.State, cfg.Tracker.HandoffState, cfg.Tracker.TerminalStates, o.logger)
 		DispatchIssue(dispatchCtx, o.state, issue, nil, host, o.makeWorkerFn("", host, resolution.AgentKind, resolution.TemplateID, "", adapter, attemptSettings))
 		if entry := o.state.Running[issue.ID]; entry != nil {
 			entry.ContinuationContext = seed

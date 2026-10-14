@@ -15,6 +15,7 @@ import (
 // other store method.
 type headChangeStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	count int

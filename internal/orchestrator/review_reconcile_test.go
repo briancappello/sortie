@@ -82,6 +82,7 @@ func (m *mockSCMAdapter) RemoveLabel(_ context.Context, _ int, _, _, _ string) e
 // reviewReconcileStore is a self-contained ReconcileStore for review tests.
 type reviewReconcileStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	savedEntries    []persistence.RetryEntry
@@ -543,6 +544,24 @@ func assertEscalations(t *testing.T, tracker *reviewTrackerStub, want int) {
 	if tracker.commentIssueCalls != want {
 		t.Errorf("routed escalation events = %d, want %d", tracker.commentIssueCalls, want)
 	}
+}
+
+func assertEscalationBegan(t *testing.T, state *State, rkey string, trigger ReactionEscalationTrigger) *PendingReaction {
+	t.Helper()
+	entry, ok := state.PendingReactions[rkey]
+	if !ok {
+		t.Fatalf("PendingReactions[%q] missing after the escalation, want the entry kept", rkey)
+	}
+	if entry.EscalatedAt.IsZero() {
+		t.Errorf("PendingReactions[%q].EscalatedAt is zero, want the escalation standing", rkey)
+	}
+	if entry.EscalationTrigger != trigger {
+		t.Errorf("PendingReactions[%q].EscalationTrigger = %q, want %q", rkey, entry.EscalationTrigger, trigger)
+	}
+	if !entry.PendingRetryAt.After(entry.EscalatedAt) {
+		t.Errorf("PendingReactions[%q].PendingRetryAt = %v, want after EscalatedAt %v (re-enqueued at the poll interval)", rkey, entry.PendingRetryAt, entry.EscalatedAt)
+	}
+	return entry
 }
 
 func makeDue(t *testing.T, state *State, rkey string) *PendingReaction {
@@ -1123,45 +1142,6 @@ func TestReconcileReviewComments_DebounceElapsed_Dispatches(t *testing.T) {
 	}
 }
 
-func TestReconcileReviewComments_TurnCapExceeded_Escalates(t *testing.T) {
-	t.Parallel()
-
-	state, rkey := spentReviewState(t, "ISS-R-11", "rc-old")
-
-	store := &reviewReconcileStore{}
-	metrics := newReviewMetricsSpy()
-	tracker := &reviewTrackerStub{}
-	scm := &mockSCMAdapter{comments: []domain.ReviewComment{summaryComment("rc-old"), summaryComment("rc-new")}}
-	params := reviewEscalationParams(t, store, scm, tracker)
-	log, buf := logCapture()
-
-	reconcileReviewComments(state, params, log, context.Background(), metrics)
-	state.TrackerOpsWg.Wait()
-
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry still present after turn cap; want consumed")
-	}
-	if _, ok := state.Claimed["ISS-R-11"]; ok {
-		t.Error("claim not released after turn cap escalation; want released")
-	}
-	if len(store.deletedIssueIDs) != 1 || store.deletedIssueIDs[0] != "ISS-R-11" {
-		t.Errorf("DeleteRetryEntry calls = %v, want [ISS-R-11]", store.deletedIssueIDs)
-	}
-	if _, ok := state.RetryAttempts["ISS-R-11"]; ok {
-		t.Error("retry still scheduled after escalation; want none")
-	}
-	if _, ok := state.ReactionAttempts[rkey]; ok {
-		t.Errorf("ReactionAttempts[%s] present after escalation; want deleted", rkey)
-	}
-	assertHandedOffCached(t, state, rkey, "rc-old")
-	if scm.calls != 1 {
-		t.Errorf("FetchPendingReviews calls = %d, want 1 (the budget is decided after the fetch)", scm.calls)
-	}
-	assertEscalations(t, tracker, 1)
-	assertLogLineHasIntAttr(t, buf.String(), "review fix continuation turns exhausted, escalating", "turn_count", 3)
-	assertLogLacksLine(t, buf.String(), "review triage requested escalation")
-}
-
 func TestReconcileReviewComments_TurnCapExceeded_CrossKindIsolation(t *testing.T) {
 	t.Parallel()
 
@@ -1188,9 +1168,7 @@ func TestReconcileReviewComments_TurnCapExceeded_CrossKindIsolation(t *testing.T
 	reconcileReviewComments(state, params, discardLogger(), context.Background(), metrics)
 	state.TrackerOpsWg.Wait()
 
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("review PendingReactions entry present after escalation; want consumed")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
 	if _, ok := state.Claimed[issueID]; !ok {
 		t.Error("claim released by review escalation while a CI worker runs; want held so the worker's exit can seed its watch")
 	}
@@ -2056,9 +2034,7 @@ func TestReconcileReviewComments_Triage_Escalate(t *testing.T) {
 	if tracker.addLabelCalled != 1 {
 		t.Errorf("AddLabel calls = %d, want 1 (triage escalation uses the kind's own escalation action)", tracker.addLabelCalled)
 	}
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry survived a triage escalation, want dropped (matches a budget escalation)")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerTriage)
 	if store.markDispatchedCalls != 1 {
 		t.Errorf("MarkReactionDispatched calls = %d, want 1", store.markDispatchedCalls)
 	}
@@ -2231,9 +2207,7 @@ func TestReconcileReviewComments_Triage_EpisodeCloseClearsHandledForNextEpisode(
 	if tracker.addLabelCalled != 1 {
 		t.Errorf("AddLabel calls = %d, want 1 (the replayed handled verdict from episode 1 must not suppress the fresh escalate)", tracker.addLabelCalled)
 	}
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry survived a triage escalation, want dropped (the replayed handled verdict from episode 1 must not suppress it)")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerTriage)
 	if store.markDispatchedCalls != 2 {
 		t.Errorf("MarkReactionDispatched calls = %d, want 2 (one real verdict per episode: handled, then escalate)", store.markDispatchedCalls)
 	}
@@ -2644,14 +2618,18 @@ func TestReconcileReviewComments_SpentBudget_NewCommentEscalatesOnce(t *testing.
 			if metrics.reviewEscalations["label"] != 1 {
 				t.Errorf(`IncReviewEscalations("label") = %d, want 1`, metrics.reviewEscalations["label"])
 			}
-			if _, ok := state.PendingReactions[rkey]; ok {
-				t.Error("PendingReactions entry present after escalation; want consumed")
-			}
+			assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
 			if _, ok := state.Claimed["ISS-R-ONCE"]; ok {
 				t.Error("claim kept after escalation; want released")
 			}
-			if _, ok := state.ReactionAttempts[rkey]; ok {
-				t.Error("counter kept after escalation; want deleted")
+			if len(store.deletedIssueIDs) != 1 || store.deletedIssueIDs[0] != "ISS-R-ONCE" {
+				t.Errorf("DeleteRetryEntry calls = %v, want [ISS-R-ONCE]", store.deletedIssueIDs)
+			}
+			if _, ok := state.RetryAttempts["ISS-R-ONCE"]; ok {
+				t.Error("retry still scheduled after escalation; want none")
+			}
+			if state.ReactionAttempts[rkey] != defaultReviewConfig().MaxContinuationTurns {
+				t.Errorf("ReactionAttempts[%s] = %d, want %d (kept while the escalation stands)", rkey, state.ReactionAttempts[rkey], defaultReviewConfig().MaxContinuationTurns)
 			}
 			assertHandedOffCached(t, state, rkey, tt.handedOff...)
 			if store.deleteFingerprintCalls != 1 {
@@ -2663,6 +2641,15 @@ func TestReconcileReviewComments_SpentBudget_NewCommentEscalatesOnce(t *testing.
 			assertLogLineHasIntAttr(t, buf.String(), "review fix continuation turns exhausted, escalating", "turn_count", 3)
 			assertLogLineHasIntAttr(t, buf.String(), "review fix continuation turns exhausted, escalating", "max_continuation_turns", 3)
 			assertLogLacksLine(t, buf.String(), "review triage requested escalation")
+
+			makeDue(t, state, rkey)
+			reconcileReviewComments(state, params, log, context.Background(), metrics)
+			state.TrackerOpsWg.Wait()
+
+			assertEscalations(t, tracker, 1)
+			if _, ok := state.RetryAttempts["ISS-R-ONCE"]; ok {
+				t.Error("standing pass scheduled a retry; want none")
+			}
 		})
 	}
 }
@@ -2889,8 +2876,9 @@ func TestReconcileReviewComments_HandedOff_TriageEscalationKeepsSet(t *testing.T
 	if tracker.addLabelCalled != 1 {
 		t.Fatalf("AddLabel calls = %d, want 1", tracker.addLabelCalled)
 	}
-	if _, ok := state.ReactionAttempts[rkey]; ok {
-		t.Error("ReactionAttempts present after a triage escalation; want deleted")
+	assertEscalationBegan(t, state, rkey, EscalationTriggerTriage)
+	if state.ReactionAttempts[rkey] != 1 {
+		t.Errorf("ReactionAttempts[%s] = %d, want 1 (kept while the escalation stands)", rkey, state.ReactionAttempts[rkey])
 	}
 	assertHandedOffCached(t, state, rkey, "rc-earlier")
 }
@@ -3013,9 +3001,7 @@ func TestReconcileReviewComments_NoEscalationAfterSuccessfulLastTurn(t *testing.
 
 	assertEscalations(t, tracker, 1)
 	assertLogLineHasIntAttr(t, buf.String(), escalatingMsg, "turn_count", 3)
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry present after the escalation; want consumed")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
 	assertHandedOffCached(t, state, rkey, "c1", "c2", "c3", "review-1", "review-2", "review-3")
 	assertStoredHandedOff(t, store, issueID, ReactionKindReview, "c1", "c2", "c3", "review-1", "review-2", "review-3")
 }

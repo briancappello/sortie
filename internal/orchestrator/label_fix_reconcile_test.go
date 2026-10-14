@@ -21,6 +21,7 @@ import (
 // stored mark still dispatches regardless of its value.
 type labelFixDispatchedFlagStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	mark       string

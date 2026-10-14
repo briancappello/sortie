@@ -36,6 +36,10 @@ type ReconcileStore interface {
 	CountWorkerRunsCompletedSince(ctx context.Context, issueID string, since time.Time) (int, error)
 	DeleteStageHop(ctx context.Context, issueID string) error
 	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
+	GetReactionEscalation(ctx context.Context, issueID, kind string) (persistence.ReactionEscalation, bool, error)
+	SaveReactionEscalation(ctx context.Context, rec persistence.ReactionEscalation) error
+	EndReactionEscalation(ctx context.Context, issueID, kind string) error
+	DeleteReactionEscalations(ctx context.Context, issueID string) error
 }
 
 var _ ReconcileStore = (*persistence.Store)(nil)
@@ -499,16 +503,18 @@ type issueReleaseCounts struct {
 	RetryCancelled   bool
 }
 
-// retryEntryDeleter is the one store method [releaseIssueRuntimeState]
-// needs.
+// retryEntryDeleter is the pair of store methods [releaseIssueRuntimeState]
+// needs: the issue's persisted retry and its escalation records.
 type retryEntryDeleter interface {
 	DeleteRetryEntry(ctx context.Context, issueID string) error
+	DeleteReactionEscalations(ctx context.Context, issueID string) error
 }
 
 // releaseIssueRuntimeState drops one issue's runtime reaction bookkeeping
 // and its dispatch claim: every pending reaction entry, every reaction
 // attempt counter, every cached handed-off and reported comment set, the
-// pending retry, and the claim. The stored handed-off rows stay. It
+// pending retry, the escalation records, and the claim. The stored
+// handed-off rows stay. It
 // performs no tracker call, no source-control call, no reaction-fingerprint
 // read or write, and no workspace removal.
 //
@@ -558,6 +564,13 @@ func releaseIssueRuntimeState(ctx context.Context, state *State, store retryEntr
 			slog.Any("error", err),
 		)
 	}
+	// Deleted unconditionally, like the retry row: a record can outlive its
+	// entry across a restart.
+	if err := store.DeleteReactionEscalations(ctx, issueID); err != nil {
+		entryLog.Warn("failed to delete reaction escalation records",
+			slog.Any("error", err),
+		)
+	}
 	if _, exists := state.Claimed[issueID]; exists {
 		delete(state.Claimed, issueID)
 		counts.ClaimReleased = true
@@ -577,6 +590,11 @@ func releaseIssueRuntimeState(ctx context.Context, state *State, store retryEntr
 // An issue reported in no state (an empty state name) is acted on only at
 // its second consecutive such reading, because a person's label edit can
 // pass through zero state labels for a moment.
+//
+// An issue with no worker that the tracker reports outside the handoff
+// state, and that holds a standing escalation, is not left untouched: a
+// person's move has answered the escalation, and [endOutsideHandoff] ends it
+// once a direct read confirms the reading.
 func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logger, ctx context.Context, now time.Time, metrics domain.Metrics) {
 	if params.TrackerAdapter == nil {
 		return
@@ -666,6 +684,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			}
 			continue
 		}
+
+		endOutsideHandoff(ctx, state, params.Store, params.TrackerAdapter, issueID, stateName, params.HandoffState, params.TerminalStates, log)
 
 		if entry == nil {
 			continue

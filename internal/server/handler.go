@@ -26,6 +26,7 @@ type stateResponse struct {
 	Parked                 []parkedEntryResponse            `json:"parked"`
 	PendingReactions       []pendingReactionResponse        `json:"pending_reactions"`
 	BetweenStages          []stageHopResponse               `json:"between_stages"`
+	Attention              []attentionItemResponse          `json:"attention"`
 	AgentTotals            orchestrator.SnapshotAgentTotals `json:"agent_totals"`
 	RateLimits             map[string]any                   `json:"rate_limits"`
 	ActiveEstimatedCostUSD *float64                         `json:"active_estimated_cost_usd,omitempty"`
@@ -48,6 +49,7 @@ type stateCounts struct {
 	Parked           int `json:"parked"`
 	PendingReactions int `json:"pending_reactions"`
 	BetweenStages    int `json:"between_stages"`
+	Attention        int `json:"attention"`
 }
 
 type runningEntryResponse struct {
@@ -251,6 +253,7 @@ type pendingReactionResponse struct {
 	UsedAttempts      *int                   `json:"used_attempts"`
 	MaxAttempts       *int                   `json:"max_attempts"`
 	EscalatedAt       *time.Time             `json:"escalated_at"`
+	EscalationTrigger string                 `json:"escalation_trigger,omitempty"`
 	WatchEndsAt       *time.Time             `json:"watch_ends_at"`
 	LastCheck         *reactionCheckResponse `json:"last_check"`
 
@@ -261,6 +264,51 @@ type pendingReactionResponse struct {
 
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
+}
+
+// attentionItemResponse is the JSON wire format for one thing that needs a
+// person. Used by GET /api/v1/state.
+type attentionItemResponse struct {
+	ID                string                    `json:"id"`
+	Kind              string                    `json:"kind"`
+	Severity          string                    `json:"severity"`
+	Since             *time.Time                `json:"since"`
+	IssueID           string                    `json:"issue_id,omitempty"`
+	IssueIdentifier   string                    `json:"issue_identifier,omitempty"`
+	DisplayIdentifier string                    `json:"display_identifier,omitempty"`
+	IssueTitle        string                    `json:"issue_title,omitempty"`
+	IssueURL          string                    `json:"issue_url,omitempty"`
+	ReasonText        string                    `json:"reason_text"`
+	WhyText           string                    `json:"why_text"`
+	ClearsText        string                    `json:"clears_text"`
+	Action            attentionActionResponse   `json:"action"`
+	Evidence          attentionEvidenceResponse `json:"evidence"`
+}
+
+type attentionActionResponse struct {
+	Kind string `json:"kind"`
+	URL  string `json:"url,omitempty"`
+}
+
+// attentionEvidenceResponse carries each member only on the item kinds that
+// have it.
+type attentionEvidenceResponse struct {
+	Reason             string                 `json:"reason,omitempty"`
+	Label              string                 `json:"label,omitempty"`
+	UsedSessions       *int                   `json:"used_sessions,omitempty"`
+	BudgetSessions     *int                   `json:"budget_sessions,omitempty"`
+	UsedTokens         *int64                 `json:"used_tokens,omitempty"`
+	UsedTokensComplete *bool                  `json:"used_tokens_complete,omitempty"`
+	BudgetTokens       *int64                 `json:"budget_tokens,omitempty"`
+	ReactionKind       string                 `json:"reaction_kind,omitempty"`
+	ConfigKey          string                 `json:"config_key,omitempty"`
+	PullRequest        *pullRequestResponse   `json:"pull_request,omitempty"`
+	EscalationTrigger  string                 `json:"escalation_trigger,omitempty"`
+	UsedAttempts       *int                   `json:"used_attempts,omitempty"`
+	MaxAttempts        *int                   `json:"max_attempts,omitempty"`
+	LastCheck          *reactionCheckResponse `json:"last_check,omitempty"`
+	File               string                 `json:"file,omitempty"`
+	Error              string                 `json:"error,omitempty"`
 }
 
 // pullRequestResponse is the JSON wire format for the pull request a pending
@@ -656,20 +704,15 @@ func toPendingReactionResponse(e orchestrator.SnapshotPendingReaction) pendingRe
 		State:             e.State,
 		Kind:              e.Kind,
 		ConfigKey:         e.ConfigKey,
-		PullRequest: pullRequestResponse{
-			Number:     e.PullRequest.Number,
-			Repository: e.PullRequest.Repository,
-			URL:        e.PullRequest.URL,
-			Branch:     e.PullRequest.Branch,
-			HeadSHA:    e.PullRequest.HeadSHA,
-		},
-		CreatedAt:    e.CreatedAt.UTC(),
-		DispatchedAt: utcOrNil(e.DispatchedAt),
-		NextPollAt:   e.NextPollAt.UTC(),
-		Wait:         e.Wait,
-		UsedAttempts: e.UsedAttempts,
-		MaxAttempts:  e.MaxAttempts,
-		LastCheck:    (*reactionCheckResponse)(e.LastCheck),
+		PullRequest:       toPullRequestResponse(e.PullRequest),
+		CreatedAt:         e.CreatedAt.UTC(),
+		DispatchedAt:      utcOrNil(e.DispatchedAt),
+		NextPollAt:        e.NextPollAt.UTC(),
+		Wait:              e.Wait,
+		UsedAttempts:      e.UsedAttempts,
+		MaxAttempts:       e.MaxAttempts,
+		LastCheck:         (*reactionCheckResponse)(e.LastCheck),
+		EscalationTrigger: e.EscalationTrigger,
 
 		RuleName:        e.RuleName,
 		StagePosition:   toStagePositionResponse(e.StagePosition),
@@ -683,6 +726,63 @@ func toPendingReactionResponse(e orchestrator.SnapshotPendingReaction) pendingRe
 		resp.WatchEndsAt = new(e.WatchEndsAt.UTC())
 	}
 	return resp
+}
+
+func toPullRequestResponse(pr orchestrator.SnapshotPullRequest) pullRequestResponse {
+	return pullRequestResponse{
+		Number:     pr.Number,
+		Repository: pr.Repository,
+		URL:        pr.URL,
+		Branch:     pr.Branch,
+		HeadSHA:    pr.HeadSHA,
+	}
+}
+
+// toAttentionResponses converts the derived list to its wire format, never nil.
+func toAttentionResponses(items []sentence.AttentionItem) []attentionItemResponse {
+	responses := make([]attentionItemResponse, 0, len(items))
+	for _, item := range items {
+		ev := item.Evidence
+		resp := attentionItemResponse{
+			ID:                item.ID,
+			Kind:              item.Kind,
+			Severity:          item.Severity,
+			IssueID:           item.IssueID,
+			IssueIdentifier:   item.IssueIdentifier,
+			DisplayIdentifier: item.DisplayIdentifier,
+			IssueTitle:        item.IssueTitle,
+			IssueURL:          item.IssueURL,
+			ReasonText:        item.ReasonText,
+			WhyText:           item.WhyText,
+			ClearsText:        item.ClearsText,
+			Action:            attentionActionResponse{Kind: item.Action.Kind, URL: item.Action.URL},
+			Evidence: attentionEvidenceResponse{
+				Reason:             ev.Reason,
+				Label:              ev.Label,
+				UsedSessions:       ev.UsedSessions,
+				BudgetSessions:     ev.BudgetSessions,
+				UsedTokens:         ev.UsedTokens,
+				UsedTokensComplete: ev.UsedTokensComplete,
+				BudgetTokens:       ev.BudgetTokens,
+				ReactionKind:       ev.ReactionKind,
+				ConfigKey:          ev.ConfigKey,
+				EscalationTrigger:  ev.EscalationTrigger,
+				UsedAttempts:       ev.UsedAttempts,
+				MaxAttempts:        ev.MaxAttempts,
+				LastCheck:          (*reactionCheckResponse)(ev.LastCheck),
+				File:               ev.File,
+				Error:              ev.Error,
+			},
+		}
+		if item.Since != nil {
+			resp.Since = new(item.Since.UTC())
+		}
+		if ev.PullRequest != nil {
+			resp.Evidence.PullRequest = new(toPullRequestResponse(*ev.PullRequest))
+		}
+		responses = append(responses, resp)
+	}
+	return responses
 }
 
 func toPendingReactionResponses(rows []orchestrator.SnapshotPendingReaction, words sentence.Context) []pendingReactionResponse {
@@ -753,7 +853,7 @@ func heldUsedTokens(e orchestrator.SnapshotBudgetEntry) *int64 {
 	return e.UsedTokens
 }
 
-func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRates, words sentence.Context) stateResponse {
+func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRates, words sentence.Context, health *orchestrator.SnapshotHealth) stateResponse {
 	running := make([]runningEntryResponse, 0, len(snap.Running))
 	for _, e := range snap.Running {
 		row := toServedRunningEntry(e, snap, tokenRates)
@@ -791,6 +891,8 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRa
 		betweenStages = append(betweenStages, row)
 	}
 
+	attention := toAttentionResponses(sentence.Attention(snap, health, words))
+
 	rateLimits := snap.RateLimits
 	if rateLimits == nil {
 		rateLimits = map[string]any{}
@@ -805,6 +907,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRa
 			Parked:           len(parked),
 			PendingReactions: len(pendingReactions),
 			BetweenStages:    len(betweenStages),
+			Attention:        len(attention),
 		},
 		Running:          running,
 		Retrying:         retrying,
@@ -812,6 +915,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRa
 		Parked:           parked,
 		PendingReactions: pendingReactions,
 		BetweenStages:    betweenStages,
+		Attention:        attention,
 		AgentTotals:      snap.AgentTotals,
 		RateLimits:       rateLimits,
 	}
@@ -900,15 +1004,20 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var health *orchestrator.SnapshotHealth
+	if s.healthFn != nil {
+		health = new(s.healthFn())
+	}
+
 	words := s.sentenceContext(snap)
-	resp := toStateResponse(snap, s.tokenRates, words)
+	resp := toStateResponse(snap, s.tokenRates, words, health)
 	resp.Version = s.version
 	resp.StartedAt = utcOrNil(s.startedAt)
 	if words.Shape != nil {
 		resp.Config = toConfigResponse(*words.Shape, s.tokenRates)
 	}
-	if s.healthFn != nil {
-		resp.Health = toStateHealthResponse(s.healthFn())
+	if health != nil {
+		resp.Health = toStateHealthResponse(*health)
 	}
 	writeJSON(w, s.logger, http.StatusOK, resp)
 

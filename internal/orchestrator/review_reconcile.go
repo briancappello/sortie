@@ -70,8 +70,8 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 		entryLog := logging.WithIssue(log, pending.IssueID, pending.Identifier)
 		rkey := ReactionKey(pending.IssueID, ReactionKindReview)
 
-		// TTL enforcement.
-		if ttl > 0 && now.Sub(watchWindowStart(pending)) > ttl {
+		// A standing escalation is never aged out; its own facts end it.
+		if ttl > 0 && !pending.escalationStands() && now.Sub(watchWindowStart(pending)) > ttl {
 			cancelReactionTriage(pending)
 			// A spent counter outlives the drop: an entry re-seeded by
 			// another kind's worker exit would otherwise open a fresh
@@ -94,6 +94,7 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 			state.PendingReactions[key] = pending
 			continue
 		}
+		retryEscalationSave(ctx, state, params.Store, pending, entryLog)
 
 		// A run in flight makes this pass's fetch redundant, so the
 		// entry waits one tick instead. The backoff counter is
@@ -104,7 +105,13 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 			continue
 		}
 
-		readPullRequestURL(ctx, params.SCMAdapter, pending, entryLog)
+		if pending.escalationStands() {
+			if watchStandingPullRequest(ctx, state, params.Store, params.SCMAdapter, key, pending, true, now, pollInterval, entryLog) {
+				continue
+			}
+		} else {
+			readPullRequestURL(ctx, params.SCMAdapter, pending, entryLog)
+		}
 
 		// Fetch reviews from SCM.
 		comments, err := params.SCMAdapter.FetchPendingReviews(ctx, reviewData.PRNumber, reviewData.Owner, reviewData.Repo)
@@ -148,6 +155,7 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 			// anything. A retained verdict would otherwise be replayed
 			// against the next episode that recomputes the same set.
 			cancelReactionTriage(pending)
+			endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
 			pending.PendingRetryAt = now.Add(pollInterval)
 			pending.LastCheck = commentReactionCheck(now, 0, 0)
 			requeueReaction(state, key, pending, waitPollInterval)
@@ -156,6 +164,23 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 
 		// Build fingerprint from sorted actionable comment IDs.
 		fingerprint := buildReviewFingerprint(actionable)
+
+		if pending.escalationStands() {
+			spent := state.ReactionAttempts[rkey] >= params.ReviewConfig.MaxContinuationTurns
+			switch judgeCommentEscalation(ctx, state, params.Store, pending, actionable, fingerprint, spent, entryLog) {
+			case commentEscalationUnread:
+				pending.PendingRetryAt = now.Add(pollInterval)
+				requeueReaction(state, key, pending, waitBackoff)
+				continue
+			case commentEscalationStands:
+				pending.PendingRetryAt = now.Add(pollInterval)
+				pending.LastCheck = commentReactionCheck(now, len(actionable), 0)
+				requeueReaction(state, key, pending, waitPollInterval)
+				continue
+			}
+			// The counter stays only while the escalation stands.
+			delete(state.ReactionAttempts, rkey)
+		}
 
 		// Dedup check via reaction_fingerprints table.
 		if err := params.Store.UpsertReactionFingerprint(ctx, pending.IssueID, ReactionKindReview, fingerprint); err != nil {
@@ -212,7 +237,7 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 		// so a spent budget escalates it.
 		turnCount := state.ReactionAttempts[rkey]
 		if turnCount >= params.ReviewConfig.MaxContinuationTurns {
-			escalateReviewFailure(state, params, pending, turnCount, EscalationTriggerBudget, reviewData, entryLog, ctx, metrics)
+			escalateReviewFailure(state, params, pending, turnCount, EscalationTriggerBudget, reviewData, fingerprint, now, pollInterval, entryLog, ctx, metrics)
 			continue
 		}
 
@@ -245,7 +270,7 @@ func reconcileReviewComments(state *State, params ReconcileParams, log *slog.Log
 			requeueReaction(state, key, pending, waitPollInterval)
 			continue
 		case triageEscalate:
-			escalateReviewFailure(state, params, pending, turnCount, EscalationTriggerTriage, reviewData, entryLog, ctx, metrics)
+			escalateReviewFailure(state, params, pending, turnCount, EscalationTriggerTriage, reviewData, fingerprint, now, pollInterval, entryLog, ctx, metrics)
 			continue
 		}
 
@@ -308,13 +333,59 @@ func computeReactionPendingDelay(attempts int) time.Duration {
 }
 
 // escalateReviewFailure handles the case where review fix continuation
-// turns are exhausted. It applies the configured escalation action,
-// cancels the retry, releases the claim unless a worker runs for the issue,
-// and clears the review reaction's own pending entry, counter, and
-// fingerprint. The handed-off comment set stays, so a comment already given
-// to a run is never reported as new. Sibling reaction kinds for the same
-// issue are left untouched.
+// turns are exhausted or the triage command asked for a person. It begins
+// the escalation on the comment set fingerprint and applies the configured
+// escalation action unless the set was escalated before, cancels the retry,
+// releases the claim unless a worker runs for the issue, and clears the
+// review reaction's own fingerprint. The entry and its counter stay, and
+// the entry re-enqueues at the poll interval, until the escalation ends.
+// The handed-off comment set stays, so a comment already given to a run is
+// never reported as new. Sibling reaction kinds for the same issue are left
+// untouched.
 func escalateReviewFailure(
+	state *State,
+	params ReconcileParams,
+	pending *PendingReaction,
+	turnCount int,
+	trigger ReactionEscalationTrigger,
+	reviewData *ReviewReactionData,
+	fingerprint string,
+	now time.Time,
+	pollInterval time.Duration,
+	log *slog.Logger,
+	ctx context.Context,
+	metrics domain.Metrics,
+) {
+	if beginEscalation(ctx, state, params.Store, pending, trigger, fingerprint, now, log) {
+		applyReviewEscalation(state, params, pending, turnCount, trigger, reviewData, log, ctx, metrics)
+	}
+
+	CancelRetry(state, pending.IssueID)
+
+	if err := params.Store.DeleteRetryEntry(ctx, pending.IssueID); err != nil {
+		log.Error("failed to delete retry entry during review escalation",
+			slog.Any("error", err),
+		)
+	}
+
+	releaseClaimUnlessRunning(state, pending.IssueID)
+
+	// Scoped to this kind's own slot: a sibling reaction's pending
+	// entry, counter, and fingerprint for the same issue survive a
+	// review-only escalation.
+	if err := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindReview); err != nil {
+		log.Warn("failed to delete reaction fingerprint during review escalation",
+			slog.Any("error", err),
+		)
+	}
+
+	pending.PendingRetryAt = now.Add(pollInterval)
+	requeueReaction(state, ReactionKey(pending.IssueID, ReactionKindReview), pending, waitPollInterval)
+}
+
+// applyReviewEscalation applies the configured escalation action of the
+// review reaction: the event, and the label when so configured.
+func applyReviewEscalation(
 	state *State,
 	params ReconcileParams,
 	pending *PendingReaction,
@@ -382,27 +453,6 @@ func escalateReviewFailure(
 	publishEscalation(ctx, &state.TrackerOpsWg, delivery, log, record, func(err error) {
 		log.Warn("review escalation comment failed", slog.Any("error", err))
 	})
-
-	CancelRetry(state, pending.IssueID)
-
-	if err := params.Store.DeleteRetryEntry(ctx, pending.IssueID); err != nil {
-		log.Error("failed to delete retry entry during review escalation",
-			slog.Any("error", err),
-		)
-	}
-
-	releaseClaimUnlessRunning(state, pending.IssueID)
-
-	// Scoped to this kind's own slot: a sibling reaction's pending
-	// entry, counter, and fingerprint for the same issue survive a
-	// review-only escalation.
-	delete(state.PendingReactions, ReactionKey(pending.IssueID, ReactionKindReview))
-	delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindReview))
-	if err := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindReview); err != nil {
-		log.Warn("failed to delete reaction fingerprint during review escalation",
-			slog.Any("error", err),
-		)
-	}
 }
 
 // buildReviewEscalationComment builds a plain-text escalation comment
@@ -592,9 +642,35 @@ func carriesNewComment(state *State, issueID, kind string, comments []domain.Rev
 // carries. The handed-off key must already be loaded. It never modifies
 // state.
 func newCommentCount(state *State, issueID, kind string, comments []domain.ReviewComment) int {
+	return countCommentsOutsideRuns(state, issueID, kind, comments, true)
+}
+
+// ungivenCommentCount returns how many comments no run was given: outside
+// the cached handed-off set and the IDs the issue's running turn carries.
+// The reported set does not count, because the bot-review escalation puts
+// the comments it escalates there. Only an inline comment counts for
+// bot-review, as for its escalation. The handed-off key must already be
+// loaded.
+func ungivenCommentCount(state *State, issueID, kind string, comments []domain.ReviewComment) int {
+	if kind == ReactionKindBotReview {
+		inline := make([]domain.ReviewComment, 0, len(comments))
+		for _, c := range comments {
+			if c.FilePath != "" {
+				inline = append(inline, c)
+			}
+		}
+		comments = inline
+	}
+	return countCommentsOutsideRuns(state, issueID, kind, comments, false)
+}
+
+func countCommentsOutsideRuns(state *State, issueID, kind string, comments []domain.ReviewComment, reportedCounts bool) int {
 	rkey := ReactionKey(issueID, kind)
 	handedOff := state.ReactionHandedOffComments[rkey]
-	reported := state.ReactionReportedComments[rkey]
+	var reported map[string]struct{}
+	if reportedCounts {
+		reported = state.ReactionReportedComments[rkey]
+	}
 	var running map[string]struct{}
 	if entry := state.Running[issueID]; entry != nil {
 		running = make(map[string]struct{})
@@ -643,15 +719,16 @@ func recordHandedOffComments(ctx context.Context, state *State, store handedOffC
 }
 
 // recordReportedComments adds the ID of every comment to the reported set of
-// the issue and kind. The reported set is runtime-only.
-func recordReportedComments(state *State, issueID, kind string, comments []domain.ReviewComment) {
+// the issue under the bot-review kind, the only kind that reports comments.
+// The reported set is runtime-only.
+func recordReportedComments(state *State, issueID string, comments []domain.ReviewComment) {
 	if len(comments) == 0 {
 		return
 	}
 	if state.ReactionReportedComments == nil {
 		state.ReactionReportedComments = make(map[string]map[string]struct{})
 	}
-	rkey := ReactionKey(issueID, kind)
+	rkey := ReactionKey(issueID, ReactionKindBotReview)
 	reported := state.ReactionReportedComments[rkey]
 	if reported == nil {
 		reported = make(map[string]struct{}, len(comments))

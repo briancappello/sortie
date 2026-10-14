@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -58,10 +59,18 @@ type SnapshotSCMHealth struct {
 	Provider string
 }
 
+// SnapshotPreflightHealth is the dispatch preflight check.
+type SnapshotPreflightHealth struct {
+	SnapshotHealthCheck
+	// WorkflowLoadFailed reports that the latest failed run failed because the
+	// workflow file did not load; false while the check passes.
+	WorkflowLoadFailed bool
+}
+
 // SnapshotHealth is the health of Sortie's own checks.
 type SnapshotHealth struct {
 	Database  SnapshotHealthCheck
-	Preflight SnapshotHealthCheck
+	Preflight SnapshotPreflightHealth
 	Workflow  SnapshotWorkflowHealth
 	Poll      SnapshotPollHealth
 	// SCM is nil when no reaction uses a source-control provider.
@@ -71,11 +80,15 @@ type SnapshotHealth struct {
 // Health returns the latest runs of Sortie's own checks with every error
 // text masked. Safe for concurrent use; it performs no I/O.
 func (o *Orchestrator) Health() SnapshotHealth {
+	preflight, workflowLoadFailed := o.preflightHealth.snapshotPreflight()
 	health := SnapshotHealth{
-		Database:  o.databaseHealth.snapshot().masked(),
-		Preflight: o.withoutWorkflowDir(o.preflightHealth.snapshot()).masked(),
-		Workflow:  SnapshotWorkflowHealth{File: o.workflowFile()},
-		Poll:      o.pollHealth.snapshot(),
+		Database: o.databaseHealth.snapshot().masked(),
+		Preflight: SnapshotPreflightHealth{
+			SnapshotHealthCheck: o.withoutWorkflowDir(preflight).masked(),
+			WorkflowLoadFailed:  workflowLoadFailed,
+		},
+		Workflow: SnapshotWorkflowHealth{File: o.workflowFile()},
+		Poll:     o.pollHealth.snapshot(),
 	}
 	health.Poll.SnapshotHealthCheck = health.Poll.masked()
 
@@ -121,10 +134,14 @@ func (o *Orchestrator) withoutWorkflowDir(c SnapshotHealthCheck) SnapshotHealthC
 // fail the check nor appear in it.
 func (o *Orchestrator) recordPreflight(validation PreflightResult) {
 	var failure error
+	loadFailed := false
 	if !validation.OK() {
 		failure = validation
+		loadFailed = slices.ContainsFunc(validation.Errors, func(e PreflightError) bool {
+			return e.Check == preflightCheckWorkflowLoad
+		})
 	}
-	o.preflightHealth.record(time.Now(), failure)
+	o.preflightHealth.recordRun(time.Now(), failure, loadFailed)
 }
 
 // advance leaves Error to the caller after a failure, because the poll
@@ -154,15 +171,30 @@ func (c SnapshotHealthCheck) masked() SnapshotHealthCheck {
 type healthRecord struct {
 	mu    sync.Mutex
 	check SnapshotHealthCheck
+	// workflowLoadFailed is set by the preflight check alone.
+	workflowLoadFailed bool
 }
 
 func (r *healthRecord) record(at time.Time, err error) {
+	r.recordRun(at, err, false)
+}
+
+// recordRun records a run and whether it failed on the workflow load; the flag
+// of an earlier run never outlives the run that follows it.
+func (r *healthRecord) recordRun(at time.Time, err error, workflowLoadFailed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.check.advance(at, err != nil)
+	r.workflowLoadFailed = workflowLoadFailed
 	if err != nil {
 		r.check.Error = err.Error()
 	}
+}
+
+func (r *healthRecord) snapshotPreflight() (check SnapshotHealthCheck, workflowLoadFailed bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.check, r.workflowLoadFailed
 }
 
 func (r *healthRecord) snapshot() SnapshotHealthCheck {

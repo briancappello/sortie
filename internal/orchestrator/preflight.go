@@ -13,6 +13,13 @@ import (
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
+// PreflightFailedPrefix leads the text of a failed [PreflightResult].
+const PreflightFailedPrefix = "dispatch preflight failed: "
+
+// preflightCheckWorkflowLoad is the [PreflightError.Check] of a workflow file
+// that cannot be loaded.
+const preflightCheckWorkflowLoad = "workflow_load"
+
 // PreflightError represents a single preflight validation failure.
 type PreflightError struct {
 	// Check identifies which validation check failed. Known values:
@@ -64,7 +71,7 @@ func (r PreflightResult) Error() string {
 	for i, e := range r.Errors {
 		msgs[i] = e.Message
 	}
-	return "dispatch preflight failed: " + strings.Join(msgs, "; ")
+	return PreflightFailedPrefix + strings.Join(msgs, "; ")
 }
 
 // PreflightParams holds the dependencies for preflight validation.
@@ -109,7 +116,7 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 	// misleading. The operator must fix the workflow file first.
 	if err := params.ReloadWorkflow(); err != nil {
 		errs = append(errs, PreflightError{
-			Check:   "workflow_load",
+			Check:   preflightCheckWorkflowLoad,
 			Message: "workflow file cannot be loaded: " + err.Error(),
 		})
 		return PreflightResult{Errors: errs}

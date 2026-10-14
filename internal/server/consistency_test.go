@@ -11,7 +11,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
-// leadingCount extracts the leading integer from note, or -1 when note is empty.
 func leadingCount(t *testing.T, note string) int {
 	t.Helper()
 	if note == "" {
@@ -28,9 +27,6 @@ func leadingCount(t *testing.T, note string) int {
 	return n
 }
 
-// TestDashboardAndStateAgreeOnCountsAndCost verifies [buildDashboardData]
-// and [toStateResponse] report the same counts and cost for the same
-// [orchestrator.RuntimeSnapshotResult].
 func TestDashboardAndStateAgreeOnCountsAndCost(t *testing.T) {
 	t.Parallel()
 
@@ -74,7 +70,7 @@ func TestDashboardAndStateAgreeOnCountsAndCost(t *testing.T) {
 		},
 	}
 
-	stateResp := toStateResponse(snap, rates, sentence.Context{})
+	stateResp := toStateResponse(snap, rates, sentence.Context{}, nil)
 	dashData := buildDashboardData(snap, "v1", now.Add(-time.Hour), nil, now, rates)
 
 	if stateResp.AgentTotals.UnmeasuredSessions != snap.AgentTotals.UnmeasuredSessions {

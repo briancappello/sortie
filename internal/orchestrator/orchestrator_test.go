@@ -99,6 +99,7 @@ func (f observerFunc) OnStateChange() { f() }
 
 type stubStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	mu              sync.Mutex
@@ -4722,7 +4723,7 @@ func TestHealthReportsInvalidReloadAndFailedPreflight(t *testing.T) {
 	clean := o.Health()
 	for name, check := range map[string]SnapshotHealthCheck{
 		"Database":  clean.Database,
-		"Preflight": clean.Preflight,
+		"Preflight": clean.Preflight.SnapshotHealthCheck,
 		"Workflow":  clean.Workflow.SnapshotHealthCheck,
 		"Poll":      clean.Poll.SnapshotHealthCheck,
 	} {
@@ -9112,6 +9113,33 @@ func TestHandleTick_StageHopDirectReadWithoutStateHoldsTheIssue(t *testing.T) {
 	}
 	if hop := h.o.state.StageHops["id-1"]; hop == nil || hop.TargetObserved {
 		t.Errorf("handleTick() hop record = %+v, want kept and unobserved", hop)
+	}
+}
+
+func TestHandleTick_ParkReleasedByLabelRemovalEndsStandingEscalation(t *testing.T) {
+	t.Parallel()
+
+	h := newRunHarness(t, runConfig(t, stagedRulesRaw()), "kind-a", "kind-b", "kind-c")
+	rkey := ReactionKey("id-1", ReactionKindReview)
+	h.state.Parked["id-1"] = &ParkedEntry{Identifier: "S-1", Reason: parkReasonAgentBlocked, ParkedState: "To Do", Label: "needs-human", LabelApplied: true}
+	h.state.PendingReactions[rkey] = &PendingReaction{
+		IssueID: "id-1", Identifier: "S-1", Kind: ReactionKindReview,
+		EscalatedAt: time.Now().Add(-time.Hour), EscalationTrigger: EscalationTriggerBudget, EscalationSubject: "comment-set",
+	}
+	h.state.ReactionAttempts[rkey] = 3
+	h.tracker.candidates = []domain.Issue{candidate("id-1", "S-1")}
+	h.tracker.issues["id-1"] = candidate("id-1", "S-1")
+	h.build()
+
+	h.o.handleTick(context.Background())
+	h.o.state.WorkerWg.Wait()
+
+	sessionOfWorkspace(t, h.started(), "S-1")
+	if _, ok := h.state.PendingReactions[rkey]; ok {
+		t.Error("PendingReactions[review] after the park released and dispatched = present, want dropped")
+	}
+	if got, ok := h.state.ReactionAttempts[rkey]; ok {
+		t.Errorf("ReactionAttempts[review] after the park released and dispatched = %d, want none", got)
 	}
 }
 

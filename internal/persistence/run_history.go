@@ -216,6 +216,46 @@ func (s *Store) QueryRunHistoryByIssue(ctx context.Context, issueID string) ([]R
 	return entries, nil
 }
 
+// reactionRecoveryRunColumns is the column list of the queries that load a
+// run row for rebuilding a pending reaction, read by [scanRecoveryRun].
+const reactionRecoveryRunColumns = `r.id, r.issue_id, r.identifier, r.display_identifier, r.attempt, r.agent_adapter,
+			r.workspace, r.started_at, r.completed_at, r.status, r.error, r.workflow_file,
+			r.turns_completed, r.review_metadata, r.rule_name, r.template_id,
+			r.input_tokens, r.output_tokens, r.total_tokens, r.cache_read_tokens, r.cache_write_tokens, r.tokens_measured,
+			r.unaccounted_turns, r.configured_model, r.configured_effort, r.reported_model,
+			r.stage_previous, r.stage_previous_outcome, r.chain_id,
+			r.issue_title, r.issue_url, r.dispatched_at`
+
+// scanRecoveryRun reads one row selected with [reactionRecoveryRunColumns].
+func scanRecoveryRun(rows *sql.Rows) (RunHistory, error) {
+	var run RunHistory
+	var errVal, wfVal, dispIDVal, reviewMetaVal sql.NullString
+	if err := rows.Scan(
+		&run.ID, &run.IssueID, &run.Identifier, &dispIDVal, &run.Attempt, &run.AgentAdapter,
+		&run.Workspace, &run.StartedAt, &run.CompletedAt, &run.Status, &errVal, &wfVal,
+		&run.TurnsCompleted, &reviewMetaVal, &run.RuleName, &run.TemplateID,
+		&run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.CacheReadTokens, &run.CacheWriteTokens, &run.TokensMeasured,
+		&run.UnaccountedTurns, &run.ConfiguredModel, &run.ConfiguredEffort, &run.ReportedModel,
+		&run.StagePrevious, &run.StagePreviousOutcome, &run.ChainID,
+		&run.IssueTitle, &run.IssueURL, &run.DispatchedAt,
+	); err != nil {
+		return RunHistory{}, err
+	}
+	if errVal.Valid {
+		run.Error = new(errVal.String)
+	}
+	if wfVal.Valid {
+		run.WorkflowFile = wfVal.String
+	}
+	if dispIDVal.Valid {
+		run.DisplayID = dispIDVal.String
+	}
+	if reviewMetaVal.Valid {
+		run.ReviewMetadata = new(reviewMetaVal.String)
+	}
+	return run, nil
+}
+
 // LoadLatestSuccessfulRunsForReactionRecovery returns at most limit latest
 // successful rows, one per issue, for rows with non-empty workspace and
 // completed_at >= completedAfter, ordered by descending id. limit is
@@ -243,47 +283,64 @@ func (s *Store) LoadLatestSuccessfulRunsForReactionRecovery(ctx context.Context,
 			ORDER BY latest_id DESC
 			LIMIT ?
 		)
-		SELECT r.id, r.issue_id, r.identifier, r.display_identifier, r.attempt, r.agent_adapter,
-			r.workspace, r.started_at, r.completed_at, r.status, r.error, r.workflow_file,
-			r.turns_completed, r.review_metadata, r.rule_name, r.template_id,
-			r.input_tokens, r.output_tokens, r.total_tokens, r.cache_read_tokens, r.cache_write_tokens, r.tokens_measured,
-			r.unaccounted_turns, r.configured_model, r.configured_effort, r.reported_model,
-			r.stage_previous, r.stage_previous_outcome, r.chain_id,
-			r.issue_title, r.issue_url, r.dispatched_at
+		SELECT `+reactionRecoveryRunColumns+`
 		FROM run_history AS r
 		JOIN bounded ON bounded.latest_id = r.id
 		ORDER BY r.id DESC`, completedAfter.UTC().Format(time.RFC3339), limit)
 	if err != nil {
 		return nil, fmt.Errorf("load recovery runs: %w", err)
 	}
+	return collectRecoveryRuns(rows)
+}
+
+// LoadLatestSuccessfulRunsForIssues returns, for each given issue, its
+// latest successful row with a non-empty workspace, whatever its age,
+// ordered by descending id. Returns an empty non-nil slice, without a
+// query, when issueIDs is empty.
+func (s *Store) LoadLatestSuccessfulRunsForIssues(ctx context.Context, issueIDs []string) ([]RunHistory, error) {
+	if len(issueIDs) == 0 {
+		return []RunHistory{}, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")
+	args := make([]any, len(issueIDs))
+	for i, id := range issueIDs {
+		args[i] = id
+	}
+
+	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(issueIDs); the column list is a constant
+		`WITH latest AS (
+			SELECT MAX(id) AS latest_id
+			FROM run_history
+			WHERE status = 'succeeded'
+			  AND workspace <> ''
+			  AND issue_id IN (%s)
+			GROUP BY issue_id
+		)
+		SELECT %s
+		FROM run_history AS r
+		JOIN latest ON latest.latest_id = r.id
+		ORDER BY r.id DESC`,
+		placeholders, reactionRecoveryRunColumns,
+	)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load latest runs for issues: %w", err)
+	}
+	return collectRecoveryRuns(rows)
+}
+
+// collectRecoveryRuns drains rows selected with [reactionRecoveryRunColumns]
+// and closes them.
+func collectRecoveryRuns(rows *sql.Rows) ([]RunHistory, error) {
 	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
 
 	entries := []RunHistory{}
 	for rows.Next() {
-		var run RunHistory
-		var errVal, wfVal, dispIDVal, reviewMetaVal sql.NullString
-		if err := rows.Scan(
-			&run.ID, &run.IssueID, &run.Identifier, &dispIDVal, &run.Attempt, &run.AgentAdapter,
-			&run.Workspace, &run.StartedAt, &run.CompletedAt, &run.Status, &errVal, &wfVal,
-			&run.TurnsCompleted, &reviewMetaVal, &run.RuleName, &run.TemplateID,
-			&run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.CacheReadTokens, &run.CacheWriteTokens, &run.TokensMeasured,
-			&run.UnaccountedTurns, &run.ConfiguredModel, &run.ConfiguredEffort, &run.ReportedModel,
-			&run.StagePrevious, &run.StagePreviousOutcome, &run.ChainID,
-			&run.IssueTitle, &run.IssueURL, &run.DispatchedAt,
-		); err != nil {
+		run, err := scanRecoveryRun(rows)
+		if err != nil {
 			return nil, fmt.Errorf("load recovery runs: %w", err)
-		}
-		if errVal.Valid {
-			run.Error = new(errVal.String)
-		}
-		if wfVal.Valid {
-			run.WorkflowFile = wfVal.String
-		}
-		if dispIDVal.Valid {
-			run.DisplayID = dispIDVal.String
-		}
-		if reviewMetaVal.Valid {
-			run.ReviewMetadata = new(reviewMetaVal.String)
 		}
 		entries = append(entries, run)
 	}

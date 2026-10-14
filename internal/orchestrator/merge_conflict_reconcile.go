@@ -64,7 +64,7 @@ func reconcileMergeConflicts(state *State, params ReconcileParams, log *slog.Log
 
 		entryLog := logging.WithIssue(log, pending.IssueID, pending.Identifier)
 
-		if ttl > 0 && now.Sub(watchWindowStart(pending)) > ttl {
+		if ttl > 0 && !pending.escalationStands() && now.Sub(watchWindowStart(pending)) > ttl {
 			cancelReactionTriage(pending)
 			delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindMergeConflict))
 			entryLog.Warn("merge conflict watch window elapsed, dropping",
@@ -78,6 +78,7 @@ func reconcileMergeConflicts(state *State, params ReconcileParams, log *slog.Log
 			state.PendingReactions[key] = pending
 			continue
 		}
+		retryEscalationSave(ctx, state, params.Store, pending, entryLog)
 
 		// A run in flight makes this pass's mergeability read
 		// redundant, so the entry waits one tick instead. The backoff
@@ -92,6 +93,15 @@ func reconcileMergeConflicts(state *State, params ReconcileParams, log *slog.Log
 		// it, so the not-dirty branch stays reachable and a resolved
 		// conflict resets the counter rather than escalating.
 		status, err := params.SCMAdapter.GetMergeability(ctx, data.PRNumber, data.Owner, data.Repo)
+		if pending.escalationStands() && pullRequestEnded(status, err) {
+			cancelReactionTriage(pending)
+			endEscalationAndCounter(ctx, state, params.Store, pending, entryLog)
+			entryLog.Info("escalated pull request ended, dropping",
+				slog.String("reaction_kind", ReactionKindMergeConflict),
+				slog.Int("pr_number", data.PRNumber),
+			)
+			continue
+		}
 		if err != nil {
 			pending.PendingAttempts++
 			delay := max(computeReactionPendingDelay(pending.PendingAttempts), pollInterval)
@@ -130,6 +140,7 @@ func reconcileMergeConflicts(state *State, params ReconcileParams, log *slog.Log
 			// The episode closes, so the fingerprint an in-flight run was
 			// started for no longer describes anything.
 			cancelReactionTriage(pending)
+			endEscalation(ctx, params.Store, pending, entryLog)
 			if delErr := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindMergeConflict); delErr != nil {
 				entryLog.Warn("failed to delete merge conflict reaction fingerprint",
 					slog.Any("error", delErr),
@@ -171,6 +182,12 @@ func handleMergeConflictDirty(
 	ctx context.Context,
 	metrics domain.Metrics,
 ) {
+	if pending.escalationStands() && standingMergeConflictHolds(ctx, state, params, pending, status, rkey, log) {
+		pending.PendingRetryAt = now.Add(pollInterval)
+		requeueReaction(state, key, pending, waitPollInterval)
+		return
+	}
+
 	if incumbent := retrySlotIncumbent(state, pending.IssueID); incumbent != nil {
 		logRetrySlotDeferral(log, ReactionKindMergeConflict, incumbent)
 		pending.WatchRestartedAt = now
@@ -257,7 +274,7 @@ func handleMergeConflictDirty(
 		return
 	case triageEscalate:
 		escalateMergeConflictFailure(state, params, pending, state.ReactionAttempts[rkey],
-			EscalationTriggerTriage, data, log, ctx, metrics)
+			EscalationTriggerTriage, data, fingerprint, now, pollInterval, log, ctx, metrics)
 		return
 	}
 
@@ -278,12 +295,36 @@ func handleMergeConflictDirty(
 	state.ReactionAttempts[rkey]++
 	attempts := state.ReactionAttempts[rkey]
 	if attempts > params.MergeConflictConfig.MaxRetries {
-		escalateMergeConflictFailure(state, params, pending, attempts, EscalationTriggerBudget, data, log, ctx, metrics)
+		escalateMergeConflictFailure(state, params, pending, attempts, EscalationTriggerBudget, data, fingerprint, now, pollInterval, log, ctx, metrics)
 		return
 	}
 
 	dispatchMergeConflictContinuation(state, params, pending, data, status, log, ctx)
 	metrics.IncMergeConflictChecks("dispatched")
+}
+
+// standingMergeConflictHolds ends the standing escalation when its ceiling
+// no longer counts the rebases dispatched as spent or the conflicting head
+// differs from the one escalated, and reports whether it still stands. A
+// head the provider has not reported cannot differ.
+func standingMergeConflictHolds(
+	ctx context.Context,
+	state *State,
+	params ReconcileParams,
+	pending *PendingReaction,
+	status domain.PRMergeStatus,
+	rkey string,
+	log *slog.Logger,
+) bool {
+	spent := state.ReactionAttempts[rkey] >= params.MergeConflictConfig.MaxRetries
+	if endLiftedBudgetEscalation(ctx, params.Store, pending, spent, log) {
+		return false
+	}
+	if head := buildMergeConflictFingerprint(status.HeadSHA); head != "" && head != pending.EscalationSubject {
+		endEscalation(ctx, params.Store, pending, log)
+		return false
+	}
+	return true
 }
 
 // mergeConflictReactionCheck records what a mergeability read observed. A
@@ -380,18 +421,51 @@ func buildMergeConflictTemplateMap(data *MergeConflictReactionData, status domai
 	}
 }
 
-// escalateMergeConflictFailure applies the configured escalation action
-// (label, comment, or none) after the per-episode retry budget is exhausted, then
-// removes the merge-conflict slot, fingerprint, and per-episode attempt
-// counter. The attempts value is captured at the call boundary, so the
-// scoped counter delete below cannot disturb the reported count.
-//
-// Unlike the bot-review and auto-merge escalations, this resets the
-// per-episode attempt counter via a scoped delete because the
-// merge-conflict counter is episodic, mirroring the CI reaction. The reset
-// is scoped to this kind's own slot, so sibling reactions' counters and
-// state.Claimed are never touched.
+// escalateMergeConflictFailure begins the escalation on the conflicting
+// head's fingerprint and applies the configured escalation action (label,
+// comment, or none) unless that head was escalated before. The entry stays
+// and re-enqueues at the poll interval until the escalation ends. A budget
+// escalation leaves the attempt counter at the rebases dispatched, without
+// the observation that tripped the cap; the counter is episodic, like the CI
+// one, so the episode exit deletes it. The fingerprint row goes at the
+// escalation. Sibling reactions' counters and state.Claimed are never
+// touched.
 func escalateMergeConflictFailure(
+	state *State,
+	params ReconcileParams,
+	pending *PendingReaction,
+	attempts int,
+	trigger ReactionEscalationTrigger,
+	data *MergeConflictReactionData,
+	fingerprint string,
+	now time.Time,
+	pollInterval time.Duration,
+	log *slog.Logger,
+	ctx context.Context,
+	metrics domain.Metrics,
+) {
+	rkey := ReactionKey(pending.IssueID, ReactionKindMergeConflict)
+	if trigger == EscalationTriggerBudget {
+		state.ReactionAttempts[rkey] = attempts - 1
+	}
+
+	if beginEscalation(ctx, state, params.Store, pending, trigger, fingerprint, now, log) {
+		applyMergeConflictEscalation(state, params, pending, attempts, trigger, data, log, ctx, metrics)
+	}
+
+	if err := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindMergeConflict); err != nil {
+		log.Warn("merge conflict fingerprint delete failed during escalation",
+			slog.Any("error", err),
+		)
+	}
+
+	pending.PendingRetryAt = now.Add(pollInterval)
+	requeueReaction(state, ReactionKey(pending.IssueID, ReactionKindMergeConflict), pending, waitPollInterval)
+}
+
+// applyMergeConflictEscalation applies the configured escalation action of
+// the merge-conflict reaction: the event, and the label when so configured.
+func applyMergeConflictEscalation(
 	state *State,
 	params ReconcileParams,
 	pending *PendingReaction,
@@ -458,14 +532,6 @@ func escalateMergeConflictFailure(
 	publishEscalation(ctx, &state.TrackerOpsWg, delivery, log, record, func(err error) {
 		log.Warn("merge conflict escalation comment failed", slog.Any("error", err))
 	})
-
-	delete(state.PendingReactions, ReactionKey(pending.IssueID, ReactionKindMergeConflict))
-	if err := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindMergeConflict); err != nil {
-		log.Warn("merge conflict fingerprint delete failed during escalation",
-			slog.Any("error", err),
-		)
-	}
-	delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindMergeConflict))
 }
 
 // buildMergeConflictEscalationComment returns the plain-text escalation

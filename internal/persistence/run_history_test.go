@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -864,6 +865,58 @@ func TestLatestAgentRuns(t *testing.T) {
 
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Errorf("LatestAgentRuns(%v) = %+v, %v, want %+v, nil", tt.ask, got, err, want)
+			}
+		})
+	}
+}
+
+func TestLoadLatestSuccessfulRunsForIssues(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	ctx := context.Background()
+
+	old := appendRecoveryRun(t, s, "ISS-OLD", "PROJ-1", 1, recentCompletedAt(400))
+	appendRecoveryRun(t, s, "ISS-LATER", "PROJ-2", 1, recentCompletedAt(5))
+	latest := appendRecoveryRun(t, s, "ISS-LATER", "PROJ-2", 2, recentCompletedAt(4))
+	appendOrFatal(t, s, RunHistory{
+		IssueID: "ISS-LATER", Identifier: "PROJ-2", Attempt: 3,
+		AgentAdapter: "mock", Workspace: "/ws/PROJ-2",
+		StartedAt: recentCompletedAt(3), CompletedAt: recentCompletedAt(3), Status: "failed",
+	})
+	appendOrFatal(t, s, RunHistory{
+		IssueID: "ISS-NOPATH", Identifier: "PROJ-3", Attempt: 1,
+		AgentAdapter: "mock", StartedAt: recentCompletedAt(2), CompletedAt: recentCompletedAt(2), Status: "succeeded",
+	})
+	appendRecoveryRun(t, s, "ISS-OTHER", "PROJ-4", 1, recentCompletedAt(2))
+
+	tests := []struct {
+		name     string
+		issueIDs []string
+		want     []int64
+	}{
+		{"run older than any recovery lookback", []string{"ISS-OLD"}, []int64{old.ID}},
+		{"latest successful run beats a later failed one", []string{"ISS-LATER"}, []int64{latest.ID}},
+		{"empty workspace and unrequested issues are absent", []string{"ISS-NOPATH", "ISS-OLD"}, []int64{old.ID}},
+		{"no issues", nil, []int64{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rows, err := s.LoadLatestSuccessfulRunsForIssues(ctx, tt.issueIDs)
+			if err != nil {
+				t.Fatalf("LoadLatestSuccessfulRunsForIssues(%v): %v", tt.issueIDs, err)
+			}
+
+			got := []int64{}
+			for _, row := range rows {
+				got = append(got, row.ID)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("LoadLatestSuccessfulRunsForIssues(%v) run ids = %v, want %v", tt.issueIDs, got, tt.want)
 			}
 		})
 	}

@@ -107,6 +107,9 @@ var migration031SQL string
 //go:embed sql/032_first_after_hop.sql
 var migration032SQL string
 
+//go:embed sql/033_reaction_escalations.sql
+var migration033SQL string
+
 var migrations = []Migration{
 	{Version: 1, Description: "core persistence tables", SQL: migration001SQL},
 	{Version: 2, Description: "extended token metrics", SQL: migration002SQL},
@@ -140,4 +143,5 @@ var migrations = []Migration{
 	{Version: 30, Description: "issue outcomes", SQL: migration030SQL},
 	{Version: 31, Description: "run context and issue facts on parked issues and issue facts on stage hops", SQL: migration031SQL},
 	{Version: 32, Description: "first run after a stage hop on run history", SQL: migration032SQL},
+	{Version: 33, Description: "reaction escalation records", SQL: migration033SQL},
 }

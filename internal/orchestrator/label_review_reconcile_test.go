@@ -122,6 +122,7 @@ func (p *labelReviewSCMPanicOnOthers) DeleteBranch(_ context.Context, _, _, _ st
 // interface.
 type labelReviewFingerprintStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	marks  map[string]string

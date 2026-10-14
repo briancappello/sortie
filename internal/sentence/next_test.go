@@ -70,7 +70,9 @@ func TestNextOutcomes(t *testing.T) {
 	ciLabelEscalation := orchestrator.ShapeEscalation{Escalation: "label", EscalationLabel: "needs-human"}
 	ci := orchestrator.ShapeReactions{CIFailure: &orchestrator.ShapeCIFailure{ShapeEscalation: ciLabelEscalation}}
 	ciTriage := orchestrator.ShapeReactions{CIFailure: &orchestrator.ShapeCIFailure{Triage: true, ShapeEscalation: ciLabelEscalation}}
-	review := orchestrator.ShapeReactions{ReviewComments: &orchestrator.ShapeReviewComments{DebounceMS: 60000}}
+	review := orchestrator.ShapeReactions{ReviewComments: &orchestrator.ShapeReviewComments{DebounceMS: 60000, ShapeEscalation: ciLabelEscalation}}
+	botReview := orchestrator.ShapeReactions{BotReview: &orchestrator.ShapeBotReview{ShapeEscalation: ciLabelEscalation}}
+	mergeConflicts := orchestrator.ShapeReactions{MergeConflicts: &orchestrator.ShapeMergeConflicts{ShapeEscalation: ciLabelEscalation}}
 	fixLabel := orchestrator.ShapeReactions{LabelCommands: &orchestrator.ShapeLabelCommands{FixLabel: "sortie:fix"}}
 
 	const (
@@ -128,6 +130,33 @@ func TestNextOutcomes(t *testing.T) {
 			want: []NextOutcome{{
 				ciCondition,
 				"CI fixes are used up (2 of 2), so Sortie applies `needs-human` to MT-1 and keeps watching the pull request. A new commit that no Sortie run made can restart the count.",
+			}},
+		},
+		{
+			name:      "review fixes used up escalate and keep watching the pull request",
+			situation: Situation{PendingReactions: pendingRow("review", watchedFor(1590*time.Second, 3, 3))},
+			shape:     fixtureShape(review),
+			want: []NextOutcome{{
+				"If a check in the next 25m finds new review comments on PR #88",
+				"Review fixes are used up (3 of 3), so Sortie applies `needs-human` to MT-1 and keeps watching the pull request.",
+			}},
+		},
+		{
+			name:      "bot review fixes used up escalate and keep watching the pull request",
+			situation: Situation{PendingReactions: pendingRow("bot-review", watchedFor(1500*time.Second, 3, 3))},
+			shape:     fixtureShape(botReview),
+			want: []NextOutcome{{
+				"If a check in the next 25m finds a new review bot comment on the code of PR #88",
+				"Bot review fixes are used up (3 of 3), so Sortie applies `needs-human` to MT-1 and keeps watching the pull request.",
+			}},
+		},
+		{
+			name:      "rebases used up escalate and keep watching the pull request",
+			situation: Situation{PendingReactions: pendingRow("merge-conflict", watchedFor(1500*time.Second, 2, 2))},
+			shape:     fixtureShape(mergeConflicts),
+			want: []NextOutcome{{
+				"If a check in the next 25m finds a new merge conflict on PR #88",
+				"Rebases are used up (2 of 2), so Sortie applies `needs-human` to MT-1 and keeps watching the pull request. A new commit that no Sortie run made can restart the count.",
 			}},
 		},
 		{

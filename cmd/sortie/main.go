@@ -709,34 +709,35 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	recoveryEnabled := br.cfg.Tracker.HandoffState != "" && (ciProvider != nil || scmAdapter != nil)
 	recoveryOutcome := orchestrator.PendingReactionRecoveryResult{}
 	var recoveryErr error
+	recoveryNow := time.Now().UTC()
+	recoveryLookback := orchestrator.PendingReactionRecoveryLookback
+	recoveryParams := orchestrator.PendingReactionRecoveryParams{
+		WorkspaceRoot:                     br.cfg.Workspace.Root,
+		TrackerAdapter:                    br.trackerAdapter,
+		HandoffState:                      br.cfg.Tracker.HandoffState,
+		TerminalStates:                    br.cfg.Tracker.TerminalStates,
+		CIProvider:                        ciProvider,
+		SCMAdapter:                        scmAdapter,
+		AutoMergeReactionConfigured:       autoMergeConfigured,
+		ReviewReactionConfigured:          reviewActive,
+		BotReviewReactionConfigured:       botReviewConfigured,
+		MergeConflictReactionConfigured:   mergeConflictConfigured,
+		LabelReviewReactionConfigured:     labelReviewConfigured,
+		LabelFixReactionConfigured:        labelFixConfigured,
+		MergeCompletionReactionConfigured: mergeCompletionConfigured,
+		RecoveryLookback:                  recoveryLookback,
+		MaxCandidates:                     orchestrator.PendingReactionRecoveryMaxCandidates,
+		NowFunc: func() time.Time {
+			return recoveryNow
+		},
+		Logger: br.logger,
+	}
 	if recoveryEnabled {
-		recoveryNow := time.Now().UTC()
-		recoveryLookback := orchestrator.PendingReactionRecoveryLookback
 		recoveryCutoff := recoveryNow.Add(-recoveryLookback)
 		var recoveryRuns []persistence.RunHistory
 		recoveryRuns, recoveryErr = store.LoadLatestSuccessfulRunsForReactionRecovery(ctx, recoveryCutoff, orchestrator.PendingReactionRecoveryMaxCandidates)
 		if recoveryErr == nil {
-			recoveryOutcome, recoveryErr = orchestrator.RecoverPendingReactions(ctx, state, recoveryRuns, orchestrator.PendingReactionRecoveryParams{
-				WorkspaceRoot:                     br.cfg.Workspace.Root,
-				TrackerAdapter:                    br.trackerAdapter,
-				HandoffState:                      br.cfg.Tracker.HandoffState,
-				TerminalStates:                    br.cfg.Tracker.TerminalStates,
-				CIProvider:                        ciProvider,
-				SCMAdapter:                        scmAdapter,
-				AutoMergeReactionConfigured:       autoMergeConfigured,
-				ReviewReactionConfigured:          reviewActive,
-				BotReviewReactionConfigured:       botReviewConfigured,
-				MergeConflictReactionConfigured:   mergeConflictConfigured,
-				LabelReviewReactionConfigured:     labelReviewConfigured,
-				LabelFixReactionConfigured:        labelFixConfigured,
-				MergeCompletionReactionConfigured: mergeCompletionConfigured,
-				RecoveryLookback:                  recoveryLookback,
-				MaxCandidates:                     orchestrator.PendingReactionRecoveryMaxCandidates,
-				NowFunc: func() time.Time {
-					return recoveryNow
-				},
-				Logger: br.logger,
-			})
+			recoveryOutcome, recoveryErr = orchestrator.RecoverPendingReactions(ctx, state, recoveryRuns, recoveryParams)
 		}
 	}
 	recoveryLogAttrs := []any{
@@ -761,6 +762,18 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	} else {
 		recoveryLogAttrs = append(recoveryLogAttrs, slog.Bool("success", true))
 		br.logger.Info("pending reaction recovery completed", recoveryLogAttrs...)
+	}
+
+	restored, restoreErr := orchestrator.RestoreReactionEscalations(ctx, state, store, recoveryParams)
+	restoreLogAttrs := []any{
+		slog.Int("applied", restored.Applied),
+		slog.Int("rebuilt", restored.Rebuilt),
+		slog.Int("ended", restored.Ended),
+	}
+	if restoreErr != nil {
+		br.logger.Error("reaction escalation restore failed", append(restoreLogAttrs, slog.Any("error", restoreErr))...)
+	} else {
+		br.logger.Info("reaction escalation restore completed", restoreLogAttrs...)
 	}
 
 	// Attempt to bind the HTTP server before constructing metrics so
