@@ -8,7 +8,7 @@ decision-makers: Serghei Iakovlev
 
 ## Context and Problem Statement
 
-The embedded dashboard was a single server-rendered `html/template` page that reloaded itself every five seconds. It is being rebuilt as a client-side application on the JSON API: an operational overview, an issue page, history, analytics, and health, and later interactive surfaces such as chat with agents, a workflow designer, a kanban-style tracker, authentication, and multiple users. A hand-written page cannot carry that, and the project had no frontend toolchain. Every frontend change depends on the answers recorded here: framework, language, and bundler; how built assets reach the binary; routing; how the client stays in step with the Go response types; design tokens and themes; lint, format, test, and size gates; real-time delivery; and a structure that admits the later surfaces without a rewrite.
+The embedded dashboard was a single server-rendered `html/template` page that reloaded itself every five seconds. It is being rebuilt as a client-side application on the JSON API: an operational overview, an issue page, history, analytics, and health, and later interactive surfaces such as chat with agents, a workflow designer, a kanban-style tracker, authentication, and multiple users. A hand-written page cannot carry that, and the project had no frontend toolchain. Every frontend change depends on the answers recorded here: framework, language, and bundler; how built assets reach the binary; routing; how the client stays in step with the Go response types; design tokens and themes; lint and format gates; real-time delivery; and a structure that admits the later surfaces without a rewrite.
 
 ## Decision Drivers
 
@@ -47,7 +47,6 @@ Chosen option: **React 19 with strict TypeScript, Vite, and npm, with the built 
 | Client state | React state and the URL | Selection, filters, and open panels live in components or in search parameters, so views stay linkable. No global store library; a screen that later needs one (the workflow designer) adds it inside its own module. |
 | Lint | Oxlint with type-aware rules, plus `tsc --noEmit` | A native binary with a handful of installed packages against roughly a hundred for ESLint with typescript-eslint; implements the React hook rules. |
 | Format | Oxfmt | Same toolchain as Oxlint. Pre-1.0, so pinned exactly; Biome's formatter is the fallback if its output churns. |
-| Tests | Vitest for units and components, Playwright for end-to-end | Vitest shares Vite's configuration. Playwright drives the real Go binary serving the embedded output, including a long-lived-tab soak test with a fake event stream. |
 
 Fonts are the system font stack. Icons and images ship inside the build output.
 
@@ -97,10 +96,10 @@ Change signals carry a monotonically increasing state revision as the event `id`
 | Gate | Needs Node | Runs in |
 |---|---|---|
 | Type contract test | No | `make test`, every OS |
-| Embedded output test: every asset `index.html` references exists, and the size budget holds | No | `make test`, every OS |
-| Lint, type check, format check, Vitest, Playwright, output drift | Yes | `make ui-check`, part of `make check`; one Linux CI job on every pull request |
+| Embedded output test: every asset `index.html` references exists | No | `make test`, every OS |
+| Lint, type check, format check, output drift | Yes | `make ui-check`, part of `make check`; one Linux CI job on every pull request |
 
-The size budget is measured on gzip of the embedded files: 150 KiB for `index.html` plus everything it loads eagerly, 100 KiB for any lazily loaded chunk, and 1.5 MiB uncompressed for the whole output. Raising a budget is a reviewed change to the test. The dashboard CI job is not a required check for now. `make build`, `make test`, and `make lint` never call Node, so the Go-only contributor's bar is unchanged.
+The dashboard CI job is not a required check for now. `make build`, `make test`, and `make lint` never call Node, so the Go-only contributor's bar is unchanged.
 
 ### Supply chain
 
@@ -108,7 +107,7 @@ The size budget is measured on gzip of the embedded files: 150 KiB for `index.ht
 
 ### Structure for later surfaces
 
-Each screen is a module under `web/src/screens/<name>/`, loaded lazily by its route. A screen may import shared components, the generated API types and client, and the stream client; it never imports another screen. A lint rule enforces the boundary. A new surface is a new module and a new route, with its heavy libraries confined to its own chunk and its own budget.
+Each screen is a module under `web/src/screens/<name>/`, loaded lazily by its route. A screen may import shared components, the generated API types and client, and the stream client; it never imports another screen. A lint rule enforces the boundary. A new surface is a new module and a new route, with its heavy libraries confined to its own chunk.
 
 ### Relation to earlier decisions
 
@@ -126,7 +125,7 @@ ADR-0006 states that any addition must be pure Go with no CGo, and ADR-0008 fram
 | Vanilla TypeScript | Smallest everything, but live updates that preserve focus, scroll, and selection need keyed reconciliation and a reactive store, which is a framework every agent session would reinvent, and manual escaping makes every new sink a cross-site scripting risk for server-provided text. |
 | htmx with Go templates | The only option with no Node at all and a perfect fit for driver 3, but it moves rendering back into Go against a JSON-API client, and the selection, drawer, command palette, and editors are client state it leaves to extra JavaScript. |
 | esbuild or Bun as bundler | esbuild has no hot module replacement and Vite no longer uses it; Bun is a second, unpinned JavaScript runtime with thin framework plugins. |
-| pnpm or Bun as package manager | pnpm blocks dependency install scripts and delays new versions by default, but npm reaches the same with three `.npmrc` lines, and pnpm is one more tool to pin and install; npm lacks only pnpm's check that refuses a version whose publishing trust level dropped. Bun blocks install scripts by default, but it is a second JavaScript runtime beside the Node that Playwright and other tools still need. |
+| pnpm or Bun as package manager | pnpm blocks dependency install scripts and delays new versions by default, but npm reaches the same with three `.npmrc` lines, and pnpm is one more tool to pin and install; npm lacks only pnpm's check that refuses a version whose publishing trust level dropped. Bun blocks install scripts by default, but it is a second JavaScript runtime beside the Node the build already needs. |
 | ESLint with typescript-eslint and Prettier | Roughly a hundred packages against a few native binaries, and the TypeScript 6 API alongside TypeScript 7. |
 | Plain CSS with CSS Modules | Keeps one hand-written vocabulary and a smaller tree, but Tailwind's theme layer gives one token definition that both utilities and custom properties read, and it is the styling agents and component sources use most. |
 | Radix primitives | Equally capable and runtime-proven in the evaluation; Base UI is its maintainers' successor line and the component source's default, so new owned components start there. |
@@ -140,18 +139,18 @@ ADR-0006 states that any addition must be pure Go with no CGo, and ADR-0008 fram
 ### Positive
 
 - Operators keep one binary with nothing to install and nothing fetched at runtime, through every install channel including `go install`.
-- Go-only contributors, the release job, and the container build stay Go-only, and the Go-side gates (type contract, embedded assets, and budget) run on every OS without Node.
+- Go-only contributors, the release job, and the container build stay Go-only, and the Go-side gates (type contract and embedded assets) run on every OS without Node.
 - A response-type change in Go cannot drift silently from the client, and third parties get a JSON Schema derived from the same walk.
-- Each later surface lands as one lazily loaded module with its own budget, using mainstream libraries agents already know.
+- Each later surface lands as one lazily loaded module, using mainstream libraries agents already know.
 
 ### Negative
 
 - **Concurrent dashboard pull requests conflict on the committed output.** Content-hashed names cascade, so almost every change rewrites the entry chunk. Resolution is mechanical (take either side, rebuild, commit) and the drift gate rejects a hand merge, but every such conflict costs a rebuild.
 - **The drift gate is not a required check.** A pull request whose committed output is stale shows a red dashboard job but can still merge, and the binary then embeds the stale output until the next rebuild.
 - **Dependabot npm updates that change the bundle turn the drift gate red** and need a rebuild before merge.
-- **React carries the largest runtime of the candidates**, about 115 KiB gzip for React, a router, a dialog, and a virtual list before application code, which leaves modest headroom under the initial-load budget, and React has the slowest renderer of the mainstream frameworks. Neither matters at a LAN dashboard's scale, but the budget will be felt.
+- **React carries the largest runtime of the candidates**, about 115 KiB gzip for React, a router, a dialog, and a virtual list before application code, and React has the slowest renderer of the mainstream frameworks. Neither matters at a LAN dashboard's scale.
 - **Hook rules are a recurring bug source** (stale closures, dependency arrays); lint enforcement mitigates it, not removes it.
-- **The stream lives in a `SharedWorker`.** Its lifecycle (attach, detach, reconnect, replacement after an upgrade) is code the project owns and tests, it is harder to inspect than a page's own network traffic, and the per-tab fallback path must be kept working beside it.
+- **The stream lives in a `SharedWorker`.** Its lifecycle (attach, detach, reconnect, replacement after an upgrade) is code the project owns, it is harder to inspect than a page's own network traffic, and the per-tab fallback path must be kept working beside it.
 - **npm's safety controls are opt-in.** They hold only while `web/.npmrc` keeps them and the Node pin stays at 24.15.0 or later, and npm has no check that refuses a version whose publishing trust level dropped.
 - **Oxfmt is pre-1.0** and may change formatting between minor versions.
 - **The repository gains a JavaScript toolchain** to keep current, with its own release cadence and security advisories.
@@ -161,9 +160,7 @@ ADR-0006 states that any addition must be pure Go with no CGo, and ADR-0008 fram
 1. `go build`, `go vet ./...` and `go test ./...` pass on a clean checkout with no Node installed, and the resulting binary serves the full dashboard at `/ui/`.
 2. Adding a field to a response type turns `go test` red until the generated TypeScript and JSON Schema are regenerated.
 3. Committing output that differs from a fresh build, including a missing new file, fails the dashboard CI job.
-4. Exceeding any size budget fails `go test`.
-5. A browser loading a deep link under `/ui/` from the binary renders the app with the content security policy enforced and no console violations.
-6. With the server's write timeout in force, a stream stays open past it; shutting the server down with a stream open returns without waiting out the shutdown deadline; and a client that stops reading never delays the orchestrator's event loop.
-7. Ten dashboard tabs on one origin, hidden and visible, several of them on session views, all stay live (a hidden tab's title follows the attention count) and keep their requests responsive over plain HTTP, with one stream open for the browser.
-8. An automated check computes contrast for every declared foreground and background token pair in both themes and fails below WCAG 2.2 AA.
-9. With the committed `.npmrc` and the pinned Node, `npm ci` installs a dependency that declares a `preinstall` script without running it, and `npm install` refuses a version published less than three days ago.
+4. A browser loading a deep link under `/ui/` from the binary renders the app with the content security policy enforced and no console violations.
+5. With the server's write timeout in force, a stream stays open past it; shutting the server down with a stream open returns without waiting out the shutdown deadline; and a client that stops reading never delays the orchestrator's event loop.
+6. Ten dashboard tabs on one origin, hidden and visible, several of them on session views, all stay live (a hidden tab's title follows the attention count) and keep their requests responsive over plain HTTP, with one stream open for the browser.
+7. With the committed `.npmrc` and the pinned Node, `npm ci` installs a dependency that declares a `preinstall` script without running it, and `npm install` refuses a version published less than three days ago.
