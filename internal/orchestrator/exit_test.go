@@ -306,6 +306,7 @@ func TestHandleWorkerExit_NormalExit(t *testing.T) {
 
 	store := &mockExitStore{}
 	state := exitState(t, "ISSUE-1", nil)
+	state.Running["ISSUE-1"].FirstAfterHop = true
 	params := defaultExitParams(t, store)
 
 	HandleWorkerExit(state, WorkerResult{
@@ -351,6 +352,9 @@ func TestHandleWorkerExit_NormalExit(t *testing.T) {
 	}
 	if store.runHistories[0].Error != nil {
 		t.Errorf("RunHistory.Error = %v, want nil", store.runHistories[0].Error)
+	}
+	if !store.runHistories[0].FirstAfterHop {
+		t.Error("RunHistory.FirstAfterHop = false, want true: the exit must carry the entry's flag")
 	}
 
 	if len(store.metrics) != 1 {

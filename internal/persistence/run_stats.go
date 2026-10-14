@@ -28,8 +28,13 @@ type RunHistoryCapabilities struct {
 	HasStageChains bool
 
 	// HasTrigger is outside [RunHistoryCapabilities.Full];
-	// [RunHistoryCapabilities.TriggerBreakdown] depends on it.
-	HasTrigger bool // migration 028: trigger
+	// [RunHistoryCapabilities.TriggerBreakdown] depends on it, and
+	// [RunHistoryCapabilities.OriginBreakdown] through it.
+	HasTrigger bool // migration 028: trigger, reaction_kind
+
+	// HasFirstAfterHop is outside [RunHistoryCapabilities.Full];
+	// [RunHistoryCapabilities.OriginBreakdown] depends on it.
+	HasFirstAfterHop bool // migration 032: first_after_hop
 }
 
 // Full reports whether the database carries every optional run_history
@@ -58,6 +63,12 @@ func (c RunHistoryCapabilities) ChainBreakdown() bool {
 // ChainBreakdown plus the trigger column.
 func (c RunHistoryCapabilities) TriggerBreakdown() bool {
 	return c.ChainBreakdown() && c.HasTrigger
+}
+
+// OriginBreakdown reports whether a read can group runs by run origin:
+// TriggerBreakdown plus the first-run-after-hop column.
+func (c RunHistoryCapabilities) OriginBreakdown() bool {
+	return c.TriggerBreakdown() && c.HasFirstAfterHop
 }
 
 // RunStatsRow is the narrow run_history projection the aggregate read
@@ -96,6 +107,14 @@ type RunStatsRow struct {
 	// Trigger is nil when the column is NULL or
 	// [RunHistoryCapabilities.TriggerBreakdown] reports false.
 	Trigger *string
+
+	// ReactionKind is empty when the column is NULL or empty, or
+	// [RunHistoryCapabilities.TriggerBreakdown] reports false.
+	ReactionKind string
+
+	// FirstAfterHop is false unless [RunHistoryCapabilities.OriginBreakdown]
+	// reports true.
+	FirstAfterHop bool
 }
 
 // runStatsColumnsFull is the column list when Full reports true and
@@ -157,8 +176,9 @@ func (s *Store) RunHistoryCapabilities(ctx context.Context) (RunHistoryCapabilit
 		HasCacheWriteTokens: columns["cache_write_tokens"],
 		HasConfiguredSettings: columns["configured_model"] && columns["configured_effort"] &&
 			columns["reported_model"],
-		HasStageChains: columns["chain_id"] && columns["stage_target"] && columns["stage_result"],
-		HasTrigger:     columns["trigger"],
+		HasStageChains:   columns["chain_id"] && columns["stage_target"] && columns["stage_result"],
+		HasTrigger:       columns["trigger"] && columns["reaction_kind"],
+		HasFirstAfterHop: columns["first_after_hop"],
 	}, nil
 }
 
@@ -186,6 +206,7 @@ func (s *Store) ScanRunHistoryRange(
 	breakdown := caps.ModelBreakdown()
 	chains := caps.ChainBreakdown()
 	triggers := caps.TriggerBreakdown()
+	origins := caps.OriginBreakdown()
 	query := runStatsColumnsBase
 	switch {
 	case full && caps.HasCacheWriteTokens:
@@ -200,7 +221,10 @@ func (s *Store) ScanRunHistoryRange(
 		query += ", identifier, display_identifier, chain_id, stage_previous, stage_result"
 	}
 	if triggers {
-		query += ", trigger"
+		query += ", trigger, reaction_kind"
+	}
+	if origins {
+		query += ", first_after_hop"
 	}
 	query += "\nFROM run_history"
 
@@ -228,7 +252,7 @@ func (s *Store) ScanRunHistoryRange(
 
 	for rows.Next() {
 		var row RunStatsRow
-		var reviewMeta, displayID, trigger sql.NullString
+		var reviewMeta, displayID, trigger, reactionKind sql.NullString
 		var dest []any
 		switch {
 		case full && caps.HasCacheWriteTokens:
@@ -254,7 +278,10 @@ func (s *Store) ScanRunHistoryRange(
 			dest = append(dest, &row.Identifier, &displayID, &row.ChainID, &row.StagePrevious, &row.StageResult)
 		}
 		if triggers {
-			dest = append(dest, &trigger)
+			dest = append(dest, &trigger, &reactionKind)
+		}
+		if origins {
+			dest = append(dest, &row.FirstAfterHop)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return fmt.Errorf("scan run history range: %w", err)
@@ -266,6 +293,7 @@ func (s *Store) ScanRunHistoryRange(
 		if trigger.Valid {
 			row.Trigger = new(trigger.String)
 		}
+		row.ReactionKind = reactionKind.String
 
 		if err := visit(row); err != nil {
 			return err

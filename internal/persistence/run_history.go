@@ -90,9 +90,9 @@ type RunHistory struct {
 
 	// Trigger is the sortie_retries_total label of the schedule that
 	// started the retry whose fire dispatched the run; empty for a poll-tick
-	// dispatch and for a retry a reaction started. Nil reads and writes
-	// NULL: the retry never stored what started it, or the row predates
-	// migration 028.
+	// dispatch and for a retry a reaction other than the CI fix started. Nil
+	// reads and writes NULL: the retry never stored what started it, or the
+	// row predates migration 028.
 	Trigger *string
 
 	// ReactionKind is the dispatching retry's reaction kind; empty when none.
@@ -108,6 +108,10 @@ type RunHistory struct {
 	// OriginRecorded is false when session_id is NULL, which only a row
 	// written before migration 028 holds. It is ignored on write.
 	OriginRecorded bool
+
+	// FirstAfterHop is true on the first run dispatched after the stage hop
+	// StagePrevious names, and false on every other run.
+	FirstAfterHop bool
 }
 
 // AppendRunHistory inserts a completed run attempt. The input ID is
@@ -140,8 +144,8 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
@@ -149,7 +153,7 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 		run.UnaccountedTurns, run.ConfiguredModel, run.ConfiguredEffort, run.ReportedModel,
 		run.StagePrevious, run.StagePreviousOutcome, run.ChainID, run.StageTarget, run.StageResult,
 		run.IssueTitle, run.IssueURL, run.DispatchedAt,
-		triggerVal, run.ReactionKind, run.SessionID, run.SSHHost,
+		triggerVal, run.ReactionKind, run.SessionID, run.SSHHost, run.FirstAfterHop,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)

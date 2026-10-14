@@ -51,6 +51,12 @@ by retry trigger
   <none>     1     0          0.0%          0s      0s      0s       0.0    110,000       -
   ci_fix     1     1          100.0%        30m 0s  30m 0s  30m 0s   5.0    2,400,000     $12.00
 
+by run origin
+  ORIGIN     RUNS  SUCCEEDED  SUCCESS RATE  P50     P95     MEAN     TURNS  TOTAL TOKENS  COST
+  <unknown>  4     2          50.0%         10m 0s  20m 0s  11m 40s  2.5    2,150,000     $7.52
+  <none>     1     0          0.0%          0s      0s      0s       0.0    110,000       -
+  ci_fix     1     1          100.0%        30m 0s  30m 0s  30m 0s   5.0    2,400,000     $12.00
+
 self review
   runs reviewed 2   iterate 1   pass 1   hit iteration cap 1   mean iterations 2.50
 

@@ -360,6 +360,10 @@ func renderStatsText(stdout, stderr io.Writer, report runstats.Report) {
 			fmt.Fprintln(stdout) //nolint:errcheck // stdout write failure is unrecoverable
 			renderStatsGroupTable(stdout, "by retry trigger", "trigger", report.ByTrigger, full, false)
 		}
+		if len(report.ByOrigin) > 0 {
+			fmt.Fprintln(stdout) //nolint:errcheck // stdout write failure is unrecoverable
+			renderStatsGroupTable(stdout, "by run origin", "origin", report.ByOrigin, full, false)
+		}
 		fmt.Fprintln(stdout) //nolint:errcheck // stdout write failure is unrecoverable
 		renderStatsSelfReview(stdout, report.SelfReview)
 	}

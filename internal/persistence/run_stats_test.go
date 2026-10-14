@@ -515,29 +515,42 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 			row := runAt("with-model", "2026-01-01T00:00:00Z")
 			row.ConfiguredModel, row.DisplayID = "provider/cheap", "PROJ-1"
 			row.ChainID, row.StagePrevious, row.StageResult = "chain-1", "specify", "advanced"
-			row.Trigger = new("ci_fix")
+			row.Trigger, row.ReactionKind = new("ci_fix"), "review"
 			appendOrFatal(t, s, row)
 			appendOrFatal(t, s, runAt("no-model", "2026-01-02T00:00:00Z"))
 			empty := runAt("empty-trigger", "2026-01-03T00:00:00Z")
 			empty.Trigger = new("")
 			appendOrFatal(t, s, empty)
+			first := runAt("first-after-hop", "2026-01-04T00:00:00Z")
+			first.FirstAfterHop = true
+			appendOrFatal(t, s, first)
 		}, []string{
-			"with-model|provider/cheap|with-model|PROJ-1|chain-1|specify|advanced|\"ci_fix\"",
-			"no-model||no-model|||||<nil>",
-			"empty-trigger||empty-trigger|||||\"\"",
+			"with-model|provider/cheap|with-model|PROJ-1|chain-1|specify|advanced|\"ci_fix\"|review|false",
+			"no-model||no-model|||||<nil>||false",
+			"empty-trigger||empty-trigger|||||\"\"||false",
+			"first-after-hop||first-after-hop|||||<nil>||true",
 		}},
+		{"origin left empty without error on a database upgraded from before migration 028", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 27)
+			insertBareRun(t, s, "pre-028")
+			migrateOrFatal(t, s)
+		}, []string{"pre-028||MT-1|||||<nil>||false"}},
+		{"first_after_hop left false without error on a database before migration 032", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 31)
+			insertBareRun(t, s, "pre-032")
+		}, []string{"pre-032||MT-1|||||<nil>||false"}},
 		{"trigger left nil without error on a database before migration 028", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 27)
 			insertBareRun(t, s, "pre-028")
-		}, []string{"pre-028||MT-1|||||<nil>"}},
+		}, []string{"pre-028||MT-1|||||<nil>||false"}},
 		{"left empty without error on a database before migration 021", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 20)
 			insertBareRun(t, s, "old")
-		}, []string{"old|||||||<nil>"}},
+		}, []string{"old|||||||<nil>||false"}},
 		{"chain columns left empty without error on a database before migration 024", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 23)
 			insertBareRun(t, s, "old")
-		}, []string{"old|||||||<nil>"}},
+		}, []string{"old|||||||<nil>||false"}},
 		{"a legacy table with only the base columns still scans", createLegacyRunHistoryTable, nil},
 	}
 
@@ -559,7 +572,7 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 				if row.Trigger != nil {
 					trigger = strconv.Quote(*row.Trigger)
 				}
-				got = append(got, strings.Join([]string{row.IssueID, row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult, trigger}, "|"))
+				got = append(got, strings.Join([]string{row.IssueID, row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult, trigger, row.ReactionKind, strconv.FormatBool(row.FirstAfterHop)}, "|"))
 				return nil
 			})
 
