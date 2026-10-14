@@ -229,6 +229,9 @@ function OverviewBody({ state }: OverviewBodyProps) {
 
   function actionTarget(): AttentionItemResponse | undefined {
     if (isHeld) {
+      if (selected?.attention && selected.attention.issue_identifier === peekIdentifier) {
+        return selected.attention;
+      }
       return (state.attention ?? []).find(
         (item) => item.issue_identifier === peekIdentifier && item.acknowledged_at === null,
       );
