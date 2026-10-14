@@ -8978,12 +8978,13 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 		want       map[string]StageLineage
 		wantBefore int
 		wantMarked []string
+		wantFirst  string
 	}{
 		{name: "dispatches no hop reached each start a chain", want: map[string]StageLineage{"id-1": {ChainID: fresh}, "id-2": {ChainID: fresh}}},
 		{
 			name: "a restored hop record hands its chain and pass time to the dispatch it reached and to no other",
 			hops: []persistence.StageHop{hopReachedPlan}, want: map[string]StageLineage{"id-1": reachedPlan, "id-2": {ChainID: fresh}},
-			wantBefore: 1, wantMarked: []string{"id-1"},
+			wantBefore: 1, wantMarked: []string{"id-1"}, wantFirst: "id-1",
 		},
 		{
 			name: "a restored hop record already followed by a run is neither listed nor marked again",
@@ -9030,6 +9031,9 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 				}
 				if got != want {
 					t.Errorf("Running[%q].StageLineage = %+v, want %+v", id, got, want)
+				}
+				if wantFirst := id == tt.wantFirst; entry.FirstAfterHop != wantFirst {
+					t.Errorf("Running[%q].FirstAfterHop = %t, want %t", id, entry.FirstAfterHop, wantFirst)
 				}
 			}
 			if after := RuntimeSnapshot(h.state, time.Now()).BetweenStages; len(after) != 0 {

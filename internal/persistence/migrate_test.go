@@ -240,6 +240,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"reaction_kind", "TEXT", false, 0},
 				{"session_id", "TEXT", false, 0},
 				{"ssh_host", "TEXT", false, 0},
+				{"first_after_hop", "INTEGER", true, 0},
 			},
 		},
 		{
@@ -635,6 +636,31 @@ func TestMigrate_Migration031_FillsParkedRuns(t *testing.T) {
 		if err != nil || got != tt.want {
 			t.Errorf("park of %s after upgrade = %q, %v, want %q, nil", tt.issueID, got, err, tt.want)
 		}
+	}
+}
+
+func TestMigrate_Migration032_MarksFirstRunAfterHop(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateToVersion(t, s, 31)
+	if _, err := s.db.ExecContext(context.Background(),
+		`INSERT INTO run_history (issue_id, identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, rule_name, chain_id, stage_previous, trigger, reaction_kind)
+			VALUES ('i1', 'MT-1', 1, 'mock', '/tmp', '2026-02-01T10:00:00Z', '2026-02-01T10:01:00Z', 'succeeded', 'plan', 'c1', 'specify', '', ''),
+				('i1', 'MT-1', 2, 'mock', '/tmp', '2026-02-01T11:00:00Z', '2026-02-01T11:01:00Z', 'succeeded', 'plan', 'c1', 'specify', '', ''),
+				('i2', 'MT-2', 1, 'mock', '/tmp', '2026-02-01T10:00:00Z', '2026-02-01T10:01:00Z', 'succeeded', 'plan', 'c2', 'specify', NULL, NULL),
+				('i2', 'MT-2', 2, 'mock', '/tmp', '2026-02-01T11:00:00Z', '2026-02-01T11:01:00Z', 'succeeded', 'plan', 'c2', 'specify', '', '')`,
+	); err != nil {
+		t.Fatalf("seed version 31 store: %v", err)
+	}
+
+	migrateOrFatal(t, s)
+
+	var got string
+	err := s.db.QueryRowContext(context.Background(),
+		`SELECT group_concat(first_after_hop, '|') FROM (SELECT first_after_hop FROM run_history ORDER BY id)`).Scan(&got)
+	if want := "1|0|1|0"; err != nil || got != want {
+		t.Errorf("first_after_hop by id after upgrade = %q, %v, want %q, nil", got, err, want)
 	}
 }
 

@@ -1040,6 +1040,9 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			entry.StageLineage = lineage
 			startPass(entry)
 			issueLog := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
+			// Read before the mark below flips RunDispatched.
+			hop := o.state.StageHops[issue.ID]
+			entry.FirstAfterHop = hop != nil && hop.TargetRule == resolution.RuleName && !hop.RunDispatched
 			markStageHopDispatched(ctx, o.state, o.store, issue.ID, issueLog)
 			clearIssueOutcome(ctx, o.store, issue.ID, issueLog)
 			entry.RuleSettingsApplied = attemptSettings.Settings.RuleName != ""

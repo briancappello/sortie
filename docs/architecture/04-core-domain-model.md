@@ -105,6 +105,8 @@ Fields (logical):
   - The name of the rule whose stage hop led to the attempt's dispatch, frozen with the dispatch selection and rendered as `stage.previous` (Section 12.1). Empty when no hop led to the dispatch.
 - `stage_previous_outcome` (string)
   - `succeeded` or `no_change`: the outcome of the run of `stage_previous` that ended in the hop, rendered as `stage.previous_outcome`. Empty whenever `stage_previous` is empty.
+- `first_after_hop` (boolean)
+  - True on the first attempt dispatched after the hop `stage_previous` names. False on a later dispatch into that stage while the hop record stands (after a restart, a released hold, or a lost retry), on a retry or reaction continuation, and when `stage_previous` is empty. A row recorded before the flag was kept takes it from the upgrade.
 - `chain_id` (string)
   - The stage chain identifier frozen with the dispatch selection. A dispatch no hop reached starts a chain with a fresh random value; a dispatch a hop reached inherits the chain of the hop; a retry or reaction continuation carries the chain of the run it continues. Empty only on a row written before the chain was recorded.
 - `dispatched_at` (timestamp)
@@ -116,7 +118,7 @@ Fields (logical):
 - `issue_title`, `issue_url` (strings)
   - The tracker's title and web link of the issue as read when the attempt was dispatched. Empty on a row recorded before they were kept.
 - `trigger` (string or unknown)
-  - What started the retry whose fire dispatched the attempt: the `sortie_retries_total` label of the schedule that created that retry (`error`, `continuation`, `stall`, or `ci_fix`), kept through every put-back. Empty for a dispatch from the poll tick and for a retry a reaction started. Unknown where the row does not record it: a row recorded before the origin was kept, and an attempt dispatched by a retry that never stored what started it.
+  - What started the retry whose fire dispatched the attempt: the `sortie_retries_total` label of the schedule that created that retry (`error`, `continuation`, `stall`, or `ci_fix`), kept through every put-back. Empty for a dispatch from the poll tick and for a retry a reaction other than the CI fix started; the CI fix records `ci_fix`. Unknown where the row does not record it: a row recorded before the origin was kept, and an attempt dispatched by a retry that never stored what started it.
 - `reaction_kind` (string or unknown)
   - The reaction kind of the retry that dispatched the attempt. Empty when none. Unknown where the row does not record it.
 - `session_id` (string or unknown)

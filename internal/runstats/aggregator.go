@@ -40,6 +40,28 @@ func triggerLabel(t *string) string {
 	return label(*t)
 }
 
+// originLabel names the run origin group of row, first match wins. A
+// non-empty trigger decides before the reaction kind, so an error or stall
+// retry of a reaction run lands in the same group as in by_trigger. A
+// stage_hop is decided by FirstAfterHop alone: a later dispatch into a hopped
+// stage carries the same StagePrevious.
+func originLabel(row persistence.RunStatsRow) string {
+	switch {
+	case row.Trigger == nil:
+		return "<unknown>"
+	case *row.Trigger != "":
+		return *row.Trigger
+	case row.ReactionKind != "":
+		return row.ReactionKind
+	case row.Status == "ci_failed":
+		return "<none>"
+	case row.FirstAfterHop:
+		return "stage_hop"
+	default:
+		return "poll_tick"
+	}
+}
+
 // duration computes row's duration in seconds from its stored RFC3339
 // timestamps. ok is false when either timestamp fails to parse or the
 // resulting difference is negative.
@@ -229,7 +251,8 @@ func degradedSchemaWarning(caps persistence.RunHistoryCapabilities) string {
 		{caps.HasTokenMeasurement, "which runs the coding agent could measure"},
 		{caps.HasConfiguredSettings, "the model each run was configured with"},
 		{caps.HasStageChains, "stage chains"},
-		{caps.HasTrigger, "retry triggers"},
+		{caps.HasTrigger, "what started each run"},
+		{caps.HasFirstAfterHop, "the first run after each stage hop"},
 	}
 
 	var unrecorded, dropped []string
@@ -264,9 +287,16 @@ const chainBreakdownWarning = "this database was written before sortie recorded 
 	"so the report leaves out the breakdown by stage chain. " +
 	"Run sortie once with this workflow to add it."
 
-// triggerBreakdownWarning explains the missing by_trigger breakdown.
-const triggerBreakdownWarning = "this database was written before sortie recorded the retry trigger of each run, " +
-	"so the report leaves out the breakdown by retry trigger. " +
+// triggerBreakdownWarning explains the missing by_trigger and by_origin
+// breakdowns.
+const triggerBreakdownWarning = "this database was written before sortie recorded what started each run, " +
+	"so the report leaves out the breakdowns by retry trigger and by run origin. " +
+	"Run sortie once with this workflow to add them."
+
+// originBreakdownWarning explains the missing by_origin breakdown on a
+// database that does record what started each run.
+const originBreakdownWarning = "this database was written before sortie recorded the first run after each stage hop, " +
+	"so the report leaves out the breakdown by run origin. " +
 	"Run sortie once with this workflow to add it."
 
 // Aggregator folds a stream of [persistence.RunStatsRow] values, via
@@ -288,6 +318,7 @@ type Aggregator struct {
 	byModel    map[string]*groupAccum
 	byChain    map[string]*groupAccum
 	byTrigger  map[string]*groupAccum
+	byOrigin   map[string]*groupAccum
 	chains     map[string]*chainAccum
 	issueIDs   map[string]struct{}
 
@@ -310,6 +341,7 @@ func New(caps persistence.RunHistoryCapabilities, price Pricer) *Aggregator {
 		byModel:         make(map[string]*groupAccum),
 		byChain:         make(map[string]*groupAccum),
 		byTrigger:       make(map[string]*groupAccum),
+		byOrigin:        make(map[string]*groupAccum),
 		chains:          make(map[string]*chainAccum),
 		issueIDs:        make(map[string]struct{}),
 		selfReview:      selfReviewAccum{byVerdict: make(map[string]int)},
@@ -347,6 +379,9 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 		}
 		if a.caps.TriggerBreakdown() {
 			bumped = append(bumped, bumpGroup(a.byTrigger, triggerLabel(row.Trigger), isSucceeded))
+		}
+		if a.caps.OriginBreakdown() {
+			bumped = append(bumped, bumpGroup(a.byOrigin, originLabel(row), isSucceeded))
 		}
 
 		for _, g := range bumped {
@@ -491,6 +526,7 @@ func (a *Aggregator) Report(
 		ByModel:      []Group{},
 		ByChain:      []ChainGroup{},
 		ByTrigger:    []Group{},
+		ByOrigin:     []Group{},
 
 		RatesConfigured: a.ratesConfigured,
 	}
@@ -512,6 +548,9 @@ func (a *Aggregator) Report(
 		if a.caps.TriggerBreakdown() {
 			rpt.ByTrigger = a.groupSlice(a.byTrigger, full)
 		}
+		if a.caps.OriginBreakdown() {
+			rpt.ByOrigin = a.groupSlice(a.byOrigin, full)
+		}
 		rpt.SelfReview = a.selfReviewReport()
 	}
 
@@ -531,6 +570,8 @@ func (a *Aggregator) composeWarnings(extra []string) []string {
 		list = append(list, chainBreakdownWarning)
 	case !a.caps.TriggerBreakdown():
 		list = append(list, triggerBreakdownWarning)
+	case !a.caps.OriginBreakdown():
+		list = append(list, originBreakdownWarning)
 	}
 	return append(list, extra...)
 }

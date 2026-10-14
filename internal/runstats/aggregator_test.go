@@ -80,6 +80,7 @@ func withTriggerBreakdown(caps persistence.RunHistoryCapabilities) persistence.R
 	caps = withModelBreakdown(caps)
 	caps.HasStageChains = true
 	caps.HasTrigger = true
+	caps.HasFirstAfterHop = true
 	return caps
 }
 
@@ -376,7 +377,7 @@ func TestDegradedSchemaWarning(t *testing.T) {
 			caps: persistence.RunHistoryCapabilities{},
 			want: []string{
 				"before sortie recorded turns, self-review results, dispatch-rule routing, tokens and cost",
-				"stage chains, retry triggers",
+				"stage chains, what started each run, the first run after each stage hop",
 				"Run sortie once with this workflow to add them.",
 			},
 			absent: []string{"does carry", "falls back"},
@@ -500,6 +501,72 @@ func TestStatsByTrigger(t *testing.T) {
 			if len(got) > 0 && (sumRuns(report.ByTrigger) != report.Summary.Runs || report.ByTrigger[0].Runs != 2) {
 				t.Errorf("Report(%+v) by_trigger = %+v, want runs summing to %d with ci_fix at 2", tt.caps, report.ByTrigger, report.Summary.Runs)
 			}
+			if len(got) == 0 && (report.ByOrigin == nil || len(report.ByOrigin) > 0) {
+				t.Errorf("Report(%+v).ByOrigin = %#v, want an empty, non-nil list beside the empty by_trigger", tt.caps, report.ByOrigin)
+			}
+		})
+	}
+}
+
+func originRow(trigger *string, reactionKind, stagePrevious string, firstAfterHop bool) persistence.RunStatsRow {
+	row := modelRow("claude-code", "model-a", "succeeded", 0)
+	row.Trigger, row.ReactionKind, row.StagePrevious, row.FirstAfterHop = trigger, reactionKind, stagePrevious, firstAfterHop
+	return row
+}
+
+func TestStatsByOrigin(t *testing.T) {
+	t.Parallel()
+
+	noOriginColumn := withTriggerBreakdown(fullCaps)
+	noOriginColumn.HasFirstAfterHop = false
+	errorRetry := originRow(new("error"), "", "", false)
+	errorRetry.Status = "failed"
+	tests := []struct {
+		name string
+		caps persistence.RunHistoryCapabilities
+		want map[string]int
+	}{
+		{
+			name: "each origin forms its own group and only the first run after a hop is stage_hop",
+			caps: withTriggerBreakdown(fullCaps),
+			want: map[string]int{"poll_tick": 2, "stage_hop": 1, "error": 1, "ci_fix": 1, "review": 1, "<unknown>": 1},
+		},
+		{name: "first_after_hop column absent leaves the breakdown empty beside by_trigger", caps: noOriginColumn},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agg := New(tt.caps, nil)
+			addRows(t, agg,
+				originRow(new(""), "", "", false),
+				originRow(new(""), "", "specify", true),
+				errorRetry,
+				originRow(new("ci_fix"), "ci", "", false),
+				originRow(new(""), "review", "", false),
+				originRow(nil, "", "", false),
+				originRow(new(""), "", "specify", false),
+			)
+
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+
+			if report.ByOrigin == nil {
+				t.Fatalf("Report(%+v).ByOrigin = nil, want a non-nil list", tt.caps)
+			}
+			got := map[string]int{}
+			for _, g := range report.ByOrigin {
+				got[g.Name] = g.Runs
+			}
+			if !maps.Equal(got, tt.want) {
+				t.Errorf("Report(%+v) by_origin runs = %v, want %v", tt.caps, got, tt.want)
+			}
+			if len(tt.want) > 0 && sumRuns(report.ByOrigin) != report.Summary.Runs {
+				t.Errorf("Report(%+v) by_origin = %+v, want runs summing to %d", tt.caps, report.ByOrigin, report.Summary.Runs)
+			}
+			if sumRuns(report.ByTrigger) != report.Summary.Runs {
+				t.Errorf("Report(%+v) by_trigger = %+v, want runs summing to %d", tt.caps, report.ByTrigger, report.Summary.Runs)
+			}
 		})
 	}
 }
@@ -549,6 +616,8 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	chainCaps := modelCaps
 	chainCaps.HasStageChains = true
 	triggerCaps := withTriggerBreakdown(fullCaps)
+	originlessCaps := triggerCaps
+	originlessCaps.HasFirstAfterHop = false
 	callerWarnings := []string{"token_rates: first", "token_rates: second"}
 
 	tests := []struct {
@@ -559,6 +628,7 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	}{
 		{name: "every breakdown supported and no caller warnings", caps: triggerCaps, want: []string{}},
 		{name: "trigger breakdown missing", caps: chainCaps, extra: callerWarnings, want: append([]string{triggerBreakdownWarning}, callerWarnings...)},
+		{name: "origin breakdown missing", caps: originlessCaps, extra: callerWarnings, want: append([]string{originBreakdownWarning}, callerWarnings...)},
 		{name: "chain breakdown missing", caps: modelCaps, extra: callerWarnings, want: append([]string{chainBreakdownWarning}, callerWarnings...)},
 		{name: "model breakdown missing", caps: fullCaps, extra: callerWarnings, want: append([]string{modelBreakdownWarning}, callerWarnings...)},
 		{name: "schema not full", caps: persistence.RunHistoryCapabilities{}, extra: callerWarnings, want: append([]string{degradedSchemaWarning(persistence.RunHistoryCapabilities{})}, callerWarnings...)},

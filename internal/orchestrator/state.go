@@ -234,6 +234,11 @@ type RunningEntry struct {
 	// was dispatched with; its ChainID is never empty.
 	StageLineage StageLineage
 
+	// FirstAfterHop reports that the poll tick dispatched this run as the
+	// first run after the issue's stage hop. A retry never sets it.
+	// Runtime-only.
+	FirstAfterHop bool
+
 	// RuleSettingsApplied reports that the rule's settings block applied
 	// to this attempt.
 	RuleSettingsApplied bool
