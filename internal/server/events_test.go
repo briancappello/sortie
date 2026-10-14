@@ -20,7 +20,10 @@ func openStream(t *testing.T, timing streamTiming, lastEventID string) (srv *Ser
 	srv = New(Params{SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}), RefreshFn: acceptingRefresh()})
 	srv.timing = timing
 	srv.httpServer.ReadTimeout, srv.httpServer.WriteTimeout = 150*time.Millisecond, 150*time.Millisecond
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.httpServer.Close() })
 	if lastEventID == "current" {
