@@ -1343,7 +1343,7 @@ dispatch:
         effort: max           # model inherited from the top-level block
 ```
 
-Issues with neither label run on the top-level block. `sortie stats` groups the runs by rule, by configured model, by stage chain, and by retry trigger.
+Issues with neither label run on the top-level block. `sortie stats` groups the runs by rule, by configured model, by stage chain, by retry trigger, and by what started each run.
 
 Two work profiles on two kinds fit in one workflow. A rule that introduces a kind other than `agent.kind` and carries that kind's block needs no top-level block for it:
 
@@ -1878,7 +1878,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
-| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger, priced at the `token_rates` the process started with. |
+| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger and by what started them, priced at the `token_rates` the process started with. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
@@ -2954,7 +2954,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `stage_target`, `stage_result` | string or absent | The rule the run's exit targeted with a hop decision and its result: `advanced`, `partial`, `failed`, or `ceiling`. Omitted when the run reached no decision. A read taken just after the run completes can precede the decision, and the next read carries it. |
 | `self_review`            | object or `null`   | `null` when the run carries no self-review record. Otherwise `final_verdict` (`none` when the run recorded an empty verdict, masked like `issue_title`), `total_iterations`, and `cap_reached`. |
 | `origin_recorded`        | boolean            | `false` for a run recorded before the origin keys below existed. Every origin key is then `null`. |
-| `trigger`                | string or `null`   | What started the retry whose fire dispatched the run: `error`, `continuation`, `stall`, or `ci_fix`. `""` for a dispatch from the poll tick and for a retry a reaction started, which `reaction_kind` names. `null` when not recorded, and for a run dispatched by a retry queued before the upgrade that never stored what started it. |
+| `trigger`                | string or `null`   | What started the retry whose fire dispatched the run: `error`, `continuation`, `stall`, or `ci_fix`. `""` for a dispatch from the poll tick and for a retry a reaction other than the CI fix started, which `reaction_kind` names. `null` when not recorded, and for a run dispatched by a retry queued before the upgrade that never stored what started it. |
 | `reaction_kind`          | string or `null`   | The reaction kind of the retry that dispatched the run, `""` when none, `null` when not recorded. |
 | `reaction_config_key`    | string or `null`   | The key of the `reactions` section of `WORKFLOW.md` that `reaction_kind` is configured under. `""` or `null` exactly when `reaction_kind` is. |
 | `session_id`             | string or `null`   | The agent session the run used, `""` when it started none, `null` when not recorded. Not masked. |
@@ -2975,7 +2975,7 @@ A request whose filters match fewer runs than the page holds reads run history d
 
 #### `GET /api/v1/stats`: run statistics
 
-Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, and retry trigger. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
 
 **Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
 
@@ -3062,6 +3062,21 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "tokens_unmeasured_runs": 1
     }
   ],
+  "by_origin": [
+    {
+      "name": "<unknown>",
+      "runs": 4,
+      "succeeded": 2,
+      "success_rate": 0.5,
+      "share": 0.6667,
+      "duration_seconds": {"p50": 600, "p95": 1800, "mean": 900, "samples": 4},
+      "mean_turns": 3,
+      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
+      "cost_usd": 12.25,
+      "cost_per_succeeded_run_usd": 6.13,
+      "tokens_unmeasured_runs": 1
+    }
+  ],
   "self_review": {
     "runs_with_metadata": 2,
     "by_final_verdict": [{"verdict": "iterate", "runs": 1}, {"verdict": "pass", "runs": 1}],
@@ -3072,7 +3087,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
 }
 ```
 
-The example omits the members of the breakdowns other than `by_status`, `by_chain`, and `by_trigger`; every breakdown is a list of groups of the same shape.
+The example omits the members of the breakdowns other than `by_status`, `by_chain`, `by_trigger`, and `by_origin`; every breakdown is a list of groups of the same shape.
 
 **Envelope fields:**
 
@@ -3081,7 +3096,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `generated_at`   | string            | The instant of the request, as an RFC 3339 timestamp in UTC. Relative bounds count back from it. |
 | `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
 | `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
-| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, and `by_trigger` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
+| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `by_trigger`, and `by_origin` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
 | `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. The warnings of the `token_rates` the process started with follow. |
 | `summary`        | object            | The report-wide figures, below. |
 | `by_status`      | array of groups   | One group per run status. |
@@ -3091,6 +3106,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `by_model`       | array of groups   | One group per configured model, `<none>` for the runs that configured none. |
 | `by_chain`       | array of chain groups | One entry per stage chain in which a hop was due or made. It is a listing, not a partition: runs outside a chain, and chains without a hop, are absent. |
 | `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
+| `by_origin`      | array of groups   | One group per run origin, below. |
 | `self_review`    | object or `null`  | The self-review results, below. `null` on the `base` tier. |
 
 Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[]` rather than `null` when it holds no group.
@@ -3129,7 +3145,20 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 
 **`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
 
-**`by_trigger` names.** A group is named by the trigger value the runs stored: `error`, `continuation`, `stall`, or `ci_fix`, as in the `trigger` of a run row. `<none>` names the runs whose trigger is the empty string: runs dispatched from the poll tick, runs a reaction started, and recorded CI results. `<unknown>` names the runs whose row records no trigger: runs recorded before Sortie kept the trigger, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, so their `runs` sum to `summary.runs`. `by_trigger` carries no other names, and is `[]` on a database that lacks the trigger column, which the first `warnings` entry then states.
+**`by_trigger` names.** A group is named by the trigger value the runs stored: `error`, `continuation`, `stall`, or `ci_fix`, as in the `trigger` of a run row. `<none>` names the runs whose trigger is the empty string: runs dispatched from the poll tick, runs a reaction other than the CI fix started, and recorded CI results. `<unknown>` names the runs whose row records no trigger: runs recorded before Sortie kept the trigger, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, so their `runs` sum to `summary.runs`. `by_trigger` carries no other names, and is `[]` on a database that lacks the trigger column, which the first `warnings` entry then states.
+
+**`by_origin` names.** A group is named by what started its runs, and the first rule that matches decides a run's group.
+
+| Name | Runs it holds |
+| ---- | ------------- |
+| `<unknown>` | Runs whose row records no trigger: runs recorded before Sortie kept what started a run, and runs dispatched by a retry that never stored what started it. |
+| `error`, `continuation`, `stall`, `ci_fix` | Runs a retry dispatched, named by what queued the retry: a failed run, a run that ended with its issue still active, a stalled run, or a CI failure (the CI fix). |
+| `review`, `bot-review`, `merge-conflict`, `label-review`, `label-fix` | Runs a pull request reaction dispatched: a review fix, a bot review fix, a rebase after a merge conflict, a label review, or a label fix. The name is the `reaction_kind` of a run row. |
+| `<none>` | Recorded CI results, which no dispatch started. |
+| `stage_hop` | The first run dispatched after a stage hop, into the stage the hop led to. A later run in that stage does not count. |
+| `poll_tick` | Every other run the poll tick dispatched, including a later dispatch into a stage a hop led to, as after a restart, a released hold, or a lost retry. |
+
+The groups partition the counted runs, so their `runs` sum to `summary.runs`. A group named by a retry trigger holds the runs of the `by_trigger` group of that name. `by_origin` carries no other names, and is `[]` on a database an older Sortie last wrote, which the first `warnings` entry then states.
 
 **`self_review` fields:** `runs_with_metadata`, the runs that carry a self-review record; `by_final_verdict`, a list of `verdict` and `runs` pairs in ascending verdict order, where the verdict is `pass`, `iterate`, or `none` for a record with an empty verdict; `cap_reached_runs`, the runs whose self-review stopped at its iteration cap; `mean_iterations`, `null` when `runs_with_metadata` is `0`; and `unparsed_runs`, the records that could not be read. With no run in range the full tier still serves the object, with zero counts and `mean_iterations` `null`.
 
