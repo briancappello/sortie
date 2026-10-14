@@ -22,7 +22,7 @@ Closed     bool
 
 A PR is conflicted when `status.Mergeability == MergeabilityDirty`. `MergeabilityUnknown` is a deferral condition (the provider is still computing), not a conflict. The two values MUST NOT be conflated: `MergeabilityUnknown` defers at the poll interval without touching the fingerprint or the attempt counter, exactly as auto-merge handles it (§11C.5).
 
-Not every adapter can satisfy the rule. The Gitea adapter's single `mergeable` boolean cannot separate a conflict from an in-progress recheck, so it maps a conflicted pull request to `MergeabilityUnknown` and never to `MergeabilityDirty` (§11C.5). This reaction therefore never arms on that provider: its entry takes the U1 deferral on every tick until its age passes the configured watch window, which escalates nothing and leaves no tracker-visible signal. A deployment that sets the window to `0` leaves such an entry polling until the tracker issue reaches a terminal state. Configuration shape is still valid, so neither the offline validator nor construction rejects the pairing.
+Not every adapter can satisfy the rule. The Gitea adapter's single `mergeable` boolean cannot separate a conflict from an in-progress recheck, so it maps a conflicted pull request to `MergeabilityUnknown` and never to `MergeabilityDirty` (§11C.5). This reaction therefore never arms on that provider: its entry takes the unknown-mergeability deferral on every tick until its age passes the configured watch window, which escalates nothing and leaves no tracker-visible signal. A deployment that sets the window to `0` leaves such an entry polling until the tracker issue reaches a terminal state. Configuration shape is still valid, so neither the offline validator nor construction rejects the pairing.
 
 ### 11E.3 Reconcile loop integration
 
@@ -98,7 +98,7 @@ The retry-slot guard in Section 11E.4 is unaffected by anything in this section:
 | `head_sha` | `status.HeadSHA` at dispatch time |
 | `base` | `status.BaseBranch`, the PR's real target branch, read live from `GetMergeability` on this tick |
 
-`base` is always the PR object's actual base ref, not an assumed default branch. The orchestrator already holds the PR object and cannot diverge from the platform's view; the agent does not re-derive the base independently. `MarkReactionDispatched` is called on the same tick the continuation is scheduled; this is the marker the D1 dedup branch reads in subsequent ticks.
+`base` is always the PR object's actual base ref, not an assumed default branch. The orchestrator already holds the PR object and cannot diverge from the platform's view; the agent does not re-derive the base independently. `MarkReactionDispatched` is called on the same tick the continuation is scheduled; this is the marker the dirty branch's dedup guard reads in subsequent ticks.
 
 The `merge_conflict` key MUST be registered in `prompt.continuationKeys` and seeded to nil in the template data map so `Option("missingkey=error")` does not reject templates that reference the field when no conflict continuation is active.
 
