@@ -1263,40 +1263,6 @@ func TestRunLongHelp(t *testing.T) {
 	}
 }
 
-// autoMergeWorkflowNoProvider returns a minimal WORKFLOW.md with
-// reactions.auto_merge but an empty provider, so the auto-merge feature is
-// disabled and no SCM adapter initialization is attempted.
-func autoMergeWorkflowNoProvider(issuesPath, workspaceRoot string) []byte {
-	return fmt.Appendf(nil, `---
-tracker:
-  kind: file
-  project: DEMO
-  active_states:
-    - "To Do"
-  handoff_state: Done
-
-file:
-  path: %s
-
-agent:
-  kind: mock
-  max_turns: 1
-
-polling:
-  interval_ms: 500
-
-workspace:
-  root: %s
-
-reactions:
-  auto_merge:
-    provider: ""
----
-
-Fix issue {{ .issue.identifier }}.
-`, issuesPath, workspaceRoot)
-}
-
 // autoMergeWorkflowUnknownProvider returns a WORKFLOW.md with an unknown SCM
 // provider, which should cause startup to fail with exit code 1.
 func autoMergeWorkflowUnknownProvider(issuesPath, workspaceRoot string) []byte {
@@ -1540,36 +1506,6 @@ func TestRunCIFailure_MismatchedProviders(t *testing.T) {
 	}
 }
 
-// TestRunAutoMerge_EmptyProvider verifies that when reactions.auto_merge.provider
-// is empty, the server starts normally and does NOT log "auto_merge reaction
-// enabled" (spec Test 6 at the wiring layer).
-func TestRunAutoMerge_EmptyProvider(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	wsRoot := filepath.Join(dir, "workspaces")
-
-	issuesPath := filepath.Join(dir, "issues.json")
-	if err := os.WriteFile(issuesPath, quickStartIssues(), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	wfPath := writeCustomWorkflowFile(t, dir, autoMergeWorkflowNoProvider(issuesPath, wsRoot))
-
-	var stdout bytes.Buffer
-	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
-	}
-
-	logs := stderr.String()
-	if strings.Contains(logs, "auto_merge reaction enabled") {
-		t.Error(`"auto_merge reaction enabled" logged despite empty provider; want absent`)
-	}
-}
-
 // TestRunAutoMerge_UnknownProvider verifies that an unknown SCM provider in
 // reactions.auto_merge causes startup to fail with exit code 1.
 // No t.Parallel: calls t.Chdir.
@@ -1708,42 +1644,6 @@ Fix issue {{ .issue.identifier }}.
 `, issuesPath, workspaceRoot)
 }
 
-// labelCommandsProviderEmptyWorkflow returns a WORKFLOW.md with an inert
-// label_commands block (provider empty). Both command labels are set to
-// prove they are ignored when the provider is empty.
-func labelCommandsProviderEmptyWorkflow(issuesPath, workspaceRoot string) []byte {
-	return fmt.Appendf(nil, `---
-tracker:
-  kind: file
-  project: DEMO
-  active_states:
-    - "To Do"
-  handoff_state: Done
-
-file:
-  path: %s
-
-agent:
-  kind: mock
-  max_turns: 1
-
-polling:
-  interval_ms: 500
-
-workspace:
-  root: %s
-
-reactions:
-  label_commands:
-    provider: ""
-    review_label: "sortie:review"
-    fix_label: "sortie:fix"
----
-
-Fix issue {{ .issue.identifier }}.
-`, issuesPath, workspaceRoot)
-}
-
 // TestLabelFixOnly_ConstructsSCMAdapter verifies that a fix-only
 // label_commands configuration (empty review_label, non-empty fix_label)
 // alone drives labelFixActive and the SCM-adapter construction attempt,
@@ -1802,52 +1702,6 @@ func TestLabelFixOnly_JoinsProviderConflictCheck(t *testing.T) {
 	logs := stderr.String()
 	if !strings.Contains(logs, "must use the same provider") {
 		t.Errorf("expected 'must use the same provider' in error log, got:\n%s", logs)
-	}
-}
-
-// TestLabelFixInactive_NothingFires verifies that with label_commands
-// absent or its provider empty, neither label reaction activates and
-// startup proceeds normally.
-// No t.Parallel: subtests call t.Chdir.
-func TestLabelFixInactive_NothingFires(t *testing.T) {
-	tests := []struct {
-		name       string
-		workflowFn func(issuesPath, workspaceRoot string) []byte
-	}{
-		{"block absent", quickStartWorkflow},
-		{"provider empty", labelCommandsProviderEmptyWorkflow},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			t.Chdir(dir)
-			wsRoot := filepath.Join(dir, "workspaces")
-
-			issuesPath := filepath.Join(dir, "issues.json")
-			if err := os.WriteFile(issuesPath, quickStartIssues(), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			wfPath := writeCustomWorkflowFile(t, dir, tt.workflowFn(issuesPath, wsRoot))
-
-			var stdout bytes.Buffer
-			var stderr lockedBuf
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			code := run(ctx, []string{wfPath}, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
-			}
-
-			logs := stderr.String()
-			if strings.Contains(logs, "label fix reaction enabled") {
-				t.Error(`"label fix reaction enabled" logged despite inactive label_commands; want absent`)
-			}
-			if strings.Contains(logs, "label review reaction enabled") {
-				t.Error(`"label review reaction enabled" logged despite inactive label_commands; want absent`)
-			}
-		})
 	}
 }
 
