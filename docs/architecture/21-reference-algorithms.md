@@ -91,6 +91,9 @@ on_tick(state):
       state = end_outside_handoff(state, issue.id, issue.state)
       state = dispatch_issue(issue, state, attempt=null, continuation_context=seed)
 
+  # Reached only when the candidate fetch succeeded; §13.7.2 states the rule.
+  state = prune_acknowledgements(state)
+
   notify_observers()
   schedule_tick(state.poll_interval_ms)
   return state

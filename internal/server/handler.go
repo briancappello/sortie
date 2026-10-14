@@ -273,6 +273,7 @@ type attentionItemResponse struct {
 	Kind              string                    `json:"kind"`
 	Severity          string                    `json:"severity"`
 	Since             *time.Time                `json:"since"`
+	AcknowledgedAt    *time.Time                `json:"acknowledged_at"`
 	IssueID           string                    `json:"issue_id,omitempty"`
 	IssueIdentifier   string                    `json:"issue_identifier,omitempty"`
 	DisplayIdentifier string                    `json:"display_identifier,omitempty"`
@@ -466,6 +467,21 @@ type retryNowResponse struct {
 	DisplayIdentifier string    `json:"display_identifier,omitempty"`
 	Attempt           int       `json:"attempt,omitempty"`
 	OutcomeText       string    `json:"outcome_text"`
+}
+
+// acknowledgeResponse is the body of a 200 and a 409 from
+// POST /api/v1/attention/{id}/acknowledge.
+type acknowledgeResponse struct {
+	Acknowledged        bool       `json:"acknowledged"`
+	AlreadyAcknowledged bool       `json:"already_acknowledged"`
+	RequestedAt         time.Time  `json:"requested_at"`
+	ID                  string     `json:"id,omitempty"`
+	Kind                string     `json:"kind,omitempty"`
+	IssueID             string     `json:"issue_id,omitempty"`
+	IssueIdentifier     string     `json:"issue_identifier,omitempty"`
+	DisplayIdentifier   string     `json:"display_identifier,omitempty"`
+	AcknowledgedAt      *time.Time `json:"acknowledged_at,omitempty"`
+	OutcomeText         string     `json:"outcome_text"`
 }
 
 type errorResponse struct {
@@ -748,6 +764,16 @@ func toPullRequestResponse(pr orchestrator.SnapshotPullRequest) pullRequestRespo
 	}
 }
 
+func countUnacknowledged(items []attentionItemResponse) int {
+	count := 0
+	for _, item := range items {
+		if item.AcknowledgedAt == nil {
+			count++
+		}
+	}
+	return count
+}
+
 // toAttentionResponses converts the derived list to its wire format, never nil.
 func toAttentionResponses(items []sentence.AttentionItem) []attentionItemResponse {
 	responses := make([]attentionItemResponse, 0, len(items))
@@ -786,6 +812,9 @@ func toAttentionResponses(items []sentence.AttentionItem) []attentionItemRespons
 		}
 		if item.Since != nil {
 			resp.Since = new(item.Since.UTC())
+		}
+		if item.AcknowledgedAt != nil {
+			resp.AcknowledgedAt = new(item.AcknowledgedAt.UTC())
 		}
 		if ev.PullRequest != nil {
 			resp.Evidence.PullRequest = new(toPullRequestResponse(*ev.PullRequest))
@@ -917,7 +946,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRa
 			Parked:           len(parked),
 			PendingReactions: len(pendingReactions),
 			BetweenStages:    len(betweenStages),
-			Attention:        len(attention),
+			Attention:        countUnacknowledged(attention),
 		},
 		Running:          running,
 		Retrying:         retrying,
@@ -985,6 +1014,14 @@ func (s *Server) routeRetryNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.handleRetryNow(w, r)
+}
+
+func (s *Server) routeAcknowledge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, r, http.MethodPost)
+		return
+	}
+	s.handleAcknowledge(w, r)
 }
 
 func (s *Server) routeIssueDetail(w http.ResponseWriter, r *http.Request) {
@@ -1292,6 +1329,92 @@ func (s *Server) retryNowAnswer(w http.ResponseWriter, r *http.Request, requeste
 	default:
 		return http.StatusServiceUnavailable, unavailable
 	}
+}
+
+func (s *Server) handleAcknowledge(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	status, body := s.acknowledgeAnswer(w, r, start.UTC())
+	writeJSON(w, s.logger, status, body)
+
+	s.logger.Debug("request served",
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.Int("status", status),
+		slog.Duration("duration", time.Since(start)),
+	)
+}
+
+// acknowledgeAnswer runs the request and returns the status and body to write.
+func (s *Server) acknowledgeAnswer(w http.ResponseWriter, r *http.Request, requestedAt time.Time) (int, any) {
+	refused := acknowledgeResponse{
+		RequestedAt: requestedAt,
+		OutcomeText: sentence.AcknowledgeOutcome(false, false, orchestrator.AttentionCause{}),
+	}
+	unavailable := errorResponse{Error: errorDetail{
+		Code:    "acknowledge_unavailable",
+		Message: "Sortie did not take the request; nothing changed",
+	}}
+
+	if s.drainingFlag.Load() {
+		return http.StatusConflict, refused
+	}
+	if s.acknowledgeFn == nil {
+		return http.StatusServiceUnavailable, unavailable
+	}
+
+	itemID := r.PathValue("id")
+	result := s.acknowledgeFn(r.Context(), itemID)
+
+	// The wait for the event loop is unbounded, so the server's own deadline
+	// may have lapsed by now.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.httpServer.WriteTimeout))
+
+	switch result.Status {
+	case orchestrator.AcknowledgeRecorded, orchestrator.AcknowledgeAlready:
+		already := result.Status == orchestrator.AcknowledgeAlready
+		issueID, identifier, displayID := causeIssue(result.Cause)
+		return http.StatusOK, acknowledgeResponse{
+			Acknowledged:        true,
+			AlreadyAcknowledged: already,
+			RequestedAt:         requestedAt,
+			ID:                  result.Cause.ID,
+			Kind:                result.Cause.Kind,
+			IssueID:             issueID,
+			IssueIdentifier:     identifier,
+			DisplayIdentifier:   displayID,
+			AcknowledgedAt:      new(result.AcknowledgedAt.UTC()),
+			OutcomeText:         sentence.AcknowledgeOutcome(true, already, result.Cause),
+		}
+	case orchestrator.AcknowledgeNotFound:
+		return http.StatusNotFound, errorResponse{Error: errorDetail{
+			Code:    "attention_item_not_found",
+			Message: fmt.Sprintf("no current attention item has ID %q", itemID),
+		}}
+	case orchestrator.AcknowledgeFailed:
+		return http.StatusInternalServerError, errorResponse{Error: errorDetail{
+			Code:    "acknowledgement_not_saved",
+			Message: "Sortie could not save the acknowledgement; nothing changed",
+		}}
+	case orchestrator.AcknowledgeDraining:
+		return http.StatusConflict, refused
+	default:
+		return http.StatusServiceUnavailable, unavailable
+	}
+}
+
+// causeIssue returns the issue keys of the row a cause names, empty for a
+// process-wide cause.
+func causeIssue(cause orchestrator.AttentionCause) (issueID, identifier, displayID string) {
+	switch {
+	case cause.Parked != nil:
+		return cause.Parked.IssueID, cause.Parked.Identifier, cause.Parked.DisplayID
+	case cause.Budget != nil:
+		return cause.Budget.IssueID, cause.Budget.Identifier, cause.Budget.DisplayID
+	case cause.Reaction != nil:
+		return cause.Reaction.IssueID, cause.Reaction.Identifier, cause.Reaction.DisplayID
+	}
+	return "", "", ""
 }
 
 func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {

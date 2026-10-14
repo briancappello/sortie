@@ -4,11 +4,11 @@
 // wording instead of reading Sortie state itself.
 //
 // Start with [For] for an issue, [NextOutcomes] for what Sortie does next for
-// an issue, [Attention] for what needs a person, and [RefreshOutcome] and
-// [RetryNowOutcome] for a refresh and a retry-now request. All are safe for
-// concurrent use and never fail: a template that cannot render yields a fixed
-// fallback text, or leaves out the one next outcome it belongs to, and logs
-// one record.
+// an issue, [Attention] for what needs a person, and [RefreshOutcome],
+// [RetryNowOutcome], and [AcknowledgeOutcome] for a refresh, a retry-now, and an
+// acknowledge request. All are safe for concurrent use and never fail: a
+// template that cannot render yields a fixed fallback text, or leaves out the
+// one next outcome it belongs to, and logs one record.
 package sentence
 
 import (
@@ -119,6 +119,25 @@ func RetryNowOutcome(queued bool, displayID, identifier string, attempt int) str
 	return render("ctl_retry_now", "text", map[string]any{
 		"Key":     issueKey(displayID, identifier),
 		"Attempt": attempt,
+	})
+}
+
+// AcknowledgeOutcome returns the outcome sentence of a request to acknowledge
+// an attention item. acknowledged is false for a request refused because
+// Sortie is shutting down, which ignores the other arguments; already is true
+// when the item was acknowledged before the request.
+func AcknowledgeOutcome(acknowledged, already bool, cause orchestrator.AttentionCause) string {
+	if !acknowledged {
+		return render("ctl_acknowledge_refused", "text", nil)
+	}
+	name := "ctl_acknowledge"
+	if already {
+		name = "ctl_acknowledge_already"
+	}
+	item := attentionItem(cause, Context{})
+	return render(name, "text", map[string]any{
+		"Key":    issueKey(item.DisplayIdentifier, item.IssueIdentifier),
+		"Reason": item.ReasonText,
 	})
 }
 

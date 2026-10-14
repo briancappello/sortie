@@ -2253,6 +2253,17 @@ func TestBuildIssueDetail(t *testing.T) {
 	})
 }
 
+func acknowledgeHold(t *testing.T, snap *orchestrator.RuntimeSnapshotResult, at time.Time) {
+	t.Helper()
+	for _, cause := range orchestrator.AttentionCauses(*snap, nil) {
+		if cause.Kind == orchestrator.AttentionKindBudgetHeld {
+			snap.AttentionAcknowledgements = map[string]time.Time{cause.ID: at}
+			return
+		}
+	}
+	t.Fatal("AttentionCauses() holds no budget_held cause, want one to acknowledge")
+}
+
 func TestHandleState(t *testing.T) {
 	t.Parallel()
 
@@ -2311,16 +2322,27 @@ func TestHandleState(t *testing.T) {
 		t.Parallel()
 
 		parkedAt := time.Date(2026, 3, 24, 11, 0, 0, 0, time.UTC)
+		heldAndParked := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: fixedTime,
+			Parked: []orchestrator.SnapshotParkedEntry{
+				{IssueID: "id-1", Identifier: "MT-652", Reason: "agent_blocked", ParkedAt: parkedAt},
+			},
+			BudgetExhausted: []orchestrator.SnapshotBudgetEntry{
+				{IssueID: "id-1", Identifier: "MT-652", Reason: "session_budget", UsedSessions: 3, BudgetSessions: 3, ExhaustedAt: parkedAt.Add(time.Hour)},
+			},
+		}
+		acknowledgeHold(t, &heldAndParked, parkedAt.Add(90*time.Minute))
 		tests := []struct {
-			name      string
-			snap      orchestrator.RuntimeSnapshotResult
-			wantCount int
-			wantItem  map[string]any
+			name               string
+			snap               orchestrator.RuntimeSnapshotResult
+			wantLen            int
+			wantCount          int
+			wantAcknowledgedAt map[string]any
+			wantItem           map[string]any
 		}{
 			{
-				name:      "clean state serves an empty list",
-				snap:      orchestrator.RuntimeSnapshotResult{GeneratedAt: fixedTime},
-				wantCount: 0,
+				name: "clean state serves an empty list",
+				snap: orchestrator.RuntimeSnapshotResult{GeneratedAt: fixedTime},
 			},
 			{
 				name: "parked issue serves tagged keys and omits empty issue keys",
@@ -2330,7 +2352,9 @@ func TestHandleState(t *testing.T) {
 						{IssueID: "id-1", Identifier: "MT-652", Reason: "agent_blocked", Label: "needs-human", LabelApplied: true, ParkedAt: parkedAt},
 					},
 				},
-				wantCount: 1,
+				wantLen:            1,
+				wantCount:          1,
+				wantAcknowledgedAt: map[string]any{"parked": nil},
 				wantItem: map[string]any{
 					"kind":             "parked",
 					"severity":         "warning",
@@ -2341,6 +2365,13 @@ func TestHandleState(t *testing.T) {
 					"action":           map[string]any{"kind": "acknowledge"},
 					"evidence":         map[string]any{"reason": "agent_blocked", "label": "needs-human"},
 				},
+			},
+			{
+				name:               "acknowledged hold stays listed and leaves the count while the park of its issue stays counted",
+				snap:               heldAndParked,
+				wantLen:            2,
+				wantCount:          1,
+				wantAcknowledgedAt: map[string]any{"budget_held": "2026-03-24T12:30:00Z", "parked": nil},
 			},
 		}
 
@@ -2364,8 +2395,22 @@ func TestHandleState(t *testing.T) {
 					t.Fatalf("decode response: %v", err)
 				}
 
-				if body.Attention == nil || len(body.Attention) != tt.wantCount || body.Counts.Attention != tt.wantCount {
-					t.Fatalf("GET /api/v1/state attention = %v with counts.attention %d, want a non-null list of %d", body.Attention, body.Counts.Attention, tt.wantCount)
+				if body.Attention == nil || len(body.Attention) != tt.wantLen {
+					t.Fatalf("GET /api/v1/state attention = %v, want a non-null list of %d", body.Attention, tt.wantLen)
+				}
+				if body.Counts.Attention != tt.wantCount {
+					t.Errorf("GET /api/v1/state counts.attention = %d, want %d", body.Counts.Attention, tt.wantCount)
+				}
+				for _, listed := range body.Attention {
+					kind, _ := listed["kind"].(string)
+					got, ok := listed["acknowledged_at"]
+					if !ok {
+						t.Errorf("attention %q lacks acknowledged_at, want the key present", kind)
+						continue
+					}
+					if want := tt.wantAcknowledgedAt[kind]; got != want {
+						t.Errorf("attention %q acknowledged_at = %v, want %v", kind, got, want)
+					}
 				}
 				if tt.wantItem == nil {
 					return
@@ -3204,6 +3249,112 @@ func TestHandleRetryNow(t *testing.T) {
 			}
 			if body.Error.Code != tt.wantCode {
 				t.Errorf("POST %s error code = %q, want %q", path, body.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestHandleAcknowledge(t *testing.T) {
+	t.Parallel()
+
+	const (
+		recordedID = "464f9ff8ea54c4c6cfb43af394234d57"
+		repeatedID = "0b8e1c52a7d94f3e8a61c9d27f4b5e30"
+		failingID  = "9c3d7a10e5b84f26b1a0d8e47c2f6a95"
+	)
+	firstAt := time.Date(2026, 2, 24, 20, 0, 0, 0, time.UTC)
+	hold := func(id string) orchestrator.AttentionCause {
+		return orchestrator.AttentionCause{
+			ID:   id,
+			Kind: orchestrator.AttentionKindBudgetHeld,
+			Budget: &orchestrator.SnapshotBudgetEntry{
+				IssueID: "ghi789", Identifier: "MT-651", Reason: "session_budget", UsedSessions: 3, BudgetSessions: 3, ExhaustedAt: firstAt,
+			},
+		}
+	}
+	acknowledge := func(_ context.Context, id string) orchestrator.AcknowledgeResult {
+		switch id {
+		case recordedID:
+			return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeRecorded, Cause: hold(id), AcknowledgedAt: firstAt.Add(13*time.Minute + 5*time.Second)}
+		case repeatedID:
+			return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeAlready, Cause: hold(id), AcknowledgedAt: firstAt}
+		case failingID:
+			return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeFailed}
+		}
+		return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeNotFound}
+	}
+	srv := New(Params{
+		SnapshotFn:    fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+		RefreshFn:     acceptingRefresh(),
+		AcknowledgeFn: acknowledge,
+		Logger:        slog.New(slog.DiscardHandler),
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+
+	tests := []struct {
+		name        string
+		id          string
+		wantStatus  int
+		wantAlready bool
+		wantAt      string
+		wantText    string
+		wantCode    string
+	}{
+		{
+			name:       "recorded item",
+			id:         recordedID,
+			wantStatus: http.StatusOK,
+			wantAt:     "2026-02-24T20:13:05Z",
+			wantText:   "Acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears.",
+		},
+		{
+			name:        "item acknowledged before keeps its first time",
+			id:          repeatedID,
+			wantStatus:  http.StatusOK,
+			wantAlready: true,
+			wantAt:      "2026-02-24T20:00:00Z",
+			wantText:    "Already acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears.",
+		},
+		{name: "unknown item", id: "ffffffffffffffffffffffffffffffff", wantStatus: http.StatusNotFound, wantCode: "attention_item_not_found"},
+		{name: "acknowledgement not saved", id: failingID, wantStatus: http.StatusInternalServerError, wantCode: "acknowledgement_not_saved"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := "/api/v1/attention/" + tt.id + "/acknowledge"
+			resp, err := http.Post(ts.URL+path, "", nil)
+			if err != nil {
+				t.Fatalf("POST %s: %v", path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body := decodeJSON[struct {
+				acknowledgeResponse
+				errorResponse
+			}](t, resp)
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("POST %s status = %d, want %d", path, resp.StatusCode, tt.wantStatus)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Errorf("POST %s error code = %q, want %q", path, body.Error.Code, tt.wantCode)
+			}
+			if body.OutcomeText != tt.wantText {
+				t.Errorf("POST %s outcome_text = %q, want %q", path, body.OutcomeText, tt.wantText)
+			}
+			if body.AlreadyAcknowledged != tt.wantAlready {
+				t.Errorf("POST %s already_acknowledged = %t, want %t", path, body.AlreadyAcknowledged, tt.wantAlready)
+			}
+			if tt.wantAt == "" {
+				return
+			}
+			if !body.Acknowledged || body.ID != tt.id {
+				t.Errorf("POST %s acknowledged = %t, id = %q, want true, %q", path, body.Acknowledged, body.ID, tt.id)
+			}
+			if body.AcknowledgedAt == nil || body.AcknowledgedAt.Format(time.RFC3339) != tt.wantAt {
+				t.Errorf("POST %s acknowledged_at = %v, want %s", path, body.AcknowledgedAt, tt.wantAt)
 			}
 		})
 	}
