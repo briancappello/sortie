@@ -1,6 +1,7 @@
 import { createBrowserRouter } from "react-router";
 
 import { NotFound } from "@/app/NotFound";
+import { RouteError } from "@/app/RouteError";
 import { Shell } from "@/app/Shell";
 import { InboxIcon } from "@/components/icons";
 
@@ -19,19 +20,24 @@ export const router = createBrowserRouter(
       element: <Shell screens={screens} />,
       children: [
         {
-          index: true,
-          lazy: {
-            Component: async () =>
-              (await import("@/screens/overview/OverviewScreen")).OverviewScreen,
-          },
+          ErrorBoundary: RouteError,
+          children: [
+            {
+              index: true,
+              lazy: {
+                Component: async () =>
+                  (await import("@/screens/overview/OverviewScreen")).OverviewScreen,
+              },
+            },
+            {
+              path: "issues/:identifier",
+              lazy: {
+                Component: async () => (await import("@/screens/issue/IssueScreen")).IssueScreen,
+              },
+            },
+            { path: "*", element: <NotFound /> },
+          ],
         },
-        {
-          path: "issues/:identifier",
-          lazy: {
-            Component: async () => (await import("@/screens/issue/IssueScreen")).IssueScreen,
-          },
-        },
-        { path: "*", element: <NotFound /> },
       ],
     },
   ],
