@@ -41,6 +41,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API can now run an issue's scheduled retry right away: `POST /api/v1/retries/{identifier}/run` makes it due now instead of after its wait, for example once a rate limit has reset or a tracker outage is over, so restarting Sortie is no longer the only way to run it sooner. The retry then passes the same checks as a retry whose time has come (the limit on agents running at once, the session and token budgets, and the issue's tracker state), and one that still cannot start keeps the time it was due before, so asking for it early never makes it wait longer. The response says in one sentence what it did. Sortie's HTTP server has no authentication, so a deployment that others can reach must sit behind a reverse proxy with authentication or a VPN. ([#1304](https://github.com/sortie-ai/sortie/issues/1304))
 
+- The JSON API can now acknowledge an item that needs a person: `POST /api/v1/attention/{id}/acknowledge` takes the item out of the attention count and keeps it listed with the time it was acknowledged, also across a restart, while a different or recurring cause on the issue shows as a new item. Sortie's HTTP server has no authentication, so a deployment that others can reach must sit behind a reverse proxy with authentication or a VPN. ([#1303](https://github.com/sortie-ai/sortie/issues/1303))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -92,6 +94,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `first_after_hop` to `run_history` and mark the earliest run after each stage hop already in the history. A later run in the same stage stays unmarked, and a run recorded before Sortie kept stage chains is never marked. ([#1336](https://github.com/sortie-ai/sortie/issues/1336))
 
 - Add the `reaction_escalations` table, which holds the escalation of each pull request reaction, one row per issue and reaction kind. An escalation standing at the upgrade's restart is not restored, and the next escalation of its kind records one. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
+
+- Add the `attention_acknowledgements` table, which keeps each acknowledged item's acknowledgement for as long as its cause lasts. ([#1303](https://github.com/sortie-ai/sortie/issues/1303))
 
 ## [1.27.0] - 2026-10-11
 

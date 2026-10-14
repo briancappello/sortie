@@ -1281,6 +1281,11 @@ type State struct {
 	// person acts on it. The durable mirror is the parked_issues table.
 	Parked map[string]*ParkedEntry
 
+	// AttentionAcknowledgements maps an attention item ID to when a person
+	// acknowledged the item. The durable mirror is the
+	// attention_acknowledgements table. Only the event loop mutates this map.
+	AttentionAcknowledgements map[string]time.Time
+
 	// StageHops maps issue ID to the issue's consecutive automatic stage
 	// hops since the last reset. The durable mirror is the stage_hops
 	// table. Only the event loop may mutate this map.
@@ -1408,6 +1413,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		BudgetAnnounced:           make(map[string]BudgetAnnouncement),
 		BudgetHoldNoticed:         make(map[string]string),
 		Parked:                    make(map[string]*ParkedEntry),
+		AttentionAcknowledgements: make(map[string]time.Time),
 		StageHops:                 make(map[string]*StageHopEntry),
 		AgentTotals:               totals,
 		ReactionAttempts:          make(map[string]int),
@@ -1722,6 +1728,10 @@ type RuntimeSnapshotResult struct {
 	// force at capture; 0 means no limit.
 	MaxTokens   int `json:"max_tokens"`
 	MaxSessions int `json:"max_sessions"`
+
+	// AttentionAcknowledgements is a copy of State.AttentionAcknowledgements,
+	// keyed by attention item ID.
+	AttentionAcknowledgements map[string]time.Time `json:"-"`
 }
 
 // ActiveElapsedSeconds sums wall-clock elapsed seconds across all running
@@ -1949,6 +1959,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 
 	snap.MaxTokens = state.MaxTokens
 	snap.MaxSessions = state.MaxSessions
+	snap.AttentionAcknowledgements = maps.Clone(state.AttentionAcknowledgements)
 
 	snap.BudgetExhaustedCount = len(state.BudgetExhausted)
 	budgetExhausted := make([]SnapshotBudgetEntry, 0, len(state.BudgetExhausted))

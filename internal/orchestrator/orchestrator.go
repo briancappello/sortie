@@ -81,6 +81,8 @@ type OrchestratorStore interface {
 	SaveReactionEscalation(ctx context.Context, rec persistence.ReactionEscalation) error
 	EndReactionEscalation(ctx context.Context, issueID, kind string) error
 	DeleteReactionEscalations(ctx context.Context, issueID string) error
+	SaveAttentionAcknowledgement(ctx context.Context, ack persistence.AttentionAcknowledgement) error
+	DeleteAttentionAcknowledgements(ctx context.Context, itemIDs []string) error
 }
 
 var _ OrchestratorStore = (*persistence.Store)(nil)
@@ -90,9 +92,10 @@ var _ OrchestratorStore = (*persistence.Store)(nil)
 type Observer interface {
 	// OnStateChange is called on the event loop goroutine after tick
 	// completion, worker exit, retry fire, each agent-lane message (agent
-	// event, turn start, self-review progress, unaccounted turns), and the
-	// start of shutdown. It can run many times a second while sessions are
-	// active.
+	// event, turn start, self-review progress, unaccounted turns), an
+	// operator request the loop applies that changes what the API serves (a
+	// retry made due now, an attention item acknowledged), and the start of
+	// shutdown. It can run many times a second while sessions are active.
 	OnStateChange()
 }
 
@@ -1193,6 +1196,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		slog.Int("budget_exhausted", len(o.state.BudgetExhausted)),
 	)
 
+	o.pruneAttentionAcknowledgements(ctx)
 	o.notifyObservers()
 }
 

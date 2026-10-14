@@ -275,6 +275,15 @@ One row per issue, holding current state since the last reset rather than histor
 
 One row per issue, holding current state rather than history. The orchestrator writes the row on its event loop at the observation sites and applies the record rule in one statement, so a stored merge survives a later terminal read; the poll tick's dispatch deletes the row when it picks the issue up again (Section 4.1.8). The row is its own table, not a column of `run_history`, because an ending can be observed while a run is in flight, before that run's row exists, and a handoff or a merge belongs to the issue rather than to one run. The table has no index beyond its primary key and no backfill: an issue that ended before the table existed has no row and reports no outcome. `GET /api/v1/runs` selects runs by this table's `observed_at` through the ending bounds (Section 13.7.2).
 
+**`attention_acknowledgements`**: attention items a person has seen (migration 034)
+
+| Column            | Type             | Notes                                                                                   |
+| ----------------- | ---------------- | --------------------------------------------------------------------------------------- |
+| `item_id`         | TEXT PRIMARY KEY | The `id` of the attention item (§13.7.2)                                                |
+| `acknowledged_at` | TEXT NOT NULL    | RFC 3339 with nanoseconds, in UTC; when the item was first acknowledged                 |
+
+One row per acknowledged item, holding current state rather than history. The orchestrator writes the row on its event loop when it records an acknowledgement, inserting the row or replacing the row with the same `item_id`; it saves the row before it changes the in-memory map, so every acknowledgement a client was told about survives a restart. A repeat request writes nothing, which keeps the first time. The poll tick deletes the rows of every item the state no longer derives, in one statement, and only on a tick whose candidate fetch succeeded (Section 8.1). The startup load reads every row before the event loop starts, and a row with an empty `item_id` or a time that does not parse is skipped. The table references no other table, because a budget hold exists only in memory until the first tick that reads the candidate issues rebuilds it.
+
 ### 19.3 Migration Strategy
 
 - Migrations are numbered sequentially and applied in order at startup.

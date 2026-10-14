@@ -388,6 +388,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		orchestrator.PopulateBudgetHoldNotices(state, budgetHoldNoticeRows, br.logger)
 	}
 
+	attentionAcknowledgementRows, err := store.ListAttentionAcknowledgements(ctx)
+	if err != nil {
+		br.logger.Warn("failed to load attention acknowledgements, starting with none", slog.Any("error", err))
+	} else {
+		orchestrator.PopulateAttentionAcknowledgements(state, attentionAcknowledgementRows, br.logger)
+	}
+
 	agentCtor, err := registry.Agents.Get(br.cfg.Agent.Kind)
 	if err != nil {
 		br.logger.Error("unknown agent kind", slog.String("kind", br.cfg.Agent.Kind), slog.Any("error", err))
@@ -890,6 +897,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			SnapshotFn:       o.SnapshotFunc(),
 			RefreshFn:        o.RefreshFunc(),
 			RetryNowFn:       o.RetryNowFunc(),
+			AcknowledgeFn:    o.AcknowledgeFunc(),
 			WorkflowShapeFn:  o.WorkflowShape,
 			HealthFn:         o.Health,
 			Logger:           br.logger,

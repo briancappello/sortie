@@ -24,6 +24,8 @@ A retry whose selection the configuration in force changes emits one `Info` reco
 
 A request that makes a retry due (`POST /api/v1/retries/{identifier}/run`, §13.7.2) emits one `Info` record, message `"retry made due on request"`, through the issue-scoped logger, carrying `attempt` and `replaced_due_at_ms`, the due time the request replaced.
 
+A request that records an acknowledgement of an attention item (`POST /api/v1/attention/{id}/acknowledge`, §13.7.2) emits one `Info` record, message `"attention item acknowledged"`, carrying `item_id` and `kind`, through the issue-scoped logger when the item concerns an issue. A repeat of an acknowledged item emits none. A failed save emits one `Error` record, message `"failed to persist attention acknowledgement"`, carrying `item_id`, `kind`, and `error`, and the item stays unacknowledged. A failed deletion of the acknowledgements of items that no longer exist emits one `Warn` record, message `"failed to delete attention acknowledgements"`, carrying `error`; the next poll tick that reads the candidate issues retries it.
+
 An issue that carries the stage labels of two or more dispatch rules emits one `Warn` record, message `"several stage labels found"`, through the issue-scoped logger, carrying `stage_labels` (every stage label the issue carries, as written in the workflow, in rule list order) and `rule_name` (the rule the evaluation selected). The record is emitted once per evaluation of the rules, on the poll tick and on a retry that is routed afresh, and never for a retry whose frozen selection stands.
 
 A stage hop (§7.3) records its decision result on the run's `run_history` row and emits `stage.advanced` or `stage.not_advanced` (§10.4.7), and it emits its log records through the issue-scoped logger. The attributes `source_rule`, `target_rule`, `target_label`, `hop_count`, `hop_ceiling`, and `chain_path` recur: `hop_ceiling` is the per-issue ceiling in force, and `chain_path` is the rule chain through the source rule, rule names joined with ` -> `.
@@ -133,7 +135,7 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 - `between_stages` (list of issues between stages, sorted by identifier and then issue ID; always present, empty when none). An issue is between stages when a stage hop was made and no run of the issue was dispatched since. Each row carries the issue's ID, identifier, and display identifier, the title, tracker link, type, and state the hopping run read, the issue's labels as the hop leaves them (the run's read without the stage labels the hop removes and with the stage label it adds), the stage the issue left, the stage it reached, the stage label the hop added, the time of the hop, and the dispatch time of the pass the hopping run belongs to. The row also names the stage reached as its dispatch rule, places that rule on its stage chain, and carries the agent kind and configured model a dispatch of that rule resolves to under the configuration as of the latest poll tick, which the orchestrator refreshes every tick and sets at startup so that a hop made between ticks already finds them; each is omitted when that configuration names no rule with a stage label under that name. An issue joins the list when its hop is made and leaves it when a run of the issue is dispatched, whichever lane dispatches it, or when a reset of the hop count drops the hop record. The snapshot leaves out an issue that has a running session or a queued retry, so no issue is in `between_stages` and in `running` or `retrying` at once. The hop record persists the display identifier, title, link, type, labels, state, pass dispatch time, and whether a run was dispatched since the hop, and a restart restores them, so it serves the rows it served before. A hop record written before the upgrade that introduced the type, labels, and state serves none of them for as long as it lasts, which is until the next stage dispatches. The title, link, type, labels, and state are masked as Section 15.3 states, in the snapshot rather than in the state they are copied from. Section 13.7.2 gives the keys and how to read them
 - `config` (the effective workflow shape: the tracker states, the dispatch rules in order with how each is selected, the stage chains their `next` links form, the hop ceiling, the reaction kinds the process applies with their limits, escalation, and timing, the token rates, the session and token budgets, the poll interval, the concurrency caps, the SSH hosts, and whether each agent selection reports token usage). It reports the configuration in force after the last successful load, except that a reaction appears exactly when the process applies it, with the settings it applies, and the token rates are the ones the process started with. It carries no credential. Section 13.7.2 gives the keys and how to read them
 - `health` (the health of Sortie's own checks: `database`, `preflight`, `workflow`, `poll`, and `scm`, the last `null` when no reaction uses a source-control provider). Every check reports whether its latest run failed, when it last ran, when it last passed, how many runs in a row have failed, when the first of those failed, and the latest failure's error text. `database` is the ping the poll tick makes of the store after it applies the configuration and before it reconciles. `preflight` is the result of the tick's dispatch preflight, with the error text of the failures it found. `workflow` is the loads of the workflow file, the watcher's and the reload each tick's preflight forces, with the name of the file in effect, so a reload that fails is reported while the previous configuration stays in effect. `poll` is the poll loop: one run per poll tick, whether the timer or a refresh ran it, with how the tick ended, the tracker's latest read error, and when the next poll is due. `scm` is the reads the orchestrator makes of the source-control provider the reactions share; it reflects the most recent provider read across every pull request, so its last run dates that read, and a provider that no reaction reads is not checked. A check's error text is masked as Section 15.3 states, in the snapshot rather than in the record it is copied from. Section 13.7.2 gives the keys and how to read them
-- `attention` (list of what needs a person; always present, empty when nothing does). The orchestrator derives the list on each request from the snapshot above and the `health` checks and stores it nowhere, so an item exists exactly while its cause holds. Its causes are a parked issue, an issue held by a per-issue budget ceiling, a pending reaction whose escalation stands, a workflow file that failed to load, and a dispatch preflight that fails for a reason other than that load. Each item carries the issue it concerns (none for a cause that concerns the process), when its cause began, a severity, the one action a client should offer, the facts behind it, and wording for why it needs a person and what clears it, taken from the status sentence table. Section 13.7.2 gives the keys and how to read them
+- `attention` (list of what needs a person; always present, empty when nothing does). The orchestrator derives the list on each request from the snapshot above and the `health` checks and stores it nowhere, so an item exists exactly while its cause holds. A person can acknowledge an item, and Sortie stores that acknowledgement, so it survives a restart and lasts while its item does. Its causes are a parked issue, an issue held by a per-issue budget ceiling, a pending reaction whose escalation stands, a workflow file that failed to load, and a dispatch preflight that fails for a reason other than that load. Each item carries the issue it concerns (none for a cause that concerns the process), when its cause began, when a person acknowledged it (none while unacknowledged), a severity, the one action a client should offer, the facts behind it, and wording for why it needs a person and what clears it, taken from the status sentence table. The attention count leaves acknowledged items out. Section 13.7.2 gives the keys and how to read them
 - `version` and `started_at` (the Sortie version, and the time the process started, taken before the startup work so it is the instant the readiness probe counts its uptime from). Section 13.7.2 gives the keys
 
 Recommended snapshot error modes:
@@ -226,7 +228,7 @@ Provide a JSON REST API under `/api/v1/*` for current runtime state and operatio
 Minimum endpoints:
 
 - `GET /api/v1/state`
-  - Returns a summary view of the current system state (running sessions, retry queue/delays, pending pull request reactions, issues between stages, what needs a person, aggregate token/runtime totals, latest rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, the process start time, and any additional tracked summary fields).
+  - Returns a summary view of the current system state (running sessions, retry queue/delays, pending pull request reactions, issues between stages, what needs a person and which of it a person has acknowledged, aggregate token/runtime totals, latest rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, the process start time, and any additional tracked summary fields).
   - Suggested response shape:
 
     ```json
@@ -241,7 +243,7 @@ Minimum endpoints:
         "parked": 1,
         "pending_reactions": 2,
         "between_stages": 1,
-        "attention": 4
+        "attention": 3
       },
       "running": [
         {
@@ -506,6 +508,7 @@ Minimum endpoints:
           "kind": "workflow_reload_failed",
           "severity": "critical",
           "since": "2026-02-24T20:14:51Z",
+          "acknowledged_at": null,
           "reason_text": "WORKFLOW.md failed to load",
           "why_text": "WORKFLOW.md failed to load (config: agent.turn_timeout_ms: must be greater than 0), so poll ticks dispatch nothing until it loads, and the configuration that last loaded stays in effect.",
           "clears_text": "Clears when WORKFLOW.md loads again, which Sortie tries each time the file is saved and on every poll tick.",
@@ -520,6 +523,7 @@ Minimum endpoints:
           "kind": "parked",
           "severity": "warning",
           "since": "2026-02-24T20:05:00Z",
+          "acknowledged_at": null,
           "issue_id": "jkl012",
           "issue_identifier": "MT-652",
           "issue_title": "Rotate the signing keys",
@@ -538,6 +542,7 @@ Minimum endpoints:
           "kind": "budget_held",
           "severity": "warning",
           "since": "2026-02-24T20:12:00Z",
+          "acknowledged_at": "2026-02-24T20:13:05Z",
           "issue_id": "ghi789",
           "issue_identifier": "MT-651",
           "issue_title": "Migrate the billing tables",
@@ -557,6 +562,7 @@ Minimum endpoints:
           "kind": "reaction_escalated",
           "severity": "warning",
           "since": "2026-02-24T20:12:40Z",
+          "acknowledged_at": null,
           "issue_id": "mno345",
           "issue_identifier": "MT-653",
           "issue_title": "Add the export button",
@@ -1047,6 +1053,35 @@ Minimum endpoints:
   - Every `202` and `409` response carries `outcome_text`: one sentence that states what the response confirms, a retry due now, or that nothing was queued because Sortie is shutting down. It never states an effect still to come, because whether the retry starts is decided by the fire after the response.
   - Sortie's HTTP server has no authentication, so anyone who can reach it can run a retry early. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
 
+- `POST /api/v1/attention/{id}/acknowledge`
+  - Records that a person has seen an attention item. The item leaves `counts.attention` and stays in the `attention` array of `GET /api/v1/state` with `acknowledged_at` set, so a client moves it out of the main list and still shows when it was acknowledged. `{id}` is the item's `id`, one path segment, matched exactly against the items the state derives when Sortie takes the request. The route ignores the request body and the query string. Every item can be acknowledged, whatever its `action.kind`.
+  - The event loop checks that the item is current and records the acknowledgement in one iteration, so no poll tick clears the item between the check and the write. Sortie saves the acknowledgement to the store before it changes the state it serves, so every `200` survives a restart. The request makes no call to the tracker, the forge, or an agent. It changes nothing in the tracker or the pull request, and nothing in Sortie but the acknowledgement: it releases no park, lifts no hold, ends no escalation, and leaves every retry as it was.
+  - The response waits for the event loop to take the request, with no fixed bound: it arrives at once while the loop is idle, and at the end of the iteration in progress otherwise. The wait ends when the loop takes the request, when the client disconnects, or when shutdown begins. A request withdrawn by a disconnect or by shutdown changes nothing.
+  - Response (`200 OK`) shape:
+
+    ```json
+    {
+      "acknowledged": true,
+      "already_acknowledged": false,
+      "requested_at": "2026-02-24T20:13:05Z",
+      "id": "464f9ff8ea54c4c6cfb43af394234d57",
+      "kind": "budget_held",
+      "issue_id": "ghi789",
+      "issue_identifier": "MT-651",
+      "acknowledged_at": "2026-02-24T20:13:05Z",
+      "outcome_text": "Acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears."
+    }
+    ```
+
+  - The `200` also carries `display_identifier` when the issue has one. An item of a cause that concerns the process has no issue, so its response omits every issue key. `id`, `kind`, and the issue keys are the facts `outcome_text` is built from.
+  - A repeat for an item that is already acknowledged answers `200` with `already_acknowledged` true and `acknowledged_at` set to the first acknowledgement. It changes nothing, keeps the first time, and emits no change signal on `GET /api/v1/events`. Two requests for one item reach the event loop one after the other: the first records, and the second is the repeat.
+  - The route answers `200` and not `202`, because the acknowledgement is recorded and saved when the response is written.
+  - `404 Not Found` with code `attention_item_not_found` answers an `id` that no current item carries: an unknown `id`, and an item that cleared before the loop took the request. The client refetches the state, and the item is gone.
+  - `409 Conflict` answers a request made while Sortie shuts down, or one the loop had not yet taken when shutdown began. Its body holds `acknowledged` false, `already_acknowledged` false, `requested_at`, and `outcome_text`, and nothing changed.
+  - `500 Internal Server Error` with code `acknowledgement_not_saved` answers a request whose acknowledgement the store did not save. Nothing changed, the item stays unacknowledged, and the person acknowledges again.
+  - Every `200` and `409` response carries `outcome_text`: one sentence that states what the response confirms, an item acknowledged, an item that was already acknowledged, or that nothing was acknowledged because Sortie is shutting down. It names which item of the issue it concerns by the item's `reason_text`, and states the scope of what the response confirms, that the item comes back only if a new cause appears.
+  - Sortie's HTTP server has no authentication, so anyone who can reach it can acknowledge an attention item and take it out of the attention count. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
+
 - `GET /api/v1/events`
   - Opens a server-sent event stream that signals each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. A signal is never a payload: it names no issue, agent message, or figure, and the stream exposes nothing that `GET /api/v1/state` does not.
   - Answers `200` with `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` so a default nginx does not buffer. The route takes no parameters and ignores the query string. A method other than `GET` answers `405` with `Allow: GET` and the JSON error envelope.
@@ -1060,7 +1095,7 @@ Minimum endpoints:
     ```
 
     `<revision>` is an unsigned decimal counter that rises with every change. It starts from the wall-clock time at server start in nanoseconds, so a restarted process does not repeat the revisions of the previous one. `data` is the empty JSON object, because a browser dispatches no event whose data is empty; a client ignores members it does not know.
-  - A signal follows each change after the change is applied, so a refetch made after a signal sees every change the signal counted. Signals come from every event-loop iteration that ends a tick, a refresh, a worker exit, a retry, or a request that makes a retry due; from every message of a running agent session (an agent event, a turn start, a self-review progress report, or an unaccounted-turn count); from the start of shutdown; and from every load of the workflow file by the watcher, whether it succeeds or fails. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, the elapsed times a client computes from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+  - A signal follows each change after the change is applied, so a refetch made after a signal sees every change the signal counted. Signals come from every event-loop iteration that ends a tick, a refresh, a worker exit, a retry, a request that makes a retry due, or a request that records an acknowledgement; from every message of a running agent session (an agent event, a turn start, a self-review progress report, or an unaccounted-turn count); from the start of shutdown; and from every load of the workflow file by the watcher, whether it succeeds or fails. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, the elapsed times a client computes from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
   - A stream writes at most one change signal per second. The first change after a quiet second is written at once; the changes made during a second are written together as one signal when it ends, and none is dropped. Two consecutive signals on one stream never carry the same `id`.
   - Reconnect is decided by exact string equality of the `Last-Event-ID` request header with the current revision, never by ordering. An equal value opens a stream with no signal until the next change. An absent header, an earlier revision, a revision of an earlier process, or any other string gets one signal at once.
   - A heartbeat is written every 15 seconds, counted from the stream's start.
@@ -1171,8 +1206,8 @@ API design notes:
   - `hopped_at` is when the hop was made, in UTC, and `null` when the record holds no time. `dispatched_at` is the pass of the run that made the hop, which the next stage's run continues, in UTC, and `null` when the record holds no pass time.
   - An issue is listed from its hop until a run of it is dispatched, or until a reset of its hop count drops the record (Section 13.1). It is never also in `running` or `retrying`, and it can also be in `budget_exhausted`.
   - The list is sorted by `issue_identifier`, then `issue_id`, and `counts.between_stages` equals its length. The per-issue response answers for an issue known only through such a row.
-- An attention item, on the `attention` array of `GET /api/v1/state`, describes one thing that needs a person. The orchestrator derives the list on each request from the snapshot and the health checks, so an item exists exactly while its cause holds and disappears on the first request after the cause clears; nothing is stored, and nothing needs reconciling at startup. The keys are additive; no existing key changes name, type, or meaning. A client that shows the list counts, orders, and words nothing itself.
-  - `attention` is always present and is `[]` when nothing needs a person. `counts.attention` equals its length.
+- An attention item, on the `attention` array of `GET /api/v1/state`, describes one thing that needs a person. The orchestrator derives the list on each request from the snapshot and the health checks, so an item exists exactly while its cause holds and disappears on the first request after the cause clears. The list is stored nowhere, while the acknowledgements of its items are stored (`acknowledged_at`). The keys are additive; no existing key changes name, type, or meaning. A client that shows the list counts, orders, and words nothing itself.
+  - `attention` is always present and is `[]` when nothing needs a person. `counts.attention` counts the items whose `acknowledged_at` is `null`, so an acknowledged item leaves the count and stays in the list.
   - `kind` is one of the following. Each cause yields one item, with the `since`, `severity`, and `action` the row gives.
 
     | `kind` | Cause | `since` | `severity` | `action.kind` |
@@ -1186,9 +1221,14 @@ API design notes:
   - A preflight that fails on the workflow load yields no `preflight_failed` item, because the reload item already names the cause. Without that rule one broken file shows an item for the load and another for the preflight, and after the watcher loads the fixed file the preflight check keeps the load error until the next tick and raises an item for a cause that is gone. A `preflight_failed` item's `since` is when the preflight began failing, which predates the item when the failing streak began on the workflow load.
   - `severity` is `critical` for a kind under which poll ticks dispatch nothing for any issue and `warning` for a kind about one issue. It is fixed per kind and never grows with age.
   - `since` is `null` only for a park whose stored time does not parse. A hold's `since` is the row's `exhausted_at`, and after a restart it is the first poll tick, because the onset of a hold lives only in memory.
-  - `action` holds `kind`, which is `open_issue`, `open_pull_request`, or `acknowledge`, and `url`, present exactly for the first two. `acknowledge` is the action of an item with nothing to open; it promises no route.
+  - `acknowledged_at` is present on every item. It is when a person acknowledged the item, in UTC, and `null` while the item is unacknowledged. An acknowledgement moves no item in the order and changes none of its facts.
+    - An acknowledgement belongs to one episode of its item's cause: from the item's derivation until the first poll tick that reads the candidate issues and no longer derives the item. That tick deletes the acknowledgement. A different reason on the issue, or the same reason after its cause cleared, shows as a new item with `acknowledged_at` `null`.
+    - A poll tick that cannot read the candidate issues, because its preflight or its candidate fetch failed, deletes no acknowledgement. The set of budget holds changes only on a tick that reads the candidates, and before the first such tick after a restart it is empty, so a deletion then would drop the acknowledgement of every hold during a tracker outage.
+    - A hold whose issue left the active states and came back returns unacknowledged, with its earlier `since`, because leaving the candidates clears a hold and the tick that found it gone deleted its acknowledgement.
+    - Acknowledgements survive a restart. Sortie reloads them before the event loop starts. A park and an escalation return with their `id` and keep their acknowledgement, and a hold keeps it once the first poll tick that reads the candidate issues rebuilds the hold, or earlier when the fire of a recovered retry holds the issue. That tick deletes the acknowledgement of every item it no longer derives. An item of a cause that concerns the process cannot span a restart, because startup stops on a workflow file that fails to load and on a preflight that fails, so its acknowledgement goes at that tick.
+  - `action` holds `kind`, which is `open_issue`, `open_pull_request`, or `acknowledge`, and `url`, present exactly for the first two. `acknowledge` is the action of an item with nothing to open. Every item can be acknowledged through `POST /api/v1/attention/{id}/acknowledge`, whatever its `action.kind`.
   - The issue keys (`issue_id`, `issue_identifier`, `display_identifier`, `issue_title`, `issue_url`) are copied from the source row as the row serves them, masked, with `display_identifier`, `issue_title`, and `issue_url` omitted when empty. An item of a cause that concerns the process omits every issue key.
-  - `id` is the lowercase hex of the first 16 bytes of SHA-256 over the JSON encoding of the string array `[kind, parts...]`, and the encoding never changes, because a client keys stored state by `id`. A time part is in UTC. The parts are the following; no masked string enters an `id`, so a secret registered later changes none.
+  - `id` is the lowercase hex of the first 16 bytes of SHA-256 over the JSON encoding of the string array `[kind, parts...]`, and the encoding never changes, because Sortie keys stored acknowledgements by `id` and a client may key its own state by it. A time part is in UTC. The parts are the following; no masked string enters an `id`, so a secret registered later changes none.
 
     | `kind` | Parts |
     |---|---|
@@ -1198,7 +1238,7 @@ API design notes:
     | `workflow_reload_failed` | `failing_since` in RFC 3339 with nanoseconds |
     | `preflight_failed` | `failing_since` in RFC 3339 with nanoseconds |
 
-  - No part changes while its cause holds, so an `id` stays the same across requests and across a restart for a park and for an escalation, which keep their time. A recurrence changes a part, so a stored acknowledgement never hides a new cause: a new park has a new time, a hold reached again after a raise or under an edited ceiling has a new ceiling, a different budget reason is a new reason, an escalation that ended and began again has a new time, and a failure after a pass has a new `failing_since`. The park time enters at whole seconds because the store keeps a park at that precision, so the precision survives a restart.
+  - No part changes while its cause holds, so an `id` stays the same across requests and across a restart for a park and for an escalation, which keep their time. A recurrence changes a part: a new park has a new time, a hold reached again after a raise or under an edited ceiling has a new ceiling, a different budget reason is a new reason, an escalation that ended and began again has a new time, and a failure after a pass has a new `failing_since`. The one recurrence that changes no part is a hold that clears and returns under the same reason and ceiling, because its issue left the active states and came back or its ceiling was raised and restored: it gets its `id` back, and no acknowledgement carries over to it, because Sortie deletes an acknowledgement once a poll tick that reads the candidate issues no longer finds its item. So a stored acknowledgement never hides a new cause. The park time enters at whole seconds because the store keeps a park at that precision, so the precision survives a restart.
   - The list is ordered by `severity` (`critical` before `warning`), then `since` (`null` first, then ascending), then `id` ascending. The order is total, so the same inputs serve the same list.
   - `reason_text`, `why_text`, and `clears_text` are English sentences taken from the status sentence table, one template per park reason, per budget reason, per check, and per escalating reaction kind (the template of an escalated reaction takes its `why_text` from the row's `escalation_trigger`). `reason_text` is a short phrase without a final period; `why_text` and `clears_text` are one sentence each, ending with a period. They follow the rules of the status sentences below: only a fact Sortie records, masked as Section 15.3 states, no clock time, date, cost, or stage, and `Status not available` for a part that fails to render, with the failure logged. The item stays when a part fails, so neither the list nor its count drops a cause.
   - `evidence` holds the facts behind the item. A member is present exactly on the kinds named and absent on every other.
@@ -1279,7 +1319,7 @@ API design notes:
   - An outcome that starts a session names the budget hold, the session budget or the token budget, when a budget gate would stop it. An outcome that a configured triage command replaces says that the triage command runs, and an outcome that a spent count replaces says that the reaction escalates, in the order the kind's pass decides them.
   - The list is not exhaustive. It leaves out what the configuration does not decide: a stop the agent requests, a person's tracker or pull request edit other than a label command, a failed tracker, forge, or store call, a withheld handoff and the park it leads to, and a wait for a free agent slot. A client does not read a missing branch as one that cannot happen.
   - A pair whose condition or text fails to render is left out of the list and the failure is logged. The route answers as it would otherwise.
-- Endpoints should be read-only except for operational triggers like `/refresh` and `/retries/{identifier}/run`.
+- Endpoints should be read-only except for operational triggers like `/refresh`, `/retries/{identifier}/run`, and `/attention/{id}/acknowledge`.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state logic.
