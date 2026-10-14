@@ -1,1 +1,0 @@
-import{Ln as e,Vn as t,o as n,r}from"./index-BG7UPYKr.js";var i=t();function a({identifier:e}){let t=n(e);return(0,i.jsx)(r,{identifier:e,row:t})}function o(){let{identifier:t}=e();return t===void 0?void 0:(0,i.jsx)(a,{identifier:t})}export{o as IssueScreen};
