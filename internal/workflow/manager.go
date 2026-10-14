@@ -103,6 +103,7 @@ type Manager struct {
 	currentTemplateIndex map[string]*prompt.Template
 	lastLoadErr          error
 	loadStatus           LoadStatus
+	loadNotifier         func()
 
 	watcher *fsnotify.Watcher
 	done    chan struct{}
@@ -254,6 +255,28 @@ func (m *Manager) SetLogger(logger *slog.Logger) {
 	m.mu.Unlock()
 }
 
+// SetLoadNotifier registers a function the watcher calls after each load it
+// records, whether the load succeeded or failed. The function runs after the
+// manager lock is released, so [Manager.Config] and [Manager.LoadStatus]
+// already return that load's outcome. [Manager.Reload] does not call it, and
+// loads recorded before registration notify nothing. A nil argument clears
+// the notifier. Safe for concurrent use; the file-watcher goroutine may be
+// running.
+func (m *Manager) SetLoadNotifier(notify func()) {
+	m.mu.Lock()
+	m.loadNotifier = notify
+	m.mu.Unlock()
+}
+
+func (m *Manager) notifyLoad() {
+	m.mu.RLock()
+	notify := m.loadNotifier
+	m.mu.RUnlock()
+	if notify != nil {
+		notify()
+	}
+}
+
 // Reload synchronously re-reads the workflow file, parses config and
 // prompt, and swaps the effective values. On error the previous config
 // is retained and the error is returned. This supports the orchestrator's
@@ -382,6 +405,7 @@ func (m *Manager) reload() {
 		m.lastLoadErr = err
 		m.recordLoadLocked(err)
 		m.mu.Unlock()
+		m.notifyLoad()
 		return
 	}
 
@@ -393,6 +417,7 @@ func (m *Manager) reload() {
 			m.lastLoadErr = err
 			m.recordLoadLocked(err)
 			m.mu.Unlock()
+			m.notifyLoad()
 			return
 		}
 	}
@@ -405,6 +430,7 @@ func (m *Manager) reload() {
 	m.recordLoadLocked(nil)
 	m.mu.Unlock()
 	logger.Info("workflow reloaded", slog.String("path", m.path))
+	m.notifyLoad()
 }
 
 // loadPipeline runs the full Load -> NewServiceConfig -> dispatch

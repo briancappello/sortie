@@ -574,7 +574,7 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
   review_metadata = null
   phase_err = null
   phase_cut = false
-  cfg = current_config()  // re-read for dynamic reload; NOT the source of turn_timeout_ms (R-9)
+  cfg = current_config()  // re-read for dynamic reload; NOT the source of turn_timeout_ms
   signal_admits = pending_reason == "" OR pending_reason == "needs-human-review" OR pending_reason == "no-change-needed"
   admitted = cfg.self_review.enabled AND issue.state is active AND deps.Posture.DrivesIssueState() AND signal_admits
   if admitted AND worker_ctx is not done:

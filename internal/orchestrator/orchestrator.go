@@ -84,8 +84,11 @@ var _ OrchestratorStore = (*persistence.Store)(nil)
 // Observer receives notifications when orchestrator state changes.
 // Implementations must not block and must not mutate state.
 type Observer interface {
-	// OnStateChange is called after each event loop iteration that modifies
-	// state (tick completion, worker exit, retry fire).
+	// OnStateChange is called on the event loop goroutine after tick
+	// completion, worker exit, retry fire, each agent-lane message (agent
+	// event, turn start, self-review progress, unaccounted turns), and the
+	// start of shutdown. It can run many times a second while sessions are
+	// active.
 	OnStateChange()
 }
 
@@ -632,6 +635,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			o.draining.Store(true)
 			tickTimer.Stop()
 			o.pollHealth.schedule(time.Time{})
+			o.notifyObservers()
 			o.drainRunningWorkers()
 			o.drainTriageRuns()
 			o.drainTrackerOps()
@@ -691,15 +695,19 @@ func (o *Orchestrator) Run(ctx context.Context) {
 
 		case msg := <-o.agentEventCh:
 			o.applyAgentEvent(ctx, msg, true)
+			o.notifyObservers()
 
 		case msg := <-o.selfReviewCh:
 			o.applySelfReviewProgress(msg)
+			o.notifyObservers()
 
 		case msg := <-o.turnStartedCh:
 			o.applyTurnStarted(msg)
+			o.notifyObservers()
 
 		case msg := <-o.unaccountedTurnsCh:
 			o.applyUnaccountedTurns(ctx, msg)
+			o.notifyObservers()
 
 		case req := <-o.snapshotCh:
 			snap := RuntimeSnapshot(o.state, time.Now())
@@ -1980,15 +1988,19 @@ func (o *Orchestrator) drainRunningWorkers() {
 
 		case msg := <-o.agentEventCh:
 			o.applyAgentEvent(drainCtx, msg, false)
+			o.notifyObservers()
 
 		case msg := <-o.selfReviewCh:
 			o.applySelfReviewProgress(msg)
+			o.notifyObservers()
 
 		case msg := <-o.turnStartedCh:
 			o.applyTurnStarted(msg)
+			o.notifyObservers()
 
 		case msg := <-o.unaccountedTurnsCh:
 			o.applyUnaccountedTurns(drainCtx, msg)
+			o.notifyObservers()
 
 		case req := <-o.snapshotCh:
 			snap := RuntimeSnapshot(o.state, time.Now())
@@ -2068,7 +2080,7 @@ func (o *Orchestrator) cancelRetryTimers() {
 }
 
 // notifyObservers calls [Observer.OnStateChange] on each observer. Called
-// after tick, worker exit, and retry timer handling, not after agent events.
+// from the event loop goroutine only, after the change is applied.
 func (o *Orchestrator) notifyObservers() {
 	for _, obs := range o.observers {
 		obs.OnStateChange()

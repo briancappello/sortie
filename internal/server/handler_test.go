@@ -3088,6 +3088,7 @@ func TestMethodNotAllowed(t *testing.T) {
 		{name: "DELETE /api/v1/state", method: http.MethodDelete, path: "/api/v1/state"},
 		{name: "GET /api/v1/refresh", method: http.MethodGet, path: "/api/v1/refresh"},
 		{name: "PUT /api/v1/refresh", method: http.MethodPut, path: "/api/v1/refresh"},
+		{name: "POST /api/v1/events", method: http.MethodPost, path: "/api/v1/events"},
 		{name: "POST /api/v1/MT-100", method: http.MethodPost, path: "/api/v1/MT-100"},
 		{name: "DELETE /api/v1/MT-100", method: http.MethodDelete, path: "/api/v1/MT-100"},
 	}

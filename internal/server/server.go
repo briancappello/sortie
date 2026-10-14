@@ -273,6 +273,9 @@ type Server struct {
 	runHistory       RunHistoryReader
 	tokenRates       TokenRates
 	stats            StatsFunc
+
+	changes *changeFeed
+	timing  streamTiming
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -321,6 +324,12 @@ func New(params Params) *Server {
 		runHistory:       params.RunHistory,
 		tokenRates:       params.TokenRates,
 		stats:            params.Stats,
+		changes:          newChangeFeed(),
+		timing: streamTiming{
+			heartbeat:      15 * time.Second,
+			signalInterval: time.Second,
+			frameDeadline:  2 * time.Second,
+		},
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -340,6 +349,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/runs", s.routeRuns)
 	mux.HandleFunc("/api/v1/stats", s.routeStats)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
+	mux.HandleFunc("/api/v1/events", s.routeEvents)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 
 	if params.MetricsRegistry != nil {
@@ -357,6 +367,7 @@ func New(params Params) *Server {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	s.httpServer.RegisterOnShutdown(s.changes.close)
 
 	return s
 }
@@ -385,7 +396,9 @@ func (s *Server) Serve(ln net.Listener) error {
 
 // Shutdown gracefully shuts down the server without interrupting
 // in-flight requests. Sets the draining flag as defense-in-depth
-// before delegating to [http.Server.Shutdown].
+// before delegating to [http.Server.Shutdown]. Every open event stream
+// ends as soon as shutdown begins, so its connection stops counting as
+// active.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.drainingFlag.Store(true)
 	return s.httpServer.Shutdown(ctx)
@@ -399,5 +412,10 @@ func (s *Server) SetDraining() {
 	s.drainingFlag.Store(true)
 }
 
-// OnStateChange satisfies [orchestrator.Observer]. Currently a no-op.
-func (s *Server) OnStateChange() {}
+// OnStateChange satisfies [orchestrator.Observer] and tells every open event
+// stream that something the API serves has changed. It performs no I/O,
+// never blocks, and waits on nothing, so it is safe for concurrent use from
+// any goroutine, before [Server.Serve] and after [Server.Shutdown].
+func (s *Server) OnStateChange() {
+	s.changes.publish()
+}

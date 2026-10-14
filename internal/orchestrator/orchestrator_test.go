@@ -1773,6 +1773,50 @@ func TestOrchestrator_UnaccountedTurnsRelayWritesWithoutWorkerExit(t *testing.T)
 	})
 }
 
+func TestOrchestrator_RunNotifiesObserversAfterAgentLaneMessage(t *testing.T) {
+	t.Parallel()
+
+	const id = "ISSUE-LANE-NOTIFY"
+	tests := []struct {
+		name string
+		send func(o *Orchestrator)
+	}{
+		{"token usage event", func(o *Orchestrator) { o.agentEventCh <- agentEventMsg{id, tokenUsageEvent(1, 1, 2, 0)} }},
+		{"turn start", func(o *Orchestrator) { o.turnStartedCh <- turnStartedMsg{IssueID: id, TurnsStarted: 2} }},
+		{"self-review progress", func(o *Orchestrator) { o.selfReviewCh <- selfReviewProgressMsg{IssueID: id, Iteration: 1} }},
+		{"unaccounted turns", func(o *Orchestrator) { o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: id, UnaccountedTurns: 3} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := NewState(60000, 4, 0, nil, AgentTotals{})
+			state.Running[id] = queuedOrderingIssueEntry(id)
+			o := budgetOrchestrator(state, budgetTickConfig(0), &stubStore{}, &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}})
+			o.drainTimeout = 100 * time.Millisecond
+			notified := make(chan struct{}, 16)
+			o.AddObserver(observerFunc(func() { notified <- struct{}{} }))
+			var running sync.WaitGroup
+			running.Go(func() { o.Run(t.Context()) })
+			t.Cleanup(running.Wait)
+
+			<-notified
+			_, _ = o.SnapshotFunc()()
+			for len(notified) > 0 {
+				<-notified
+			}
+			tt.send(o)
+
+			select {
+			case <-notified:
+			case <-time.After(5 * time.Second):
+				t.Errorf("observer not called within 5 seconds of the %s, want a call with no tick in between", tt.name)
+			}
+		})
+	}
+}
+
 // waitForTurnCount polls snapshots until issueID reports want, failing on
 // a larger value or at the deadline. Run applies turn-started messages
 // asynchronously to snapshot requests, so a single read can race ahead.
