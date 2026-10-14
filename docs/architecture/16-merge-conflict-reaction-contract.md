@@ -28,7 +28,7 @@ Not every adapter can satisfy the rule. The Gitea adapter's single `mergeable` b
 
 The merge-conflict reconcile pass runs after `reconcileBotReviewComments` and before `reconcileAutoMerge` in each poll tick. It is skipped entirely when no `SCMAdapter` is constructed or when merge-conflict is not configured.
 
-The state machine mirrors `reconcileCIStatus` (§11A), not the bot-review or auto-merge loops. The defining property: there is no retry-budget check before the `GetMergeability` read. The read runs on every due tick so the not-dirty branch (N1, which resets the per-episode attempt counter) is always reachable. The budget check and the attempt increment live inside the dirty branch (D1), after the precondition guards and the head-SHA dedup. The comparison is strict over-limit (`attempts > MaxRetries`).
+The state machine mirrors `reconcileCIStatus` (§11A), not the bot-review or auto-merge loops. The defining property: there is no retry-budget check before the `GetMergeability` read. The read runs on every due tick so the not-dirty branch, which resets the per-episode attempt counter, is always reachable. The budget check and the attempt increment live inside the dirty branch, after the precondition guards and the head-SHA dedup. The comparison is strict over-limit (`attempts > MaxRetries`).
 
 Loop body per `ReactionKindMergeConflict` entry in `state.PendingReactions`:
 
@@ -39,9 +39,9 @@ Loop body per `ReactionKindMergeConflict` entry in `state.PendingReactions`:
 5. If the entry holds a triage run that has not finished (Section 5.3.8), re-enqueue it ready for the next tick and continue. `GetMergeability` is not called and the pending-backoff counter is untouched.
 6. Call `GetMergeability`. On error, increment the pending-backoff counter, set `PendingRetryAt`, re-enqueue, count `sortie_merge_conflict_checks_total{result="error"}`, and continue.
 7. Switch on `status.Mergeability`:
-   - `MergeabilityUnknown` (U1): re-enqueue at `now + poll_interval`; count `"unknown"`; do not touch the fingerprint or the attempt counter.
-   - `MergeabilityDirty` (D1): apply the dirty-branch logic described in §11E.4 and §11E.5.
-   - All other values (`clean`, `unstable`, `blocked`) (N1): cancel any in-flight triage run, whose fingerprint this branch is about to erase; delete the fingerprint row; delete the per-episode attempt counter (`delete(state.ReactionAttempts, rkey)`); re-enqueue at `now + poll_interval`; count `"clear"`. This closes the episode.
+   - `MergeabilityUnknown`: re-enqueue at `now + poll_interval`; count `"unknown"`; do not touch the fingerprint or the attempt counter.
+   - `MergeabilityDirty`: apply the dirty-branch logic described in §11E.4 and §11E.5.
+   - All other values (`clean`, `unstable`, `blocked`): cancel any in-flight triage run, whose fingerprint this branch is about to erase; delete the fingerprint row; delete the per-episode attempt counter (`delete(state.ReactionAttempts, rkey)`); re-enqueue at `now + poll_interval`; count `"clear"`. This closes the episode.
 
 ### 11E.4 Fingerprint and deduplication
 
@@ -55,7 +55,7 @@ After all three guards pass, the fingerprint is computed as `sha256(headSHA)` an
 
 When the stored fingerprint matches the computed value and is marked dispatched, the entry is re-enqueued at `now + poll_interval` with no increment and no dispatch. This dedup prevents a persistent same-head observation from firing multiple continuations while the rebase is in flight.
 
-The fingerprint churns on each new push: a new head SHA produces a new fingerprint with `dispatched = 0`, so a conflict that persists across a rebase re-arms a new attempt. The N1 branch deletes the row entirely when the PR is not dirty, so the first subsequent dirty observation always finds `dispatched = 0` and dispatches.
+The fingerprint churns on each new push: a new head SHA produces a new fingerprint with `dispatched = 0`, so a conflict that persists across a rebase re-arms a new attempt. The not-dirty branch deletes the row entirely when the PR is not dirty, so the first subsequent dirty observation always finds `dispatched = 0` and dispatches.
 
 ### 11E.5 Escalation and episode exits
 
@@ -81,7 +81,7 @@ DeleteReactionFingerprint(issueID, "merge-conflict")
 delete(state.ReactionAttempts,    ReactionKey(issueID, "merge-conflict"))
 ```
 
-The counter reset is scoped to this kind's own slot, not an issue-wide clear. This makes both episode exits symmetric: the N1 branch and the escalation exit each leave the counter deleted, so a later independent conflict always opens a fresh episode at `attempts = 1` regardless of which exit closed the prior episode.
+The counter reset is scoped to this kind's own slot, not an issue-wide clear. This makes both episode exits symmetric: the not-dirty branch and the escalation exit each leave the counter deleted, so a later independent conflict always opens a fresh episode at `attempts = 1` regardless of which exit closed the prior episode.
 
 Cross-kind isolation: `escalateMergeConflictFailure` MUST scope all deletions to the `merge-conflict` kind only. It MUST NOT call `CancelRetry` or `DeleteRetryEntry`, MUST NOT clear any sibling kind's slot, and MUST NOT `delete state.Claimed[issue_id]`. A failed merge-conflict resolution MUST NOT invalidate parallel `ci`, `review`, `bot-review`, or `merge` reactions on the same issue. Escalation tracker-call failures are logged and counted (`sortie_merge_conflict_escalations_total{action="error"}`) but do not block the slot-scoped cleanup.
 
