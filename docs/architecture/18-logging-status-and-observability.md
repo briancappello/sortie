@@ -145,7 +145,7 @@ Recommended snapshot error modes:
 
 ### 13.4 Optional Human-Readable Status Surface
 
-A human-readable status surface is optional and implementation-defined. When the HTTP server is enabled (Section 13.7), the HTML dashboard served at `/` (Section 13.7.1) is the concrete realization of this surface.
+A human-readable status surface is optional and implementation-defined. When the HTTP server is enabled (Section 13.7), the dashboard application under `/ui/` (Sections 13.7.1 and 13.7.4) is the concrete realization of this surface.
 
 If present, it should draw from orchestrator state/metrics only and must not be required for correctness.
 
@@ -214,12 +214,15 @@ Enablement and configuration:
 - The `--dry-run` flag suppresses server startup regardless of port or host settings.
 - Changes to HTTP listener settings require restart (hot-rebind is not supported).
 
-#### 13.7.1 Human-Readable Dashboard (`/`)
+#### 13.7.1 Dashboard
 
-- Host a human-readable dashboard at `/`.
-- The returned document should depict the current state of the system (for example active sessions, retry delays, token consumption, runtime totals, recent events, health/error indicators, and run history from SQLite).
-- It is up to the implementation whether this is server-generated HTML or a client-side app that consumes the JSON API below.
-- A run-history row whose selection came through a hop, or whose exit reached a hop decision, shows its rule, its stage chain, and its stage path: the previous rule, the row's own rule, and, when the exit reached a decision, the target rule with its result. Every other row, including a row written before the chain was recorded, renders as before.
+- `GET /` redirects to `/ui/`, where the dashboard application runs (Section 13.7.4).
+- The dashboard is a client-side application that reads only the JSON API below and refetches when the change stream signals a change.
+- Overview is the first screen. It opens with a headline that says whether anything needs a person, then lists what needs a person (Needs attention), every active issue in the order Sortie dispatched it (Active), and the issues whose runs ended today (Ended today).
+- Nothing in the dashboard assumes a stage, a dispatch rule, or a reaction. A workflow without them renders without those parts.
+- A figure Sortie does not know reads as unknown, never as zero. Every cost is labeled an estimate.
+- The dashboard holds still while a detail panel is open, and an operator can pause it. Read state stays in the browser.
+- A run in an issue's detail shows its rule and, when its exit reached a hop decision, the target rule and the result.
 
 #### 13.7.2 JSON REST API (`/api/v1/*`)
 
@@ -740,6 +743,7 @@ Minimum endpoints:
   - Prices use the rates `config.token_rates` serves, the rates the process started with. After an edit of `token_rates` in WORKFLOW.md the command and the route price differently until the process restarts. `warnings` lists the capability warning of an older database, if any, then the warnings of those rates.
   - `summary.issues` is the number of distinct issues among the runs `summary.runs` counts, `0` when no run is in range. `by_trigger` groups those runs by the retry trigger that started them, one group per stored value, named by the value. `<none>` names the empty trigger: runs dispatched from the poll tick, runs a reaction other than the CI fix started, and recorded CI results. `<unknown>` names a run whose row records no trigger: runs recorded before the trigger was kept, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, carry the figures `by_rule` computes, and sort like every other breakdown. `by_trigger` is `[]` when the database predates the trigger column, and `warnings` says so.
   - `by_origin` groups the same runs by what started each one, and the first rule that matches decides a run's group. `<unknown>` names a run whose row records no trigger. A non-empty trigger names the group (`error`, `continuation`, `stall`, or `ci_fix`), so a group named by a retry trigger holds the same runs, with the same figures, in `by_origin` and in `by_trigger`. A run with an empty trigger and a reaction kind takes the name of the kind (`review`, `bot-review`, `merge-conflict`, `label-review`, or `label-fix`). `<none>` names recorded CI results, which no dispatch started. `stage_hop` names the first run dispatched after a stage hop and no later run. `poll_tick` names every other run the poll tick dispatched, a later dispatch into a stage a hop led to included while the hop record stands, as after a restart, a released hold, or a lost retry. The groups partition the counted runs, carry the figures `by_rule` computes, and sort like every other breakdown. `by_origin` is `[]` when the database predates the first-run column, and `warnings` says so; `by_trigger` is `[]` beside it when the database also predates the trigger columns.
+  - `summary.succeeded`, `failed`, `stopped`, and `cancelled` count the runs by how they ended and add up to `summary.runs`. `failed` counts `failed` and `ci_failed` runs and any status the report does not know, `stopped` counts `needs_person` and `budget_stopped` runs, and `cancelled` counts `cancelled` runs.
   - With no run in range the route answers `200` with `summary.runs` and `summary.issues` at `0`, every breakdown `[]`, and `null` for every figure no run supplies.
   - The route refuses a request it cannot read exactly as asked, as `GET /api/v1/runs` does. A parameter this route does not define, a parameter given more than once, a value that is not a range bound, and a `since` that is not before `until` answer `400` with the error code `invalid_parameter`, whose message names the parameter and the rule, and the route reads nothing. A failed read, or a server without run history, answers `503` with `history_unavailable`. Any method other than `GET` answers `405`. A client that disconnects during the read gets no response, and the read stops.
   - The report is not masked, because it holds no issue titles, error text, or agent output. Its strings are names and identifiers, including the operator's rule, template, and model names, and host paths: `workflow_path`, `db_path`, and the `by_template` names, served as the command prints them.
@@ -759,6 +763,9 @@ Minimum endpoints:
         "runs": 6,
         "issues": 5,
         "succeeded": 3,
+        "failed": 3,
+        "stopped": 0,
+        "cancelled": 0,
         "success_rate": 0.5,
         "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
         "mean_turns_succeeded": 4,
@@ -1322,11 +1329,11 @@ API design notes:
 - Endpoints should be read-only except for operational triggers like `/refresh`, `/retries/{identifier}/run`, and `/attention/{id}/acknowledge`.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
-- If the dashboard is a client-side app, it should consume this API rather than duplicating state logic.
+- The dashboard consumes this API and holds no state logic of its own.
 
 #### 13.7.3 Prometheus Metrics Endpoint (`/metrics`)
 
-When the HTTP server is enabled, Sortie exposes a Prometheus exposition-format scrape endpoint at `/metrics`, backed by a dedicated registry so the process exports only its own series and none of the runtime's defaults. See ADR-0008. The endpoint is co-located with the JSON API and HTML dashboard on the same address and port; no separate configuration is required.
+When the HTTP server is enabled, Sortie exposes a Prometheus exposition-format scrape endpoint at `/metrics`, backed by a dedicated registry so the process exports only its own series and none of the runtime's defaults. See ADR-0008. The endpoint is co-located with the JSON API and dashboard on the same address and port; no separate configuration is required.
 
 Implementation requirements:
 
@@ -1376,7 +1383,7 @@ Defined metrics (label sets and buckets are specified here; see ADR-0008 for his
 
 #### 13.7.4 Dashboard application (`/ui/`)
 
-The server serves a client-side application that is compiled into the binary, under `/ui/` with path routing. The server-rendered page at `/` stays until the application replaces it. The application document and its files are read only from the compiled-in output, never from the filesystem.
+The server serves a client-side application that is compiled into the binary, under `/ui/` with path routing. `GET /` answers `302 Found` with `Location: /ui/`. The application document and its files are read only from the compiled-in output, never from the filesystem.
 
 The route answers `GET` and `HEAD`. Any other method on a path under `/ui/` answers `405 Method Not Allowed` with `Allow: GET, HEAD`, and `GET /ui` redirects to `/ui/`. No path outside `/ui/` answers the application document, and the route does not overlap `/api/v1/*`, `/metrics`, `/livez`, or `/readyz`.
 

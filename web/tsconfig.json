@@ -9,6 +9,9 @@
     "noEmit": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["vite/client", "node"]
+    "types": ["vite/client", "node"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   }
 }

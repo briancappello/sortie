@@ -5,7 +5,6 @@ package server
 
 import (
 	"context"
-	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
@@ -38,17 +37,12 @@ type RetryNowFunc func(ctx context.Context, identifier string) orchestrator.Retr
 // given ID; ctx is the request's context.
 type AcknowledgeFunc func(ctx context.Context, itemID string) orchestrator.AcknowledgeResult
 
-// SlotFunc returns the current maximum concurrent agent count.
-// Called on each dashboard render to compute available slots.
-// If nil, available slots defaults to 0.
-type SlotFunc func() int
-
 // RunHistoryEntry is a server-layer view of a completed run attempt.
 // Decoupled from persistence types to avoid leaking internal packages.
 type RunHistoryEntry struct {
 	// Identifier is the tracker-assigned issue identifier (e.g., "PROJ-123").
 	Identifier string
-	// DisplayID is the short display label shown on the dashboard.
+	// DisplayID is the short display label that the JSON API reports.
 	DisplayID string
 	// Attempt is the one-based retry attempt number.
 	Attempt int
@@ -219,17 +213,12 @@ type Params struct {
 	// Addr is the TCP address to listen on (e.g. "127.0.0.1:8080").
 	Addr string
 
-	// Version is the build version string displayed on the dashboard.
-	// Falls back to "dev" when empty.
+	// Version is the build version string that the JSON API reports.
 	Version string
 
 	// StartedAt is the time the process started, used to compute
-	// uptime on the dashboard.
+	// uptime in the JSON API.
 	StartedAt time.Time
-
-	// SlotFunc returns the current max concurrent agents from config.
-	// If nil, available slots displays as 0 on the dashboard.
-	SlotFunc SlotFunc
 
 	// MetricsRegistry is an optional Prometheus registry for the
 	// /metrics endpoint. When non-nil, New registers a handler at
@@ -254,12 +243,12 @@ type Params struct {
 
 	// RunHistory reads persisted run history. When nil, GET /api/v1/runs
 	// answers 503, GET /api/v1/{identifier} serves live detail with a null
-	// history, and the dashboard omits its run table.
+	// history.
 	RunHistory RunHistoryReader
 
 	// TokenRates maps agent adapter kind strings to per-token USD
-	// rates for cost estimation on the dashboard. When nil or empty,
-	// the dashboard shows raw token counts without cost estimates.
+	// rates for cost estimation in the JSON API. When nil or empty,
+	// the API reports raw token counts without cost estimates.
 	TokenRates TokenRates
 
 	// Stats computes the run statistics report. Called on each
@@ -267,8 +256,8 @@ type Params struct {
 	Stats StatsFunc
 }
 
-// Server is the embedded HTTP server for JSON API, dashboard, and
-// metrics endpoints. Construct via [New]. Safe for concurrent use
+// Server is the embedded HTTP server for the JSON API, the dashboard
+// application's assets, and metrics endpoints. Construct via [New]. Safe for concurrent use
 // after construction.
 type Server struct {
 	httpServer      *http.Server
@@ -280,10 +269,8 @@ type Server struct {
 	acknowledgeFn   AcknowledgeFunc
 	workflowShapeFn func() orchestrator.WorkflowShape
 	healthFn        func() orchestrator.SnapshotHealth
-	dashboardTmpl   *template.Template
 	version         string
 	startedAt       time.Time
-	slotFunc        SlotFunc
 
 	drainingFlag     atomic.Bool
 	dbPingFn         DBPingFunc
@@ -318,14 +305,6 @@ func New(params Params) *Server {
 
 	mux := http.NewServeMux()
 
-	tmpl := template.Must(
-		template.New("dashboard").Funcs(template.FuncMap{
-			"fmtInt":  FormatInt,
-			"fmtCost": FormatCost,
-			"even":    func(i int) bool { return i%2 == 0 },
-		}).Parse(dashboardHTML),
-	)
-
 	s := &Server{
 		mux:              mux,
 		logger:           logger,
@@ -335,10 +314,8 @@ func New(params Params) *Server {
 		acknowledgeFn:    params.AcknowledgeFn,
 		workflowShapeFn:  params.WorkflowShapeFn,
 		healthFn:         params.HealthFn,
-		dashboardTmpl:    tmpl,
 		version:          params.Version,
 		startedAt:        params.StartedAt,
-		slotFunc:         params.SlotFunc,
 		dbPingFn:         params.DBPingFn,
 		preflightFn:      params.PreflightFn,
 		workflowLoadedFn: params.WorkflowLoadedFn,
@@ -355,7 +332,7 @@ func New(params Params) *Server {
 
 	// Method-specific pattern so non-GET methods receive the default
 	// 405 response from Go's ServeMux.
-	mux.HandleFunc("GET /{$}", s.handleDashboard)
+	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /favicon.ico", handleFavicon)
 	mux.Handle("GET /ui/", ui.Handler())
 
@@ -442,4 +419,12 @@ func (s *Server) SetDraining() {
 // any goroutine, before [Server.Serve] and after [Server.Shutdown].
 func (s *Server) OnStateChange() {
 	s.changes.publish()
+}
+
+// handleRoot redirects to the dashboard application. The header is written
+// directly because [http.Redirect] adds a body to GET responses, and the
+// status is 302 so that browsers do not cache a redirect that may change.
+func handleRoot(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Location", "/ui/")
+	w.WriteHeader(http.StatusFound)
 }

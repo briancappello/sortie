@@ -9,6 +9,8 @@ go.sum linguist-generated
 **/testdata/** linguist-generated
 internal/agent/clientprotocol/wire_gen.go linguist-generated
 internal/server/ui/dist/** linguist-generated
+web/src/api/types.gen.ts linguist-generated
+docs/api.schema.json linguist-generated
 
 # Excluded from GitHub language stats
 docs/** linguist-documentation

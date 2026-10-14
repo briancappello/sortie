@@ -1234,7 +1234,7 @@ The count is kept per issue in the database and resets when:
 
 Each reset logs `stage hop count reset` with the `trigger`. Moving a stage label while the issue stays active does not reset the count, and neither does a failed handoff write, a withheld verdict, a reload, or reaching the ceiling. Reconciliation reads every issue that holds a hop record on each tick, whether or not it is running.
 
-**Recording.** Every run carries a chain identifier, a random value that ties together the runs of one pass through a chain. A run that no hop led to starts a new chain. The run a hop leads to continues the chain of the run that made the hop, and a retry or a restart keeps the chain of the run it continues. The run that reaches a hop decision also records the rule the hop targeted and the result: `advanced`, `partial` (the label was added but an old stage label was not removed), `failed` (the label add failed), or `ceiling`. A run recorded before the upgrade has no chain and no result. Sortie sends `stage.advanced` when a hop is made, `advanced` or `partial`, and `stage.not_advanced` when a due hop is not made, with the reason; both reach only the notification entries that list them ([Event catalog](#event-catalog)). `sortie stats` groups the runs by stage chain, listing only the chains in which a hop was due or made, and the dashboard's run history shows the rule, chain, and stage path of the runs in those chains.
+**Recording.** Every run carries a chain identifier, a random value that ties together the runs of one pass through a chain. A run that no hop led to starts a new chain. The run a hop leads to continues the chain of the run that made the hop, and a retry or a restart keeps the chain of the run it continues. The run that reaches a hop decision also records the rule the hop targeted and the result: `advanced`, `partial` (the label was added but an old stage label was not removed), `failed` (the label add failed), or `ceiling`. A run recorded before the upgrade has no chain and no result. Sortie sends `stage.advanced` when a hop is made, `advanced` or `partial`, and `stage.not_advanced` when a due hop is not made, with the reason; both reach only the notification entries that list them ([Event catalog](#event-catalog)). `sortie stats` groups the runs by stage chain, listing only the chains in which a hop was due or made, and a run in an issue's detail in the dashboard shows its rule and, when its exit reached a hop decision, the target rule and the result.
 
 **The `stage` object.** Every prompt render carries `stage` with `stage.current`, `stage.previous`, and `stage.previous_outcome`, so a template can tell what the earlier stage was and read what it left in the workspace. See [Section 5.2](#52-template-input-variables).
 
@@ -1896,7 +1896,8 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 
 | Method | Path                     | Description                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------ |
-| GET    | `/`                      | HTML dashboard — server-rendered status page with running sessions, retry queue, token totals, timing breakdown, and recent events. Auto-refreshes. |
+| GET    | `/`                      | Redirects to `/ui/` with `302 Found`. |
+| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change. |
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, the list of what needs a person, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
@@ -1909,7 +1910,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/events`         | Server-sent event stream of change signals: one `change` event each time anything the JSON API serves changes, at most one a second, and a `heartbeat` event every 15 seconds. Carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals](#get-apiv1events-change-signals). |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
-All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints), except `GET /api/v1/events`, which uses `text/event-stream`. Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/` dashboard returns `text/html`.
+All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints), except `GET /api/v1/events`, which uses `text/event-stream`. Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/ui/` dashboard returns `text/html` for its document and the content type of each file for its assets.
 
 #### Health Endpoints
 
@@ -3175,7 +3176,7 @@ A request whose filters match fewer runs than the page holds reads run history d
 
 #### `GET /api/v1/stats`: run statistics
 
-Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
 
 **Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
 
@@ -3199,6 +3200,9 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
     "runs": 6,
     "issues": 5,
     "succeeded": 3,
+    "failed": 3,
+    "stopped": 0,
+    "cancelled": 0,
     "success_rate": 0.5,
     "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
     "mean_turns_succeeded": 4,
@@ -3318,6 +3322,9 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `runs`                       | integer          | The runs completed in the range. |
 | `issues`                     | integer          | The distinct issues the counted runs belong to, `0` when no run is in range. A recorded CI result counts its issue like any other run. |
 | `succeeded`                  | integer          | The runs whose status is `succeeded`. |
+| `failed`                     | integer          | The runs whose status is `failed` or `ci_failed`, and the runs whose status the report does not know. |
+| `stopped`                    | integer          | The runs whose status is `needs_person` or `budget_stopped`. |
+| `cancelled`                  | integer          | The runs whose status is `cancelled`. |
 | `success_rate`               | number           | `succeeded` divided by `runs`, from `0` to `1`, `0` when no run is in range. |
 | `duration_seconds`           | object           | `p50`, `p95`, `mean`, and `samples` over the succeeded runs. Each of them is `null` when `samples` is `0`. |
 | `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
@@ -3328,6 +3335,8 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
 | `cost_unpriced_runs`         | integer          | The runs that reported usage under an agent kind with no complete `token_rates` entry, when `token_rates` is configured. |
 | `tokens_unmeasured_runs`     | integer          | The runs that reported no usage. They add nothing to `tokens` and `cost_usd`. |
+
+The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `runs`.
 
 **Group fields.** Each breakdown entry is a group.
 
@@ -3727,17 +3736,17 @@ token_rates:
     cache_read_per_mtok: 0.25
 ```
 
-When `token_rates` is configured, the dashboard displays estimated USD cost for currently running sessions, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, and the `sortie stats` subcommand and `GET /api/v1/stats` price the runs they aggregate from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
+When `token_rates` is configured, the dashboard labels every cost an estimate and estimates the cost of today's runs, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, and the `sortie stats` subcommand and `GET /api/v1/stats` price the runs they aggregate from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
 
 Every figure Sortie prices is a fresh-input token, a cache-read token, a cache-write token, or an output token, priced once each at its own rate. An unset `cache_read_per_mtok` or `cache_write_per_mtok` prices that class at `input_per_mtok`, so a configuration that sets neither keeps pricing every input token, cached or not, at the input rate. `claude-code`, `copilot-cli`, and `opencode` report a cache-write count; an operator of one of those kinds sets `cache_write_per_mtok` to that provider's cache-write rate to price it separately.
 
 One rate set prices every model of a kind alike: two models of one kind run under different dispatch rules are priced at the same rates, so the savings from routing show in token counts before they show in money.
 
-When `token_rates` is absent or empty, the dashboard shows raw token counts without cost estimates, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
+When `token_rates` is absent or empty, the dashboard shows no cost, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
 
 The `config.token_rates` member of `GET /api/v1/state` serves the rates the process started with: an entry per agent kind keyed as written, each rate `null` when not set, and `complete`, `true` exactly when both `input_per_mtok` and `output_per_mtok` are set. It is `null` when `token_rates` is absent or empty.
 
-An entry keyed to a kind whose usage-reporting declaration resolves to no token usage for the sessions a configuration produces has no effect: no cost can be estimated for it. `sortie validate` reports this under the check `agent.kind.no_cost_estimate`, naming the kind, so an operator who prices a non-reporting kind learns why the dashboard's Est. Cost column stays blank rather than discovering it by reading source.
+An entry keyed to a kind whose usage-reporting declaration resolves to no token usage for the sessions a configuration produces has no effect: no cost can be estimated for it. `sortie validate` reports this under the check `agent.kind.no_cost_estimate`, naming the kind, so an operator who prices a non-reporting kind learns why the dashboard shows no cost for that kind rather than discovering it by reading source.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |

@@ -16,23 +16,13 @@ const usageBranchAgentKindField = "AgentKind"
 // usageBranchDeclarationSet names every function this file's contract
 // walks, grouped by the non-test file that declares it: every
 // function that computes or formats a usage-derived value for the
-// dashboard or the JSON API. internal/orchestrator is outside this
+// JSON API. internal/orchestrator is outside this
 // set: every AgentKind read there propagates the value into another
 // struct or a log/coalesce site (for example recovery.go's
 // legacy-rehydration audit log and retry.go's default-kind
 // coalescing), never into a presentation branch, so it carries no
 // subject for this rule to walk.
 var usageBranchDeclarationSet = map[string][]string{
-	"dashboard.go": {
-		"buildDashboardData",
-		"usageReportingRow",
-		"usageAttributionClause",
-		"usageModelRow",
-		"usageAPIRequestsRow",
-		"formatRequestsByModel",
-		"usageTokensRow",
-		"usageEstCostRow",
-	},
 	"handler.go": {
 		"toStateResponse",
 		"toRunningEntryResponse",
@@ -151,8 +141,8 @@ func TestUsageBranchAgentKindContract(t *testing.T) {
 
 // TestAgentKindReadViolations_DetectsViolations pins the checker's
 // own logic against inline source fixtures, independent of the
-// current state of dashboard.go or handler.go, so a regression in the
-// rule is caught even when both files happen to comply.
+// current state of handler.go, so a regression in the rule is caught
+// even when the file happens to comply.
 func TestAgentKindReadViolations_DetectsViolations(t *testing.T) {
 	t.Parallel()
 

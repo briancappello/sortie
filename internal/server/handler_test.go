@@ -3986,3 +3986,41 @@ func TestStateRouteNullsUnmeasuredFigures(t *testing.T) {
 		}
 	}
 }
+
+type fakeRunHistory struct {
+	rows        []RunHistoryEntry
+	err         error
+	totalsErr   error
+	outcomes    map[string]IssueOutcome
+	outcomesErr error
+	onQuery     func(RunHistoryQuery)
+}
+
+func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error) {
+	if f.onQuery != nil {
+		f.onQuery(q)
+	}
+	return f.rows, f.err
+}
+
+func (f *fakeRunHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {
+	return IssueRunTotals{}, f.totalsErr
+}
+
+func (f *fakeRunHistory) IssueOutcomes(context.Context, []string) (map[string]IssueOutcome, error) {
+	return f.outcomes, f.outcomesErr
+}
+
+func historyServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader) *httptest.Server {
+	t.Helper()
+	srv := New(Params{
+		SnapshotFn: fixedSnapshot(snap),
+		RefreshFn:  acceptingRefresh(),
+		Logger:     slog.New(slog.DiscardHandler),
+		StartedAt:  time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC),
+		RunHistory: history,
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+	return ts
+}
