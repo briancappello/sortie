@@ -31,11 +31,11 @@ export function tallyLine(
 }
 
 function tokensPart(summary: Summary): string {
-  if (summary.tokens === null) {
-    return "tokens not recorded";
-  }
   if (summary.tokens_unmeasured_runs === summary.runs) {
     return "tokens not measured";
+  }
+  if (summary.tokens === null) {
+    return "tokens not recorded";
   }
   const { total } = summary.tokens;
   const text = `${fmtTokens(total)} ${total === 1 ? "token" : "tokens"}`;
