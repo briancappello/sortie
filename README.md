@@ -73,9 +73,11 @@ You are a senior engineer.
 
 Sortie polls your tracker for matching issues and runs an agent on each one in its own workspace, several at a time. A failed run is retried. Turn on CI and review feedback, and failed checks and review comments go back to the agent to fix.
 
-You can edit `WORKFLOW.md` while Sortie runs, and it picks up the change without a restart. Run history survives restarts too, so progress and costs are  still there afterwards.
+You can edit `WORKFLOW.md` while Sortie runs, and it picks up the change without a restart. Run history survives restarts too, so progress and costs are still there afterwards.
 
-Follow along in the built-in dashboard, or connect your own tools - a JSON API with a live stream of changes, health probes, and Prometheus metrics, all on one port.
+Follow along in the built-in dashboard, or connect your own tools: a JSON API with a live stream of changes, health probes, and Prometheus metrics, all on one port.
+
+Sortie runs the same way on a laptop, a VM, or a Kubernetes cluster. It ships as a container image at `ghcr.io/sortie-ai/sortie`, its health probes plug straight into liveness and readiness checks, and it shuts down cleanly when the pod stops. The [Kubernetes guide](https://docs.sortie-ai.com/guides/deploy-sortie-to-kubernetes/) walks through a full deployment.
 
 Sortie is a single binary. There's no separate database or job queue to deploy, and Sortie itself sends no telemetry.
 
