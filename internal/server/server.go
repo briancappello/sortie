@@ -29,6 +29,10 @@ type SnapshotFunc func() (orchestrator.RuntimeSnapshotResult, error)
 // false if it was coalesced (channel already has a pending signal).
 type RefreshFunc func() bool
 
+// RetryNowFunc makes the scheduled retry of the issue with the given
+// identifier due now; ctx is the request's context.
+type RetryNowFunc func(ctx context.Context, identifier string) orchestrator.RetryNowResult
+
 // SlotFunc returns the current maximum concurrent agent count.
 // Called on each dashboard render to compute available slots.
 // If nil, available slots defaults to 0.
@@ -196,6 +200,10 @@ type Params struct {
 	// Called on POST /api/v1/refresh.
 	RefreshFn RefreshFunc
 
+	// RetryNowFn makes an issue's scheduled retry due now. Called on
+	// POST /api/v1/retries/{identifier}/run; nil answers 503.
+	RetryNowFn RetryNowFunc
+
 	// Logger is the structured logger for request and error logging.
 	Logger *slog.Logger
 
@@ -259,6 +267,7 @@ type Server struct {
 	logger          *slog.Logger
 	snapshotFn      SnapshotFunc
 	refreshFn       RefreshFunc
+	retryNowFn      RetryNowFunc
 	workflowShapeFn func() orchestrator.WorkflowShape
 	healthFn        func() orchestrator.SnapshotHealth
 	dashboardTmpl   *template.Template
@@ -312,6 +321,7 @@ func New(params Params) *Server {
 		logger:           logger,
 		snapshotFn:       params.SnapshotFn,
 		refreshFn:        params.RefreshFn,
+		retryNowFn:       params.RetryNowFn,
 		workflowShapeFn:  params.WorkflowShapeFn,
 		healthFn:         params.HealthFn,
 		dashboardTmpl:    tmpl,
@@ -349,6 +359,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/runs", s.routeRuns)
 	mux.HandleFunc("/api/v1/stats", s.routeStats)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
+	mux.HandleFunc("/api/v1/retries/{identifier}/run", s.routeRetryNow)
 	mux.HandleFunc("/api/v1/events", s.routeEvents)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 

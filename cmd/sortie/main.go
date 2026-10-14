@@ -889,6 +889,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		srv = server.New(server.Params{
 			SnapshotFn:       o.SnapshotFunc(),
 			RefreshFn:        o.RefreshFunc(),
+			RetryNowFn:       o.RetryNowFunc(),
 			WorkflowShapeFn:  o.WorkflowShape,
 			HealthFn:         o.Health,
 			Logger:           br.logger,
