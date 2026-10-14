@@ -47,10 +47,25 @@ func (unsupportedReactionObservationStore) CountWorkerRunsCompletedSince(context
 	return 0, errors.New("worker run count is unsupported by this test double")
 }
 
+type noEscalationRecords struct{}
+
+func (noEscalationRecords) GetReactionEscalation(context.Context, string, string) (persistence.ReactionEscalation, bool, error) {
+	return persistence.ReactionEscalation{}, false, nil
+}
+
+func (noEscalationRecords) SaveReactionEscalation(context.Context, persistence.ReactionEscalation) error {
+	return nil
+}
+
+func (noEscalationRecords) EndReactionEscalation(context.Context, string, string) error { return nil }
+
+func (noEscalationRecords) DeleteReactionEscalations(context.Context, string) error { return nil }
+
 // mockReconcileStore records calls to ReconcileStore methods and returns
 // configurable errors.
 type mockReconcileStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	savedEntries   []persistence.RetryEntry

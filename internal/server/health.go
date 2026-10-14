@@ -42,7 +42,7 @@ type scmHealthResponse struct {
 func toStateHealthResponse(h orchestrator.SnapshotHealth) *stateHealthResponse {
 	resp := &stateHealthResponse{
 		Database:  toHealthCheckResponse(h.Database),
-		Preflight: toHealthCheckResponse(h.Preflight),
+		Preflight: toHealthCheckResponse(h.Preflight.SnapshotHealthCheck),
 		Workflow: workflowHealthResponse{
 			File:                h.Workflow.File,
 			healthCheckResponse: toHealthCheckResponse(h.Workflow.SnapshotHealthCheck),

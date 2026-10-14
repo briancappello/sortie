@@ -127,10 +127,11 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 - `budget_exhausted` (list of blocked-issue records, sorted by identifier; always present, empty when the set is empty). Each record carries the issue's ID and identifier, the reason (`token_budget` or `session_budget`; `token_budget` takes precedence over `session_budget` when one issue reaches both gates), the used and budgeted session and token counts, the count of the issue's sessions the token ceiling stopped in flight (present only when the token ceiling was evaluated for the issue), the time the hold began, the issue's title, tracker link, type, labels, and state, and the dispatch the hold blocks: its dispatch rule, stage lineage and position, agent kind, configured model, and the dispatch time of its pass. The issue facts come from the read of the poll tick that last rebuilt the set, or from the retry the hold was found on until the next tick. The dispatch context is the retry's when the retry lane recorded the hold, and a later rebuild keeps it. A hold the poll tick finds with no prior record, as after a restart, a stage hop, a park release, or a person's return of the issue to an active state, takes the context of the dispatch it blocks: the target rule of a stage hop still waiting for its next dispatch, resolved from the configuration in force, and otherwise the issue's latest agent run, read from run history through one batched store call and never from the tracker. A failed read is logged and leaves those records without a context until the next tick reads again, and an issue with no agent run has none. The set is rebuilt per tick from those two gates (Section 8.4) and also updated by the retry lane when it discovers a hold between ticks.
 - `parked_count` (number of issues currently held out of primary dispatch; always present)
 - `parked` (list of park records, sorted by identifier and then issue ID; always present, empty when no issue is parked). Each record carries the issue's ID and identifier, the display identifier when the tracker needs a qualified form, the issue's title and tracker link, the reason (`agent_blocked` or `handoff_absence`), the tracker state observed when the park was recorded, the parking label the orchestrator applied, whether a read has shown that label on the issue, and the time the park was recorded. A record also carries the run the park follows (its dispatch rule, stage lineage with the dispatch time of its pass, agent kind, and configured model) and the issue's type and labels as read for the park, and its `state` is the tracker state observed at the park, the value `parked_state` holds. The run is the one that stopped for a park made at a worker exit or at the retry timer, and the newest agent run of the issue in run history for a park the poll tick makes. The title, link, type, labels, and state are masked as Section 15.3 states, in the snapshot rather than in the state they are copied from. The park persists the run, the title, the link, the type, and the labels and restores them at startup, so a restart serves what was served before it. A park recorded before the upgrade that introduced the run takes it from the newest agent run of its issue that started at or before the park, filled when the store migrates, and holds no type or labels until a read supplies them. A park recorded without a run, because the poll tick's read of run history failed, serves no rule, position, agent, model, or dispatch time until it is released. A park that holds no read of its issue, because it was recorded or restored without one, takes the first read the orchestrator takes of the issue: the next poll tick's candidate, or one single-issue read when the candidate fetch omits the issue and the batched state read of the release step finds it (Section 8.1). A park that holds a title or link and no labels, as one persisted before the type and labels were recorded does, takes the type and labels of the next poll tick's candidate only, with no tracker call of its own, and keeps the title and link it holds. The labels a park stores leave out its own parking label, because a new park's labels are read before the label is written and a later read carries the label once it is applied. A title or link already held is never replaced, and a park that holds a whole read is never read again
-- `pending_reactions` (list of pending pull request reactions, one row per issue and kind, sorted by identifier, then issue ID, then kind; always present, empty when none). Each row carries the issue's ID, identifier, display identifier, title, and tracker link; the reaction's kind and the `reactions` key of WORKFLOW.md it is configured under; the pull request it watches (number, repository, web link, head branch, and head commit); when the orchestrator created the reaction, when the pass of the run it follows was dispatched, when its next check is due, and when it stops watching unless its watch restarts first; why it waits for that check; the tries it used of its ceiling; when it escalated; and what its latest check observed. Each row also carries the dispatch rule of the run the reaction follows, the position of that rule on its stage chain, and that run's agent kind and configured model, with the issue's type, labels, and state as that run read them. When that run's exit moved the issue to `tracker.handoff_state`, the row's `state` is the handoff target, because the run's read is the active state the transition replaced; every other exit records the run's read unchanged. The identity and every other runtime-derived string, the issue type, labels, and state included, are masked as Section 15.3 states, in the snapshot rather than in the state they are copied from. Pending reactions are runtime-only, so a restart rebuilds the rows without a link, wait reason, check result, or escalation time; the dispatch time, rule, agent kind, and model come back from the run history row the reaction is rebuilt from, and a rebuilt row carries the issue's title and link only, with no type, labels, or state, because run history records neither. Section 13.7.2 gives the keys and how to read them
+- `pending_reactions` (list of pending pull request reactions, one row per issue and kind, sorted by identifier, then issue ID, then kind; always present, empty when none). Each row carries the issue's ID, identifier, display identifier, title, and tracker link; the reaction's kind and the `reactions` key of WORKFLOW.md it is configured under; the pull request it watches (number, repository, web link, head branch, and head commit); when the orchestrator created the reaction, when the pass of the run it follows was dispatched, when its next check is due, and when it stops watching unless its watch restarts first; why it waits for that check; the tries it used of its ceiling; when its standing escalation began and why; and what its latest check observed. Each row also carries the dispatch rule of the run the reaction follows, the position of that rule on its stage chain, and that run's agent kind and configured model, with the issue's type, labels, and state as that run read them. When that run's exit moved the issue to `tracker.handoff_state`, the row's `state` is the handoff target, because the run's read is the active state the transition replaced; every other exit records the run's read unchanged. The identity and every other runtime-derived string, the issue type, labels, and state included, are masked as Section 15.3 states, in the snapshot rather than in the state they are copied from. Pending reactions are runtime-only except for an escalation: the orchestrator stores a standing escalation with its time, its trigger, and the tries it used, and the startup restore brings it back, also for an issue that the recovery of pending reactions does not reach. A restart therefore rebuilds the rows without a link, wait reason, or check result, but with their escalation; the dispatch time, rule, agent kind, and model come back from the run history row the reaction is rebuilt from, and a rebuilt row carries the issue's title and link only, with no type, labels, or state, because run history records neither. Section 13.7.2 gives the keys and how to read them
 - `between_stages` (list of issues between stages, sorted by identifier and then issue ID; always present, empty when none). An issue is between stages when a stage hop was made and no run of the issue was dispatched since. Each row carries the issue's ID, identifier, and display identifier, the title, tracker link, type, and state the hopping run read, the issue's labels as the hop leaves them (the run's read without the stage labels the hop removes and with the stage label it adds), the stage the issue left, the stage it reached, the stage label the hop added, the time of the hop, and the dispatch time of the pass the hopping run belongs to. The row also names the stage reached as its dispatch rule, places that rule on its stage chain, and carries the agent kind and configured model a dispatch of that rule resolves to under the configuration as of the latest poll tick, which the orchestrator refreshes every tick and sets at startup so that a hop made between ticks already finds them; each is omitted when that configuration names no rule with a stage label under that name. An issue joins the list when its hop is made and leaves it when a run of the issue is dispatched, whichever lane dispatches it, or when a reset of the hop count drops the hop record. The snapshot leaves out an issue that has a running session or a queued retry, so no issue is in `between_stages` and in `running` or `retrying` at once. The hop record persists the display identifier, title, link, type, labels, state, pass dispatch time, and whether a run was dispatched since the hop, and a restart restores them, so it serves the rows it served before. A hop record written before the upgrade that introduced the type, labels, and state serves none of them for as long as it lasts, which is until the next stage dispatches. The title, link, type, labels, and state are masked as Section 15.3 states, in the snapshot rather than in the state they are copied from. Section 13.7.2 gives the keys and how to read them
 - `config` (the effective workflow shape: the tracker states, the dispatch rules in order with how each is selected, the stage chains their `next` links form, the hop ceiling, the reaction kinds the process applies with their limits, escalation, and timing, the token rates, the session and token budgets, the poll interval, the concurrency caps, the SSH hosts, and whether each agent selection reports token usage). It reports the configuration in force after the last successful load, except that a reaction appears exactly when the process applies it, with the settings it applies, and the token rates are the ones the process started with. It carries no credential. Section 13.7.2 gives the keys and how to read them
 - `health` (the health of Sortie's own checks: `database`, `preflight`, `workflow`, `poll`, and `scm`, the last `null` when no reaction uses a source-control provider). Every check reports whether its latest run failed, when it last ran, when it last passed, how many runs in a row have failed, when the first of those failed, and the latest failure's error text. `database` is the ping the poll tick makes of the store after it applies the configuration and before it reconciles. `preflight` is the result of the tick's dispatch preflight, with the error text of the failures it found. `workflow` is the loads of the workflow file, the watcher's and the reload each tick's preflight forces, with the name of the file in effect, so a reload that fails is reported while the previous configuration stays in effect. `poll` is the poll loop: one run per poll tick, whether the timer or a refresh ran it, with how the tick ended, the tracker's latest read error, and when the next poll is due. `scm` is the reads the orchestrator makes of the source-control provider the reactions share; it reflects the most recent provider read across every pull request, so its last run dates that read, and a provider that no reaction reads is not checked. A check's error text is masked as Section 15.3 states, in the snapshot rather than in the record it is copied from. Section 13.7.2 gives the keys and how to read them
+- `attention` (list of what needs a person; always present, empty when nothing does). The orchestrator derives the list on each request from the snapshot above and the `health` checks and stores it nowhere, so an item exists exactly while its cause holds. Its causes are a parked issue, an issue held by a per-issue budget ceiling, a pending reaction whose escalation stands, a workflow file that failed to load, and a dispatch preflight that fails for a reason other than that load. Each item carries the issue it concerns (none for a cause that concerns the process), when its cause began, a severity, the one action a client should offer, the facts behind it, and wording for why it needs a person and what clears it, taken from the status sentence table. Section 13.7.2 gives the keys and how to read them
 - `version` and `started_at` (the Sortie version, and the time the process started, taken before the startup work so it is the instant the readiness probe counts its uptime from). Section 13.7.2 gives the keys
 
 Recommended snapshot error modes:
@@ -223,7 +224,7 @@ Provide a JSON REST API under `/api/v1/*` for current runtime state and operatio
 Minimum endpoints:
 
 - `GET /api/v1/state`
-  - Returns a summary view of the current system state (running sessions, retry queue/delays, pending pull request reactions, issues between stages, aggregate token/runtime totals, latest rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, the process start time, and any additional tracked summary fields).
+  - Returns a summary view of the current system state (running sessions, retry queue/delays, pending pull request reactions, issues between stages, what needs a person, aggregate token/runtime totals, latest rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, the process start time, and any additional tracked summary fields).
   - Suggested response shape:
 
     ```json
@@ -237,7 +238,8 @@ Minimum endpoints:
         "budget_exhausted": 1,
         "parked": 1,
         "pending_reactions": 2,
-        "between_stages": 1
+        "between_stages": 1,
+        "attention": 4
       },
       "running": [
         {
@@ -413,7 +415,8 @@ Minimum endpoints:
           "used_attempts": 2,
           "max_attempts": 2,
           "escalated_at": "2026-02-24T20:12:40Z",
-          "watch_ends_at": "2026-02-25T20:12:40Z",
+          "escalation_trigger": "budget_exhausted",
+          "watch_ends_at": null,
           "last_check": {
             "observed_at": "2026-02-24T20:12:40Z",
             "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
@@ -493,6 +496,96 @@ Minimum endpoints:
           "configured_model": "claude-sonnet-4-20250514",
           "status_text": "Between stages: specify to implement",
           "status_text_full": "MT-654 moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
+        }
+      ],
+      "attention": [
+        {
+          "id": "d028c459215208a709b5ecc3ff4535b1",
+          "kind": "workflow_reload_failed",
+          "severity": "critical",
+          "since": "2026-02-24T20:14:51Z",
+          "reason_text": "WORKFLOW.md failed to load",
+          "why_text": "WORKFLOW.md failed to load (config: agent.turn_timeout_ms: must be greater than 0), so poll ticks dispatch nothing until it loads, and the configuration that last loaded stays in effect.",
+          "clears_text": "Clears when WORKFLOW.md loads again, which Sortie tries each time the file is saved and on every poll tick.",
+          "action": {"kind": "acknowledge"},
+          "evidence": {
+            "file": "WORKFLOW.md",
+            "error": "config: agent.turn_timeout_ms: must be greater than 0"
+          }
+        },
+        {
+          "id": "8a6c3b55f9b8dd4b16eb33baf67df78d",
+          "kind": "parked",
+          "severity": "warning",
+          "since": "2026-02-24T20:05:00Z",
+          "issue_id": "jkl012",
+          "issue_identifier": "MT-652",
+          "issue_title": "Rotate the signing keys",
+          "issue_url": "https://tracker.example.com/browse/MT-652",
+          "reason_text": "Parked: the agent needs a person",
+          "why_text": "The agent stopped because it cannot go on without a person, so Sortie parked MT-652 under the label `needs-human`.",
+          "clears_text": "Clears when a poll tick finds `needs-human` removed from MT-652, or MT-652 moved out of In Progress.",
+          "action": {"kind": "open_issue", "url": "https://tracker.example.com/browse/MT-652"},
+          "evidence": {
+            "reason": "agent_blocked",
+            "label": "needs-human"
+          }
+        },
+        {
+          "id": "464f9ff8ea54c4c6cfb43af394234d57",
+          "kind": "budget_held",
+          "severity": "warning",
+          "since": "2026-02-24T20:12:00Z",
+          "issue_id": "ghi789",
+          "issue_identifier": "MT-651",
+          "issue_title": "Migrate the billing tables",
+          "issue_url": "https://tracker.example.com/browse/MT-651",
+          "reason_text": "Session budget reached",
+          "why_text": "MT-651 has used 3 sessions of its budget of 3.",
+          "clears_text": "Clears on the next poll tick after `agent.max_sessions` is raised above 3 or is removed, or after MT-651 leaves the active tracker states.",
+          "action": {"kind": "acknowledge"},
+          "evidence": {
+            "reason": "session_budget",
+            "used_sessions": 3,
+            "budget_sessions": 3
+          }
+        },
+        {
+          "id": "cd2e4d3c2c309f9ae99caa324f6e5d9d",
+          "kind": "reaction_escalated",
+          "severity": "warning",
+          "since": "2026-02-24T20:12:40Z",
+          "issue_id": "mno345",
+          "issue_identifier": "MT-653",
+          "issue_title": "Add the export button",
+          "issue_url": "https://tracker.example.com/browse/MT-653",
+          "reason_text": "CI escalated on #931",
+          "why_text": "Sortie escalated failing CI on PR #931 after 2 of 2 CI fixes; the latest check found Test failing.",
+          "clears_text": "Clears when a check of PR #931 passes, a new commit lands on it, it merges or closes, `reactions.ci_failure.max_retries` rises above 2, or MT-653 reaches a terminal tracker state or leaves In Review.",
+          "action": {"kind": "open_pull_request", "url": "https://github.com/acme/web/pull/931"},
+          "evidence": {
+            "reaction_kind": "ci",
+            "config_key": "ci_failure",
+            "pull_request": {
+              "number": 931,
+              "repository": "acme/web",
+              "url": "https://github.com/acme/web/pull/931",
+              "branch": "sortie/MT-653",
+              "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"
+            },
+            "escalation_trigger": "budget_exhausted",
+            "used_attempts": 2,
+            "max_attempts": 2,
+            "last_check": {
+              "observed_at": "2026-02-24T20:12:40Z",
+              "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
+              "status": "failing",
+              "failing_checks": ["Test"],
+              "failing": 1,
+              "pending": 0,
+              "passing": 4
+            }
+          }
         }
       ],
       "agent_totals": {
@@ -1034,8 +1127,9 @@ API design notes:
     - `merge-conflict` counts rebase continuations dispatched since the conflict episode began, against `max_retries`. At the ceiling the next new conflicting head escalates.
     - `merge` counts merge calls made, against `max_retries`, and `max_attempts` is `null` at `0`. At the ceiling the next check escalates.
     - `merge-completion` counts tracker transitions that failed, against `max_retries`. At the ceiling the next failed transition escalates.
-  - `escalated_at` is always present: when the reaction escalated for its current head, and `null` otherwise. The label a client shows is `config.reactions[config_key].escalation_label`. Only `ci` stays pending after it escalates, because the escalation is a soft stop that keeps watching the pull request; every other kind's escalation deletes its entry, so for those kinds the value is `null` for as long as the row exists. A head change clears the value, and a new head escalates again.
-  - `watch_ends_at` is always present: when the reaction stops watching unless its watch restarts first, in UTC, and `null` for a kind without a watch window (`merge-completion`, `label-review`, and `label-fix`) and for a window of `0`. The pass that owns the kind drops the entry once its age exceeds the window, so the value is the last instant the watch holds, and it measures the age from that pass's own start of the watch. `ci` measures from the head commit its latest check recorded, or from the creation of the reaction while it has recorded none, so a new head moves the value. `review`, `bot-review`, and `merge-conflict` measure from the creation of the reaction or from its last retry-slot deferral, which restarts the watch, and `merge` from the creation. The window of each kind is the one its pass applies as of the latest poll tick.
+  - `escalated_at` is always present: when the standing escalation of the reaction began, and `null` while none stands. The label a client shows is `config.reactions[config_key].escalation_label`. Every kind whose pass escalates keeps its row while the escalation stands, because the escalation is a soft stop that keeps watching the pull request, and the value is the time the escalation began: a recheck does not move it. The escalation survives a restart with its time, trigger, and the tries it used. What ends it depends on the kind (Sections 11A.7 to 11G.6), and a person moving the issue out of `tracker.handoff_state`, or releasing its park so Sortie runs the issue again, ends it for every kind. A later escalation of the same reaction records a new time.
+  - `escalation_trigger` is present exactly while `escalated_at` is non-null, and omitted otherwise. It says why the standing escalation began. `budget_exhausted`: the kind used up its tries. `triage`: the kind's triage command asked for a person. `refused`: a write the forge or the tracker answered with an authentication or payload error, on `merge` and `merge-completion`. `missing_merge_commit`: the forge reports the pull request merged but gives no merge commit by the end of the grace period, on `merge-completion`.
+  - `watch_ends_at` is always present: when the reaction stops watching unless its watch restarts first, in UTC, and `null` for a kind without a watch window (`merge-completion`, `label-review`, and `label-fix`), for a window of `0`, and while an escalation stands, because no window ages out a standing escalation. The pass that owns the kind drops an entry with no standing escalation once its age exceeds the window, so the value is the last instant the watch holds, and it measures the age from that pass's own start of the watch. `ci` measures from the head commit its latest check recorded, or from the creation of the reaction while it has recorded none, so a new head moves the value. `review`, `bot-review`, and `merge-conflict` measure from the creation of the reaction or from its last retry-slot deferral, which restarts the watch, and `merge` from the creation. The window of each kind is the one its pass applies as of the latest poll tick.
   - `last_check` is always present: what the latest completed check observed, `null` before the first check completes and always `null` for `merge`, `merge-completion`, `label-review`, and `label-fix`. A result replaces the previous one and leaves with its entry. A head change clears a CI result, because a result for an earlier head describes nothing the reaction now evaluates. It is a flat object whose members follow the kind.
     - `observed_at` is when the check completed, in UTC, on every kind that records a result.
     - `head_sha` is the head commit the check read, on `ci` and `merge-conflict`, omitted when the provider reported none, and masked.
@@ -1051,6 +1145,51 @@ API design notes:
   - `hopped_at` is when the hop was made, in UTC, and `null` when the record holds no time. `dispatched_at` is the pass of the run that made the hop, which the next stage's run continues, in UTC, and `null` when the record holds no pass time.
   - An issue is listed from its hop until a run of it is dispatched, or until a reset of its hop count drops the record (Section 13.1). It is never also in `running` or `retrying`, and it can also be in `budget_exhausted`.
   - The list is sorted by `issue_identifier`, then `issue_id`, and `counts.between_stages` equals its length. The per-issue response answers for an issue known only through such a row.
+- An attention item, on the `attention` array of `GET /api/v1/state`, describes one thing that needs a person. The orchestrator derives the list on each request from the snapshot and the health checks, so an item exists exactly while its cause holds and disappears on the first request after the cause clears; nothing is stored, and nothing needs reconciling at startup. The keys are additive; no existing key changes name, type, or meaning. A client that shows the list counts, orders, and words nothing itself.
+  - `attention` is always present and is `[]` when nothing needs a person. `counts.attention` equals its length.
+  - `kind` is one of the following. Each cause yields one item, with the `since`, `severity`, and `action` the row gives.
+
+    | `kind` | Cause | `since` | `severity` | `action.kind` |
+    |---|---|---|---|---|
+    | `parked` | A row of `parked` | `parked_at` truncated to whole seconds, `null` when the stored time does not parse | `warning` | `open_issue`; `acknowledge` when the row holds no `issue_url` |
+    | `budget_held` | A row of `budget_exhausted` | `exhausted_at` | `warning` | `acknowledge` |
+    | `reaction_escalated` | A row of `pending_reactions` whose `escalated_at` is non-null, whatever its kind | `escalated_at` | `warning` | `merge-completion`: `open_issue`, else `acknowledge`. Every other kind: `open_pull_request`; else `open_issue`; else `acknowledge` |
+    | `workflow_reload_failed` | `health.workflow.consecutive_failures` above `0` | `health.workflow.failing_since` | `critical` | `acknowledge` |
+    | `preflight_failed` | `health.preflight.consecutive_failures` above `0`, unless the latest failed run failed on the workflow load | `health.preflight.failing_since` | `critical` | `acknowledge` |
+
+  - A preflight that fails on the workflow load yields no `preflight_failed` item, because the reload item already names the cause. Without that rule one broken file shows an item for the load and another for the preflight, and after the watcher loads the fixed file the preflight check keeps the load error until the next tick and raises an item for a cause that is gone. A `preflight_failed` item's `since` is when the preflight began failing, which predates the item when the failing streak began on the workflow load.
+  - `severity` is `critical` for a kind under which poll ticks dispatch nothing for any issue and `warning` for a kind about one issue. It is fixed per kind and never grows with age.
+  - `since` is `null` only for a park whose stored time does not parse. A hold's `since` is the row's `exhausted_at`, and after a restart it is the first poll tick, because the onset of a hold lives only in memory.
+  - `action` holds `kind`, which is `open_issue`, `open_pull_request`, or `acknowledge`, and `url`, present exactly for the first two. `acknowledge` is the action of an item with nothing to open; it promises no route.
+  - The issue keys (`issue_id`, `issue_identifier`, `display_identifier`, `issue_title`, `issue_url`) are copied from the source row as the row serves them, masked, with `display_identifier`, `issue_title`, and `issue_url` omitted when empty. An item of a cause that concerns the process omits every issue key.
+  - `id` is the lowercase hex of the first 16 bytes of SHA-256 over the JSON encoding of the string array `[kind, parts...]`, and the encoding never changes, because a client keys stored state by `id`. A time part is in UTC. The parts are the following; no masked string enters an `id`, so a secret registered later changes none.
+
+    | `kind` | Parts |
+    |---|---|
+    | `parked` | `issue_id`; the park time truncated to whole seconds in RFC 3339, `""` when the stored time does not parse |
+    | `budget_held` | `issue_id`; `reason`; the ceiling `reason` names in decimal, `budget_tokens` for `token_budget` and `budget_sessions` for `session_budget` |
+    | `reaction_escalated` | `issue_id`; the row's `kind`; `escalated_at` in RFC 3339 with nanoseconds |
+    | `workflow_reload_failed` | `failing_since` in RFC 3339 with nanoseconds |
+    | `preflight_failed` | `failing_since` in RFC 3339 with nanoseconds |
+
+  - No part changes while its cause holds, so an `id` stays the same across requests and across a restart for a park and for an escalation, which keep their time. A recurrence changes a part, so a stored acknowledgement never hides a new cause: a new park has a new time, a hold reached again after a raise or under an edited ceiling has a new ceiling, a different budget reason is a new reason, an escalation that ended and began again has a new time, and a failure after a pass has a new `failing_since`. The park time enters at whole seconds because the store keeps a park at that precision, so the precision survives a restart.
+  - The list is ordered by `severity` (`critical` before `warning`), then `since` (`null` first, then ascending), then `id` ascending. The order is total, so the same inputs serve the same list.
+  - `reason_text`, `why_text`, and `clears_text` are English sentences taken from the status sentence table, one template per park reason, per budget reason, per check, and per escalating reaction kind (the template of an escalated reaction takes its `why_text` from the row's `escalation_trigger`). `reason_text` is a short phrase without a final period; `why_text` and `clears_text` are one sentence each, ending with a period. They follow the rules of the status sentences below: only a fact Sortie records, masked as Section 15.3 states, no clock time, date, cost, or stage, and `Status not available` for a part that fails to render, with the failure logged. The item stays when a part fails, so neither the list nor its count drops a cause.
+  - `evidence` holds the facts behind the item. A member is present exactly on the kinds named and absent on every other.
+
+    | Member | Kind | Value |
+    |---|---|---|
+    | `reason` | `parked`, `budget_held` | The row's `reason`: `agent_blocked` or `handoff_absence`; `token_budget` or `session_budget` |
+    | `label` | `parked` | The row's `label` |
+    | `used_sessions`, `budget_sessions` | `budget_held` with `session_budget` | The row's values |
+    | `used_tokens`, `used_tokens_complete`, `budget_tokens` | `budget_held` with `token_budget` | The row's values; `used_tokens_complete` is false exactly when the spend is a lower bound |
+    | `reaction_kind`, `config_key`, `pull_request`, `escalation_trigger` | `reaction_escalated` | The row's `kind`, `config_key`, `pull_request`, and `escalation_trigger`, in the shapes the row serves |
+    | `used_attempts`, `max_attempts` | `reaction_escalated` | The row's values, each omitted when `null` |
+    | `last_check` | `reaction_escalated` | The row's `last_check`, omitted when `null` |
+    | `file` | `workflow_reload_failed` | `health.workflow.file` |
+    | `error` | `workflow_reload_failed`, `preflight_failed` | The check's `error` exactly as `health` serves it |
+
+  - What clears each cause is the source's own rule. A park is released when a person removes its label after Sortie has seen it, or moves the issue to another tracker state. A hold leaves the set when the poll tick's rebuild no longer finds the issue at a ceiling or among its candidates. A reaction escalation ends on the facts of its kind (Sections 11A.7 to 11G.6). A reload failure ends with the next load that succeeds, and a preflight failure with the next preflight that passes.
 - A run row, on `GET /api/v1/runs` and in the `history.runs` array of the per-issue response, describes one finished run read from run history. The keys are additive; no existing key changes name, type, or meaning.
   - `run_id` is the run's key in run history and the paging key. `issue_id`, `issue_identifier`, `attempt`, `status`, `started_at`, and `completed_at` are always present. `display_identifier`, `issue_title`, `issue_url`, `rule_name`, `agent_kind`, `configured_model`, `configured_effort`, `model_name`, `workflow_file`, and the stage keys are omitted when the row holds none. Every value is served as recorded: the timestamps are RFC 3339 in UTC as the writer stored them, `dispatched_at` is the pass dispatch time as a running row defines it and `null` when the row holds none, `model_name` is the model the runtime reported, as on a running row, and `rule_name` is `default` for `dispatch.default` and omitted for the workflow-wide fallback.
   - `issue_title`, `issue_url`, `error`, and `self_review.final_verdict` are masked as Section 15.3 states, when the response is built rather than when the row is written, so a value registered as a secret after the run is masked too. Rule names, models, the workflow file, the session ID, and the SSH host are served unmasked, as running rows serve them. `error` is `null` when the run recorded none.

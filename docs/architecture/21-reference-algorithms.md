@@ -86,6 +86,9 @@ on_tick(state):
       # issue was given, per configured kind without a triage block; nil
       # dispatches as before.
       seed = fresh_run_seed(issue, state)
+      # A candidate that holds a standing escalation is read against the
+      # handoff state before it is claimed (Section 16.3).
+      state = end_outside_handoff(state, issue.id, issue.state)
       state = dispatch_issue(issue, state, attempt=null, continuation_context=seed)
 
   notify_observers()
@@ -135,6 +138,42 @@ function reconcile_running_issues(state):
 
 The refresh also reads every issue that holds a stage hop record (§8.5), and a hop record decides a no-state reading through `confirm_no_state` on its own flag: the first reading keeps the record, its count, and its hold, and the second resets it with the `not_active` trigger. A reading in a configured state clears the flag, and an issue missing from the response leaves every flag as it is. A run that ends before the second reading takes the exit disposition of its last configured state, because the exit reads the entry's issue snapshot, which a no-state reading never updates.
 
+For an issue the refresh reads in a non-terminal state while Sortie does not drive it, and which holds a standing escalation, the refresh ends each standing escalation of the issue and drops its entry and counter (§8.5 Part B). The dispatch loop of Section 16.2 applies the same reading to a candidate that holds a standing escalation before it claims the candidate, because the release of a park can dispatch the issue on the tick that releases it.
+
+```text
+function end_outside_handoff(state, issue_id, listed_state):
+  escalated = [entry for entry in state.pending_reactions of issue_id if entry.escalated_at is set]
+  if handoff_state is empty or escalated is empty:
+    return state
+  if listed_state is not empty:
+    clear no_state_observed on every entry of escalated
+    if listed_state equals handoff_state, case-insensitively:
+      return state
+  if issue_id in state.running, state.retry_attempts, state.claimed, or state.parked:
+    return state
+
+  # A search can trail Sortie's own handoff write, so a listing never decides alone.
+  read, err = tracker.fetch_issue_by_id(issue_id)
+  if err:
+    return state                                      # never a no-state reading
+  if read.state is empty:
+    confirmed = [confirm_no_state(entry.no_state_observed) for entry in escalated]
+    if not all(confirmed):
+      return state
+  else:
+    clear no_state_observed on every entry of escalated
+    if read.state equals handoff_state, case-insensitively, or read.state in terminal_states:
+      return state
+
+  for entry in escalated:
+    end_escalation(entry)                             # the record keeps its subject
+    delete(state.pending_reactions, entry.key)
+    delete(state.reaction_attempts, entry.key)
+    if entry.kind == "bot-review":
+      delete(state.reaction_reported_comments, entry.key)
+  return state
+```
+
 ```text
 function reconcile_ci_status(state):
   if ci_provider is nil:
@@ -154,9 +193,16 @@ function reconcile_ci_status(state):
     switch result.status:
       case "passing":
         delete(state.reaction_attempts, key)
+        end_escalation(pending)            # a passing verdict ends a standing escalation
       case "pending":
         state.pending_reactions[key] = pending
       case "failing":
+        if pending.escalated_at is set:
+          if pending.escalation_trigger == "budget_exhausted" and not fixes_spent(state, pending):
+            end_escalation(pending)
+          else:
+            state.pending_reactions[key] = pending   # a standing escalation dispatches nothing
+            continue
         handle_ci_failure(state, pending, result)
 
   return state
@@ -177,8 +223,8 @@ function reconcile_review_comments(state):
     # Watch window; a spent counter survives the drop. The cached
     # handed-off set is dropped at any counter value, its rows are kept.
     # watch_start is watch_restarted_at when a retry-slot deferral set it,
-    # else created_at
-    if review_config.watch_window_ms > 0 and now - watch_start(pending) > review_config.watch_window_ms:
+    # else created_at. A standing escalation is never aged out.
+    if review_config.watch_window_ms > 0 and pending.escalated_at is not set and now - watch_start(pending) > review_config.watch_window_ms:
       cancel_triage(pending)
       if state.reaction_attempts[rkey] < review_config.max_continuation_turns:
         delete(state.reaction_attempts, rkey)
@@ -211,6 +257,9 @@ function reconcile_review_comments(state):
     max_time = max(c.submitted_at for c in actionable)
 
     if len(actionable) == 0:
+      if pending.escalated_at is set:
+        end_escalation(pending)
+        delete(state.reaction_attempts, rkey)
       cancel_triage(pending)
       pending.pending_retry_at = now + poll_interval
       state.pending_reactions[key] = pending
@@ -238,6 +287,21 @@ function reconcile_review_comments(state):
         state.pending_reactions[key] = pending
         continue
       state.handed_off_comments[rkey] = set(ids)
+    # A standing escalation dispatches nothing. A budget escalation ends
+    # when no comment is new; a triage escalation ends when the set the
+    # command judged changed (Section 11B.4)
+    if pending.escalated_at is set:
+      if pending.escalation_trigger == "budget_exhausted":
+        ends = not any(is_new_comment(state, pending.issue_id, "review", c) for c in actionable)
+      else:
+        ends = fingerprint != pending.escalation_subject
+      if not ends:
+        pending.pending_retry_at = now + poll_interval
+        state.pending_reactions[key] = pending
+        continue
+      end_escalation(pending)
+      delete(state.reaction_attempts, rkey)
+
     if not any(is_new_comment(state, pending.issue_id, "review", c) for c in actionable):
       if all(c.id in state.handed_off_comments[rkey] for c in actionable):
         store.mark_reaction_dispatched(pending.issue_id, "review")
@@ -259,6 +323,7 @@ function reconcile_review_comments(state):
 
     # Continuation budget; a set reaching this point holds a new comment
     turn_count = state.reaction_attempts[rkey]
+    # The escalation keeps the entry pending with the escalation recorded
     if turn_count >= review_config.max_continuation_turns:
       escalate_review_failure(state, pending, turn_count)
       continue

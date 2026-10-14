@@ -40,6 +40,7 @@ type WorkerExitStore interface {
 	UpsertSessionMetadata(ctx context.Context, meta persistence.SessionMetadata) error
 	SaveRetryEntry(ctx context.Context, entry persistence.RetryEntry) error
 	DeleteRetryEntry(ctx context.Context, issueID string) error
+	DeleteReactionEscalations(ctx context.Context, issueID string) error
 	QueryConsecutiveHandoffAbsenceCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
 	ResetHandoffAbsenceSequence(ctx context.Context, issueID string) error
 	UpsertParkedIssue(ctx context.Context, entry persistence.ParkedIssue) error
@@ -1002,6 +1003,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 						nowCI = params.NowFunc().UTC()
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindCI)
+					replaced := state.PendingReactions[rkey]
 					state.PendingReactions[rkey] = &PendingReaction{
 						IssueID:     workerResult.IssueID,
 						Identifier:  workerResult.Identifier,
@@ -1026,6 +1028,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 						IssueIdentity: reactionIdentity,
 					}
+					carryEscalation(state.PendingReactions[rkey], replaced)
 				} else if scm.Branch != "" {
 					log.Debug("ci watch not seeded: workspace metadata missing pull request identity",
 						slog.Int("pr_number", scm.PRNumber),

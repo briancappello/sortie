@@ -133,7 +133,6 @@ func newData(key string) map[string]any {
 		"MaxSessions":     0,
 		"Run":             "",
 		"Runs":            "",
-		"After":           "",
 		"Restart":         false,
 		"N":               0,
 		"Used":            0,
@@ -477,8 +476,8 @@ func reactionPair(row orchestrator.SnapshotPendingReaction, s Situation, c Conte
 	return outcomePair{}, false
 }
 
-// recordFixWords records the wording of the fix a kind runs and what its pass
-// does once the tries are used up.
+// recordFixWords records the wording of the fix a kind runs and the escalation
+// its pass applies once the tries are used up.
 func recordFixWords(data map[string]any, row orchestrator.SnapshotPendingReaction, member reactionMember) {
 	words, ok := fixVocabulary[row.Kind]
 	if !ok {
@@ -486,7 +485,6 @@ func recordFixWords(data map[string]any, row orchestrator.SnapshotPendingReactio
 	}
 	data["Run"] = words.run
 	data["Runs"] = words.runs
-	data["After"] = words.after
 	data["Restart"] = words.restart
 	data["Escalation"] = member.escalation.Escalation
 	data["EscalationLabel"] = strings.TrimSpace(member.escalation.EscalationLabel)

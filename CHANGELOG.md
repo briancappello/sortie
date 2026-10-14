@@ -37,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `sortie stats` and `/api/v1/stats` now break the runs down by what started each run: a dispatch from the poll tick, the first run after a stage hop, a retry after a failed or stalled run, a continuation of an issue still in progress, or a pull request reaction (a CI fix, a review fix, a bot review fix, a rebase after a merge conflict, or a label command), with the same figures the other breakdowns show. Recorded CI failures form a group of their own, and a run recorded before Sortie kept what started it counts as unknown, never as a dispatch from the poll tick. ([#1336](https://github.com/sortie-ai/sortie/issues/1336))
 - Sortie now streams change notices at `/api/v1/events` as server-sent events: a connected client learns within a second that anything the JSON API shows has changed, including a running agent's token counts and latest message and an edit of WORKFLOW.md, so a dashboard can refresh only when something changed instead of reloading every few seconds. A notice carries no data of its own. ([#1294](https://github.com/sortie-ai/sortie/issues/1294))
 
+- The JSON API (`/api/v1/state`) now lists what needs a person: every parked issue, every issue held by its token or session budget, every pull request reaction Sortie escalated to a person, a WORKFLOW.md edit that failed to load, and a failing dispatch preflight. Each item says in plain English why it needs a person and what clears it, carries the facts behind it, names the one action a client should offer (open the issue, open the pull request, or acknowledge) and how severe it is, and keeps its ID for as long as its cause lasts, so a dashboard counts and orders the list with no rules of its own. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -65,6 +67,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A fix or review label added to a pull request during another kind of Sortie run for its issue, such as a CI fix, now starts its command once that run ends; Sortie used to ignore the label and leave it on the pull request. ([#1312](https://github.com/sortie-ai/sortie/issues/1312))
 
+- An escalated pull request reaction now stays escalated until what it escalated is resolved, or until a person moves the issue out of its handoff state or releases its park so Sortie runs it again, after which the next run starts that reaction afresh. A restart no longer forgets it, so Sortie no longer runs a second round of fixes and escalates again after a restart, and `watch_window_ms` no longer ends the watch of an escalated pull request. Escalated review comments, review bot comments, merge conflicts, auto-merges, and issue moves after a merge now stay in the JSON API (`/api/v1/state`) as escalated, as escalated CI already did. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
+
+- A passing re-run of a pull request's checks now ends its CI escalation, and the escalation keeps the time Sortie escalated it instead of moving it forward at every recheck of checks that stay red. Sortie still applies the escalation at most once per commit. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
+
 ### Migrations
 
 - Add `issue_title` and `issue_url` to `run_history` and `retry_entries`, and `display_identifier` to `retry_entries`. A retry or run recorded before the upgrade reads back with no title or link; a queued retry gets one from the first tracker poll or when it next fires. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
@@ -82,6 +88,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `rule_name`, `agent_kind`, `configured_model`, `stage_previous`, `stage_previous_outcome`, `chain_id`, `dispatched_at`, `issue_type`, and `issue_labels` to `parked_issues`, and `issue_type`, `issue_labels`, and `issue_state` to `stage_hops`. An issue parked before the upgrade takes its rule, stage, agent, model, and pick-up time from its last run before the park, and its issue type and labels from the next poll that lists it; an issue waiting for its next stage at the upgrade shows no issue type, labels, or state while it waits. ([#1321](https://github.com/sortie-ai/sortie/issues/1321))
 
 - Add `first_after_hop` to `run_history` and mark the earliest run after each stage hop already in the history. A later run in the same stage stays unmarked, and a run recorded before Sortie kept stage chains is never marked. ([#1336](https://github.com/sortie-ai/sortie/issues/1336))
+
+- Add the `reaction_escalations` table, which holds the escalation of each pull request reaction, one row per issue and reaction kind. An escalation standing at the upgrade's restart is not restored, and the next escalation of its kind records one. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
 
 ## [1.27.0] - 2026-10-11
 

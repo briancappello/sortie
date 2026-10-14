@@ -129,6 +129,57 @@ func TestHealthMasksTrackerFailureAcrossConsecutiveFailures(t *testing.T) {
 	}
 }
 
+func TestHealthReportsWorkflowLoadFailedFromLatestPreflightRun(t *testing.T) {
+	t.Parallel()
+
+	failing := func(checks ...string) PreflightResult {
+		var result PreflightResult
+		for _, check := range checks {
+			result.Errors = append(result.Errors, PreflightError{Check: check, Message: check + " failed"})
+		}
+		return result
+	}
+
+	tests := []struct {
+		name     string
+		runs     []PreflightResult
+		wantLoad bool
+		wantFail int
+	}{
+		{name: "failing on the workflow load", runs: []PreflightResult{failing("workflow_load")}, wantLoad: true, wantFail: 1},
+		{name: "failing on another check", runs: []PreflightResult{failing("tracker.kind")}, wantFail: 1},
+		{name: "failing on the workflow load and another check", runs: []PreflightResult{failing("tracker.kind", "workflow_load")}, wantLoad: true, wantFail: 1},
+		{name: "passing run after a load failure", runs: []PreflightResult{failing("workflow_load"), {}}},
+		{name: "other failure after a load failure", runs: []PreflightResult{failing("workflow_load"), failing("tracker.kind")}, wantFail: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wm := &stubWorkflowManager{config: lifecycleConfig(t.TempDir())}
+			o := NewOrchestrator(OrchestratorParams{
+				State:           NewState(60000, 5, 0, nil, AgentTotals{}),
+				Logger:          discardLogger(),
+				TrackerAdapter:  &mockTrackerAdapter{},
+				AgentAdapter:    &mockAgentAdapter{},
+				WorkflowManager: wm,
+				Store:           &stubStore{},
+			})
+
+			for _, run := range tt.runs {
+				o.recordPreflight(run)
+			}
+
+			got := o.Health().Preflight
+			if got.WorkflowLoadFailed != tt.wantLoad || got.ConsecutiveFailures != tt.wantFail {
+				t.Errorf("Health().Preflight = {WorkflowLoadFailed: %t, ConsecutiveFailures: %d}, want {%t, %d}",
+					got.WorkflowLoadFailed, got.ConsecutiveFailures, tt.wantLoad, tt.wantFail)
+			}
+		})
+	}
+}
+
 func TestObserveReadClassification(t *testing.T) {
 	t.Parallel()
 

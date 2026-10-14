@@ -13,12 +13,16 @@ import (
 const fallbackText = "Status not available"
 
 // parts holds the template sources of one table entry: short and long for a
-// state sentence, text for an outcome, condition and text for a next outcome.
+// state sentence, text for an outcome, condition and text for a next outcome,
+// reason, why, and clears for an attention item.
 type parts struct {
 	short     string
 	long      string
 	text      string
 	condition string
+	reason    string
+	why       string
+	clears    string
 }
 
 // Fragments shared by several templates.
@@ -45,6 +49,37 @@ const (
 	afterAhead = "{{if eq .Ahead \"retry\"}} after {{retry .AheadTrigger .AheadRunInline .AheadAttempt}} ends" +
 		"{{else if eq .Ahead \"run\"}} after the current run ends{{end}}"
 )
+
+// Fragments shared by the attention templates.
+const (
+	parkedClears = "Clears when a poll tick finds `{{.Label}}` removed from {{.Key}}{{if .Unseen}} after Sortie has seen it there{{end}}" +
+		"{{if .State}}, or {{.Key}} moved out of {{.State}}{{end}}."
+	parkedSeen      = "{{if .Unseen}} (not yet seen on the issue){{end}}"
+	budgetLeaves    = "or after {{.Key}} leaves the active tracker states."
+	triesOfMax      = "{{count .Tries}}{{if .HasMax}} of {{count .Max}}{{end}}"
+	orLeavesHandoff = "{{if .Handoff}} or leaves {{.Handoff}}{{end}}"
+	terminalExit    = "{{.Key}} reaches a terminal tracker state" + orLeavesHandoff
+	latestCheck     = "{{if eq .Latest \"failing\"}}; the latest check found " +
+		"{{if .FailingChecks}}{{list .FailingChecks}} failing{{else}}{{plural .FailingN \"failing check\" \"failing checks\"}}{{end}}" +
+		"{{else if eq .Latest \"pending\"}}; the latest check found CI pending{{end}}"
+	triageAsked = " because the triage command asked for a person"
+)
+
+// ifTrigger opens a branch that renders when the escalation began for trigger.
+func ifTrigger(trigger orchestrator.ReactionEscalationTrigger) string {
+	return `{{if eq .Trigger "` + string(trigger) + `"}}`
+}
+
+// elseIfTrigger continues a branch chain opened by [ifTrigger].
+func elseIfTrigger(trigger orchestrator.ReactionEscalationTrigger) string {
+	return `{{else if eq .Trigger "` + string(trigger) + `"}}`
+}
+
+// onBudget renders text only for an escalation that began on an exhausted
+// budget.
+func onBudget(text string) string {
+	return ifTrigger(orchestrator.EscalationTriggerBudget) + text + "{{end}}"
+}
 
 var table = map[string]parts{
 	"run_work": {
@@ -196,6 +231,91 @@ var table = map[string]parts{
 		long:  "{{.Key}} waits on a pull request reaction for PR #{{.PR}}; " + nextCheck + ".",
 	},
 
+	"attn_parked_agent_blocked": {
+		reason: "Parked: the agent needs a person",
+		why:    "The agent stopped because it cannot go on without a person, so Sortie parked {{.Key}} under the label `{{.Label}}`" + parkedSeen + ".",
+		clears: parkedClears,
+	},
+	"attn_parked_handoff_absence": {
+		reason: "Parked: no evidence of work",
+		why: "{{.Key}}'s runs ended without evidence of work as many times in a row as `agent.max_consecutive_absences` allows, " +
+			"so Sortie parked it under the label `{{.Label}}`" + parkedSeen + ".",
+		clears: parkedClears,
+	},
+	"attn_budget_tokens": {
+		reason: "Token budget reached",
+		why: "{{.Key}} has used {{if .AtLeast}}at least {{end}}{{tokens .Used}} tokens of its budget of {{tokens .Budget}}" +
+			"{{if .Stopped}}, and the budget stopped {{plural .Stopped \"session\" \"sessions\"}} mid-run{{end}}.",
+		clears: "Clears on the next poll tick after `agent.max_tokens` is raised above what {{.Key}} has used or is removed, " + budgetLeaves,
+	},
+	"attn_budget_sessions": {
+		reason: "Session budget reached",
+		why:    "{{.Key}} has used {{plural .UsedSessions \"session\" \"sessions\"}} of its budget of {{count .BudgetSessions}}.",
+		clears: "Clears on the next poll tick after `agent.max_sessions` is raised above {{count .UsedSessions}} or is removed, " + budgetLeaves,
+	},
+	"attn_reload": {
+		reason: "{{.File}} failed to load",
+		why:    "{{.File}} failed to load ({{.Error}}), so poll ticks dispatch nothing until it loads, and the configuration that last loaded stays in effect.",
+		clears: "Clears when {{.File}} loads again, which Sortie tries each time the file is saved and on every poll tick.",
+	},
+	"attn_preflight": {
+		reason: "Dispatch preflight failed",
+		why:    "The dispatch preflight failed ({{.Error}}), so poll ticks dispatch nothing until it passes.",
+		clears: "Clears on the first poll tick whose dispatch preflight passes.",
+	},
+
+	"attn_escalated_ci": {
+		reason: "CI escalated on #{{.PR}}",
+		why: ifTrigger(orchestrator.EscalationTriggerTriage) + "Sortie escalated failing CI on PR #{{.PR}}" + triageAsked + latestCheck + "." +
+			"{{else}}Sortie escalated failing CI on PR #{{.PR}} after " + triesOfMax + " CI fixes" + latestCheck + ".{{end}}",
+		clears: "Clears when a check of PR #{{.PR}} passes, a new commit lands on it, it merges or closes" +
+			onBudget(", `reactions.ci_failure.max_retries` rises above {{count .Tries}}") + ", or " + terminalExit + ".",
+	},
+	"attn_escalated_review": {
+		reason: "Review comments escalated on #{{.PR}}",
+		why: ifTrigger(orchestrator.EscalationTriggerTriage) + "Sortie escalated review comments on PR #{{.PR}}" + triageAsked + "." +
+			"{{else}}Sortie used " + triesOfMax + " review fix runs on PR #{{.PR}}, and the pull request still holds review comments no Sortie run was given.{{end}}",
+		clears: "Clears when " + ifTrigger(orchestrator.EscalationTriggerTriage) + "the review comments on PR #{{.PR}} change" +
+			"{{else}}no review comment on PR #{{.PR}} is left that no Sortie run was given{{end}}, when the pull request merges or closes" +
+			onBudget(", when Sortie restarts with `reactions.review_comments.max_continuation_turns` above {{count .Tries}}") +
+			", or when " + terminalExit + ".",
+	},
+	"attn_escalated_bot_review": {
+		reason: "Bot review escalated on #{{.PR}}",
+		why: ifTrigger(orchestrator.EscalationTriggerTriage) + "Sortie escalated review bot comments on PR #{{.PR}}" + triageAsked + "." +
+			"{{else}}Sortie used " + triesOfMax + " bot review fix runs on PR #{{.PR}}, " +
+			"and the pull request still holds review bot comments on its code that no Sortie run was given.{{end}}",
+		clears: "Clears when " + ifTrigger(orchestrator.EscalationTriggerTriage) + "the review bot comments on PR #{{.PR}} change" +
+			"{{else}}no review bot comment on the code of PR #{{.PR}} is left that no Sortie run was given{{end}}, when the pull request merges or closes" +
+			onBudget(", when Sortie restarts with `reactions.bot_review.max_continuation_turns` above {{count .Tries}}") +
+			", or when " + terminalExit + ".",
+	},
+	"attn_escalated_merge_conflict": {
+		reason: "Merge conflict escalated on #{{.PR}}",
+		why: ifTrigger(orchestrator.EscalationTriggerTriage) + "Sortie escalated the merge conflict on PR #{{.PR}}" + triageAsked + "." +
+			"{{else}}Sortie escalated the merge conflict on PR #{{.PR}} after " + triesOfMax + " rebase runs.{{end}}",
+		clears: "Clears when a check finds no merge conflict on PR #{{.PR}}, a new commit lands on it, it merges or closes" +
+			onBudget(", Sortie restarts with `reactions.merge_conflicts.max_retries` above {{count .Tries}}") + ", or " + terminalExit + ".",
+	},
+	"attn_escalated_merge": {
+		reason: "Auto-merge escalated on #{{.PR}}",
+		why: ifTrigger(orchestrator.EscalationTriggerRefused) + "Sortie stopped auto-merging PR #{{.PR}} because the forge refused the merge call." +
+			"{{else}}Sortie stopped auto-merging PR #{{.PR}} after " + triesOfMax + " merge calls did not merge it.{{end}}",
+		clears: "Clears when PR #{{.PR}} merges or closes" +
+			onBudget(", Sortie restarts with `reactions.auto_merge.max_retries` above {{count .Tries}} or at `0`") + ", or " + terminalExit + ".",
+	},
+	"attn_escalated_merge_completion": {
+		reason: "Merge completion escalated on #{{.PR}}",
+		why: ifTrigger(orchestrator.EscalationTriggerRefused) +
+			"Sortie could not move {{.Key}}{{if .Target}} to {{.Target}}{{end}} after PR #{{.PR}} merged, because the tracker refused the move." +
+			elseIfTrigger(orchestrator.EscalationTriggerMissingMergeCommit) +
+			"PR #{{.PR}} merged, but the forge reports no merge commit for it, so Sortie has not moved {{.Key}}{{if .Target}} to {{.Target}}{{end}}." +
+			"{{else}}Sortie could not move {{.Key}}{{if .Target}} to {{.Target}}{{end}} after PR #{{.PR}} merged: " +
+			"{{plural .Tries \"tracker move\" \"tracker moves\"}} failed.{{end}}",
+		clears: "Clears when " + terminalExit +
+			ifTrigger(orchestrator.EscalationTriggerMissingMergeCommit) + ", or when the forge reports the merge commit of PR #{{.PR}}{{end}}.",
+	},
+
 	"stage_wait": {
 		short: "Between stages: {{.Source}} to {{.Target}}",
 		long:  "{{.Key}} moved from stage {{.Source}} to stage {{.Target}}, and Sortie added `{{.Label}}`; {{.Target}} starts when a poll tick reads that label on the issue.",
@@ -252,7 +372,7 @@ var table = map[string]parts{
 	"next_stage_start": {text: "Stage {{.Next}} starts in a new session."},
 	"next_fix": {text: "Sortie dispatches {{.Run}} {{count .N}}" + ofMax +
 		"{{if .Debounce}} once no newer comment arrives for {{duration .Debounce}}{{end}}."},
-	"next_escalate": {text: "{{.Runs}} are used up ({{count .Used}} of {{count .Max}}), so Sortie " + posture + " and {{.After}}." +
+	"next_escalate": {text: "{{.Runs}} are used up ({{count .Used}} of {{count .Max}}), so Sortie " + posture + " and keeps watching the pull request." +
 		"{{if .Restart}} A new commit that no Sortie run made can restart the count.{{end}}"},
 	"next_triage":           {text: "Sortie runs the triage command, and its answer decides what follows."},
 	"next_held":             {text: "Sortie holds {{.Key}} at its " + heldAt + "."},
@@ -278,6 +398,9 @@ func mustParse(entries map[string]parts) *template.Template {
 			{"long", entry.long},
 			{"text", entry.text},
 			{"condition", entry.condition},
+			{"reason", entry.reason},
+			{"why", entry.why},
+			{"clears", entry.clears},
 		} {
 			if part.source == "" {
 				continue
@@ -398,21 +521,19 @@ var hopResults = map[string]string{
 	"failed":  "the next stage's label could not be added to the issue",
 }
 
-// fixWords words what a reaction kind runs when its watch finds its event, and
-// what its pass does once the tries are used up.
+// fixWords words what a reaction kind runs when its watch finds its event.
 type fixWords struct {
 	run     string
 	runs    string
-	after   string
 	restart bool // a head no Sortie run made resets the count
 }
 
 // fixVocabulary is keyed by the reaction kinds that count tries and run a fix.
 var fixVocabulary = map[string]fixWords{
-	orchestrator.ReactionKindCI:            {run: "CI fix", runs: "CI fixes", after: "keeps watching the pull request", restart: true},
-	orchestrator.ReactionKindReview:        {run: "review fix", runs: "Review fixes", after: "stops watching for review comments"},
-	orchestrator.ReactionKindBotReview:     {run: "bot review fix", runs: "Bot review fixes", after: "stops watching for bot review comments"},
-	orchestrator.ReactionKindMergeConflict: {run: "rebase", runs: "Rebases", after: "stops watching for merge conflicts", restart: true},
+	orchestrator.ReactionKindCI:            {run: "CI fix", runs: "CI fixes", restart: true},
+	orchestrator.ReactionKindReview:        {run: "review fix", runs: "Review fixes"},
+	orchestrator.ReactionKindBotReview:     {run: "bot review fix", runs: "Bot review fixes"},
+	orchestrator.ReactionKindMergeConflict: {run: "rebase", runs: "Rebases", restart: true},
 }
 
 // watchNames names, in the order a sentence lists them, what each reactions

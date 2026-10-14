@@ -86,6 +86,7 @@ func (s *retrySlotSCM) RemoveLabel(_ context.Context, _ int, _, _, label string)
 // a canned return value.
 type retrySlotStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	marks      map[string]string

@@ -34,7 +34,7 @@ Loop body per `ReactionKindMergeConflict` entry in `state.PendingReactions`:
 
 1. Delete the entry from the map (prevents reprocessing within the same tick).
 2. Type-assert `KindData` to `*MergeConflictReactionData`; on mismatch, log and skip.
-3. Drop the entry when its age, counted from the entry's creation or its last retry-slot deferral and never from the last recorded head, exceeds the configured `reactions.merge_conflicts.watch_window_ms` (default `1800000`, thirty minutes; `0` removes the bound).
+3. Drop the entry when its age, counted from the entry's creation or its last retry-slot deferral and never from the last recorded head, exceeds the configured `reactions.merge_conflicts.watch_window_ms` (default `1800000`, thirty minutes; `0` removes the bound). The window never drops an entry whose escalation stands (§11E.5).
 4. Respect the `PendingRetryAt` poll throttle: if `now < PendingRetryAt`, re-enqueue and continue.
 5. If the entry holds a triage run that has not finished (Section 5.3.8), re-enqueue it ready for the next tick and continue. `GetMergeability` is not called and the pending-backoff counter is untouched.
 6. Call `GetMergeability`. On error, increment the pending-backoff counter, set `PendingRetryAt`, re-enqueue, count `sortie_merge_conflict_checks_total{result="error"}`, and continue.
@@ -42,6 +42,8 @@ Loop body per `ReactionKindMergeConflict` entry in `state.PendingReactions`:
    - `MergeabilityUnknown`: re-enqueue at `now + poll_interval`; count `"unknown"`; do not touch the fingerprint or the attempt counter.
    - `MergeabilityDirty`: apply the dirty-branch logic described in §11E.4 and §11E.5.
    - All other values (`clean`, `unstable`, `blocked`): cancel any in-flight triage run, whose fingerprint this branch is about to erase; delete the fingerprint row; delete the per-episode attempt counter (`delete(state.ReactionAttempts, rkey)`); re-enqueue at `now + poll_interval`; count `"clear"`. This closes the episode.
+
+An entry whose escalation stands (§11E.5) runs steps 1 to 6 and the switch of step 7 as above, and the dirty branch differs. A head whose fingerprint equals the escalation's subject re-enqueues the entry at `now + poll_interval` and does nothing else: no dispatch, no escalation action, no triage run, and no counter change. A head whose fingerprint differs from the subject ends the escalation, and the pass goes on from the head-change block as for an entry with none. A not-dirty read ends the escalation through the episode exit of step 7.
 
 ### 11E.4 Fingerprint and deduplication
 
@@ -67,21 +69,29 @@ When the gate proceeds, or when no `triage` block is configured, the per-episode
 - If `attempts > MaxRetries` (default 1): invoke `escalateMergeConflictFailure`.
 - Otherwise: invoke `dispatchMergeConflictContinuation`.
 
-`escalateMergeConflictFailure` emits the `escalation.merge_conflicts` event (Section 10.4.7) under every posture and applies the configured escalation action, in a detached `TrackerOpsWg` goroutine with a 30-second timeout, then performs the episode-exit cleanup. Its action, metric label, and cleanup are the same whether the budget or a triage command reached it; only the log message and the event body differ, and a triage escalation states that the command asked for a person rather than claiming a budget was exhausted. The event body is a plain-text message naming the PR number and the number of attempts.
+`escalateMergeConflictFailure` emits the `escalation.merge_conflicts` event (Section 10.4.7) under every posture and applies the configured escalation action, in a detached `TrackerOpsWg` goroutine with a 30-second timeout, then performs the escalation cleanup. Its action, metric label, and cleanup are the same whether the budget or a triage command reached it; only the log message and the event body differ, and a triage escalation states that the command asked for a person rather than claiming a budget was exhausted. The event body is a plain-text message naming the PR number and the number of attempts.
 
 - `escalation: label` (default): add `escalation_label` (default `needs-human`) to the tracker issue via `TrackerAdapter.AddLabel`, in its own detached goroutine. The event reaches only destinations that subscribe to `escalation.merge_conflicts`, so the issue receives no comment unless a `tracker_comment` entry lists it.
 - `escalation: comment` (deprecated): apply no label; the `tracker_comment` destination receives the event through a subscription Sortie synthesizes from this value. The comment keeps posting and a deprecation advisory names the replacement: `escalation: none` plus `escalation.merge_conflicts` in the events of a `tracker_comment` entry (Section 5.3.10).
 - `escalation: none`: apply no label; the event reaches only destinations subscribed to it.
 
-Episode-exit cleanup is identical for every escalation posture. After the action:
+Escalation cleanup is identical for every escalation posture. The escalation records on the entry its time, its trigger (`budget_exhausted` or `triage`), and its subject, the head fingerprint, and stores that record. After the action:
 
 ```
-delete(state.PendingReactions,    ReactionKey(issueID, "merge-conflict"))
 DeleteReactionFingerprint(issueID, "merge-conflict")
-delete(state.ReactionAttempts,    ReactionKey(issueID, "merge-conflict"))
 ```
 
-The counter reset is scoped to this kind's own slot, not an issue-wide clear. This makes both episode exits symmetric: the not-dirty branch and the escalation exit each leave the counter deleted, so a later independent conflict always opens a fresh episode at `attempts = 1` regardless of which exit closed the prior episode.
+The entry stays pending and re-enqueues at `now + poll_interval`. The counter stays in place, at the number of rebases dispatched, without the observation that tripped the cap. The configured action applies once per head: when an escalation of a head ends and a later escalation of the same head begins, the entry records a new time and trigger and applies no action.
+
+While the escalation stands, the entry dispatches nothing, applies no action, appends no run-history row, starts no triage run, and is never dropped by the watch window. The orchestrator stores the escalation, so it survives a restart with its time, trigger, subject, and counter (Section 14.3). The escalation ends on any of these facts, and on no other:
+
+- A check that finds no conflict, the episode exit of §11E.3, which deletes the fingerprint row and the counter.
+- A conflicting head whose fingerprint differs from the subject. The pass then goes on as for an entry with no escalation, and a new head resets the counter only when no Sortie run made it, as without an escalation.
+- For a `budget_exhausted` escalation, a ceiling that no longer counts the stored rebases as spent: this kind counts a counter at or above `max_retries` as spent.
+- The pull request merges, closes, or is missing, or the tracker issue reaches a terminal state. Each ends the watch, so the pass drops the entry and its counter.
+- A person moves the issue out of `tracker.handoff_state`, or releases its park so Sortie runs the issue again, while Sortie does not drive it (Section 8.5 Part B). The reading drops the entry and its counter, so the next run starts the reaction with a fresh budget.
+
+The not-dirty exit and the removal of the entry leave the counter deleted, so a later independent conflict opens a fresh episode at `attempts = 1`.
 
 Cross-kind isolation: `escalateMergeConflictFailure` MUST scope all deletions to the `merge-conflict` kind only. It MUST NOT call `CancelRetry` or `DeleteRetryEntry`, MUST NOT clear any sibling kind's slot, and MUST NOT `delete state.Claimed[issue_id]`. A failed merge-conflict resolution MUST NOT invalidate parallel `ci`, `review`, `bot-review`, or `merge` reactions on the same issue. Escalation tracker-call failures are logged and counted (`sortie_merge_conflict_escalations_total{action="error"}`) but do not block the slot-scoped cleanup.
 
@@ -104,9 +114,11 @@ The `merge_conflict` key MUST be registered in `prompt.continuationKeys` and see
 
 ### 11E.7 Seeding and recovery
 
-Worker-exit seeding applies the same metadata predicate `review` and `bot-review` use: an entry is created only when `SCMMetadata` reports `pr_number > 0` and non-empty `owner`, `repo`, and `branch`. The seeding block runs in the `WorkerExitNormal` branch of `HandleWorkerExit`, after the existing auto-merge enqueue block, guarded on `params.SCMAdapter != nil && params.MergeConflictReactionConfigured`. A "create only if absent" guard preserves an in-progress pending entry across re-exits, matching the review, bot-review, and auto-merge kinds.
+Worker-exit seeding applies the same metadata predicate `review` and `bot-review` use: an entry is created only when `SCMMetadata` reports `pr_number > 0` and non-empty `owner`, `repo`, and `branch`. The seeding block runs in the `WorkerExitNormal` branch of `HandleWorkerExit`, after the existing auto-merge enqueue block, guarded on `params.SCMAdapter != nil && params.MergeConflictReactionConfigured`. A "create only if absent" guard preserves an in-progress pending entry across re-exits, matching the review, bot-review, and auto-merge kinds. The guard also preserves a standing escalation, because a worker exit seeds only when no entry exists.
 
 Startup recovery re-seeds a `merge-conflict` pending entry for recent handoff-stage issues when `SCMMetadata` passes the same predicate. The recovered count is surfaced in the startup recovery log. Recovery is gated on the configured flag, so a configured-but-providerless setup recovers no entries, matching the §11D.6 pattern for bot-review.
+
+A standing escalation is restored at startup from its stored record, also for an issue that startup recovery does not reach (Section 14.3). A restored entry takes `HeadRecordedAt` from the escalation time, so a restart does not change how a new head is budgeted: the entry dispatches nothing while the escalation stands, a graceful stop records every run it drains, and the runs completed since the escalation time are exactly the worker sessions that could have made a later head. A new head with no worker run since the escalation is attributed to a person and resets the counter, so its conflict dispatches a rebase and does not escalate a second time. Only a run cut off by a hard stop, or still running when the drain times out, records no row; its push also reads as a person's, which costs at most one fresh budget.
 
 ### 11E.8 Config and observability
 
@@ -145,7 +157,12 @@ Per-issue `merge-conflict` reaction lifecycle (the `issue_id:merge-conflict` slo
 | pending | Reconcile tick, `Mergeability == dirty`, new head this reaction has not dispatched for, attribution `not_orchestrator` | pending | Delete the per-episode counter before incrementing, so the reported attempt count is `1` rather than continuing to climb across successive conflicting heads; record `HeadRecordedAt`. |
 | pending | Reconcile tick, `Mergeability == dirty`, new head this reaction has not dispatched for, attribution `unknown` | pending | Leave the per-episode counter at its prior value; record `HeadRecordedAt`. |
 | pending | Reconcile tick, `Mergeability == dirty`, new head, `attempts <= MaxRetries` | dispatched | Increment per-episode counter; schedule continuation; mark dispatched; count dispatched. |
-| pending | Reconcile tick, `Mergeability == dirty`, new head, `attempts > MaxRetries` | escalated | Increment per-episode counter; apply escalation; delete slot, fingerprint, and per-episode counter. MUST NOT release the claim or clear sibling slots (§11E.5). |
-| pending | Reconcile tick, entry age exceeds the configured `watch_window_ms` window | (none) | Delete the per-episode counter and log a WARN record. The fingerprint row, the claim, and the retry are left in place. |
+| pending | Reconcile tick, `Mergeability == dirty`, new head, `attempts > MaxRetries` | escalated | Apply escalation and record it on the entry; delete the fingerprint row; leave the per-episode counter at the rebases dispatched. The entry stays pending. MUST NOT release the claim or clear sibling slots (§11E.5). |
+| escalated | Reconcile tick, no ending fact (the same head, or `Mergeability == unknown`) | escalated | Re-enqueue at `now + poll_interval`. No dispatch, action, or triage run. |
+| escalated | Reconcile tick, `Mergeability != dirty` | pending | End the escalation; delete the fingerprint row and the per-episode counter; re-enqueue. Episode closes. |
+| escalated | Reconcile tick, `Mergeability == dirty`, head fingerprint differs from the subject | pending | End the escalation; the pass goes on as for a new head. |
+| escalated | Pull request merged, closed, or missing | (none) | Drop the entry and its per-episode counter. |
+| escalated | Issue leaves `tracker.handoff_state` while Sortie does not drive it | (none) | Drop the entry and its per-episode counter. |
+| pending | Reconcile tick, entry with no standing escalation, age exceeds the configured `watch_window_ms` window | (none) | Delete the per-episode counter and log a WARN record. The fingerprint row, the claim, and the retry are left in place. |
 | pending | Issue reaches terminal state (tracker reconcile) | (none) | Drop the `merge-conflict` pending entry and its per-episode counter, cancel and delete the issue's retry, and release the claim; `reaction_fingerprints` is left intact. |
 

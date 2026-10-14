@@ -467,26 +467,49 @@ const (
 	countsNoAttempts attemptCounting = false
 )
 
+// escalation classifies whether a kind's pass escalates to a person. It is
+// a named type for the same reason as [attemptCounting].
+type escalation bool
+
+const (
+	escalates      escalation = true
+	neverEscalates escalation = false
+)
+
 // reactionKindSpec classifies one registered reaction kind.
 type reactionKindSpec struct {
 	configKey     string          // key of the reactions section of WORKFLOW.md the kind is configured under
 	pinsWorkspace bool            // a pending entry of the kind excludes its workspace from sweep candidacy
 	attempts      attemptCounting // the kind's pass counts tries in State.ReactionAttempts
+	escalates     escalation      // the kind's pass escalates and keeps a durable escalation record
 }
 
 // reactionKinds is the single registry of reaction kinds. Presence in the
 // map means the kind is known. Every entry is an unkeyed literal so the
 // compiler rejects a kind registered without its configuration key, its
-// pin classification, or its attempt counting.
+// pin classification, its attempt counting, or its escalation class.
 var reactionKinds = map[string]reactionKindSpec{
-	ReactionKindCI:              {"ci_failure", true, countsAttempts},
-	ReactionKindReview:          {"review_comments", true, countsAttempts},
-	ReactionKindBotReview:       {"bot_review", true, countsAttempts},
-	ReactionKindAutoMerge:       {"auto_merge", true, countsAttempts},
-	ReactionKindMergeConflict:   {"merge_conflicts", true, countsAttempts},
-	ReactionKindLabelReview:     {"label_commands", false, countsNoAttempts},
-	ReactionKindLabelFix:        {"label_commands", false, countsNoAttempts},
-	ReactionKindMergeCompletion: {"merge_completion", false, countsAttempts},
+	ReactionKindCI:              {"ci_failure", true, countsAttempts, escalates},
+	ReactionKindReview:          {"review_comments", true, countsAttempts, escalates},
+	ReactionKindBotReview:       {"bot_review", true, countsAttempts, escalates},
+	ReactionKindAutoMerge:       {"auto_merge", true, countsAttempts, escalates},
+	ReactionKindMergeConflict:   {"merge_conflicts", true, countsAttempts, escalates},
+	ReactionKindLabelReview:     {"label_commands", false, countsNoAttempts, neverEscalates},
+	ReactionKindLabelFix:        {"label_commands", false, countsNoAttempts, neverEscalates},
+	ReactionKindMergeCompletion: {"merge_completion", false, countsAttempts, escalates},
+}
+
+// EscalatingReactionKinds returns the registered reaction kinds whose pass
+// escalates, sorted.
+func EscalatingReactionKinds() []string {
+	kinds := make([]string, 0, len(reactionKinds))
+	for kind, spec := range reactionKinds {
+		if spec.escalates == escalates {
+			kinds = append(kinds, kind)
+		}
+	}
+	slices.Sort(kinds)
+	return kinds
 }
 
 func isKnownReactionKind(kind string) bool {
@@ -561,13 +584,37 @@ type PendingReaction struct {
 	// HeadRecordedAt is when this process recorded the commit currently
 	// evaluated. Zero until first recorded, and zero for a startup-restored
 	// entry, because a head recorded by a previous process cannot bound a
-	// query over this process's activity. Read only by kinds whose subject
-	// is the pull request head.
+	// query over this process's activity. The exception is a restored
+	// standing escalation of a kind whose subject is the head: it takes the
+	// escalation time, which no run of the previous process can precede.
+	// Read only by kinds whose subject is the pull request head.
 	HeadRecordedAt time.Time
 
-	// EscalatedAt is when the escalation for the recorded head was applied;
-	// zero when none was. Cleared when a different head is recorded.
+	// EscalatedAt is when the standing escalation began; zero while none
+	// stands.
 	EscalatedAt time.Time
+
+	// EscalationTrigger is why the standing escalation began; empty while
+	// none stands.
+	EscalationTrigger ReactionEscalationTrigger
+
+	// EscalationSubject is what the standing escalation was about, in the
+	// kind's own terms; empty while none stands or when the escalation has
+	// no subject to latch on.
+	EscalationSubject string
+
+	// NoStateObserved reports that a tracker reading found the issue in no
+	// state while an escalation stands. Two consecutive readings end it.
+	NoStateObserved bool
+
+	// resumeAfterRestart marks a merge-completion entry restored at startup
+	// with a standing escalation: its first due pass runs the normal path
+	// once.
+	resumeAfterRestart bool
+
+	// escalationUnsaved marks a standing escalation whose record could not
+	// be saved; each later due pass of the entry saves it again.
+	escalationUnsaved bool
 
 	// WatchRestartedAt is when a retry-slot deferral last restarted the
 	// entry's watch window; zero when none has.
@@ -1602,9 +1649,14 @@ type SnapshotPendingReaction struct {
 	Wait         string              `json:"wait,omitempty"`
 	UsedAttempts *int                `json:"used_attempts"`
 	MaxAttempts  *int                `json:"max_attempts"`
-	EscalatedAt  *time.Time          `json:"escalated_at"`
+	// EscalatedAt is when the standing escalation began; nil while none stands.
+	EscalatedAt *time.Time `json:"escalated_at"`
+	// EscalationTrigger is why the standing escalation began; set exactly
+	// when EscalatedAt is non-nil.
+	EscalationTrigger string `json:"escalation_trigger,omitempty"`
 	// WatchEndsAt is when the reaction stops watching unless its watch
-	// restarts first; nil for a kind without a watch window or a window of 0.
+	// restarts first; nil for a kind without a watch window or a window of 0,
+	// and while an escalation stands.
 	WatchEndsAt *time.Time     `json:"watch_ends_at"`
 	LastCheck   *ReactionCheck `json:"last_check"`
 
@@ -2015,8 +2067,9 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 		if !entry.EscalatedAt.IsZero() {
 			escalatedAt := entry.EscalatedAt
 			row.EscalatedAt = &escalatedAt
+			row.EscalationTrigger = string(entry.EscalationTrigger)
 		}
-		if window, ok := state.ReactionWatchWindows[entry.Kind]; ok {
+		if window, ok := state.ReactionWatchWindows[entry.Kind]; ok && entry.EscalatedAt.IsZero() {
 			watchEndsAt := watchBasis(entry).Add(window)
 			row.WatchEndsAt = &watchEndsAt
 		}

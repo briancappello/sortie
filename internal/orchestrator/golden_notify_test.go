@@ -365,7 +365,7 @@ func escalationScript(reaction string) []goldenStep {
 		for _, trigger := range triggers {
 			steps = append(steps, escalationStep("review_"+string(trigger), func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindReview
-				escalateReviewFailure(state, w.reconcile, pending, 3, trigger, data, log, ctx, metrics)
+				escalateReviewFailure(state, w.reconcile, pending, 3, trigger, data, "fp", goldenNow, time.Second, log, ctx, metrics)
 			}))
 		}
 	case "bot_review":
@@ -373,7 +373,7 @@ func escalationScript(reaction string) []goldenStep {
 		for _, trigger := range triggers {
 			steps = append(steps, escalationStep("bot_review_"+string(trigger), func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindBotReview
-				escalateBotReviewFailure(state, w.reconcile, pending, 3, trigger, data, log, ctx, metrics)
+				escalateBotReviewFailure(state, w.reconcile, pending, 3, trigger, data, "fp", goldenNow, time.Second, log, ctx, metrics)
 			}))
 		}
 	case "merge_conflicts":
@@ -381,7 +381,7 @@ func escalationScript(reaction string) []goldenStep {
 		for _, trigger := range triggers {
 			steps = append(steps, escalationStep("merge_conflict_"+string(trigger), func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindMergeConflict
-				escalateMergeConflictFailure(state, w.reconcile, pending, 2, trigger, data, log, ctx, metrics)
+				escalateMergeConflictFailure(state, w.reconcile, pending, 2, trigger, data, "fp", goldenNow, time.Second, log, ctx, metrics)
 			}))
 		}
 	case "auto_merge":
@@ -389,7 +389,7 @@ func escalationScript(reaction string) []goldenStep {
 		steps = append(steps,
 			escalationStep("auto_merge_escalated", func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindAutoMerge
-				escalateAutoMergeFailure(state, w.reconcile, pending, 3, data, log, ctx, metrics)
+				escalateAutoMergeFailure(state, w.reconcile, pending, 3, EscalationTriggerBudget, "", data, goldenNow, time.Second, log, ctx, metrics)
 			}),
 			escalationStep("auto_merge_succeeded", func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindAutoMerge
@@ -401,17 +401,17 @@ func escalationScript(reaction string) []goldenStep {
 		steps = append(steps,
 			escalationStep("merge_completion_escalated", func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindMergeCompletion
-				escalateMergeCompletion(state, w.reconcile, pending, data, 3, log, ctx)
+				escalateMergeCompletion(state, w.reconcile, "mc-key", pending, data, 3, EscalationTriggerBudget, "deadbeef", goldenNow, time.Second, log, ctx)
 			}),
 			escalationStep("missing_sha_delivered", func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindMergeCompletion
-				escalateMergeCompletionMissingSHA(state, w.reconcile, pending, data, 10*time.Minute, log, ctx)
+				escalateMergeCompletionMissingSHA(state, w.reconcile, "mc-key", pending, data, 10*time.Minute, goldenNow, time.Second, log, ctx)
 			}),
 			escalationStep("missing_sha_tracker_write_fails", func(_ *testing.T, w goldenWired, state *State, pending *PendingReaction) {
 				pending.Kind = ReactionKindMergeCompletion
 				w.rec.setFailing(true)
 				defer w.rec.setFailing(false)
-				escalateMergeCompletionMissingSHA(state, w.reconcile, pending, data, 10*time.Minute, log, ctx)
+				escalateMergeCompletionMissingSHA(state, w.reconcile, "mc-key", pending, data, 10*time.Minute, goldenNow, time.Second, log, ctx)
 				state.TrackerOpsWg.Wait()
 			}),
 		)

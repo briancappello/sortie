@@ -301,7 +301,7 @@ Each reaction kind sub-object shares a common field schema:
   - MUST be non-negative; negative values are rejected with a configuration error.
   - `review_comments` and `bot_review` do not consume this field. Each bounds its dispatches with its own `max_continuation_turns` instead, and a value set here has no effect on those two kinds.
 - `escalation` (string)
-  - Action taken when the kind stops dispatching continuations and hands the subject to a person. Two conditions reach it: the kind's dispatch budget is exhausted, whether that budget is `max_retries` or `max_continuation_turns`, or a `triage` command answers `escalate`. For `review_comments` and `bot_review`, an exhausted budget reaches the escalation only when a comment arrives that no earlier run of the issue was given, and for `bot_review` only an inline comment counts. Valid values: `label` (default), `comment` (deprecated), and `none`. Every escalation emits its `escalation.<kind>` event (Section 5.3.10) whatever the value. `label` applies the label, and the event reaches only the destinations subscribed to it. `none` applies no label, and the event reaches only the destinations subscribed to it. `comment` applies no label and subscribes the `tracker_comment` destination to the event, keeps working, and draws a deprecation advisory whose replacement is `escalation: none` plus the event in the `events` of a `tracker_comment` entry. An omitted `escalation` resolves to `label` for every kind, `auto_merge` included, and draws no advisory.
+  - Action taken when the kind stops dispatching continuations and hands the subject to a person. These conditions reach it: the kind's dispatch budget is exhausted, whether that budget is `max_retries` or `max_continuation_turns`; a `triage` command answers `escalate`; the forge refuses the merge call of `auto_merge`, or the tracker refuses the issue move of `merge_completion`, with an authentication or payload error, which escalates at once; and, for `merge_completion`, a merged pull request that the forge reports without a merge commit after the fixed grace period. For `review_comments` and `bot_review`, an exhausted budget reaches the escalation only when a comment arrives that no earlier run of the issue was given, and for `bot_review` only an inline comment counts. Valid values: `label` (default), `comment` (deprecated), and `none`. Every escalation emits its `escalation.<kind>` event (Section 5.3.10) whatever the value. `label` applies the label, and the event reaches only the destinations subscribed to it. `none` applies no label, and the event reaches only the destinations subscribed to it. `comment` applies no label and subscribes the `tracker_comment` destination to the event, keeps working, and draws a deprecation advisory whose replacement is `escalation: none` plus the event in the `events` of a `tracker_comment` entry. An omitted `escalation` resolves to `label` for every kind, `auto_merge` included, and draws no advisory. An escalation stays in force until its kind's ending fact: while it stands, the kind dispatches nothing and applies its action once for the subject it escalated, and it ends when the pull request merges, closes, or is missing, when the issue reaches a terminal state, when a person moves the issue out of `tracker.handoff_state` or releases its park so Sortie runs the issue again, or on a fact of the kind itself (Sections 11A.7 to 11G.6). An escalation survives a restart.
 - `escalation_label` (string)
   - Label applied when `escalation` is `label`. Default: `needs-human`.
 - `triage` (object)
@@ -318,7 +318,7 @@ Remaining keys within a kind sub-object are collected into an `Extra` map for ki
 See Section 11A for the CI feedback contract. Extra fields:
 
 - `max_log_lines` (integer, via Extra): maximum number of log lines in the CI failure log excerpt (Section 11A.2). Default: `50`.
-- `watch_window_ms` (integer, via Extra): bounds a pending CI entry's age, measured from the last recorded head. Default: `86400000` (twenty-four hours). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound.
+- `watch_window_ms` (integer, via Extra): bounds a pending CI entry's age, measured from the last recorded head. Default: `86400000` (twenty-four hours). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound. A standing escalation is never aged out.
 
 **Reaction kind: `review_comments`**
 
@@ -329,7 +329,7 @@ Extra fields:
 - `poll_interval_ms` (integer, via Extra): polling interval for review comments. Default: `120000` (2 minutes). Minimum: `30000`.
 - `debounce_ms` (integer, via Extra): debounce window after the last detected comment before dispatching. Default: `60000` (60 seconds). MUST be non-negative.
 - `max_continuation_turns` (integer, via Extra): maximum review-fix continuation dispatches per issue before escalation. Default: `3`. MUST be positive.
-- `watch_window_ms` (integer, via Extra): bounds a pending review-comments entry's age, measured from the entry's creation. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound.
+- `watch_window_ms` (integer, via Extra): bounds a pending review-comments entry's age, measured from the entry's creation. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound. A standing escalation is never aged out.
 
 Example:
 
@@ -354,7 +354,7 @@ Extra fields:
 - `require_ci` (boolean, via Extra): whether merge requires CI success. Default: `true`.
 - `delete_branch` (boolean, via Extra): whether to delete the head branch after merge. Default: `true`.
 - `poll_interval_ms` (integer, via Extra): polling interval for merge-precondition checks. Default: `60000` (1 minute). Minimum: `30000`.
-- `watch_window_ms` (integer, via Extra): bounds a pending auto-merge entry's age, measured from the entry's creation. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound.
+- `watch_window_ms` (integer, via Extra): bounds a pending auto-merge entry's age, measured from the entry's creation. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound. A standing escalation is never aged out.
 
 Example:
 
@@ -380,7 +380,7 @@ Extra fields:
 - `bot_usernames` (list of strings, via Extra): allowlist of bot logins. A comment is bot-authored when the platform reports a bot user type or when its author login matches an entry here, case-insensitively. Default: empty. A value that is not a list, or a list holding a non-string element, is rejected with a configuration error.
 - `poll_interval_ms` (integer, via Extra): polling interval for bot comments. Default: `60000` (1 minute). Minimum: `30000`.
 - `max_continuation_turns` (integer, via Extra): maximum bot-fix continuation dispatches per issue before escalation. Default: `5`. MUST be positive.
-- `watch_window_ms` (integer, via Extra): bounds a pending bot-review entry's age, measured from the entry's creation. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound.
+- `watch_window_ms` (integer, via Extra): bounds a pending bot-review entry's age, measured from the entry's creation. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound. A standing escalation is never aged out.
 
 The kind reads no `debounce_ms` field: bot comments arrive in bulk on push and dispatch immediately.
 
@@ -393,7 +393,7 @@ Merge-conflict detection and resolution. When configured, the orchestrator polls
 Extra fields:
 
 - `poll_interval_ms` (integer, via Extra): polling interval for the conflict-detection state machine. Default: `60000` (1 minute). Minimum: `30000`.
-- `watch_window_ms` (integer, via Extra): bounds a pending merge-conflict entry's age, measured from the entry's creation rather than from the last recorded head. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound.
+- `watch_window_ms` (integer, via Extra): bounds a pending merge-conflict entry's age, measured from the entry's creation rather than from the last recorded head. Default: `1800000` (thirty minutes). MUST be non-negative and MUST NOT exceed `9223372036854`. `0` removes the clock bound. A standing escalation is never aged out.
 
 **Reaction kind: `merge_completion`**
 

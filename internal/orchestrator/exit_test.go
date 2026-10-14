@@ -28,6 +28,7 @@ import (
 
 type mockExitStore struct {
 	noopOutcomeRecorder
+	noEscalationRecords
 	runHistories    []persistence.RunHistory
 	metrics         []persistence.AggregateMetrics
 	sessionMetadata []persistence.SessionMetadata
@@ -6445,6 +6446,33 @@ func TestHandleWorkerExit_CIProvider_PopulatesPendingReaction(t *testing.T) {
 	}
 	if _, ok := state.PendingReactions[ReactionKey("CI-ISS-1", ReactionKindReview)]; ok {
 		t.Error("PendingReactions[CI-ISS-1:review] present, want absent without the review reaction configured")
+	}
+}
+
+func TestHandleWorkerExit_CIProvider_ReseedKeepsStandingEscalation(t *testing.T) {
+	t.Parallel()
+
+	wsPath := t.TempDir()
+	writePRSCMMetadata(t, wsPath, 77, "acme", "widgets", "feature/ci-test", "abc123")
+	store := &mockExitStore{}
+	state := exitState(t, "CI-ISS-ESC", nil)
+	escalatedAt := time.Date(2026, 5, 1, 9, 0, 0, 123, time.UTC)
+	rkey := ReactionKey("CI-ISS-ESC", ReactionKindCI)
+	state.PendingReactions[rkey] = &PendingReaction{
+		IssueID: "CI-ISS-ESC", Kind: ReactionKindCI,
+		EscalatedAt: escalatedAt, EscalationTrigger: EscalationTriggerTriage, EscalationSubject: "abc123",
+	}
+	params := defaultExitParams(t, store)
+	params.CIProvider = &ciProviderStubExit{}
+	params.SCMAdapter = &scmAdapterStubExit{}
+
+	HandleWorkerExit(state, WorkerResult{
+		IssueID: "CI-ISS-ESC", Identifier: "CI-ISS-ESC-ident", ExitKind: WorkerExitNormal, AgentAdapter: "mock", WorkspacePath: wsPath,
+	}, params)
+
+	entry := state.PendingReactions[rkey]
+	if entry == nil || !entry.EscalatedAt.Equal(escalatedAt) || entry.EscalationTrigger != EscalationTriggerTriage || entry.EscalationSubject != "abc123" {
+		t.Errorf("PendingReactions[ci] after a reseeding exit = %+v, want the escalation at %v by %q about %q kept", entry, escalatedAt, EscalationTriggerTriage, "abc123")
 	}
 }
 
