@@ -149,11 +149,46 @@ generate-check: ## Verify wire_gen.go matches what the generator emits, without 
 	fi
 
 .PHONY: check
-check: lint lint-no-tests lint-gopls lint-shell lint-docs test test-shell generate-check lint-tools lint-tools-no-tests test-tools ## Run the CI gates; shell lint covers all tracked scripts
+check: lint lint-no-tests lint-gopls lint-shell lint-docs test test-shell generate-check ui-check lint-tools lint-tools-no-tests test-tools ## Run the CI gates; shell lint covers all tracked scripts
 
 .PHONY: tidy
 tidy: ## Tidy go.sum and prune stale entries from go.mod
 	$(GO) mod tidy
+
+##@ Dashboard
+
+.PHONY: ui-install
+ui-install: ## Install the dashboard dependencies from the lockfile
+	cd web && $(NPM) ci
+
+.PHONY: ui-build
+ui-build: ## Build the dashboard into internal/server/ui/dist
+	cd web && $(NPM) run build
+
+.PHONY: ui-lint
+ui-lint: ## Lint and type-check the dashboard sources
+	cd web && $(NPM) run lint
+	cd web && $(NPM) run typecheck
+
+.PHONY: ui-fmt
+ui-fmt: ## Format the dashboard sources
+	cd web && $(NPM) run fmt
+
+.PHONY: ui-fmt-check
+ui-fmt-check: ## Show dashboard formatting drift without rewriting any file
+	cd web && $(NPM) run fmt:check
+
+.PHONY: ui-build-check
+ui-build-check: ui-build ## Verify the committed dashboard output matches a fresh build
+	@entries=$$(git status --porcelain --untracked-files=all -- internal/server/ui/dist); \
+	if [ -n "$$entries" ]; then \
+		printf '$(RED)internal/server/ui/dist does not match a fresh build: run make ui-build, then commit internal/server/ui/dist with the sources it was built from$(RESET)\n'; \
+		printf '%s\n' "$$entries"; \
+		exit 1; \
+	fi
+
+.PHONY: ui-check
+ui-check: ui-lint ui-fmt-check ui-build-check ## Run the dashboard gates: lint, format check, output drift
 
 ##@ Qualify module
 

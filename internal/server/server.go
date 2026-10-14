@@ -17,6 +17,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/server/ui"
 )
 
 // SnapshotFunc returns a point-in-time capture of the orchestrator's
@@ -346,6 +347,7 @@ func New(params Params) *Server {
 	// 405 response from Go's ServeMux.
 	mux.HandleFunc("GET /{$}", s.handleDashboard)
 	mux.HandleFunc("GET /favicon.ico", handleFavicon)
+	mux.Handle("GET /ui/", ui.Handler())
 
 	// Method-specific patterns ensure non-GET methods receive the
 	// default 405 response from Go's ServeMux.

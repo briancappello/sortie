@@ -2,6 +2,8 @@ module github.com/sortie-ai/sortie
 
 go 1.26.1
 
+ignore ./web/node_modules
+
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/prometheus/client_golang v1.24.1
