@@ -307,7 +307,7 @@ export function ruleOptions(
     options.push({
       kind: "chain",
       value: `chain:${first}`,
-      label: first,
+      label: "Stage Chains",
       count: countRows(rows, (rule) => rule !== null && chain.includes(rule)),
       group: first,
     });
