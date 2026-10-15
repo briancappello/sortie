@@ -81,7 +81,7 @@ Events are retained and streamed per run, where a run is one dispatch. The dispa
 
 - **Live tier.** Each running run keeps its newest 1,000 events in memory, and at most 256 KiB measured as the sum of encoded events, whichever limit is reached first. The oldest events are evicted; `seq` keeps rising.
 - **Durable tier.** At worker exit the buffer is written to SQLite once, in the same transaction as the run's `run_history` row, and the memory buffer is then released. A failed write is logged at Warn and the events are dropped, with no retry.
-- **Limits.** A finished run's events stay readable for 7 days after the run ends. Total stored size is capped at 64 MiB, pruned oldest first. Pruning runs on each write.
+- **Limits.** A finished run's events stay readable for at least 7 days after the run ends. Total stored size is capped at 64 MiB, pruned oldest first. Pruning runs on each write, so 7 days is a minimum, not an expiry.
 - **Explicit absence.** A run whose events were pruned, lost in a crash, or recorded before the schema change answers "not retained" explicitly. A run that kept only its tail exposes `first_seq` greater than 1, so the client can say that earlier events are gone.
 
 Durability matches the run's history row: a graceful shutdown keeps both, and a crash loses both.
@@ -119,7 +119,7 @@ Change frames are unchanged: payload-free, coalesced, at most one per second. Ag
 
 Running rows carry `last_event_at` (the time of any event, liveness pings included; `null` before the first event), `quiet_at`, and `stall_at`. The reference point is `last_event_at`, else `started_at`, the same reference the orchestrator's own stall stop uses. `quiet_at` is the reference plus half the stall timeout, and `stall_at` is the reference plus the stall timeout. With stall detection off (a timeout of zero or less), both are `null`.
 
-The client shows a neutral marker once its clock, corrected by the response's `generated_at`, reaches `quiet_at`. It uses a local timer, because silence produces no signal to react to. The marker reads "no events for <silence>; Sortie stops it at <timeout>". With detection off, there is no marker, only the time of the last event. The rule lives on the server; the client only compares times.
+The client shows a neutral marker once its clock, corrected by the response's `generated_at`, reaches `quiet_at`. It uses a local timer, because silence produces no signal to react to. The marker reads "no events for <silence>; Sortie stops it after <timeout>", the stall threshold after which the next poll tick stops the run. With detection off, there is no marker, only the time of the last event. The rule lives on the server; the client only compares times.
 
 Gaps between events in 6,711 unattended agent transcripts have a per-session median of one to two seconds, so a threshold of a multiple of the usual gap with a floor reduces to the floor in practice, and thresholds adapted to a run's history flag the same share of runs as a fixed one. Only the absolute level matters, so it follows the operator's own setting. Half the timeout leaves two and a half minutes of warning at the default five-minute timeout.
 
