@@ -29,8 +29,6 @@ What each runtime showed in its `initialize` handshake:
 
 A local launch needs up to three command-line switches: one that puts the runtime on the protocol, one that trusts the workspace so declared tool servers are not dropped, and one for a posture that does not ask before running a tool. Runtimes spell them differently, and no shared code branches on which runtime it is.
 
-Text from `agent_message_chunk` updates is accumulated by `messageId`, which the schema defines as shared by all chunks of one message. Each text chunk emits an empty notification to refresh the run's stall timer; changing message ID, receiving another update kind, or ending the turn flushes the accumulated text once. The buffer is capped at the adapter's 500-rune message limit. Non-text message chunks and thought chunks keep their existing event types.
-
 | Switch | `gemini` | `kiro-cli` |
 |---|---|---|
 | Protocol | `--acp` | `acp` subcommand |
@@ -38,6 +36,10 @@ Text from `agent_message_chunk` updates is accumulated by `messageId`, which the
 | Posture | `--approval-mode yolo` | `-a`, the same switch |
 
 `kiro-cli` uses one switch for trust and posture, so you cannot take back one without the other.
+
+### Message chunk coalescing
+
+Text from `agent_message_chunk` updates is accumulated by `messageId`, which the schema defines as shared by all chunks of one message. Each text chunk emits an empty notification to refresh the run's stall timer; changing message ID, receiving another update kind, or ending the turn flushes the accumulated text once. The buffer is capped at the adapter's 500-rune message limit. Non-text message chunks and thought chunks keep their existing event types.
 
 Some runtimes send many notifications under their own vendor method prefix. They are notifications, not requests, so the client answers none of them and depends on none of them.
 
