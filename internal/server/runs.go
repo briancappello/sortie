@@ -102,15 +102,22 @@ type selfReviewResponse struct {
 }
 
 // issueHistoryResponse is the history member of GET /api/v1/{identifier}: an
-// issue's newest runs, its totals over all runs, and the hop decisions of
-// the runs served.
+// issue's newest runs, its totals over all runs, the hop decisions of the
+// runs served, and the stage chain its last stage run stood on.
 type issueHistoryResponse struct {
 	Runs       []runResponse         `json:"runs"`
 	NextCursor *string               `json:"next_cursor"`
 	Totals     historyTotalsResponse `json:"totals"`
 	Hops       []hopDecisionResponse `json:"hops"`
+	LastStage  *lastStageResponse    `json:"last_stage"`
 
 	IssueOutcome *issueOutcomeResponse `json:"issue_outcome"`
+}
+
+// lastStageResponse is a stage chain and the rule on it where a run stood.
+type lastStageResponse struct {
+	Chain []string `json:"chain"`
+	Rule  string   `json:"rule"`
 }
 
 // historyTotalsResponse is an issue's spend over all of its runs.

@@ -499,6 +499,10 @@ type IssueGroupFilter struct {
 	// display_identifier equals it.
 	IssueKey string
 
+	// Search keeps the issues with a run whose identifier,
+	// display_identifier, or issue_title contains it, ignoring ASCII case.
+	Search string
+
 	// RuleName nil matches every run; a pointer to "" selects the runs whose
 	// rule_name is empty.
 	RuleName    *string
@@ -535,12 +539,67 @@ func (s *Store) QueryIssueGroups(ctx context.Context, f IssueGroupFilter) ([]Iss
 		if err != nil {
 			return nil, err
 		}
-		if len(ids) == 0 {
-			return []IssueGroup{}, nil
+		keyed = ids
+	}
+	if f.Search != "" {
+		ids, err := s.issueIDsBySearch(ctx, f.Search)
+		if err != nil {
+			return nil, err
+		}
+		if f.IssueKey != "" {
+			ids = intersect(keyed, ids)
 		}
 		keyed = ids
 	}
+	if (f.IssueKey != "" || f.Search != "") && len(keyed) == 0 {
+		return []IssueGroup{}, nil
+	}
 	return s.streamIssueGroups(ctx, f, keyed)
+}
+
+func intersect(a, b []string) []string {
+	in := make(map[string]bool, len(a))
+	for _, id := range a {
+		in[id] = true
+	}
+	out := []string{}
+	for _, id := range b {
+		if in[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// issueIDsBySearch returns the issues with a run whose identifier,
+// display_identifier, or issue_title contains text, and closes its statement
+// before it returns.
+func (s *Store) issueIDsBySearch(ctx context.Context, text string) ([]string, error) {
+	pattern := "%" + likeEscaper.Replace(text) + "%"
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT issue_id FROM run_history
+		WHERE identifier LIKE ? ESCAPE '\'
+			OR display_identifier LIKE ? ESCAPE '\'
+			OR issue_title LIKE ? ESCAPE '\'`, pattern, pattern, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("query issue groups: search: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("query issue groups: scan issue id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query issue groups: search: %w", err)
+	}
+	return ids, nil
 }
 
 // issueIDsByKey returns the issues with a run whose identifier or
