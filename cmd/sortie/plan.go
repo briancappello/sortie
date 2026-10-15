@@ -134,11 +134,48 @@ func trackerWrites(kind string) []registry.WriteCapability {
 	return meta.WriteCapabilities
 }
 
-// newPlanSyncer returns the syncer behind the HTTP plan endpoints, for the
-// tracker adapter the orchestrator already built.
-func newPlanSyncer(adapter domain.TrackerAdapter, kind string) *plan.Syncer {
-	meta, _ := registry.Trackers.Meta(kind)
-	return plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta})
+// newPlanProjects returns the plan projects behind the HTTP plan
+// endpoints. The configured project uses the tracker adapter the
+// orchestrator already built. When that adapter can inspect and create
+// projects, other projects of the same workspace get adapters of their
+// own on first use, built from the current workflow with only the project
+// replaced; otherwise only the configured project is served.
+func newPlanProjects(adapter domain.TrackerAdapter, cfg config.ServiceConfig, current func() config.ServiceConfig, states func() domain.TrackerStates) *plan.Projects {
+	meta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
+	def := plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta})
+	var factory plan.TrackerFactory
+	if _, ok := adapter.(domain.PlanProjectEnsurer); ok {
+		factory = func(_ context.Context, project string) (plan.Tracker, func(), error) {
+			return projectTracker(current(), project, states)
+		}
+	}
+	return plan.NewProjects(cfg.Tracker.Project, def, factory)
+}
+
+// projectTracker builds the tracker adapter of cfg with its project
+// replaced by project.
+func projectTracker(cfg config.ServiceConfig, project string, states func() domain.TrackerStates) (plan.Tracker, func(), error) {
+	ctor, err := registry.Trackers.Get(cfg.Tracker.Kind)
+	if err != nil {
+		return plan.Tracker{}, nil, err
+	}
+	cfgMap := trackerConfigMap(cfg.Tracker)
+	cfgMap["project"] = project
+	cfgMap["user_agent"] = "sortie/" + Version
+	config.MergeAdapterExtensions(cfgMap, cfg, cfg.Tracker.Kind)
+	adapter, err := ctor(cfgMap)
+	if err != nil {
+		return plan.Tracker{}, nil, err
+	}
+	if states != nil {
+		adapter.SetTrackerStates(states)
+	}
+	meta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
+	release := func() {}
+	if closer, ok := adapter.(io.Closer); ok {
+		release = func() { _ = closer.Close() }
+	}
+	return plan.Tracker{Adapter: adapter, Meta: meta}, release, nil
 }
 
 // newPlanTracker is planTracker; tests substitute a fake tracker.

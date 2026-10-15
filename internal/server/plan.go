@@ -50,6 +50,11 @@ type planCapabilitiesResponse struct {
 // planGraphResponse is GET /api/v1/plan/graph. Every field is present; a
 // value the tracker cannot supply is null.
 type planGraphResponse struct {
+	// Project is the tracker project the graph comes from. Dispatched
+	// reports whether Sortie dispatches agents for it: runtime state is
+	// null on every node of a project it does not dispatch.
+	Project      string                     `json:"project"`
+	Dispatched   bool                       `json:"dispatched"`
 	GeneratedAt  time.Time                  `json:"generated_at"`
 	Capabilities []registry.WriteCapability `json:"capabilities"`
 	Nodes        []planGraphNode            `json:"nodes"`
@@ -95,16 +100,36 @@ func (s *Server) controlGet(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) planSyncerOr503(w http.ResponseWriter) (*plan.Syncer, bool) {
-	if s.planSyncer == nil {
+// planSyncerFor returns the syncer of the project the request's
+// "project" query parameter names, the configured project when it names
+// none. It writes the error response and reports false when there is no
+// such syncer.
+func (s *Server) planSyncerFor(w http.ResponseWriter, r *http.Request) (*plan.Syncer, bool) {
+	if s.planProjects == nil {
 		writeErrorJSON(w, s.logger, http.StatusServiceUnavailable, "plan_unavailable", "plan sync is not configured")
 		return nil, false
 	}
-	return s.planSyncer, true
+	syncer, err := s.planProjects.Syncer(r.Context(), r.URL.Query().Get("project"))
+	if err != nil {
+		s.writePlanProjectError(w, r, err)
+		return nil, false
+	}
+	return syncer, true
 }
 
-func (s *Server) handlePlanCapabilities(w http.ResponseWriter, _ *http.Request) {
-	syncer, ok := s.planSyncerOr503(w)
+func (s *Server) writePlanProjectError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, plan.ErrProjectNotFound):
+		writeErrorJSON(w, s.logger, http.StatusNotFound, "project_not_found", err.Error())
+	case errors.Is(err, plan.ErrProjectsUnsupported):
+		writeErrorJSON(w, s.logger, http.StatusUnprocessableEntity, "projects_unsupported", err.Error())
+	default:
+		s.writeTrackerError(w, r, err)
+	}
+}
+
+func (s *Server) handlePlanCapabilities(w http.ResponseWriter, r *http.Request) {
+	syncer, ok := s.planSyncerFor(w, r)
 	if !ok {
 		return
 	}
@@ -118,7 +143,7 @@ func (s *Server) handlePlanCapabilities(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (s *Server) handlePlanSync(w http.ResponseWriter, r *http.Request) {
-	syncer, ok := s.planSyncerOr503(w)
+	syncer, ok := s.planSyncerFor(w, r)
 	if !ok {
 		return
 	}
@@ -205,7 +230,7 @@ func (s *Server) writeTrackerError(w http.ResponseWriter, r *http.Request, err e
 }
 
 func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
-	syncer, ok := s.planSyncerOr503(w)
+	syncer, ok := s.planSyncerFor(w, r)
 	if !ok {
 		return
 	}
@@ -222,8 +247,13 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 		issues = got
 	}
 
+	project := r.URL.Query().Get("project")
+	dispatched := s.planProjects.IsDefault(project)
+	if project == "" {
+		project = s.planProjects.Default()
+	}
 	var snap orchestrator.RuntimeSnapshotResult
-	if s.snapshotFn != nil {
+	if s.snapshotFn != nil && dispatched {
 		if got, err := s.snapshotFn(); err == nil {
 			snap = got
 		}
@@ -236,6 +266,8 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := planGraphResponse{
+		Project:      project,
+		Dispatched:   dispatched,
 		GeneratedAt:  time.Now().UTC(),
 		Capabilities: t.Capabilities(),
 		Nodes:        make([]planGraphNode, 0, len(issues)),
@@ -285,4 +317,83 @@ func runtimeByIssue(snap orchestrator.RuntimeSnapshotResult) map[string]*planRun
 		out[r.IssueID] = &planRuntime{Status: "running", TurnCount: &turns, LastMessage: &msg}
 	}
 	return out
+}
+
+// planProjectRequest is the PUT /api/v1/plan/projects/{key} body.
+type planProjectRequest struct {
+	Name string `json:"name"`
+}
+
+// planProjectResponse is GET and PUT /api/v1/plan/projects/{key}.
+type planProjectResponse struct {
+	Key        string   `json:"key"`
+	Name       *string  `json:"name"`
+	URL        *string  `json:"url"`
+	Exists     bool     `json:"exists"`
+	Created    bool     `json:"created"`
+	Ready      bool     `json:"ready"`
+	Dispatched bool     `json:"dispatched"`
+	Problems   []string `json:"problems"`
+}
+
+// routePlanProject serves GET (inspect) and PUT (create when missing,
+// then inspect) of one tracker project.
+func (s *Server) routePlanProject(w http.ResponseWriter, r *http.Request) {
+	var handler http.HandlerFunc
+	switch r.Method {
+	case http.MethodGet:
+		handler = s.handlePlanProjectGet
+	case http.MethodPut:
+		handler = s.handlePlanProjectPut
+	default:
+		s.methodNotAllowed(w, r, http.MethodGet, http.MethodPut)
+		return
+	}
+	s.requireControl(scopeOperator, handler)(w, r)
+}
+
+func (s *Server) handlePlanProjectGet(w http.ResponseWriter, r *http.Request) {
+	if s.planProjects == nil {
+		writeErrorJSON(w, s.logger, http.StatusServiceUnavailable, "plan_unavailable", "plan sync is not configured")
+		return
+	}
+	got, err := s.planProjects.Inspect(r.Context(), r.PathValue("key"))
+	if err != nil {
+		s.writePlanProjectError(w, r, err)
+		return
+	}
+	writeJSON(w, s.logger, http.StatusOK, s.planProjectBody(got))
+}
+
+func (s *Server) handlePlanProjectPut(w http.ResponseWriter, r *http.Request) {
+	if s.planProjects == nil {
+		writeErrorJSON(w, s.logger, http.StatusServiceUnavailable, "plan_unavailable", "plan sync is not configured")
+		return
+	}
+	var req planProjectRequest
+	if err := decodeControlBody(r, &req); err != nil {
+		writeErrorJSON(w, s.logger, http.StatusBadRequest, "invalid_request", "the body is not a project request: "+err.Error())
+		return
+	}
+	got, err := s.planProjects.Ensure(r.Context(), r.PathValue("key"), req.Name)
+	if err != nil {
+		s.writePlanProjectError(w, r, err)
+		return
+	}
+	if got.Created {
+		s.logger.Info("plan project created", slog.String("project", got.Key))
+	}
+	writeJSON(w, s.logger, http.StatusOK, s.planProjectBody(got))
+}
+
+func (s *Server) planProjectBody(p domain.PlanProject) planProjectResponse {
+	problems := p.Problems
+	if problems == nil {
+		problems = []string{}
+	}
+	return planProjectResponse{
+		Key: p.Key, Name: optional(p.Name), URL: optional(p.URL),
+		Exists: p.Exists, Created: p.Created, Ready: p.Ready(),
+		Dispatched: s.planProjects.IsDefault(p.Key), Problems: problems,
+	}
 }

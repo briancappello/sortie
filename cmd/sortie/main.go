@@ -870,6 +870,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		rawTokenRates, tokenRatesPresent := br.cfg.ExtensionValue("token_rates")
 		tokenRates, _ := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
 
+		planProjects := newPlanProjects(br.trackerAdapter, br.cfg, br.mgr.Config, func() domain.TrackerStates {
+			tracker := br.mgr.Config().Tracker
+			return domain.TrackerStates{
+				Active:     tracker.ActiveStates,
+				Terminal:   tracker.TerminalStates,
+				Handoff:    tracker.HandoffState,
+				InProgress: tracker.InProgressState,
+			}
+		})
+		defer planProjects.Close()
+
 		addr := net.JoinHostPort(br.serverHost, strconv.Itoa(br.serverPort))
 		srv = server.New(server.Params{
 			SnapshotFn:       o.SnapshotFunc(),
@@ -889,7 +900,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			HoldFn:           server.HoldFunc(o.HoldFunc()),
 			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
 			EscalateFn:       server.EscalateFunc(o.EscalateFunc()),
-			PlanSyncer:       newPlanSyncer(br.trackerAdapter, br.cfg.Tracker.Kind),
+			PlanProjects:     planProjects,
 			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
 				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)

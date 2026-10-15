@@ -162,10 +162,12 @@ type Params struct {
 	// 503.
 	EscalateFn EscalateFunc
 
-	// PlanSyncer serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
-	// and GET /api/v1/plan/capabilities. When nil, those routes answer
-	// 503.
-	PlanSyncer *plan.Syncer
+	// PlanProjects serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
+	// GET /api/v1/plan/capabilities, and GET and PUT
+	// /api/v1/plan/projects/{key}, for the configured project and, when
+	// the tracker supports it, other projects of its workspace. When nil,
+	// those routes answer 503.
+	PlanProjects *plan.Projects
 
 	// TerminalStatesFn returns the workflow's current terminal states,
 	// which mark plan graph nodes terminal. When nil, no node is.
@@ -197,7 +199,7 @@ type Server struct {
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
-	planSyncer       *plan.Syncer
+	planProjects     *plan.Projects
 	terminalStatesFn func() []string
 }
 
@@ -249,7 +251,7 @@ func New(params Params) *Server {
 		holdFn:           params.HoldFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
-		planSyncer:       params.PlanSyncer,
+		planProjects:     params.PlanProjects,
 		terminalStatesFn: params.TerminalStatesFn,
 	}
 
@@ -270,6 +272,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/plan/sync", s.controlRoute(scopeOperator, s.handlePlanSync))
 	mux.HandleFunc("/api/v1/plan/graph", s.controlGet(s.handlePlanGraph))
 	mux.HandleFunc("/api/v1/plan/capabilities", s.controlGet(s.handlePlanCapabilities))
+	mux.HandleFunc("/api/v1/plan/projects/{key}", s.routePlanProject)
 	mux.HandleFunc("/api/v1/refresh", s.controlRoute(scopeOperator, s.handleRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))

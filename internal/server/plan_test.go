@@ -129,9 +129,9 @@ func planTestServer(t *testing.T, tr *planTracker, caps []registry.WriteCapabili
 		RefreshFn:    acceptingRefresh(),
 		Logger:       slog.New(slog.DiscardHandler),
 		ControlToken: planTestToken,
-		PlanSyncer: plan.NewSyncer(plan.Tracker{Adapter: tr, Meta: registry.TrackerMeta{
+		PlanProjects: plan.NewProjects("T", plan.NewSyncer(plan.Tracker{Adapter: tr, Meta: registry.TrackerMeta{
 			WriteCapabilities: caps, PlanKeyStorage: registry.PlanKeyCustomField,
-		}}),
+		}}), nil),
 		TerminalStatesFn: func() []string { return []string{"Done"} },
 	})
 	ts := httptest.NewServer(srv.Mux())
@@ -348,9 +348,9 @@ func TestPlanGraphAfterSyncWithRuntimeState(t *testing.T) {
 	srv := New(Params{
 		SnapshotFn: fixedSnapshot(snap), RefreshFn: acceptingRefresh(), Logger: slog.New(slog.DiscardHandler),
 		ControlToken: planTestToken, TerminalStatesFn: func() []string { return []string{"done"} },
-		PlanSyncer: plan.NewSyncer(plan.Tracker{Adapter: tr, Meta: registry.TrackerMeta{
+		PlanProjects: plan.NewProjects("T", plan.NewSyncer(plan.Tracker{Adapter: tr, Meta: registry.TrackerMeta{
 			WriteCapabilities: registry.AllWriteCapabilities(), PlanKeyStorage: registry.PlanKeyCustomField,
-		}}),
+		}}), nil),
 	})
 	ts2 := httptest.NewServer(srv.Mux())
 	t.Cleanup(ts2.Close)
