@@ -31,10 +31,12 @@ interface StepProps {
   /** Whether a connector runs down from this step's marker to the next step. */
   hasNext: boolean;
   title: ReactNode;
+  /** A muted fact beside the title, such as the agent the stage runs. */
+  aside?: ReactNode;
   detail: ReactNode;
 }
 
-function Step({ marker, hasNext, title, detail }: StepProps) {
+function Step({ marker, hasNext, title, aside, detail }: StepProps) {
   return (
     <li className="relative flex gap-sm pb-md last:pb-0">
       {hasNext ? (
@@ -44,7 +46,12 @@ function Step({ marker, hasNext, title, detail }: StepProps) {
         {marker}
       </span>
       <div className="flex min-w-0 flex-col pt-xxs">
-        <span className="text-body-md text-ink">{title}</span>
+        <span className="flex flex-wrap items-baseline gap-x-sm">
+          <span className="text-body-md text-ink">{title}</span>
+          {aside === undefined ? undefined : (
+            <span className="text-body-sm text-ink-muted">{aside}</span>
+          )}
+        </span>
         <span className="text-body-sm text-ink-muted [overflow-wrap:anywhere]">{detail}</span>
       </div>
     </li>
@@ -97,14 +104,11 @@ function ChainList({ number, stages, rules, listed, handoff, hasReactions }: Cha
         marker={index + 1}
         hasNext
         title={<span className="font-mono">{name}</span>}
+        aside={rule === undefined ? undefined : `${rule.agent_kind} agent`}
         detail={
           <>
             {index === 0 ? "Starts on " : undefined}
-            {rule === undefined ? undefined : (
-              <>
-                {selectionText(rule)} · {rule.agent_kind}
-              </>
-            )}
+            {rule === undefined ? undefined : selectionText(rule)}
             {alsoFrom.length === 0 ? undefined : (
               <span className="block">
                 Also entered from{" "}
@@ -135,8 +139,8 @@ function ChainList({ number, stages, rules, listed, handoff, hasReactions }: Cha
   return (
     <div className="flex flex-col gap-sm">
       <h3 className="text-body-md font-medium text-ink">
-        Chain {number}{" "}
-        <span className="font-regular text-ink-muted">· {fmtCount(stages.length)} stages</span>
+        Chain {number}
+        <span className="ml-xs font-regular text-ink-muted">{fmtCount(stages.length)} stages</span>
       </h3>
       <ol>{steps}</ol>
     </div>
