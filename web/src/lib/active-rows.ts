@@ -302,12 +302,12 @@ export function ruleOptions(
   ];
   const chains = chainsOf(config);
   const chained = new Set(chains.flat());
-  for (const chain of chains) {
+  chains.forEach((chain, index) => {
     const [first] = chain;
     options.push({
       kind: "chain",
       value: `chain:${first}`,
-      label: "Stage Chains",
+      label: chains.length > 1 ? `Stage Chain (${index + 1})` : "Stage Chain",
       count: countRows(rows, (rule) => rule !== null && chain.includes(rule)),
       group: first,
     });
@@ -320,7 +320,7 @@ export function ruleOptions(
         group: first,
       });
     }
-  }
+  });
   const others: string[] = [];
   for (const name of rules.map((rule) => rule.name)) {
     if (name !== undefined && name !== "" && !chained.has(name) && !others.includes(name)) {
