@@ -1908,6 +1908,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
 | POST   | `/api/v1/attention/{id}/acknowledge` | Record that a person has seen an item that needs a person: it leaves the attention count and stays listed with the time it was acknowledged until its cause clears, and a new cause shows as a new item. Changes nothing in the tracker or the pull request. Returns 200 OK, 404 when no current item has the ID, and 409 Conflict during graceful shutdown. Every 200 and 409 response says in one sentence what it did. |
+| POST   | `/api/v1/reactions/{identifier}/{kind}/check` | Make a pending pull request reaction check its pull request on the next poll tick instead of at its scheduled time. The check follows every rule of the reaction, and the request itself starts no agent and changes nothing in the tracker or the pull request. A reaction still waiting after that check keeps the time its next check was due before, so asking early never makes it wait longer. Returns 202 Accepted, 404 when the issue has no pending reaction of that kind, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
 | GET    | `/api/v1/events`         | Server-sent event stream of change signals: one `change` event each time anything the JSON API serves changes, at most one a second, and a `heartbeat` event every 15 seconds. Carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals](#get-apiv1events-change-signals). |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
@@ -2644,7 +2645,7 @@ Each row of `pending_reactions`, on both routes, describes one pull request reac
 | `pull_request`       | object               | Always present. Keys below. |
 | `created_at`         | string               | When this process created the reaction, at the worker exit that seeded it or at the startup that restored it, as an RFC 3339 timestamp in UTC. A retry-slot deferral leaves it unchanged. |
 | `dispatched_at`      | string or `null`     | Always present. When Sortie dispatched the first run of the pass of the run the reaction follows, in UTC, as a running row's `dispatched_at` describes it. A startup restores it from run history. `null` when run history holds no pass time for the run. |
-| `next_poll_at`       | string               | When the next check is due, in UTC. The check runs on the first reconcile pass (poll tick or refresh) at or after it, so a value at or before `generated_at` means the next pass checks the reaction. |
+| `next_poll_at`       | string               | When the next check is due, in UTC. The check runs on the first reconcile pass (poll tick or refresh) at or after it, so a value at or before `generated_at` means the next pass checks the reaction. A request to check the reaction now moves a later value to the time Sortie takes the request. The check that request brings forward, when it keeps the reaction pending and started before the value the request replaced, gives that value back in place of the time the check would otherwise schedule. |
 | `wait`               | string or absent     | Why the reaction waits for that check (table below). Omitted until a pass first returns the reaction to the pending set, because a reaction no pass has taken has had no check and is due at once. |
 | `used_attempts`      | integer or `null`    | What the kind counts (table below). `null` for `label-review` and `label-fix`, which count nothing. |
 | `max_attempts`       | integer or `null`    | The ceiling the kind's pass applies, as of the latest poll tick. `null` when the pass applies none. |
@@ -2685,7 +2686,7 @@ Each row of `pending_reactions`, on both routes, describes one pull request reac
 | `wait`          | Meaning |
 | --------------- | ------- |
 | `poll_interval` | The pass completed its check and found nothing to act on yet, or acted and keeps watching. The kind checks again at its poll cadence. |
-| `debounce`      | For `review`: the check found new actionable comments within `debounce_ms` of the newest. `next_poll_at` ends the window, and the reaction dispatches then unless a newer comment arrives. |
+| `debounce`      | For `review`: the check found new actionable comments within `debounce_ms` of the newest. `next_poll_at` ends the window unless a request to check the reaction now moved it, and the reaction dispatches then unless a newer comment arrives. The check that request brings forward applies the window again and gives `next_poll_at` back the window end from before the request; if a newer comment extended the window, the check at that time applies it once more. |
 | `backoff`       | The pass could not complete its check: a provider, tracker, or store call failed, or the provider answered without an identifier the check needs. |
 | `retry_slot`    | The pass found work to dispatch while another retry holds the issue's retry slot. For `merge-completion`, while a run or retry claims the issue. For `label-review` and `label-fix`, a confirmed command that waits for a run of another kind to end. |
 | `triage`        | The reaction waits on its triage command: a run for the current subject is in flight, was just started, or waits for a free run slot. |
@@ -3763,6 +3764,51 @@ When Sortie cannot save the acknowledgement, it answers `500` with the error cod
 
 > **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can acknowledge an attention item and take it out of the attention count. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
 
+#### `POST /api/v1/reactions/{identifier}/{kind}/check`
+
+Makes the next check of one pending pull request reaction due now, so the reaction checks its pull request on the next poll tick instead of at its scheduled time. `{identifier}` is the `issue_identifier` and `{kind}` is the `kind` of a row of `pending_reactions`, each one path segment that a client percent-encodes, and each is matched exactly. The route takes the kind and not `config_key`, because `label-review` and `label-fix` share one key. The endpoint ignores the request body and the query string.
+
+The request moves `next_poll_at` of the row to the time Sortie takes the request when that is later, and changes nothing else about the reaction: `wait`, the tries used, any standing escalation, and `last_check` stay as they were. A reaction that is already due is left as it is, and the request still answers `202`. The request makes no call to the tracker, the forge, or a CI provider, starts no agent, schedules no retry, and writes nothing to the tracker or the pull request. It stores nothing, because pending reactions are runtime-only.
+
+The check runs on the next poll tick, or on a refresh before it. The route runs no tick and dispatches no new issues. The check follows every rule of the reaction's kind: the review debounce, the retry slot, triage, the limit on tries and the escalation at it, the watch window, and the budgets that apply to a fix the check schedules. What the check finds is handled as it is at the reaction's due time.
+
+When the check keeps the reaction pending and started before the time the request replaced, `next_poll_at` goes back to that time, and the backoff count goes back to the lower of the count the check left and the count before the request, in place of the ones the check sets. After a new pull request head the count is zero. A check that starts at or after the replaced time is one the reaction had without the request, and its own schedule stands. A request never leaves a reaction's next check later, or its backoff count higher, than without the request.
+
+The response arrives once Sortie has taken the request: at once while it is idle, and at the end of the work in progress otherwise. The wait has no fixed bound. A client that disconnects while it waits withdraws the request and changes nothing, and so does a shutdown that begins, which answers `409`. A request that arrives while a tick checks the reaction applies when that tick ends and moves the check the tick scheduled, so the reaction is checked once more on the next tick. Further requests before that tick change nothing. The answer is `202 Accepted` and not `200 OK`, because the check runs after the response.
+
+**Normal response**: the check is queued for the next poll tick:
+
+```http
+HTTP/1.1 202 Accepted
+{
+  "queued": true,
+  "requested_at": "2026-02-24T20:15:30Z",
+  "issue_id": "mno345",
+  "issue_identifier": "MT-653",
+  "kind": "ci",
+  "pull_request": {"number": 931, "repository": "acme/web"},
+  "outcome_text": "MT-653: a check of PR #931 for CI is queued for the next poll tick."
+}
+```
+
+**Unknown reaction**: the issue has no pending reaction of that kind, because the issue is unknown, the kind is not a reaction kind, the issue has no reaction of it, or the reaction left the pending set before Sortie took the request (its watch ended, or its check dispatched a fix). The client refetches `GET /api/v1/state`, which shows what became of the reaction:
+
+```http
+HTTP/1.1 404 Not Found
+{"error": {"code": "reaction_not_found", "message": "no pending \"bot-review\" reaction for issue \"MT-653\""}}
+```
+
+**Drain rejection**: Sortie is shutting down:
+
+```http
+HTTP/1.1 409 Conflict
+{"queued": false, "requested_at": "...", "outcome_text": "Nothing queued: Sortie is shutting down."}
+```
+
+A `202` also carries `display_identifier` when the issue has one. `issue_id`, `issue_identifier`, `display_identifier`, `kind`, and `pull_request` are the facts `outcome_text` is built from, and `pull_request` carries `number` and `repository` only. Every `202` and `409` response carries `outcome_text`, one sentence that states what the response confirms: a check queued for the next poll tick, or that nothing was queued. It never states what the check finds or does, because that is decided after the response.
+
+> **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can make a pull request reaction check early. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
+
 #### `GET /api/v1/events`: change signals
 
 Streams a signal each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. The response is a server-sent event stream (`text/event-stream`) that stays open until the client leaves or Sortie shuts down. A signal carries no data of its own: it names no issue and no agent message, and the stream shows nothing that `GET /api/v1/state` does not. The route takes no parameters and ignores the query string. A method other than `GET` answers `405`.
@@ -3780,7 +3826,7 @@ data: {}
 
 The `id` is a counter that rises with every change. A client keeps the last one it saw for the reconnect rule below.
 
-**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every retry made due on request, every acknowledgement recorded on request, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
+**When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every retry made due on request, every reaction check made due on request, every acknowledgement recorded on request, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
 
 **Reconnect.** A client reconnecting sends the `id` of its last signal in the `Last-Event-ID` header; a browser's `EventSource` does this on its own. When that value equals the current counter exactly, Sortie sends nothing until the next change. Any other value, an absent header, or a value from before a restart gets one change signal at once, so the client refetches.
 

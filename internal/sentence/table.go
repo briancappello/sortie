@@ -384,6 +384,7 @@ var table = map[string]parts{
 	"ctl_refresh_coalesced": {text: "A tracker poll and reconciliation was already queued; this request joined it."},
 	"ctl_refused":           {text: "Nothing queued: Sortie is shutting down."},
 	"ctl_retry_now":         {text: "Retry {{count .Attempt}} of {{.Key}} is due now."},
+	"ctl_check_now":         {text: "{{.Key}}: a check of PR #{{.PR}} for {{.KindInline}} is queued for the next poll tick."},
 
 	"ctl_acknowledge":         {text: "Acknowledged{{if .Key}} {{.Key}} ({{.Reason}}){{else}}: {{.Reason}}{{end}}. It comes back only if a new cause appears."},
 	"ctl_acknowledge_already": {text: "Already acknowledged{{if .Key}} {{.Key}} ({{.Reason}}){{else}}: {{.Reason}}{{end}}. It comes back only if a new cause appears."},

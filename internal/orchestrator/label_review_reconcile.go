@@ -72,7 +72,7 @@ func reconcileLabelReviewCommands(state *State, params ReconcileParams, log *slo
 
 		// A human gesture stays actionable regardless of age, so this kind
 		// has no TTL and no drop-on-age branch.
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}

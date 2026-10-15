@@ -150,7 +150,7 @@ Debounce uses `PendingRetryAt`: the same mechanism as CI pending backoff. When r
 
 1. Set `LastEventAt` to the maximum `submitted_at` among fetched comments.
 2. Set `PendingRetryAt = LastEventAt + debounce_ms`.
-3. Re-enqueue the entry. The next reconcile tick re-checks after the debounce window expires.
+3. Re-enqueue the entry. The next reconcile tick re-checks after the debounce window expires. An operator request (Section 13.7.2) can bring that check earlier. The check applies the window again, so the reaction dispatches no earlier than the window allows.
 
 ### 11B.8 Adapter registration
 

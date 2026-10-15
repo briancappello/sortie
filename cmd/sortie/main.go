@@ -898,6 +898,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			RefreshFn:        o.RefreshFunc(),
 			RetryNowFn:       o.RetryNowFunc(),
 			AcknowledgeFn:    o.AcknowledgeFunc(),
+			CheckNowFn:       o.CheckNowFunc(),
 			WorkflowShapeFn:  o.WorkflowShape,
 			HealthFn:         o.Health,
 			Logger:           br.logger,

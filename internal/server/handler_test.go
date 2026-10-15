@@ -3021,7 +3021,7 @@ func TestHandleRefresh(t *testing.T) {
 	}
 }
 
-func TestHandleRetryNow(t *testing.T) {
+func TestHandleIssueTriggers(t *testing.T) {
 	t.Parallel()
 
 	retryNow := func(_ context.Context, identifier string) orchestrator.RetryNowResult {
@@ -3030,10 +3030,20 @@ func TestHandleRetryNow(t *testing.T) {
 		}
 		return orchestrator.RetryNowResult{Status: orchestrator.RetryNowDue, IssueID: "def456", Identifier: identifier, Attempt: 3}
 	}
+	checkNow := func(_ context.Context, identifier, kind string) orchestrator.CheckNowResult {
+		if identifier != "MT-653" || kind != "ci" {
+			return orchestrator.CheckNowResult{Status: orchestrator.CheckNowNotFound}
+		}
+		return orchestrator.CheckNowResult{
+			Status: orchestrator.CheckNowDue, IssueID: "mno345", Identifier: identifier, DisplayID: identifier,
+			Kind: kind, PRNumber: 931, PRRepository: "acme/web",
+		}
+	}
 	srv := New(Params{
 		SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
 		RefreshFn:  acceptingRefresh(),
 		RetryNowFn: retryNow,
+		CheckNowFn: checkNow,
 		Logger:     slog.New(slog.DiscardHandler),
 	})
 	ts := httptest.NewServer(srv.Mux())
@@ -3041,38 +3051,42 @@ func TestHandleRetryNow(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		identifier string
+		path       string
 		wantStatus int
 		wantText   string
 		wantCode   string
 	}{
-		{name: "scheduled retry", identifier: "MT-650", wantStatus: http.StatusAccepted, wantText: "Retry 3 of MT-650 is due now."},
-		{name: "unknown issue", identifier: "MT-999", wantStatus: http.StatusNotFound, wantCode: "retry_not_found"},
+		{name: "scheduled retry", path: "/api/v1/retries/MT-650/run", wantStatus: http.StatusAccepted, wantText: "Retry 3 of MT-650 is due now."},
+		{name: "unknown issue", path: "/api/v1/retries/MT-999/run", wantStatus: http.StatusNotFound, wantCode: "retry_not_found"},
+		{
+			name: "pending reaction check", path: "/api/v1/reactions/MT-653/ci/check", wantStatus: http.StatusAccepted,
+			wantText: "MT-653: a check of PR #931 for CI is queued for the next poll tick.",
+		},
+		{name: "reaction kind the issue lacks", path: "/api/v1/reactions/MT-653/bot-review/check", wantStatus: http.StatusNotFound, wantCode: "reaction_not_found"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			path := "/api/v1/retries/" + tt.identifier + "/run"
-			resp, err := http.Post(ts.URL+path, "", nil)
+			resp, err := http.Post(ts.URL+tt.path, "", nil)
 			if err != nil {
-				t.Fatalf("POST %s: %v", path, err)
+				t.Fatalf("POST %s: %v", tt.path, err)
 			}
 			defer func() { _ = resp.Body.Close() }()
 			body := decodeJSON[struct {
-				retryNowResponse
+				OutcomeText string `json:"outcome_text"`
 				errorResponse
 			}](t, resp)
 
 			if resp.StatusCode != tt.wantStatus {
-				t.Errorf("POST %s status = %d, want %d", path, resp.StatusCode, tt.wantStatus)
+				t.Errorf("POST %s status = %d, want %d", tt.path, resp.StatusCode, tt.wantStatus)
 			}
 			if body.OutcomeText != tt.wantText {
-				t.Errorf("POST %s outcome_text = %q, want %q", path, body.OutcomeText, tt.wantText)
+				t.Errorf("POST %s outcome_text = %q, want %q", tt.path, body.OutcomeText, tt.wantText)
 			}
 			if body.Error.Code != tt.wantCode {
-				t.Errorf("POST %s error code = %q, want %q", path, body.Error.Code, tt.wantCode)
+				t.Errorf("POST %s error code = %q, want %q", tt.path, body.Error.Code, tt.wantCode)
 			}
 		})
 	}

@@ -585,6 +585,14 @@ type PendingReaction struct {
 	// immediately.
 	PendingRetryAt time.Time
 
+	// dueBeforeRequest is the PendingRetryAt the entry had before a request
+	// made its check due now; zero when no request did. Runtime-only.
+	dueBeforeRequest time.Time
+
+	// attemptsBeforeRequest is the PendingAttempts the entry had then; a new
+	// pull request head zeroes it. Runtime-only.
+	attemptsBeforeRequest int
+
 	// HeadRecordedAt is when this process recorded the commit currently
 	// evaluated. Zero until first recorded, and zero for a startup-restored
 	// entry, because a head recorded by a previous process cannot bound a

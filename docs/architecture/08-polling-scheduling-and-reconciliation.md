@@ -163,6 +163,8 @@ Note:
 
 Reconciliation runs every tick, in the order below.
 
+An operator request (Section 13.7.2) makes a pending reaction's next check due at once. It moves the entry's `PendingRetryAt` to the time of the request when that time is later, and changes nothing else about the entry, so the next tick checks it under every rule below, as it checks any due entry. When that check keeps the reaction pending and starts before the due time the request replaced, the entry gets back that due time and its backoff count from before the request, in place of the ones the check sets. The count is zero when the check found a new pull request head.
+
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:

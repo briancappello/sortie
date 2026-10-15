@@ -5,10 +5,11 @@
 //
 // Start with [For] for an issue, [NextOutcomes] for what Sortie does next for
 // an issue, [Attention] for what needs a person, and [RefreshOutcome],
-// [RetryNowOutcome], and [AcknowledgeOutcome] for a refresh, a retry-now, and an
-// acknowledge request. All are safe for concurrent use and never fail: a
-// template that cannot render yields a fixed fallback text, or leaves out the
-// one next outcome it belongs to, and logs one record.
+// [RetryNowOutcome], [CheckNowOutcome], and [AcknowledgeOutcome] for a
+// refresh, a retry-now, a check-now, and an acknowledge request. All are
+// safe for concurrent use and never fail: a template that cannot render
+// yields a fixed fallback text, or leaves out the one next outcome it belongs
+// to, and logs one record.
 package sentence
 
 import (
@@ -119,6 +120,24 @@ func RetryNowOutcome(queued bool, displayID, identifier string, attempt int) str
 	return render("ctl_retry_now", "text", map[string]any{
 		"Key":     issueKey(displayID, identifier),
 		"Attempt": attempt,
+	})
+}
+
+// CheckNowOutcome returns the outcome sentence of a request to check a
+// pending pull request reaction now. queued is false for a request refused
+// because Sortie is shutting down, which ignores check.
+func CheckNowOutcome(queued bool, check orchestrator.CheckNowResult) string {
+	if !queued {
+		return render("ctl_refused", "text", nil)
+	}
+	words, known := reactionKindWords[check.Kind]
+	if !known {
+		words = otherReactionKind
+	}
+	return render("ctl_check_now", "text", map[string]any{
+		"Key":        issueKey(check.DisplayID, check.Identifier),
+		"PR":         check.PRNumber,
+		"KindInline": words.inline,
 	})
 }
 
