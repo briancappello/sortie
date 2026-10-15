@@ -1,13 +1,21 @@
-import { fmtCount } from "@/lib/format";
+import { Fragment } from "react";
 
-import { Code, Section, selectionText, usageText } from "./workflow-text";
+import { ArrowRightIcon } from "@/components/icons";
+import { fmtCount } from "@/lib/format";
+import { Panel } from "@/components/Panel";
+
+import { CELL, Code, Note, selectionText, Table } from "./workflow-text";
 
 import type { ShapeAgent, ShapeDispatch, ShapeRule } from "@/api/types.gen";
 import type { ReactNode } from "react";
 
-const HEAD = "px-md py-sm text-left text-label-caps font-medium whitespace-nowrap text-ink-muted";
-const CELL = "px-md py-sm whitespace-nowrap";
-const CHAIN_HEADING = "font-heading text-body-lg font-semibold text-ink";
+function ruleName(rule: ShapeRule): ReactNode {
+  return rule.name === undefined || rule.name === "" ? (
+    <span className="text-ink-muted">unnamed</span>
+  ) : (
+    <span className="font-mono">{rule.name}</span>
+  );
+}
 
 interface FallbackProps {
   dispatch: ShapeDispatch;
@@ -15,123 +23,133 @@ interface FallbackProps {
 }
 
 function Fallback({ dispatch, agent }: FallbackProps) {
-  if (dispatch.default !== null) {
-    return (
-      <>
-        <Code>dispatch.default</Code>, agent <Code>{dispatch.default.agent_kind}</Code>, token usage{" "}
-        {usageText(dispatch.default.usage_arrival)}
-      </>
-    );
-  }
+  return dispatch.default?.agent_kind ?? agent.kind;
+}
+
+interface StepProps {
+  marker: ReactNode;
+  /** Whether a connector runs down from this step's marker to the next step. */
+  hasNext: boolean;
+  title: ReactNode;
+  detail: ReactNode;
+}
+
+function Step({ marker, hasNext, title, detail }: StepProps) {
   return (
-    <>
-      agent <Code>{agent.kind}</Code>, token usage {usageText(agent.usage_arrival)}
-    </>
+    <li className="relative flex gap-sm pb-md last:pb-0">
+      {hasNext ? (
+        <span aria-hidden="true" className="absolute top-6 bottom-0 left-3 w-px bg-line-medium" />
+      ) : undefined}
+      <span className="relative flex size-6 shrink-0 items-center justify-center rounded-full border border-line-medium bg-canvas text-body-sm text-ink-muted tabular-nums">
+        {marker}
+      </span>
+      <div className="flex min-w-0 flex-col pt-xxs">
+        <span className="text-body-md text-ink">{title}</span>
+        <span className="text-body-sm text-ink-muted [overflow-wrap:anywhere]">{detail}</span>
+      </div>
+    </li>
   );
 }
 
-interface RulesTableProps {
-  rules: readonly ShapeRule[];
+interface Listed {
+  chain: number;
+  position: number;
+  length: number;
 }
 
-function RulesTable({ rules }: RulesTableProps) {
-  const hasNext = rules.some((rule) => rule.next !== undefined && rule.next !== "");
-
-  return (
-    <div className="max-w-full overflow-x-auto rounded-lg border border-line">
-      <table className="w-full border-collapse text-body-md text-ink-body">
-        <thead className="border-b border-line">
-          <tr>
-            <th scope="col" className={HEAD}>
-              #
-            </th>
-            <th scope="col" className={HEAD}>
-              Rule
-            </th>
-            <th scope="col" className={HEAD}>
-              Selected by
-            </th>
-            {hasNext ? (
-              <th scope="col" className={HEAD}>
-                Next
-              </th>
-            ) : undefined}
-            <th scope="col" className={HEAD}>
-              Agent
-            </th>
-            <th scope="col" className={HEAD}>
-              Token usage
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rules.map((rule, index) => (
-            <tr key={index} className="border-t border-line first:border-t-0">
-              <td className={`${CELL} tabular-nums`}>{index + 1}</td>
-              <td className={CELL}>
-                {rule.name === undefined || rule.name === "" ? (
-                  <span className="text-ink-muted">unnamed</span>
-                ) : (
-                  <Code>{rule.name}</Code>
-                )}
-              </td>
-              <td className={CELL}>{selectionText(rule)}</td>
-              {hasNext ? (
-                <td className={CELL}>
-                  {rule.next === undefined || rule.next === "" ? undefined : (
-                    <Code>{rule.next}</Code>
-                  )}
-                </td>
-              ) : undefined}
-              <td className={CELL}>
-                <Code>{rule.agent_kind}</Code>
-              </td>
-              <td className={CELL}>{usageText(rule.usage_arrival)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-interface ChainProps {
-  title: string;
+interface ChainListProps {
+  number: number;
   stages: readonly string[];
   rules: readonly ShapeRule[];
-  handoffState: string | undefined;
+  listed: Map<string, Listed>;
+  handoff: string;
+  hasReactions: boolean;
 }
 
-function Chain({ title, stages, rules, handoffState }: ChainProps) {
+function ChainList({ number, stages, rules, listed, handoff, hasReactions }: ChainListProps) {
+  const steps: ReactNode[] = [];
+  for (const [index, name] of stages.entries()) {
+    const joined = listed.get(name);
+    if (index > 0 && joined !== undefined) {
+      steps.push(
+        <Step
+          key={name}
+          marker={<ArrowRightIcon />}
+          hasNext={false}
+          title={
+            <>
+              Joins chain {joined.chain} at <span className="font-mono">{name}</span>
+            </>
+          }
+          detail={`Stage ${joined.position} of ${joined.length}`}
+        />,
+      );
+      break;
+    }
+    listed.set(name, { chain: number, position: index + 1, length: stages.length });
+    const rule = rules.find((candidate) => candidate.name === name);
+    const previous = stages[index - 1];
+    const alsoFrom =
+      index === 0 ? [] : rules.filter((other) => other.next === name && other.name !== previous);
+    steps.push(
+      <Step
+        key={name}
+        marker={index + 1}
+        hasNext
+        title={<span className="font-mono">{name}</span>}
+        detail={
+          <>
+            {index === 0 ? "Starts on " : undefined}
+            {rule === undefined ? undefined : (
+              <>
+                {selectionText(rule)} · {rule.agent_kind}
+              </>
+            )}
+            {alsoFrom.length === 0 ? undefined : (
+              <span className="block">
+                Also entered from{" "}
+                {alsoFrom.map((other, at) => (
+                  <Fragment key={at}>
+                    {at === 0 ? undefined : ", "}
+                    {ruleName(other)} ({selectionText(other)})
+                  </Fragment>
+                ))}
+              </span>
+            )}
+          </>
+        }
+      />,
+    );
+    if (index === stages.length - 1) {
+      steps.push(
+        <Step
+          key="handoff"
+          marker={<ArrowRightIcon />}
+          hasNext={false}
+          title={handoff}
+          detail={`Handoff state, then ${hasReactions ? "the reactions take over" : "a person takes it from there"}`}
+        />,
+      );
+    }
+  }
   return (
-    <div className="flex flex-col gap-xs">
-      <h3 className={CHAIN_HEADING}>{title}</h3>
-      <ol className="ml-lg flex list-decimal flex-col gap-xxs text-body-md text-ink-body">
-        {stages.map((name, index) => {
-          const rule = rules.find((candidate) => candidate.name === name);
-          return (
-            <li key={index}>
-              <Code>{name}</Code>
-              {rule === undefined ? undefined : <> · {selectionText(rule)}</>}
-            </li>
-          );
-        })}
-      </ol>
-      {handoffState === undefined || handoffState === "" ? undefined : (
-        <p>Then hands off to {handoffState}.</p>
-      )}
+    <div className="flex flex-col gap-sm">
+      <h3 className="text-body-md font-medium text-ink">
+        Chain {number}{" "}
+        <span className="font-regular text-ink-muted">· {fmtCount(stages.length)} stages</span>
+      </h3>
+      <ol>{steps}</ol>
     </div>
   );
 }
 
-function hopLine(dispatch: ShapeDispatch): ReactNode {
-  const hops = `At most ${fmtCount(dispatch.hop_ceiling)} automatic stage hops in a row per issue`;
-  return dispatch.max_consecutive_hops === null ? (
-    `${hops}, the default.`
-  ) : (
-    <>
-      {hops}, set by <Code>dispatch.max_consecutive_hops</Code>.
-    </>
+function hopNote(dispatch: ShapeDispatch): ReactNode {
+  return (
+    <Note>
+      At most {fmtCount(dispatch.hop_ceiling)} automatic hops in a row per issue (
+      <Code>dispatch.max_consecutive_hops</Code>
+      {dispatch.max_consecutive_hops === null ? ", default" : undefined}).
+    </Note>
   );
 }
 
@@ -140,42 +158,77 @@ export interface DispatchSectionProps {
   dispatch: ShapeDispatch;
   agent: ShapeAgent;
   handoffState: string | undefined;
+  hasReactions: boolean;
 }
 
-/** Renders Dispatch: the rules in served order, the fallback for an unselected issue, the stage chains, and the hop ceiling. */
-export function DispatchSection({ dispatch, agent, handoffState }: DispatchSectionProps) {
+/** Renders Dispatch: the rules outside any chain as one table, then each stage chain as a numbered list ending on the handoff state. */
+export function DispatchSection({
+  dispatch,
+  agent,
+  handoffState,
+  hasReactions,
+}: DispatchSectionProps) {
   const rules = dispatch.rules ?? [];
   const chains = dispatch.chains ?? [];
+  const handoff =
+    handoffState === undefined || handoffState === "" ? "the handoff state" : handoffState;
+
+  if (rules.length === 0) {
+    return (
+      <Panel title="Dispatch">
+        <Note>
+          No dispatch rules: every issue runs on <Fallback dispatch={dispatch} agent={agent} />.
+        </Note>
+      </Panel>
+    );
+  }
+
+  const inChains = new Set(chains.flat());
+  const others = rules.filter((rule) => rule.name === undefined || !inChains.has(rule.name));
   const hasCatchAll = rules.some((rule) => rule.selected_by === "catch_all");
+  const listed = new Map<string, Listed>();
+  const lists: ReactNode[] = [];
+  for (const stages of chains) {
+    if (stages.length > 1 && listed.has(stages[1])) {
+      continue;
+    }
+    lists.push(
+      <ChainList
+        key={lists.length}
+        number={lists.length + 1}
+        stages={stages}
+        rules={rules}
+        listed={listed}
+        handoff={handoff}
+        hasReactions={hasReactions}
+      />,
+    );
+  }
 
   return (
-    <Section title="Dispatch">
-      {rules.length === 0 ? (
-        <p className="text-body-md text-ink">
-          No dispatch rules: every issue runs on <Fallback dispatch={dispatch} agent={agent} />.
-        </p>
+    <Panel title="Dispatch">
+      {others.length === 0 ? undefined : (
+        <Table headers={["Rule", "Selected by", "Agent"]}>
+          {others.map((rule, index) => (
+            <tr key={index}>
+              <td className={CELL}>{ruleName(rule)}</td>
+              <td className={CELL}>{selectionText(rule)}</td>
+              <td className={CELL}>{rule.agent_kind}</td>
+            </tr>
+          ))}
+        </Table>
+      )}
+      {lists}
+      {hasCatchAll ? undefined : (
+        <Note>
+          Issues no rule selects run on <Fallback dispatch={dispatch} agent={agent} />.
+        </Note>
+      )}
+      {lists.length === 0 ? (
+        <Note>No stage chains: every rule ends on {handoff}.</Note>
       ) : (
-        <>
-          <RulesTable rules={rules} />
-          {hasCatchAll ? undefined : (
-            <p className="text-body-md text-ink-body">
-              Issues no rule selects run on <Fallback dispatch={dispatch} agent={agent} />.
-            </p>
-          )}
-        </>
+        hopNote(dispatch)
       )}
-      {chains.map((stages, index) => (
-        <Chain
-          key={index}
-          title={chains.length === 1 ? "Stage Chain" : `Stage Chain (${index + 1})`}
-          stages={stages}
-          rules={rules}
-          handoffState={handoffState}
-        />
-      ))}
-      {chains.length === 0 ? undefined : (
-        <p className="text-body-md text-ink-body">{hopLine(dispatch)}</p>
-      )}
-    </Section>
+    </Panel>
   );
 }

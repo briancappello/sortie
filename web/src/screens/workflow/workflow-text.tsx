@@ -1,5 +1,6 @@
 import { Fragment } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { fmtDuration } from "@/lib/format";
 
 import type { ShapeMatch, ShapePriority, ShapeRule } from "@/api/types.gen";
@@ -16,6 +17,14 @@ export function Code({ children }: CodeProps) {
     <code className="rounded bg-surface-raised px-xxs font-mono text-[0.9em] [overflow-wrap:anywhere]">
       {children}
     </code>
+  );
+}
+
+/** Renders each tracker label as a {@link Badge}, joined by a separator text. */
+export function joinBadges(labels: readonly string[], separator: string): ReactNode {
+  return joinNodes(
+    labels.map((label) => <Badge key={label}>{label}</Badge>),
+    separator,
   );
 }
 
@@ -61,7 +70,7 @@ function priorityClause({ op, value, values }: ShapePriority): ReactNode {
 function matchClauses(match: ShapeMatch): ReactNode[] {
   const clauses: ReactNode[] = [];
   if (match.labels !== undefined && match.labels.length > 0) {
-    clauses.push(<>label {joinCode(match.labels, " or ")}</>);
+    clauses.push(joinBadges(match.labels, " or "));
   }
   if (match.issue_type !== undefined && match.issue_type.length > 0) {
     clauses.push(`issue type ${match.issue_type.join(" or ")}`);
@@ -85,13 +94,9 @@ function matchClauses(match: ShapeMatch): ReactNode[] {
 export function selectionText(rule: Pick<ShapeRule, "selected_by" | "stage" | "match">): ReactNode {
   switch (rule.selected_by) {
     case "stage":
-      return (
-        <>
-          stage label <Code>{rule.stage}</Code>
-        </>
-      );
+      return rule.stage === undefined ? rule.selected_by : <Badge>{rule.stage}</Badge>;
     case "catch_all":
-      return "every other issue";
+      return "as the catch-all";
     case "match": {
       const clauses = rule.match === undefined ? [] : matchClauses(rule.match);
       return clauses.length === 0 ? rule.selected_by : joinNodes(clauses, " and ");
@@ -101,14 +106,14 @@ export function selectionText(rule: Pick<ShapeRule, "selected_by" | "stage" | "m
   }
 }
 
-/** Words whether an agent reports token usage; an arrival the client has no wording for reads "not declared". */
+/** Words whether an agent kind reports token usage; an arrival the client has no wording for reads "not declared". */
 export function usageText(arrival: string): string {
   switch (arrival) {
     case "incremental":
     case "turn_end":
-      return "reported";
+      return "reports tokens";
     case "none":
-      return "not reported";
+      return "reports none";
     default:
       return "not declared";
   }
@@ -123,85 +128,53 @@ export function msText(ms: number): string {
 export function escalationText(escalation: string, label: string | undefined): ReactNode {
   switch (escalation) {
     case "label":
-      return label === undefined ? (
-        "label"
-      ) : (
-        <>
-          label <Code>{label}</Code>
-        </>
-      );
-    case "comment":
-      return "comment";
+      return label === undefined ? "label" : <Badge>{label}</Badge>;
     case "none":
-      return "none";
+      return "—";
     default:
       return escalation;
   }
 }
 
-/** Props of {@link Section}. */
-export interface SectionProps {
-  title: string;
+/** Props of {@link Note}. */
+export interface NoteProps {
   children: ReactNode;
 }
 
-/** Renders one titled section of the Workflow screen. */
-export function Section({ title, children }: SectionProps) {
-  return (
-    <section className="flex min-w-0 flex-col gap-sm rounded-lg border border-line bg-canvas p-md">
-      <h2 className="font-heading text-h7 font-semibold text-ink">{title}</h2>
-      {children}
-    </section>
-  );
+/** Renders a line of body text under a panel's content. */
+export function Note({ children }: NoteProps) {
+  return <p className="text-body-md text-ink-body">{children}</p>;
 }
 
-/** Props of {@link Rows}. */
-export interface RowsProps {
+/** Props of {@link Table}. */
+export interface TableProps {
+  headers: readonly string[];
   children: ReactNode;
 }
 
-/** Lays out {@link Row}s as a label column and a value column. */
-export function Rows({ children }: RowsProps) {
+/** Renders a borderless table of rules or reactions in a container that scrolls sideways. */
+export function Table({ headers, children }: TableProps) {
   return (
-    <dl className="grid grid-cols-[minmax(0,max-content)_minmax(0,1fr)] gap-x-md gap-y-xs text-body-md max-sm:grid-cols-1 max-sm:gap-y-0">
-      {children}
-    </dl>
-  );
-}
-
-/** Props of {@link Row}. */
-export interface RowProps {
-  label: string;
-  children: ReactNode;
-}
-
-/** Renders one label and its value. */
-export function Row({ label, children }: RowProps) {
-  return (
-    <>
-      <dt className="text-ink-muted max-sm:mt-xs">{label}</dt>
-      <dd className="text-ink [overflow-wrap:anywhere]">{children}</dd>
-    </>
-  );
-}
-
-/** Props of {@link Block}. */
-export interface BlockProps {
-  name: string;
-  /** A line below the rows. */
-  note?: ReactNode;
-  children: ReactNode;
-}
-
-/** Renders a group of rows headed by a configured name, such as a reaction key or an agent kind. */
-export function Block({ name, note, children }: BlockProps) {
-  return (
-    <div className="flex flex-col gap-xs border-t border-line pt-sm">
-      <h3 className="text-body-md font-semibold text-ink">
-        <Code>{name}</Code>
-      </h3>
-      <Rows>{children}</Rows>
-      {note === undefined ? undefined : <p className="text-body-md text-ink-muted">{note}</p>}
+    <div className="max-w-full overflow-x-auto">
+      <table className="w-full border-collapse text-body-md text-ink">
+        <thead>
+          <tr>
+            {headers.map((header) => (
+              <th
+                key={header}
+                scope="col"
+                className="border-b border-line px-sm pb-xs text-left text-body-sm font-medium whitespace-nowrap text-ink-muted"
+              >
+                {header}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
     </div>
   );
 }
+
+/** The class of a {@link Table} body cell. */
+export const CELL = "border-b border-line px-sm py-xs align-baseline whitespace-nowrap";

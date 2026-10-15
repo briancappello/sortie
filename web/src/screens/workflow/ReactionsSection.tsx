@@ -1,168 +1,120 @@
 import { fmtCount } from "@/lib/format";
+import { Panel } from "@/components/Panel";
 
-import { Block, Code, escalationText, msText, Row, Section } from "./workflow-text";
+import { CELL, escalationText, joinBadges, Table } from "./workflow-text";
 
-import type {
-  ShapeAutoMerge,
-  ShapeBotReview,
-  ShapeCIFailure,
-  ShapeLabelCommands,
-  ShapeMergeCompletion,
-  ShapeMergeConflicts,
-  ShapeReactions,
-  ShapeReviewComments,
-} from "@/api/types.gen";
+import type { ShapeReactions } from "@/api/types.gen";
 import type { ReactNode } from "react";
 
-function yesNo(value: boolean): string {
-  return value ? "yes" : "no";
+interface Row {
+  kind: string;
+  limit: ReactNode;
+  escalation: ReactNode;
 }
 
-function triageText(triage: boolean): string {
-  return triage ? "runs" : "off";
+function fixes(count: number): string {
+  return `${fmtCount(count)} ${count === 1 ? "fix" : "fixes"}`;
 }
 
-interface EscalationRowProps {
-  reaction: { escalation: string; escalation_label?: string };
+function fixRuns(count: number): string {
+  return `${fmtCount(count)} ${count === 1 ? "fix run" : "fix runs"}`;
 }
 
-function EscalationRow({ reaction }: EscalationRowProps) {
-  return (
-    <Row label="Escalation">{escalationText(reaction.escalation, reaction.escalation_label)}</Row>
-  );
-}
-
-function CIFailure({ reaction }: { reaction: ShapeCIFailure }) {
-  return (
-    <Block name="ci_failure">
-      <Row label="CI fixes">{fmtCount(reaction.max_retries)}</Row>
-      <Row label="Triage command">{triageText(reaction.triage)}</Row>
-      <EscalationRow reaction={reaction} />
-    </Block>
-  );
-}
-
-function ReviewComments({ reaction }: { reaction: ShapeReviewComments }) {
-  return (
-    <Block name="review_comments">
-      <Row label="Review fix runs">{fmtCount(reaction.max_continuation_turns)}</Row>
-      <Row label="Debounce">{msText(reaction.debounce_ms)}</Row>
-      <Row label="Checks every">{msText(reaction.poll_interval_ms)}</Row>
-      <Row label="Triage command">{triageText(reaction.triage)}</Row>
-      <EscalationRow reaction={reaction} />
-    </Block>
-  );
-}
-
-function BotReview({ reaction }: { reaction: ShapeBotReview }) {
-  const accounts = reaction.bot_usernames ?? [];
-  return (
-    <Block name="bot_review">
-      <Row label="Bot review fix runs">{fmtCount(reaction.max_continuation_turns)}</Row>
-      <Row label="Bot accounts">{accounts.length === 0 ? "none" : accounts.join(", ")}</Row>
-      <Row label="Checks every">{msText(reaction.poll_interval_ms)}</Row>
-      <Row label="Triage command">{triageText(reaction.triage)}</Row>
-      <EscalationRow reaction={reaction} />
-    </Block>
-  );
-}
-
-function MergeConflicts({ reaction }: { reaction: ShapeMergeConflicts }) {
-  return (
-    <Block name="merge_conflicts">
-      <Row label="Rebase runs per conflict">{fmtCount(reaction.max_retries)}</Row>
-      <Row label="Checks every">{msText(reaction.poll_interval_ms)}</Row>
-      <Row label="Triage command">{triageText(reaction.triage)}</Row>
-      <EscalationRow reaction={reaction} />
-    </Block>
-  );
-}
-
-function AutoMerge({ reaction }: { reaction: ShapeAutoMerge }) {
-  return (
-    <Block name="auto_merge">
-      <Row label="Strategy">{reaction.strategy}</Row>
-      <Row label="Waits for CI">{yesNo(reaction.require_ci)}</Row>
-      <Row label="Deletes the branch">{yesNo(reaction.delete_branch)}</Row>
-      <Row label="Merge calls">
-        {reaction.max_retries === null ? "no limit" : fmtCount(reaction.max_retries)}
-      </Row>
-      <Row label="Checks every">{msText(reaction.poll_interval_ms)}</Row>
-      <EscalationRow reaction={reaction} />
-    </Block>
-  );
-}
-
-function MergeCompletion({ reaction }: { reaction: ShapeMergeCompletion }) {
-  return (
-    <Block name="merge_completion">
-      <Row label="Moves the issue to">{reaction.target_state}</Row>
-      <Row label="Failed tracker moves">{fmtCount(reaction.max_retries)}</Row>
-      <Row label="Checks every">{msText(reaction.poll_interval_ms)}</Row>
-      <EscalationRow reaction={reaction} />
-    </Block>
-  );
-}
-
-function LabelCommands({ reaction }: { reaction: ShapeLabelCommands }) {
-  return (
-    <Block name="label_commands">
-      {reaction.review_label === undefined || reaction.review_label === "" ? undefined : (
-        <Row label="Review label">
-          <Code>{reaction.review_label}</Code>
-        </Row>
-      )}
-      {reaction.fix_label === undefined || reaction.fix_label === "" ? undefined : (
-        <Row label="Fix label">
-          <Code>{reaction.fix_label}</Code>
-        </Row>
-      )}
-      <Row label="Checks every">{msText(reaction.poll_interval_ms)}</Row>
-    </Block>
-  );
+function reactionRows(reactions: ShapeReactions): Row[] {
+  const escalation = (reaction: { escalation: string; escalation_label?: string }) =>
+    escalationText(reaction.escalation, reaction.escalation_label);
+  const rows: Row[] = [];
+  const {
+    ci_failure,
+    review_comments,
+    bot_review,
+    merge_conflicts,
+    auto_merge,
+    merge_completion,
+    label_commands,
+  } = reactions;
+  if (ci_failure !== undefined) {
+    rows.push({
+      kind: "ci_failure",
+      limit: fixes(ci_failure.max_retries),
+      escalation: escalation(ci_failure),
+    });
+  }
+  if (review_comments !== undefined) {
+    rows.push({
+      kind: "review_comments",
+      limit: fixRuns(review_comments.max_continuation_turns),
+      escalation: escalation(review_comments),
+    });
+  }
+  if (bot_review !== undefined) {
+    rows.push({
+      kind: "bot_review",
+      limit: fixRuns(bot_review.max_continuation_turns),
+      escalation: escalation(bot_review),
+    });
+  }
+  if (merge_conflicts !== undefined) {
+    rows.push({
+      kind: "merge_conflicts",
+      limit: fixes(merge_conflicts.max_retries),
+      escalation: escalation(merge_conflicts),
+    });
+  }
+  if (auto_merge !== undefined) {
+    rows.push({
+      kind: "auto_merge",
+      limit: `${auto_merge.strategy} merge`,
+      escalation: escalation(auto_merge),
+    });
+  }
+  if (merge_completion !== undefined) {
+    rows.push({
+      kind: "merge_completion",
+      limit: `moves to ${merge_completion.target_state}`,
+      escalation: escalation(merge_completion),
+    });
+  }
+  if (label_commands !== undefined) {
+    const labels = [label_commands.review_label, label_commands.fix_label].filter(
+      (label): label is string => label !== undefined && label !== "",
+    );
+    rows.push({
+      kind: "label_commands",
+      limit: labels.length === 0 ? "—" : joinBadges(labels, " "),
+      escalation: "—",
+    });
+  }
+  return rows;
 }
 
 /** Props of {@link ReactionsSection}. */
 export interface ReactionsSectionProps {
   reactions: ShapeReactions;
+  handoffState: string | undefined;
 }
 
-/** Renders Reactions: one block per configured pull request reaction, in a fixed order, under the restart note. */
-export function ReactionsSection({ reactions }: ReactionsSectionProps) {
-  const blocks: ReactNode[] = [];
-  if (reactions.ci_failure !== undefined) {
-    blocks.push(<CIFailure key="ci_failure" reaction={reactions.ci_failure} />);
-  }
-  if (reactions.review_comments !== undefined) {
-    blocks.push(<ReviewComments key="review_comments" reaction={reactions.review_comments} />);
-  }
-  if (reactions.bot_review !== undefined) {
-    blocks.push(<BotReview key="bot_review" reaction={reactions.bot_review} />);
-  }
-  if (reactions.merge_conflicts !== undefined) {
-    blocks.push(<MergeConflicts key="merge_conflicts" reaction={reactions.merge_conflicts} />);
-  }
-  if (reactions.auto_merge !== undefined) {
-    blocks.push(<AutoMerge key="auto_merge" reaction={reactions.auto_merge} />);
-  }
-  if (reactions.merge_completion !== undefined) {
-    blocks.push(<MergeCompletion key="merge_completion" reaction={reactions.merge_completion} />);
-  }
-  if (reactions.label_commands !== undefined) {
-    blocks.push(<LabelCommands key="label_commands" reaction={reactions.label_commands} />);
-  }
+/** Renders Reactions: one table row per configured pull request reaction, in a fixed order, above the restart note. */
+export function ReactionsSection({ reactions, handoffState }: ReactionsSectionProps) {
+  const rows = reactionRows(reactions);
+  const handoff =
+    handoffState === undefined || handoffState === "" ? "the handoff state" : handoffState;
 
   return (
-    <Section title="Reactions">
-      <p className="text-body-md text-ink-muted">
-        An edit of reactions takes effect at the next restart, except the CI fixes and escalation of{" "}
-        <Code>ci_failure</Code>, which take effect when the file loads.
-      </p>
-      {blocks.length === 0 ? (
-        <p className="text-body-md text-ink">No pull request reactions are configured.</p>
+    <Panel title="Reactions">
+      {rows.length === 0 ? (
+        <p className="text-body-md text-ink-body">No reactions: Sortie's part ends at {handoff}.</p>
       ) : (
-        blocks
+        <Table headers={["Kind", "Limit", "Escalation"]}>
+          {rows.map((row) => (
+            <tr key={row.kind}>
+              <td className={`${CELL} font-mono`}>{row.kind}</td>
+              <td className={CELL}>{row.limit}</td>
+              <td className={CELL}>{row.escalation}</td>
+            </tr>
+          ))}
+        </Table>
       )}
-    </Section>
+    </Panel>
   );
 }
