@@ -53,6 +53,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API can now check a pull request reaction right away: `POST /api/v1/reactions/{identifier}/{kind}/check` makes Sortie check that reaction's pull request on the next poll instead of at the reaction's own next check, for example right after CI finishes or a reviewer posts, so the fix that follows can start sooner. The check follows the reaction's usual rules: new review comments still get time to settle, and a reaction that used up its fixes still escalates instead of starting another; the request itself starts no agent and changes nothing in the tracker or the pull request. A reaction still waiting after that check keeps the time its next check was due, so asking early never makes it wait longer. The response says in one sentence what it did. Sortie's HTTP server has no authentication, so a deployment that others can reach must sit behind a reverse proxy with authentication or a VPN. ([#1305](https://github.com/sortie-ai/sortie/issues/1305))
 
+- The dashboard has Health and Workflow screens: Health shows whether each of Sortie's own checks passes, when it last succeeded, how many times in a row it failed, and its error, including an edit of WORKFLOW.md that failed to load while the previous configuration stays in effect; Workflow shows the configuration in effect, from dispatch rules and stage chains to reactions, limits, SSH hosts, and token rates. ([#1300](https://github.com/sortie-ai/sortie/issues/1300))
+
+- The JSON API (`/api/v1/state`) now describes the tracker poll in a plain English sentence, `health.poll.summary_text`, for example how many polls in a row failed and how long ago one last succeeded. ([#1300](https://github.com/sortie-ai/sortie/issues/1300))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -88,6 +92,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A passing re-run of a pull request's checks now ends its CI escalation, and the escalation keeps the time Sortie escalated it instead of moving it forward at every recheck of checks that stay red. Sortie still applies the escalation at most once per commit. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
 
 - The last message shown for a running `agent-client-protocol` agent is now its whole latest message instead of the last fragment it streamed. ([#1353](https://github.com/sortie-ai/sortie/issues/1353))
+
+- The username in a tracker or tool server URL is now masked in logs and in the JSON API (`/api/v1/state`). A tracker request error used to print it beside the hidden password. ([#1300](https://github.com/sortie-ai/sortie/issues/1300))
 
 ### Migrations
 
