@@ -129,6 +129,10 @@ type pumpState struct {
 	agentMessageID        *messageId
 	agentMessageRunes     int
 	agentMessageTruncated bool
+	// agentMessageAt is when the message's last text chunk was observed. The
+	// completed message carries it, so history a load replays before a turn
+	// is not dated into that turn.
+	agentMessageAt time.Time
 
 	activeTurn *activeTurn
 
@@ -556,7 +560,6 @@ func (p *pumpState) handleMessage(msg *jsonrpc.Message) {
 	case jsonrpc.KindNotification:
 		p.state.logger.Debug("unhandled notification", slog.String("method", msg.Method))
 	case jsonrpc.KindMalformed:
-		p.flushAgentMessage()
 		p.emitOrQueue(domain.AgentEvent{Type: domain.EventMalformed, Timestamp: time.Now().UTC(), Message: malformedLineMessage})
 	case jsonrpc.KindStreamEnd:
 		p.handleStreamEndMessage(msg)
@@ -688,7 +691,6 @@ func (p *pumpState) handleUsageObserved(observed *usageObserved) {
 func (p *pumpState) handleSessionUpdateMessage(msg *jsonrpc.Message) {
 	var notif sessionNotification
 	if err := json.Unmarshal(msg.Params, &notif); err != nil {
-		p.flushAgentMessage()
 		p.emitOrQueue(domain.AgentEvent{Type: domain.EventMalformed, Timestamp: time.Now().UTC(), Message: malformedLineMessage})
 		return
 	}
@@ -703,7 +705,6 @@ func (p *pumpState) handleSessionUpdateMessage(msg *jsonrpc.Message) {
 
 	sue, recognized := parseSessionUpdate(notif.Update.Remainder)
 	if !recognized {
-		p.flushAgentMessage()
 		if !p.malformedVariantLogged {
 			p.malformedVariantLogged = true
 			p.state.logger.Debug("unrecognized session update variant", slog.String("session_update", sue.rawVariant))
@@ -711,25 +712,23 @@ func (p *pumpState) handleSessionUpdateMessage(msg *jsonrpc.Message) {
 		p.emitOrQueue(domain.AgentEvent{Type: domain.EventMalformed, Timestamp: time.Now().UTC(), Message: unrecognizedSessionUpdateMessage})
 		return
 	}
-	if sue.kind != updateAgentMessageChunk {
-		p.flushAgentMessage()
-	}
-
 	if sue.kind == updateUserMessageChunk || sue.kind == updateAgentMessageChunk {
 		p.observeReplay()
 	}
 	p.observeModelReached(sue.kind)
 
 	result := applySessionUpdate(p.tracker, sue)
-	if result.messageChunk {
-		if result.messageText != "" && result.hasEvent {
-			p.emitOrQueue(result.event)
-		}
-		p.handleAgentMessageChunk(result.messageID, result.messageText)
-		if result.messageText == "" && result.hasEvent {
-			p.emitOrQueue(result.event)
+	switch {
+	case result.messageChunk:
+		p.handleAgentMessageChunk(result.messageID, result.messageText, result.event.Timestamp)
+		// emitOrQueue would complete the message this chunk belongs to.
+		if result.hasEvent {
+			p.publishOrQueue(result.event)
 		}
 		return
+	case sue.kind == updateUserMessageChunk:
+		// Ends the agent message before it without publishing an event.
+		p.flushAgentMessage()
 	}
 	if result.hasEvent {
 		p.emitOrQueue(result.event)
@@ -743,7 +742,7 @@ func sameMessageID(a, b *messageId) bool {
 	return *a == *b
 }
 
-func (p *pumpState) handleAgentMessageChunk(id *messageId, text string) {
+func (p *pumpState) handleAgentMessageChunk(id *messageId, text string, at time.Time) {
 	if p.agentMessageRunes > 0 && !sameMessageID(p.agentMessageID, id) {
 		p.flushAgentMessage()
 	}
@@ -753,6 +752,7 @@ func (p *pumpState) handleAgentMessageChunk(id *messageId, text string) {
 	if p.agentMessageRunes == 0 {
 		p.agentMessageID = id
 	}
+	p.agentMessageAt = at
 	for _, r := range text {
 		if p.agentMessageRunes == messageTruncateLimit {
 			p.agentMessageTruncated = true
@@ -778,10 +778,11 @@ func (p *pumpState) flushAgentMessage() {
 	} else {
 		text = redact.Truncate(text, messageTruncateLimit)
 	}
-	p.emitOrQueue(domain.AgentEvent{Type: domain.EventNotification, Timestamp: time.Now().UTC(), Message: text})
+	p.publishOrQueue(domain.AgentEvent{Type: domain.EventNotification, Timestamp: p.agentMessageAt, Message: text})
 
 	p.agentMessageText.Reset()
 	p.agentMessageID = nil
+	p.agentMessageAt = time.Time{}
 	p.agentMessageRunes = 0
 	p.agentMessageTruncated = false
 }
@@ -800,9 +801,16 @@ func (p *pumpState) observeModelReached(kind sessionUpdateKind) {
 	}
 }
 
-// emitOrQueue publishes ev into the active turn's sink, or queues it when no
-// turn is in flight, to be flushed after the next turn's session_started event.
+// emitOrQueue completes any agent message still being accumulated, then
+// publishes or queues ev, so events keep the order the agent produced them in.
 func (p *pumpState) emitOrQueue(ev domain.AgentEvent) {
+	p.flushAgentMessage()
+	p.publishOrQueue(ev)
+}
+
+// publishOrQueue publishes ev into the active turn's sink, or queues it when no
+// turn is in flight, to be flushed after the next turn's session_started event.
+func (p *pumpState) publishOrQueue(ev domain.AgentEvent) {
 	if p.activeTurn != nil {
 		p.publish(p.activeTurn)(ev)
 		return

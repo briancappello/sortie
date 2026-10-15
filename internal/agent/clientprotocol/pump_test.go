@@ -235,7 +235,10 @@ func TestSessionUpdateBeforeAnyPromptNotLost(t *testing.T) {
 	}
 	fourth := waitEvent(t, eventCh)
 	if fourth.Type != domain.EventNotification || fourth.Message != "queued before any turn" {
-		t.Fatalf("fourth event = %+v, want the queued message after the turn ended", fourth)
+		t.Fatalf("fourth event = %+v, want the queued message", fourth)
+	}
+	if !fourth.Timestamp.Equal(third.Timestamp) {
+		t.Errorf("queued message timestamp = %v, want %v, when its chunk arrived before the turn", fourth.Timestamp, third.Timestamp)
 	}
 }
 
@@ -526,8 +529,10 @@ func TestPumpAgentMessageChunksAreCoalesced(t *testing.T) {
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 
 	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "},"messageId":"message-1"}}}`)
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"usage_update","used":12000,"size":200000}}}`)
 	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"},"messageId":"message-1"}}}`)
 	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Next"},"messageId":"message-2"}}}`)
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"plan","entries":[]}}}`)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
 
 	if outcome := awaitOutcome(t, outcomeCh); outcome.err != nil {
@@ -536,11 +541,12 @@ func TestPumpAgentMessageChunksAreCoalesced(t *testing.T) {
 
 	var chunkNotifications []string
 	for _, event := range events {
-		if event.Type == domain.EventNotification && (event.Message == "" || event.Message == "hello world" || event.Message == "Next") {
+		isChunk := event.Type == domain.EventNotification && (event.Message == "" || event.Message == "hello world" || event.Message == "Next")
+		if isChunk || event.Message == planUpdateMessage {
 			chunkNotifications = append(chunkNotifications, event.Message)
 		}
 	}
-	want := []string{"", "", "", "hello world", "Next"}
+	want := []string{"", "", "hello world", "", "Next", planUpdateMessage}
 	if len(chunkNotifications) != len(want) {
 		t.Fatalf("chunk notifications = %q, want %q", chunkNotifications, want)
 	}
@@ -554,7 +560,7 @@ func TestPumpAgentMessageChunksAreCoalesced(t *testing.T) {
 func TestPumpAgentMessageBufferIsBounded(t *testing.T) {
 	pump := &pumpState{}
 	id := messageId("message-1")
-	pump.handleAgentMessageChunk(&id, strings.Repeat("界", messageTruncateLimit+100))
+	pump.handleAgentMessageChunk(&id, strings.Repeat("界", messageTruncateLimit+100), time.Now().UTC())
 	if got := pump.agentMessageText.Len(); got != len([]byte(strings.Repeat("界", messageTruncateLimit))) {
 		t.Fatalf("buffer bytes = %d, want %d", got, len([]byte(strings.Repeat("界", messageTruncateLimit))))
 	}
@@ -580,7 +586,7 @@ func TestPumpAgentMessageTruncationDoesNotLeakSecretPrefix(t *testing.T) {
 
 	pump := &pumpState{}
 	id := messageId("message-1")
-	pump.handleAgentMessageChunk(&id, strings.Repeat("x", messageTruncateLimit-2)+secret)
+	pump.handleAgentMessageChunk(&id, strings.Repeat("x", messageTruncateLimit-2)+secret, time.Now().UTC())
 	pump.flushAgentMessage()
 
 	if len(pump.queued) != 1 {

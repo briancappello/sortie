@@ -37,11 +37,11 @@ A local launch needs up to three command-line switches: one that puts the runtim
 
 `kiro-cli` uses one switch for trust and posture, so you cannot take back one without the other.
 
-### Message chunk coalescing
-
-Text from `agent_message_chunk` updates is accumulated by `messageId`, which the schema defines as shared by all chunks of one message. Each text chunk emits an empty notification to refresh the run's stall timer; changing message ID, receiving another update kind, or ending the turn flushes the accumulated text once. The buffer is capped at the adapter's 500-rune message limit. Non-text message chunks and thought chunks keep their existing event types.
-
 Some runtimes send many notifications under their own vendor method prefix. They are notifications, not requests, so the client answers none of them and depends on none of them.
+
+## Agent message chunks
+
+A runtime streams one reply as many `agent_message_chunk` updates. Chunks of one message share a `messageId`, and a new ID starts a new message. Each text chunk is reported as a notification with an empty message, which keeps the stall timer fresh without replacing the run's last agent message. The text accumulates, capped at 500 runes, and the completed message is reported once, when a chunk with another ID, a user message chunk, or any update reported as an event arrives, or when the turn or the stream ends. Updates that are only logged, such as `usage_update`, do not end a message. The completed message carries the time its last chunk arrived, so a reply a session load replays is not dated into the next turn. A non-text chunk belongs to its message and is reported as its own event.
 
 ## Usage reporting
 
