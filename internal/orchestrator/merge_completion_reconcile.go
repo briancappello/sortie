@@ -82,7 +82,7 @@ func reconcileMergeCompletion(state *State, params ReconcileParams, log *slog.Lo
 			continue
 		}
 
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}

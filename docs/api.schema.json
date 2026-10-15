@@ -535,6 +535,41 @@
       ],
       "type": "object"
     },
+    "CheckNowResponse": {
+      "properties": {
+        "display_identifier": {
+          "type": "string"
+        },
+        "issue_id": {
+          "type": "string"
+        },
+        "issue_identifier": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "outcome_text": {
+          "type": "string"
+        },
+        "pull_request": {
+          "$ref": "#/$defs/PullRequestResponse"
+        },
+        "queued": {
+          "type": "boolean"
+        },
+        "requested_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "queued",
+        "requested_at",
+        "outcome_text"
+      ],
+      "type": "object"
+    },
     "ConfigResponse": {
       "properties": {
         "agent": {

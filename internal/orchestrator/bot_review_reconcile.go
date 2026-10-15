@@ -78,7 +78,7 @@ func reconcileBotReviewComments(state *State, params ReconcileParams, log *slog.
 		}
 
 		// Poll throttle: respect PendingRetryAt.
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}

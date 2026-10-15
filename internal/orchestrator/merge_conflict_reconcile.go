@@ -74,7 +74,7 @@ func reconcileMergeConflicts(state *State, params ReconcileParams, log *slog.Log
 			continue
 		}
 
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}

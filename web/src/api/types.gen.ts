@@ -122,6 +122,17 @@ export interface ChainGroup {
   last_hop: string;
 }
 
+export interface CheckNowResponse {
+  queued: boolean;
+  requested_at: string;
+  issue_id?: string;
+  issue_identifier?: string;
+  display_identifier?: string;
+  kind?: string;
+  pull_request?: PullRequestResponse;
+  outcome_text: string;
+}
+
 export interface ConfigResponse {
   tracker: ShapeTracker;
   polling: ShapePolling;

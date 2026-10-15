@@ -100,7 +100,7 @@ func reconcileCIStatus(state *State, params ReconcileParams, log *slog.Logger, c
 			continue
 		}
 
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}
@@ -408,6 +408,7 @@ func applyCIEpochTransition(
 
 	// Unconditional: a changed head voids every prior conclusion.
 	pending.PendingAttempts = 0
+	pending.attemptsBeforeRequest = 0
 	endEscalation(ctx, params.Store, pending, log)
 	pending.LastCheck = nil
 

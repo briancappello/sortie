@@ -106,7 +106,7 @@ func reconcileAutoMerge(state *State, params ReconcileParams, log *slog.Logger, 
 			continue
 		}
 
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}

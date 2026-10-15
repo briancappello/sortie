@@ -470,6 +470,19 @@ type retryNowResponse struct {
 	OutcomeText       string    `json:"outcome_text"`
 }
 
+// checkNowResponse is the body of a 202 and a 409 from
+// POST /api/v1/reactions/{identifier}/{kind}/check.
+type checkNowResponse struct {
+	Queued            bool                 `json:"queued"`
+	RequestedAt       time.Time            `json:"requested_at"`
+	IssueID           string               `json:"issue_id,omitempty"`
+	IssueIdentifier   string               `json:"issue_identifier,omitempty"`
+	DisplayIdentifier string               `json:"display_identifier,omitempty"`
+	Kind              string               `json:"kind,omitempty"`
+	PullRequest       *pullRequestResponse `json:"pull_request,omitempty"`
+	OutcomeText       string               `json:"outcome_text"`
+}
+
 // acknowledgeResponse is the body of a 200 and a 409 from
 // POST /api/v1/attention/{id}/acknowledge.
 type acknowledgeResponse struct {
@@ -1026,6 +1039,14 @@ func (s *Server) routeAcknowledge(w http.ResponseWriter, r *http.Request) {
 	s.handleAcknowledge(w, r)
 }
 
+func (s *Server) routeCheckNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, r, http.MethodPost)
+		return
+	}
+	s.handleCheckNow(w, r)
+}
+
 func (s *Server) routeIssueDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.methodNotAllowed(w, r, http.MethodGet)
@@ -1327,6 +1348,70 @@ func (s *Server) retryNowAnswer(w http.ResponseWriter, r *http.Request, requeste
 			Message: fmt.Sprintf("no retry is scheduled for issue %q", identifier),
 		}}
 	case orchestrator.RetryNowDraining:
+		return http.StatusConflict, refused
+	default:
+		return http.StatusServiceUnavailable, unavailable
+	}
+}
+
+func (s *Server) handleCheckNow(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	status, body := s.checkNowAnswer(w, r, start.UTC())
+	writeJSON(w, s.logger, status, body)
+
+	s.logger.Debug("request served",
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.Int("status", status),
+		slog.Duration("duration", time.Since(start)),
+	)
+}
+
+// checkNowAnswer runs the request and returns the status and body to write.
+func (s *Server) checkNowAnswer(w http.ResponseWriter, r *http.Request, requestedAt time.Time) (int, any) {
+	refused := checkNowResponse{
+		RequestedAt: requestedAt,
+		OutcomeText: sentence.CheckNowOutcome(false, orchestrator.CheckNowResult{}),
+	}
+	unavailable := errorResponse{Error: errorDetail{
+		Code:    "check_now_unavailable",
+		Message: "Sortie did not take the request; nothing changed",
+	}}
+
+	if s.drainingFlag.Load() {
+		return http.StatusConflict, refused
+	}
+	if s.checkNowFn == nil {
+		return http.StatusServiceUnavailable, unavailable
+	}
+
+	identifier := r.PathValue("identifier")
+	kind := r.PathValue("kind")
+	result := s.checkNowFn(r.Context(), identifier, kind)
+
+	// The wait for the event loop is unbounded, so the server's own deadline
+	// may have lapsed by now.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.httpServer.WriteTimeout))
+
+	switch result.Status {
+	case orchestrator.CheckNowDue:
+		return http.StatusAccepted, checkNowResponse{
+			Queued:            true,
+			RequestedAt:       requestedAt,
+			IssueID:           result.IssueID,
+			IssueIdentifier:   result.Identifier,
+			DisplayIdentifier: result.DisplayID,
+			Kind:              result.Kind,
+			PullRequest:       &pullRequestResponse{Number: result.PRNumber, Repository: result.PRRepository},
+			OutcomeText:       sentence.CheckNowOutcome(true, result),
+		}
+	case orchestrator.CheckNowNotFound:
+		return http.StatusNotFound, errorResponse{Error: errorDetail{
+			Code:    "reaction_not_found",
+			Message: fmt.Sprintf("no pending %q reaction for issue %q", kind, identifier),
+		}}
+	case orchestrator.CheckNowDraining:
 		return http.StatusConflict, refused
 	default:
 		return http.StatusServiceUnavailable, unavailable

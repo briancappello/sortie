@@ -19,9 +19,30 @@ const (
 
 // requeueReaction returns entry to the pending set under key and records why
 // it waits for its next check.
+//
+// A check that a request brought forward gives back the due time and backoff
+// count the entry had before the request, so asking early never delays a
+// later check.
 func requeueReaction(state *State, key string, entry *PendingReaction, wait string) {
+	if !entry.dueBeforeRequest.IsZero() {
+		entry.PendingRetryAt = entry.dueBeforeRequest
+		entry.PendingAttempts = min(entry.PendingAttempts, entry.attemptsBeforeRequest)
+		entry.dueBeforeRequest = time.Time{}
+		entry.attemptsBeforeRequest = 0
+	}
 	entry.Wait = wait
 	state.PendingReactions[key] = entry
+}
+
+// reactionWaits reports whether entry's next check is still in the future at
+// now. Once now reaches the due time a request replaced, it forgets that due
+// time, because the check is one the entry had anyway.
+func reactionWaits(entry *PendingReaction, now time.Time) bool {
+	if !entry.dueBeforeRequest.IsZero() && !now.Before(entry.dueBeforeRequest) {
+		entry.dueBeforeRequest = time.Time{}
+		entry.attemptsBeforeRequest = 0
+	}
+	return now.Before(entry.PendingRetryAt)
 }
 
 // notePullRequestURL keeps the link status reports; an empty one changes

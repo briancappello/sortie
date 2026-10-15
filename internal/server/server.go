@@ -37,6 +37,10 @@ type RetryNowFunc func(ctx context.Context, identifier string) orchestrator.Retr
 // given ID; ctx is the request's context.
 type AcknowledgeFunc func(ctx context.Context, itemID string) orchestrator.AcknowledgeResult
 
+// CheckNowFunc makes the next check of an issue's pending pull request
+// reaction of the given kind due now; ctx is the request's context.
+type CheckNowFunc func(ctx context.Context, identifier, kind string) orchestrator.CheckNowResult
+
 // RunHistoryEntry is a server-layer view of a completed run attempt.
 // Decoupled from persistence types to avoid leaking internal packages.
 type RunHistoryEntry struct {
@@ -233,6 +237,11 @@ type Params struct {
 	// on POST /api/v1/attention/{id}/acknowledge; nil answers 503.
 	AcknowledgeFn AcknowledgeFunc
 
+	// CheckNowFn makes the next check of a pending pull request reaction due
+	// now. Called on POST /api/v1/reactions/{identifier}/{kind}/check; nil
+	// answers 503.
+	CheckNowFn CheckNowFunc
+
 	// Logger is the structured logger for request and error logging.
 	Logger *slog.Logger
 
@@ -293,6 +302,7 @@ type Server struct {
 	refreshFn       RefreshFunc
 	retryNowFn      RetryNowFunc
 	acknowledgeFn   AcknowledgeFunc
+	checkNowFn      CheckNowFunc
 	workflowShapeFn func() orchestrator.WorkflowShape
 	healthFn        func() orchestrator.SnapshotHealth
 	version         string
@@ -338,6 +348,7 @@ func New(params Params) *Server {
 		refreshFn:        params.RefreshFn,
 		retryNowFn:       params.RetryNowFn,
 		acknowledgeFn:    params.AcknowledgeFn,
+		checkNowFn:       params.CheckNowFn,
 		workflowShapeFn:  params.WorkflowShapeFn,
 		healthFn:         params.HealthFn,
 		version:          params.Version,
@@ -377,6 +388,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
 	mux.HandleFunc("/api/v1/retries/{identifier}/run", s.routeRetryNow)
 	mux.HandleFunc("/api/v1/attention/{id}/acknowledge", s.routeAcknowledge)
+	mux.HandleFunc("/api/v1/reactions/{identifier}/{kind}/check", s.routeCheckNow)
 	mux.HandleFunc("/api/v1/events", s.routeEvents)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 

@@ -253,7 +253,7 @@ func (c *contract) jsonSchema() ([]byte, error) {
 func TestAPIContract(t *testing.T) {
 	c, err := newContract(
 		reflect.TypeFor[stateResponse](), reflect.TypeFor[issueDetailResponse](), reflect.TypeFor[runsResponse](), reflect.TypeFor[issueGroupsResponse](),
-		reflect.TypeFor[runstats.Report](), reflect.TypeFor[refreshResponse](), reflect.TypeFor[retryNowResponse](),
+		reflect.TypeFor[runstats.Report](), reflect.TypeFor[refreshResponse](), reflect.TypeFor[retryNowResponse](), reflect.TypeFor[checkNowResponse](),
 		reflect.TypeFor[acknowledgeResponse](), reflect.TypeFor[errorResponse](),
 		reflect.TypeFor[healthResponse](), reflect.TypeFor[readyResponse](),
 	)
