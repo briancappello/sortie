@@ -78,8 +78,9 @@ func AddNamed(source, name, value string) {
 }
 
 // AddURLCredentials registers the userinfo of value, a URL, and, when
-// that userinfo holds a colon, the part after its first colon. A value
-// holding no "://" contributes nothing.
+// that userinfo holds a colon, the parts before and after its first
+// colon: Go's URL errors print the username beside a "***" password.
+// A value holding no "://" contributes nothing.
 func AddURLCredentials(source, value string) {
 	if !strings.Contains(value, "://") {
 		return
@@ -93,8 +94,8 @@ func AddURLCredentials(source, value string) {
 		return
 	}
 	pieces := []string{userinfo}
-	if _, password, found := strings.Cut(userinfo, ":"); found {
-		pieces = append(pieces, password)
+	if username, password, found := strings.Cut(userinfo, ":"); found {
+		pieces = append(pieces, username, password)
 	}
 	addPieces(source, pieces, hasNonSpace(userinfo))
 }
