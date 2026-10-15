@@ -1,6 +1,6 @@
 module github.com/sortie-ai/sortie
 
-go 1.26.1
+go 1.26.2
 
 ignore ./web/node_modules
 
