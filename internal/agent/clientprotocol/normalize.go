@@ -11,8 +11,9 @@ import (
 )
 
 // reasoningBlockMessage and planUpdateMessage are the compile-time
-// constant messages the normalization table assigns to a thought chunk
-// and a plan update; neither carries agent-produced text.
+// constant messages the normalization table assigns to a thought chunk,
+// a plan update, and a message chunk carrying no text; none of them
+// carries agent-produced text.
 const (
 	reasoningBlockMessage = "reasoning block"
 
