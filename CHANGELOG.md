@@ -85,6 +85,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A passing re-run of a pull request's checks now ends its CI escalation, and the escalation keeps the time Sortie escalated it instead of moving it forward at every recheck of checks that stay red. Sortie still applies the escalation at most once per commit. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
 
+- The last message shown for a running `agent-client-protocol` agent is now its whole latest message instead of the last fragment it streamed. ([#1353](https://github.com/sortie-ai/sortie/issues/1353))
+
 ### Migrations
 
 - Add `issue_title` and `issue_url` to `run_history` and `retry_entries`, and `display_identifier` to `retry_entries`. A retry or run recorded before the upgrade reads back with no title or link; a queued retry gets one from the first tracker poll or when it next fires. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))

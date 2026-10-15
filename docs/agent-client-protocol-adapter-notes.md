@@ -39,6 +39,10 @@ A local launch needs up to three command-line switches: one that puts the runtim
 
 Some runtimes send many notifications under their own vendor method prefix. They are notifications, not requests, so the client answers none of them and depends on none of them.
 
+## Agent message chunks
+
+A runtime streams one reply as many `agent_message_chunk` updates. Chunks of one message share a `messageId`, and a new ID starts a new message. Each text chunk is reported as a notification with an empty message, which keeps the stall timer fresh without replacing the run's last agent message. The text accumulates, capped at 500 runes, and the completed message is reported once, when a chunk with another ID, a user message chunk, or any update reported as an event arrives, or when the turn or the stream ends. Updates that are only logged, such as `usage_update`, do not end a message. The completed message carries the time its last chunk arrived, so a reply a session load replays is not dated into the next turn. A non-text chunk belongs to its message and is reported as its own event.
+
 ## Usage reporting
 
 The kind declares `turn_end` arrival and `per_model` attribution; a remote launch resolves to `none`/`none`. The figure does not come from the wire. A `usage_update` session update is only logged at debug level. The `_meta.quota` block on a prompt result is a presence signal and a lower bound, never the accounting figure.
