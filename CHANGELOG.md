@@ -97,6 +97,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The username in a tracker or tool server URL is now masked in logs and in the JSON API (`/api/v1/state`). A tracker request error used to print it beside the hidden password. ([#1300](https://github.com/sortie-ai/sortie/issues/1300))
 
+- After a fix command session pushes to a pull request, Sortie again watches that pull request's CI and bot reviews. A CI failure or a new bot review on the pushed commit used to go unnoticed. ([#1368](https://github.com/sortie-ai/sortie/issues/1368))
+
 ### Migrations
 
 - Add `issue_title` and `issue_url` to `run_history` and `retry_entries`, and `display_identifier` to `retry_entries`. A retry or run recorded before the upgrade reads back with no title or link; a queued retry gets one from the first tracker poll or when it next fires. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
