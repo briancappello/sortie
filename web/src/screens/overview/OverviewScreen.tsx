@@ -295,10 +295,11 @@ function OverviewBody({ state }: OverviewBodyProps) {
         />
       ) : view.isFirstRun === false && condition(view.state) !== "degraded" ? (
         <CalmState
-          running={view.state.counts.running}
-          endedCount={endedAll.length}
-          lastEndedAt={endedAll[0]?.outcome.observed_at ?? null}
-          runsFinished={view.tally?.summary.runs}
+          runningSince={(view.state.running ?? []).map((entry) => entry.started_at)}
+          maxAgents={config?.agent.max_concurrent_agents}
+          ended={endedAll}
+          runs={view.tally?.summary}
+          now={view.now}
         />
       ) : undefined}
       <ActiveList

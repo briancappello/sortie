@@ -11,7 +11,25 @@ import { ActiveRow } from "./ActiveRow";
 import { activeNavKey } from "./rows";
 
 import type { ConfigResponse } from "@/api/types.gen";
-import type { ActiveRow as ActiveRowModel } from "@/lib/active-rows";
+import type { ActiveRow as ActiveRowModel, Phase } from "@/lib/active-rows";
+
+const TALLY: readonly { word: string; phases: readonly Phase[] }[] = [
+  { word: "running", phases: ["running"] },
+  { word: "waiting", phases: ["pull_request", "between_stages"] },
+  { word: "retrying", phases: ["retry"] },
+  { word: "held", phases: ["needs_attention"] },
+];
+
+/** Words how many rows stand in each state, leaving out the states that have none. */
+function tallyOf(rows: readonly ActiveRowModel[]): string {
+  return TALLY.map(({ word, phases }) => ({
+    word,
+    count: rows.filter((row) => phases.includes(row.phase)).length,
+  }))
+    .filter(({ count }) => count > 0)
+    .map(({ word, count }) => `${count} ${word}`)
+    .join(", ");
+}
 
 /** Props of {@link ActiveList}. */
 export interface ActiveListProps {
@@ -57,7 +75,11 @@ export function ActiveList({
 
   return (
     <section className="flex flex-col gap-sm">
-      <ActiveHead view="list" meta={`${plural(rows.length, "issue", "issues")}, dispatch order`} />
+      <ActiveHead
+        view="list"
+        meta={`${plural(rows.length, "issue", "issues")}, dispatch order`}
+        tally={tallyOf(rows)}
+      />
       <div className="flex flex-wrap items-center justify-between gap-xs empty:hidden">
         <PhaseFilter rows={ruleRows} />
         <RuleFilter config={config} rows={rows} />

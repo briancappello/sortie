@@ -1,3 +1,5 @@
+import { Link } from "react-router";
+
 import { ServedText } from "@/components/ServedText";
 import { StatusMark } from "@/components/StatusMark";
 import { cn } from "@/lib/cn";
@@ -8,6 +10,9 @@ import { rowStyles, secondLineColor } from "@/lib/rows";
 import { endedNavKey } from "./rows";
 
 import type { EndedIssue } from "@/lib/ended";
+
+const LINK =
+  "text-link underline underline-offset-2 hover:text-link-hover focus-visible:outline-2 focus-visible:outline-focus-ring active:text-link-active";
 
 /** What the section says when it has no rows to list. */
 export type EndedEmpty = "unavailable" | "first-run" | "none" | "all-read" | "loading";
@@ -49,6 +54,9 @@ export function EndedToday({
         {tally === undefined ? undefined : (
           <span className="text-body-md text-ink-muted [overflow-wrap:anywhere]">{tally}</span>
         )}
+        <Link to="/history" className={cn("ml-auto text-body-md", LINK)}>
+          History
+        </Link>
       </div>
       {rows.length > 0 ? (
         <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line bg-canvas">
