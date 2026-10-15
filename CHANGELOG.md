@@ -65,6 +65,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The built-in dashboard is now a live application at `/ui/` that opens on a headline saying whether anything needs a person, then lists each item with why, what clears it, and a button to acknowledge it, then every active issue in the order Sortie picked it up (the same order in every tab and after a reload) and the issues that ended today; `/` redirects there. ([#1296](https://github.com/sortie-ai/sortie/issues/1296), [#1348](https://github.com/sortie-ai/sortie/issues/1348))
 
+- The `tick completed` poll summary now logs at INFO level only on the first poll after startup and when it differs from the previous poll's, so an idle Sortie no longer repeats the same line every poll interval; `--log-level debug` still shows it on every poll. ([#1350](https://github.com/sortie-ai/sortie/issues/1350))
+
 ### Fixed
 
 - Jira issue links no longer include a user name and password written into `tracker.endpoint`, so the link opens and an agent prompt that shows it no longer exposes them. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))
