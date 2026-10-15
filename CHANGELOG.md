@@ -57,6 +57,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API (`/api/v1/state`) now describes the tracker poll in a plain English sentence, `health.poll.summary_text`, for example how many polls in a row failed and how long ago one last succeeded. ([#1300](https://github.com/sortie-ai/sortie/issues/1300))
 
+- The dashboard has an issue page: where the issue stands on its way from the tracker through the agent to its handoff state and pull request reactions, its place in its stage chain, its runs grouped by stage, each reaction its pull request waits on, its spend against its token and session budgets, its route, and what happens next, with Retry now, Check now, and Acknowledge beside the state they act on. It opens from Overview, History, and the command palette, which now finds active and finished issues by any part of the key or the title, and `/api/v1/{identifier}` names the stage chain a finished issue last stood on. ([#1297](https://github.com/sortie-ai/sortie/issues/1297))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))

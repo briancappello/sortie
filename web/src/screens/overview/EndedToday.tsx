@@ -2,11 +2,11 @@ import { ServedText } from "@/components/ServedText";
 import { StatusMark } from "@/components/StatusMark";
 import { cn } from "@/lib/cn";
 import { fmtClock } from "@/lib/format";
+import { outcomeMark } from "@/lib/run-status";
 
 import { endedNavKey, rowStyles, secondLineColor } from "./rows";
 
 import type { EndedIssue } from "@/lib/ended";
-import type { Mark } from "@/lib/run-status";
 
 /** What the section says when it has no rows to list. */
 export type EndedEmpty = "unavailable" | "first-run" | "none" | "all-read" | "loading";
@@ -31,8 +31,6 @@ const EMPTY_TEXT: Record<Exclude<EndedEmpty, "loading">, string> = {
   none: "Nothing has ended today.",
   "all-read": "All of today's endings are read.",
 };
-
-const OUTCOME_MARK: Partial<Record<string, Mark>> = { handed_off: "handed", merged: "succeeded" };
 
 /** Renders the Ended today section: the tally line and the endings the reader has not read. */
 export function EndedToday({
@@ -81,7 +79,7 @@ interface EndedRowProps {
 
 function EndedRow({ issue, isSelected, showSelection, onOpen }: EndedRowProps) {
   const isLook = isSelected && showSelection;
-  const mark = OUTCOME_MARK[issue.outcome.kind];
+  const mark = outcomeMark(issue.outcome.kind);
   const meta = [issue.title === null ? null : issue.displayKey, issue.rule, issue.agentKind]
     .filter((part) => part !== null)
     .join(" · ");
@@ -99,7 +97,7 @@ function EndedRow({ issue, isSelected, showSelection, onOpen }: EndedRowProps) {
         <span aria-hidden="true" className="size-xs rounded-full bg-primary" />
       </span>
       <span className="flex h-5 w-(--size-icon) items-center">
-        {mark === undefined ? undefined : <StatusMark mark={mark} />}
+        {mark === null ? undefined : <StatusMark mark={mark} />}
       </span>
       <div className="min-w-0">
         <p className="text-body-md font-medium text-ink">{issue.title ?? issue.displayKey}</p>
