@@ -541,66 +541,13 @@ func (s *Store) QueryIssueGroups(ctx context.Context, f IssueGroupFilter) ([]Iss
 		}
 		keyed = ids
 	}
-	if f.Search != "" {
-		ids, err := s.issueIDsBySearch(ctx, f.Search)
-		if err != nil {
-			return nil, err
-		}
-		if f.IssueKey != "" {
-			ids = intersect(keyed, ids)
-		}
-		keyed = ids
-	}
-	if (f.IssueKey != "" || f.Search != "") && len(keyed) == 0 {
+	if f.IssueKey != "" && len(keyed) == 0 {
 		return []IssueGroup{}, nil
 	}
 	return s.streamIssueGroups(ctx, f, keyed)
 }
 
-func intersect(a, b []string) []string {
-	in := make(map[string]bool, len(a))
-	for _, id := range a {
-		in[id] = true
-	}
-	out := []string{}
-	for _, id := range b {
-		if in[id] {
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-
-// issueIDsBySearch returns the issues with a run whose identifier,
-// display_identifier, or issue_title contains text, and closes its statement
-// before it returns.
-func (s *Store) issueIDsBySearch(ctx context.Context, text string) ([]string, error) {
-	pattern := "%" + likeEscaper.Replace(text) + "%"
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT issue_id FROM run_history
-		WHERE identifier LIKE ? ESCAPE '\'
-			OR display_identifier LIKE ? ESCAPE '\'
-			OR issue_title LIKE ? ESCAPE '\'`, pattern, pattern, pattern)
-	if err != nil {
-		return nil, fmt.Errorf("query issue groups: search: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
-
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("query issue groups: scan issue id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("query issue groups: search: %w", err)
-	}
-	return ids, nil
-}
 
 // issueIDsByKey returns the issues with a run whose identifier or
 // display_identifier equals key, and closes its statement before it returns.
@@ -629,7 +576,7 @@ func (s *Store) issueIDsByKey(ctx context.Context, key string) ([]string, error)
 }
 
 // issueGroupRunPredicates returns the fixed predicates of f's rule, status,
-// and stage on the run_history table aliased as alias, with their bound
+// stage, and search on the run_history table aliased as alias, with their bound
 // values.
 func issueGroupRunPredicates(alias string, f IssueGroupFilter) ([]string, []any) {
 	var conds []string
@@ -645,6 +592,14 @@ func issueGroupRunPredicates(alias string, f IssueGroupFilter) ([]string, []any)
 	if f.StageTarget != "" {
 		conds = append(conds, alias+".stage_target = ?")
 		args = append(args, f.StageTarget)
+	}
+	if f.Search != "" {
+		pattern := "%" + likeEscaper.Replace(f.Search) + "%"
+		conds = append(conds, alias+`.issue_id IN (SELECT issue_id FROM run_history
+			WHERE identifier LIKE ? ESCAPE '\'
+				OR display_identifier LIKE ? ESCAPE '\'
+				OR issue_title LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, pattern)
 	}
 	return conds, args
 }
