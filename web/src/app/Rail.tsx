@@ -1,11 +1,12 @@
-import { NavLink } from "react-router";
+import { useState } from "react";
+import { NavLink, useNavigate } from "react-router";
 
 import { useStateQuery } from "@/api/queries";
 import { BrandMark } from "@/app/BrandMark";
 import { keyTip } from "@/app/key-tips";
 import { modifierLabel } from "@/app/keys";
 import { StatusCard } from "@/app/StatusCard";
-import { CircleHelpIcon, SearchIcon } from "@/components/icons";
+import { CircleHelpIcon, SearchIcon, XIcon } from "@/components/icons";
 import { ThemeMenu } from "@/components/ThemeMenu";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -13,7 +14,7 @@ import { fmtVersion, pluralVerb } from "@/lib/format";
 
 import type { StateResponse } from "@/api/types.gen";
 import type { IconProps } from "@/components/icons";
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 
 /**
  * One screen the shell can open. `key` is the letter pressed after `G`, `path`
@@ -68,6 +69,60 @@ function AttentionBadge({ state }: AttentionBadgeProps) {
   );
 }
 
+function matching(screens: ScreenEntry[], query: string): ScreenEntry[] {
+  const needle = query.trim().toLowerCase();
+  return needle === ""
+    ? screens
+    : screens.filter((screen) => screen.label.toLowerCase().includes(needle));
+}
+
+interface NavFilterProps {
+  query: string;
+  firstMatch: ScreenEntry | undefined;
+  onQueryChange: (query: string) => void;
+}
+
+// Enter opens the first match, so typing a few letters is enough to move.
+function NavFilter({ query, firstMatch, onQueryChange }: NavFilterProps) {
+  const navigate = useNavigate();
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter" && firstMatch !== undefined) {
+      onQueryChange("");
+      void navigate(firstMatch.path);
+    } else if (event.key === "Escape") {
+      onQueryChange("");
+      event.currentTarget.blur();
+    }
+  }
+
+  return (
+    <label className="relative mb-md flex items-center">
+      <span className="sr-only">Filter screens</span>
+      <SearchIcon className="pointer-events-none absolute left-sm text-ink-muted" />
+      <input
+        type="text"
+        placeholder="Filter"
+        autoComplete="off"
+        value={query}
+        onChange={(event) => onQueryChange(event.target.value)}
+        onKeyDown={handleKeyDown}
+        className="h-(--size-control) w-full rounded-lg border border-line bg-canvas pr-xl pl-[calc(var(--spacing-sm)+var(--size-icon)+var(--spacing-xs))] text-body-md text-ink outline-none transition-colors duration-(--duration-feedback) placeholder:text-ink-muted hover:border-line-medium focus-visible:border-line-medium focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-focus-ring"
+      />
+      {query === "" ? undefined : (
+        <button
+          type="button"
+          aria-label="Clear filter"
+          onClick={() => onQueryChange("")}
+          className="absolute right-xxs inline-grid size-6 cursor-pointer place-items-center rounded text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-focus-ring"
+        >
+          <XIcon />
+        </button>
+      )}
+    </label>
+  );
+}
+
 /** Props of {@link Rail}. */
 export interface RailProps {
   screens: ScreenEntry[];
@@ -75,10 +130,12 @@ export interface RailProps {
   onOpenShortcuts: () => void;
 }
 
-/** Renders the dark navigation rail: brand, status card, one entry per registered screen, and the foot controls. */
+/** Renders the dark navigation rail: brand, screen filter, one entry per matching screen, the status card, and the foot controls. */
 export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
   const { data } = useStateQuery();
-  const groups = groupsOf(screens);
+  const [query, setQuery] = useState("");
+  const shown = matching(screens, query);
+  const groups = groupsOf(shown);
 
   return (
     <aside
@@ -98,8 +155,11 @@ export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
           </span>
         )}
       </div>
-      <StatusCard />
+      <NavFilter query={query} firstMatch={shown[0]} onQueryChange={setQuery} />
       <nav aria-label="Main" className="min-h-0 overflow-y-auto">
+        {shown.length === 0 ? (
+          <p className="px-sm text-body-md text-ink-muted">No screens match</p>
+        ) : undefined}
         {groups.map((group, index) => (
           <div key={group[0].group}>
             {index > 0 ? <div role="separator" className="mx-sm mb-md h-px bg-line" /> : undefined}
@@ -123,6 +183,9 @@ export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
         ))}
       </nav>
       <div className="mt-auto grid gap-xxs pt-md">
+        <div className="mb-sm">
+          <StatusCard />
+        </div>
         <Button
           variant="ghost"
           className="w-full justify-start font-regular"

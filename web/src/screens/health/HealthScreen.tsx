@@ -4,6 +4,7 @@ import { useStateQuery } from "@/api/queries";
 import { Pair, Pairs, Panel } from "@/components/Panel";
 import { ServedText } from "@/components/ServedText";
 import { StatusMark } from "@/components/StatusMark";
+import { scmProviderName } from "@/lib/condition";
 import {
   fmtCount,
   fmtDuration,
@@ -20,11 +21,6 @@ import type { ReactNode } from "react";
 const HEADING = "font-heading text-h5 font-semibold text-ink";
 const LINK =
   "text-link underline underline-offset-2 hover:text-link-hover focus-visible:outline-2 focus-visible:outline-focus-ring active:text-link-active";
-const PROVIDER_NAMES: Record<string, string> = {
-  github: "GitHub",
-  gitlab: "GitLab",
-  gitea: "Gitea",
-};
 
 function markOf(check: HealthCheckResponse): Mark {
   if (check.checked_at === null) {
@@ -122,7 +118,7 @@ function Checks({ health }: ChecksProps) {
         <CheckRow name="Tracker poll" check={poll} line={sentence} unrunLine={sentence} />
         {scm === null ? undefined : (
           <CheckRow
-            name={PROVIDER_NAMES[scm.provider] ?? scm.provider}
+            name={scmProviderName(scm.provider)}
             check={scm}
             unrunLine="No pull request checked since Sortie started."
             line={
