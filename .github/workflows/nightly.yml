@@ -3,11 +3,6 @@ name: Nightly
 
 on:
   schedule:
-    # Two or more live days a week keep the previous live sample inside the
-    # MONITOR_LOOKBACK runs the incident policy reads, even when one live run
-    # is lost; one a week does not. integration-live runs unless the
-    # scripted-only cron fired, so an edit here that misses that condition
-    # runs the live tier more often, never less.
     - cron: "17 2 * * 0,2,3,5,6"
     - cron: "17 2 * * 1,4"
   workflow_dispatch:
@@ -511,7 +506,6 @@ jobs:
     name: Notify Discord
     runs-on: ubuntu-latest
     needs: [integration, integration-live, hook-stress]
-    # A failed or cancelled nightly is the one worth reporting.
     if: always()
     timeout-minutes: 5
 
@@ -522,7 +516,6 @@ jobs:
           persist-credentials: false
 
       - name: Post nightly outcome
-        # A notification failure must not redden a nightly whose tests passed.
         continue-on-error: true
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_CI }}
