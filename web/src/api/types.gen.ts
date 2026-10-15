@@ -13,6 +13,23 @@ export interface AcknowledgeResponse {
   outcome_text: string;
 }
 
+export interface ActiveIssueResponse {
+  issue_id: string;
+  issue_identifier: string;
+  display_identifier?: string;
+  issue_title?: string;
+  issue_url?: string;
+  status: string;
+  rule_name?: string;
+  stage_position: StagePositionResponse | null;
+  agent_kind?: string;
+  configured_model?: string;
+  reaction_kind?: string;
+  dispatched_at: string | null;
+  status_text: string;
+  status_text_full: string;
+}
+
 export interface AttemptsInfo {
   restart_count: number;
   current_retry_attempt: number;
@@ -722,6 +739,7 @@ export interface StateResponse {
   parked: ParkedEntryResponse[] | null;
   pending_reactions: PendingReactionResponse[] | null;
   between_stages: StageHopResponse[] | null;
+  active: ActiveIssueResponse[] | null;
   attention: AttentionItemResponse[] | null;
   agent_totals: SnapshotAgentTotals;
   rate_limits: Record<string, unknown> | null;

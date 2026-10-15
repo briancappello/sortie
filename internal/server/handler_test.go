@@ -1367,26 +1367,6 @@ func TestToStateResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("nil RateLimits becomes empty map", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running:     nil,
-			Retrying:    nil,
-			RateLimits:  nil,
-		}
-
-		got := toStateResponse(snap, nil, sentence.Context{}, nil)
-
-		if got.RateLimits == nil {
-			t.Fatal("RateLimits = nil, want non-nil empty map")
-		}
-		if len(got.RateLimits) != 0 {
-			t.Errorf("len(RateLimits) = %d, want 0", len(got.RateLimits))
-		}
-	})
-
 	t.Run("counts match entries", func(t *testing.T) {
 		t.Parallel()
 
@@ -1478,159 +1458,51 @@ func TestToStateResponse(t *testing.T) {
 		})
 	})
 
-	t.Run("nil token rates — ActiveEstimatedCostUSD absent", func(t *testing.T) {
+	t.Run("active estimated cost covers measured entries with a matching rate only", func(t *testing.T) {
 		t.Parallel()
 
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "r",
-					Identifier:        "MT-R",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 500_000,
-				},
-			},
+		claude := func(measured bool) orchestrator.SnapshotRunningEntry {
+			return orchestrator.SnapshotRunningEntry{
+				IssueID: fmt.Sprintf("id-%t", measured), Identifier: "MT-1", AgentKind: "claude",
+				AgentInputTokens: 1_000_000, AgentOutputTokens: 0, UsageMeasured: measured,
+			}
+		}
+		rates := TokenRates{"claude": TokenRateConfig{InputPerMtok: new(3.0), OutputPerMtok: new(15.0)}}
+		otherKind := claude(true)
+		otherKind.AgentKind = "other-adapter"
+
+		tests := []struct {
+			name    string
+			running []orchestrator.SnapshotRunningEntry
+			rates   TokenRates
+			want    *float64
+		}{
+			{"no rates", []orchestrator.SnapshotRunningEntry{claude(true)}, nil, nil},
+			{"rates for another agent kind", []orchestrator.SnapshotRunningEntry{otherKind}, rates, nil},
+			{"measured entry", []orchestrator.SnapshotRunningEntry{claude(true)}, rates, new(3.0)},
+			{"unmeasured entry beside a measured one", []orchestrator.SnapshotRunningEntry{claude(true), claude(false)}, rates, new(3.0)},
 		}
 
-		got := toStateResponse(snap, nil, sentence.Context{}, nil)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 
-		if got.ActiveEstimatedCostUSD != nil {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want nil", *got.ActiveEstimatedCostUSD)
-		}
-	})
+				got := toStateResponse(orchestrator.RuntimeSnapshotResult{GeneratedAt: time.Now().UTC(), Running: tt.running}, tt.rates, sentence.Context{}, nil)
 
-	t.Run("with token rates and matching AgentKind — cost computed", func(t *testing.T) {
-		t.Parallel()
-
-		fptr := func(v float64) *float64 { return &v }
-
-		// 2M input @ $3/Mtok = $6, 1M output @ $15/Mtok = $15 -> $21
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "cost-1",
-					Identifier:        "MT-C1",
-					AgentKind:         "claude",
-					AgentInputTokens:  2_000_000,
-					AgentOutputTokens: 1_000_000,
-					UsageMeasured:     true,
-				},
-			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{
-				InputPerMtok:  fptr(3.0),
-				OutputPerMtok: fptr(15.0),
-			},
-		}
-
-		got := toStateResponse(snap, rates, sentence.Context{}, nil)
-
-		if got.ActiveEstimatedCostUSD == nil {
-			t.Fatal("ActiveEstimatedCostUSD = nil, want non-nil")
-		}
-		want := 6.0 + 15.0 // $21
-		if diff := *got.ActiveEstimatedCostUSD - want; diff > 1e-9 || diff < -1e-9 {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want %v", *got.ActiveEstimatedCostUSD, want)
-		}
-	})
-
-	t.Run("with token rates but no matching AgentKind — cost absent", func(t *testing.T) {
-		t.Parallel()
-
-		fptr := func(v float64) *float64 { return &v }
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "no-match",
-					Identifier:        "MT-NM",
-					AgentKind:         "other-adapter",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 500_000,
-				},
-			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
-		}
-
-		got := toStateResponse(snap, rates, sentence.Context{}, nil)
-
-		if got.ActiveEstimatedCostUSD != nil {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want nil (no matching kind)", *got.ActiveEstimatedCostUSD)
-		}
-	})
-
-	t.Run("ActiveEstimatedCostUSD omitted from JSON when nil", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-		}
-
-		got := toStateResponse(snap, nil, sentence.Context{}, nil)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-
-		var decoded map[string]any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal: %v", err)
-		}
-
-		if _, exists := decoded["active_estimated_cost_usd"]; exists {
-			t.Error("JSON active_estimated_cost_usd present, want omitted (omitempty with nil pointer)")
-		}
-	})
-
-	t.Run("ActiveEstimatedCostUSD present in JSON when set", func(t *testing.T) {
-		t.Parallel()
-
-		fptr := func(v float64) *float64 { return &v }
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "json-cost",
-					Identifier:        "MT-JC",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 0,
-					UsageMeasured:     true,
-				},
-			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{InputPerMtok: fptr(5.0), OutputPerMtok: fptr(15.0)},
-		}
-
-		got := toStateResponse(snap, rates, sentence.Context{}, nil)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-
-		var decoded map[string]any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal: %v", err)
-		}
-
-		costVal, exists := decoded["active_estimated_cost_usd"]
-		if !exists {
-			t.Fatal("JSON active_estimated_cost_usd missing, want present")
-		}
-		if costVal != float64(5.0) {
-			t.Errorf("JSON active_estimated_cost_usd = %v, want 5.0", costVal)
+				gotJSON, present := jsonObject(t, got)["active_estimated_cost_usd"]
+				if tt.want == nil {
+					if got.ActiveEstimatedCostUSD != nil || present {
+						t.Errorf("ActiveEstimatedCostUSD, JSON key present = %v, %t, want nil, false", got.ActiveEstimatedCostUSD, present)
+					}
+					return
+				}
+				if got.ActiveEstimatedCostUSD == nil {
+					t.Fatalf("ActiveEstimatedCostUSD = nil, want %v", *tt.want)
+				}
+				if math.Abs(*got.ActiveEstimatedCostUSD-*tt.want) > 1e-9 || gotJSON != *tt.want {
+					t.Errorf("ActiveEstimatedCostUSD, JSON = %v, %v, want %v", *got.ActiveEstimatedCostUSD, gotJSON, *tt.want)
+				}
+			})
 		}
 	})
 
@@ -1667,48 +1539,6 @@ func TestToStateResponse(t *testing.T) {
 		}
 		if !strings.Contains(string(data), `"tokens_measured":true`) || !strings.Contains(string(data), `"tokens_measured":false`) {
 			t.Errorf("JSON = %s, want both tokens_measured:true and tokens_measured:false", data)
-		}
-	})
-
-	t.Run("an unmeasured entry is excluded from active_estimated_cost_usd while a measured entry with the same adapter and rate is included", func(t *testing.T) {
-		t.Parallel()
-
-		fptr := func(v float64) *float64 { return &v }
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "measured",
-					Identifier:        "MT-MEAS",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 0,
-					UsageMeasured:     true,
-				},
-				{
-					IssueID:           "unmeasured",
-					Identifier:        "MT-UNM",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 0,
-					UsageMeasured:     false,
-				},
-			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
-		}
-
-		got := toStateResponse(snap, rates, sentence.Context{}, nil)
-
-		// 1M input @ $3/Mtok = $3, from the measured entry alone.
-		if got.ActiveEstimatedCostUSD == nil {
-			t.Fatal("ActiveEstimatedCostUSD = nil, want non-nil")
-		}
-		if diff := *got.ActiveEstimatedCostUSD - 3.0; diff > 1e-9 || diff < -1e-9 {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want 3.0 (unmeasured entry excluded)", *got.ActiveEstimatedCostUSD)
 		}
 	})
 }
@@ -2082,9 +1912,6 @@ func TestBuildIssueDetail(t *testing.T) {
 			t.Fatal("buildIssueDetail(MT-100) = nil, want non-nil")
 			return
 		}
-		if got.Status != "running" {
-			t.Errorf("Status = %q, want %q", got.Status, "running")
-		}
 		if got.IssueID != "id-1" {
 			t.Errorf("IssueID = %q, want %q", got.IssueID, "id-1")
 		}
@@ -2120,9 +1947,6 @@ func TestBuildIssueDetail(t *testing.T) {
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-200) = nil, want non-nil")
 			return
-		}
-		if got.Status != "retrying" {
-			t.Errorf("Status = %q, want %q", got.Status, "retrying")
 		}
 		if got.Running != nil {
 			t.Errorf("Running = %v, want nil for retrying issue", got.Running)

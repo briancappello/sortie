@@ -748,6 +748,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			o.notifyObservers()
 
 		case req := <-o.snapshotCh:
+			refreshActiveOrder(o.state)
 			snap := RuntimeSnapshot(o.state, time.Now())
 			req.ReplyCh <- snap
 
@@ -2090,6 +2091,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 			o.notifyObservers()
 
 		case req := <-o.snapshotCh:
+			refreshActiveOrder(o.state)
 			snap := RuntimeSnapshot(o.state, time.Now())
 			req.ReplyCh <- snap
 
@@ -2169,6 +2171,7 @@ func (o *Orchestrator) cancelRetryTimers() {
 // notifyObservers calls [Observer.OnStateChange] on each observer. Called
 // from the event loop goroutine only, after the change is applied.
 func (o *Orchestrator) notifyObservers() {
+	refreshActiveOrder(o.state)
 	for _, obs := range o.observers {
 		obs.OnStateChange()
 	}

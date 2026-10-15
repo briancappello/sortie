@@ -45,11 +45,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `sortie stats --format json` and `/api/v1/stats` now report how many runs failed, stopped for a person or at a budget, or were cancelled, beside how many succeeded, so the counts add up to the runs. ([#1296](https://github.com/sortie-ai/sortie/issues/1296))
 
+- The JSON API (`/api/v1/state`) now lists every active issue once (running, retrying, held by a budget, parked, waiting on its pull request, or between stages) with its title and link, a sentence saying what it is doing, and its dispatch rule, stage, agent, and model, in the order Sortie picked the issues up. An issue keeps its place as it moves from one of these to another, so a client shows one line per issue without merging lists itself. ([#1348](https://github.com/sortie-ai/sortie/issues/1348))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
 
-- The built-in dashboard is now a live application at `/ui/` that opens on a headline saying whether anything needs a person, then lists each item with why, what clears it, and a button to acknowledge it, then every active issue in the order Sortie picked it up and the issues that ended today; `/` redirects there. ([#1296](https://github.com/sortie-ai/sortie/issues/1296))
+- The built-in dashboard is now a live application at `/ui/` that opens on a headline saying whether anything needs a person, then lists each item with why, what clears it, and a button to acknowledge it, then every active issue in the order Sortie picked it up (the same order in every tab and after a reload) and the issues that ended today; `/` redirects there. ([#1296](https://github.com/sortie-ai/sortie/issues/1296), [#1348](https://github.com/sortie-ai/sortie/issues/1348))
 
 ### Fixed
 
