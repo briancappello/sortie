@@ -1,4 +1,4 @@
-import { now } from "@/lib/server-clock";
+import { localMidnight, now } from "@/lib/server-clock";
 
 type Instant = string | number | Date;
 
@@ -128,6 +128,21 @@ function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
 
+/**
+ * Writes a share of runs as a whole percent. A ratio strictly between 0 and 1
+ * never rounds to either end, so "100%" means every run and "0%" none.
+ */
+export function fmtPercent(ratio: number): string {
+  const percent = Math.round(ratio * 100);
+  const isPartial = ratio > 0 && ratio < 1;
+  return `${isPartial ? Math.min(99, Math.max(1, percent)) : percent}%`;
+}
+
+/** Writes a mean with one decimal place, "4.0" included. */
+export function fmtMean(n: number): string {
+  return n.toFixed(1);
+}
+
 /** Writes 24-hour `HH:MM` in the browser's time zone. */
 export function fmtClock(at: Instant): string {
   const date = toDate(at);
@@ -160,6 +175,16 @@ export function fmtAgo(since: Instant, at: number = now()): string {
   }
   const seconds = (at - date.getTime()) / 1000;
   return seconds < 3600 ? `${fmtDuration(seconds)} ago` : fmtClock(date);
+}
+
+/** Writes the clock time of an instant on the server's current day, else the date and the clock time. */
+export function fmtStamp(at: string): string {
+  const instant = parseInstant(at);
+  if (instant === null) {
+    return UNKNOWN;
+  }
+  const isToday = localMidnight(instant).getTime() === localMidnight(now()).getTime();
+  return isToday ? fmtClock(instant) : `${fmtDate(instant)}, ${fmtClock(instant)}`;
 }
 
 const DESCRIBE_SUFFIX = /-\d+-g[0-9a-f]+(-dirty)?$/;

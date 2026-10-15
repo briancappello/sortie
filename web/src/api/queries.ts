@@ -1,10 +1,20 @@
-import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { ApiError, getIssue, getRuns, getState, getStats } from "@/api/client";
+import { ApiError, getIssue, getIssueGroups, getRuns, getState, getStats } from "@/api/client";
 import { setServerOffset } from "@/lib/server-clock";
 
-import type { IssueDetailResponse, Report, RunsResponse, StateResponse } from "@/api/types.gen";
-import type { UseQueryResult } from "@tanstack/react-query";
+import type { HistoryFilter } from "@/api/client";
+import type {
+  IssueDetailResponse,
+  IssueGroupsResponse,
+  Report,
+  RunsResponse,
+  StateResponse,
+} from "@/api/types.gen";
+import type { InfiniteData, UseInfiniteQueryResult, UseQueryResult } from "@tanstack/react-query";
+
+/** The span of run history the Analytics screen reports. */
+export type AnalyticsRange = "24h" | "7d" | "all";
 
 /** The one cache of server data in a tab; a change signal, not a timer, decides when data is stale. */
 export const queryClient = new QueryClient({
@@ -21,6 +31,28 @@ export const queryKeys = {
   ended: (midnight: string) => ["ended", midnight] as const,
   tally: (midnight: string) => ["tally", midnight] as const,
   firstRun: () => ["first-run"] as const,
+  history: (filter: HistoryFilter) => ["history", filter] as const,
+  historyRuns: (issueId: string, filter: HistoryFilter) =>
+    ["history-runs", issueId, filter] as const,
+  stats: (range: AnalyticsRange) => ["stats", range] as const,
+};
+
+/** Issues per History page and runs per page of an expanded group. */
+export const HISTORY_PAGE_SIZE = 20;
+export const HISTORY_RUNS_PAGE_SIZE = 50;
+
+/**
+ * The least time between two refetches a change signal may cause. A History
+ * refetch rereads every loaded page and an Analytics refetch rescans every run
+ * in its range, both through the orchestrator's store.
+ */
+export const HISTORY_REFETCH_FLOOR_MS = 5_000;
+export const STATS_REFETCH_FLOOR_MS = 30_000;
+
+const SINCE_BY_RANGE: Record<AnalyticsRange, string | undefined> = {
+  "24h": "24h",
+  "7d": "168h",
+  all: undefined,
 };
 
 const ENDED_PAGE_SIZE = 200;
@@ -98,4 +130,58 @@ export function useFirstRunQuery(): boolean | undefined {
     enabled: !hasRun,
   });
   return data === undefined ? undefined : !data;
+}
+
+/** Reads History pages of issues, newest finished run first; the next page continues from the last one's `next_cursor`. */
+export function useHistoryQuery(
+  filter: HistoryFilter,
+): UseInfiniteQueryResult<InfiniteData<IssueGroupsResponse, string | undefined>> {
+  return useInfiniteQuery({
+    queryKey: queryKeys.history(filter),
+    queryFn: ({ signal, pageParam }) =>
+      getIssueGroups({ ...filter, cursor: pageParam, limit: HISTORY_PAGE_SIZE }, signal),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    meta: { refetchFloorMs: HISTORY_REFETCH_FLOOR_MS },
+  });
+}
+
+/** Reads the runs of one expanded group page by page; it stays idle until `enabled`. */
+export function useHistoryRunsQuery(
+  issueId: string,
+  filter: HistoryFilter,
+  enabled: boolean,
+): UseInfiniteQueryResult<InfiniteData<RunsResponse, string | undefined>> {
+  return useInfiniteQuery({
+    queryKey: queryKeys.historyRuns(issueId, filter),
+    queryFn: ({ signal, pageParam }) =>
+      getRuns(
+        {
+          issue_id: issueId,
+          rule: filter.rule,
+          status: filter.status,
+          stage: filter.stage,
+          limit: HISTORY_RUNS_PAGE_SIZE,
+          cursor: pageParam,
+        },
+        signal,
+      ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled,
+    meta: { refetchFloorMs: HISTORY_REFETCH_FLOOR_MS },
+  });
+}
+
+/**
+ * Reads the run statistics of a range. The range is part of the key and no
+ * previous data stands in while another range loads, so a range never shows
+ * the figures of the one before it.
+ */
+export function useStatsQuery(range: AnalyticsRange): UseQueryResult<Report> {
+  return useQuery({
+    queryKey: queryKeys.stats(range),
+    queryFn: ({ signal }) => getStats({ since: SINCE_BY_RANGE[range] }, signal),
+    meta: { refetchFloorMs: STATS_REFETCH_FLOOR_MS },
+  });
 }

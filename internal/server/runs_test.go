@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
 	"reflect"
@@ -27,8 +28,10 @@ func costOrNil(p *float64) any {
 func TestRunsQueryBoundary(t *testing.T) {
 	t.Parallel()
 
+	const groupsPath = "/api/v1/runs/issues"
 	tests := []struct {
 		name      string
+		path      string
 		query     string
 		wantParam string
 	}{
@@ -47,35 +50,46 @@ func TestRunsQueryBoundary(t *testing.T) {
 		{name: "limit at lower bound", query: "limit=1"},
 		{name: "limit at upper bound", query: "limit=200"},
 		{name: "cursor at lower bound", query: "cursor=1"},
+		{name: "issues: limit below range", path: groupsPath, query: "limit=0", wantParam: "limit"},
+		{name: "issues: limit above range", path: groupsPath, query: "limit=51", wantParam: "limit"},
+		{name: "issues: cursor below range", path: groupsPath, query: "cursor=0", wantParam: "cursor"},
+		{name: "issues: parameter of the flat route", path: groupsPath, query: "ended_since=2026-03-24T09:00:00Z", wantParam: "ended_since"},
+		{name: "issues: repeated issue", path: groupsPath, query: "issue=a&issue=b", wantParam: "issue"},
+		{name: "issues: empty values read as absent", path: groupsPath, query: "issue=&rule=&status=&stage=&cursor=&limit="},
+		{name: "issues: limit at upper bound", path: groupsPath, query: "limit=50"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			path := cmp.Or(tt.path, "/api/v1/runs") + "?" + tt.query
 			var reads atomic.Int32
-			ts := historyServer(t, orchestrator.RuntimeSnapshotResult{}, &fakeRunHistory{onQuery: func(RunHistoryQuery) { reads.Add(1) }})
+			ts := historyServer(t, orchestrator.RuntimeSnapshotResult{}, &fakeRunHistory{
+				onQuery:  func(RunHistoryQuery) { reads.Add(1) },
+				onGroups: func(IssueGroupQuery) { reads.Add(1) },
+			})
 
-			status, body := getJSON[errorResponse](t, ts, "/api/v1/runs?"+tt.query)
+			status, body := getJSON[errorResponse](t, ts, path)
 
 			wantStatus, wantReads := http.StatusOK, int32(1)
 			if tt.wantParam != "" {
 				wantStatus, wantReads = http.StatusBadRequest, 0
 			}
 			if status != wantStatus {
-				t.Fatalf("GET /api/v1/runs?%s status = %d, want %d", tt.query, status, wantStatus)
+				t.Fatalf("GET %s status = %d, want %d", path, status, wantStatus)
 			}
 			if got := reads.Load(); got != wantReads {
-				t.Errorf("GET /api/v1/runs?%s read run history %d times, want %d", tt.query, got, wantReads)
+				t.Errorf("GET %s read run history %d times, want %d", path, got, wantReads)
 			}
 			if tt.wantParam == "" {
 				return
 			}
 			if body.Error.Code != "invalid_parameter" {
-				t.Errorf("GET /api/v1/runs?%s error code = %q, want %q", tt.query, body.Error.Code, "invalid_parameter")
+				t.Errorf("GET %s error code = %q, want %q", path, body.Error.Code, "invalid_parameter")
 			}
 			if !strings.Contains(body.Error.Message, `"`+tt.wantParam+`"`) {
-				t.Errorf("GET /api/v1/runs?%s error message = %q, want it to name parameter %q", tt.query, body.Error.Message, tt.wantParam)
+				t.Errorf("GET %s error message = %q, want it to name parameter %q", path, body.Error.Message, tt.wantParam)
 			}
 		})
 	}

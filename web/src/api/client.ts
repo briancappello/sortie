@@ -1,6 +1,7 @@
 import type {
   AcknowledgeResponse,
   IssueDetailResponse,
+  IssueGroupsResponse,
   RefreshResponse,
   Report,
   RunsResponse,
@@ -90,16 +91,40 @@ export function getIssue(identifier: string, signal?: AbortSignal): Promise<Issu
   return getJson<IssueDetailResponse>(encodeURIComponent(identifier), signal);
 }
 
+/** The History filters as the API takes them; an absent member is no filter. */
+export interface HistoryFilter {
+  issue?: string;
+  rule?: string;
+  status?: string;
+  stage?: string;
+}
+
 /** Fetches a page of run history, newest first. */
 export function getRuns(
-  q: { ended_since?: string; limit?: number; cursor?: string },
+  q: {
+    issue_id?: string;
+    rule?: string;
+    status?: string;
+    stage?: string;
+    ended_since?: string;
+    limit?: number;
+    cursor?: string;
+  },
   signal?: AbortSignal,
 ): Promise<RunsResponse> {
   return getJson<RunsResponse>(withQuery("runs", q), signal);
 }
 
-/** Fetches the run statistics report since an instant. */
-export function getStats(q: { since: string }, signal?: AbortSignal): Promise<Report> {
+/** Fetches a page of issues with their newest finished runs, newest first. */
+export function getIssueGroups(
+  q: HistoryFilter & { cursor?: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<IssueGroupsResponse> {
+  return getJson<IssueGroupsResponse>(withQuery("runs/issues", { ...q }), signal);
+}
+
+/** Fetches the run statistics report; without `since` it covers every run. */
+export function getStats(q: { since?: string }, signal?: AbortSignal): Promise<Report> {
   return getJson<Report>(withQuery("stats", q), signal);
 }
 

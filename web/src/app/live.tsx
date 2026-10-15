@@ -14,11 +14,107 @@ import { useStateQuery } from "@/api/queries";
 import { now } from "@/lib/server-clock";
 import { connectChangeStream } from "@/stream/client";
 
+import type { Query, QueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import type { StreamMessage, StreamStatus } from "@/stream/core";
 
 const STATE_KEY_ROOT = "state";
+
+function floorOf(query: Query): number | undefined {
+  const floor = query.meta?.refetchFloorMs;
+  return typeof floor === "number" ? floor : undefined;
+}
+
+interface FloorGate {
+  /** Refetches a floored query now, after its floor, or after its running fetch ends. */
+  request: (query: Query) => void;
+  /** Starts watching the cache; the returned function stops it and clears every timer and mark. */
+  watch: () => () => void;
+}
+
+/**
+ * Spaces the refetches of queries that carry `meta.refetchFloorMs`. A running
+ * fetch is never canceled: a signal during it is remembered and the query is
+ * checked again once the fetch ends, because its result can predate the signal.
+ */
+function createFloorGate(
+  client: QueryClient,
+  isPaused: () => boolean,
+  holdChange: () => void,
+): FloorGate {
+  const timers = new Map<Query, ReturnType<typeof setTimeout>>();
+  const deferred = new Set<Query>();
+
+  function forget(query: Query): void {
+    clearTimeout(timers.get(query));
+    timers.delete(query);
+    deferred.delete(query);
+  }
+
+  // A fresh query needs nothing: another path, such as a window focus, may have refetched it meanwhile.
+  function recheck(query: Query): void {
+    if (isPaused()) {
+      holdChange();
+      return;
+    }
+    if (query.isActive() && query.isStale() && document.visibilityState !== "hidden") {
+      request(query);
+    }
+  }
+
+  function request(query: Query): void {
+    const floor = floorOf(query);
+    if (floor === undefined) {
+      return;
+    }
+    if (query.state.fetchStatus !== "idle") {
+      deferred.add(query);
+      return;
+    }
+    const due = Math.max(query.state.dataUpdatedAt, query.state.errorUpdatedAt) + floor;
+    // The library stamps updates with Date.now(), so the floor reads the same clock.
+    const wait = due - Date.now();
+    if (wait <= 0) {
+      void client.refetchQueries(
+        { predicate: (candidate) => candidate === query },
+        { cancelRefetch: false },
+      );
+    } else if (!timers.has(query)) {
+      timers.set(
+        query,
+        setTimeout(() => {
+          timers.delete(query);
+          recheck(query);
+        }, wait),
+      );
+    }
+  }
+
+  function watch(): () => void {
+    const unsubscribe = client.getQueryCache().subscribe((event) => {
+      if (event.type === "removed") {
+        forget(event.query);
+      } else if (
+        event.type === "updated" &&
+        deferred.has(event.query) &&
+        event.query.state.fetchStatus === "idle"
+      ) {
+        deferred.delete(event.query);
+        event.query.invalidate();
+        recheck(event.query);
+      }
+    });
+    return () => {
+      unsubscribe();
+      for (const query of [...timers.keys(), ...deferred]) {
+        forget(query);
+      }
+    };
+  }
+
+  return { request, watch };
+}
 
 let streamStatus: StreamStatus = "connecting";
 let streamStarted = false;
@@ -80,6 +176,7 @@ export function LiveProvider({ children }: LiveProviderProps) {
   const [versionNotice, setVersionNotice] = useState<string | null>(null);
   const pausedRef = useRef(false);
   const pendingChange = useRef(false);
+  const floorGate = useRef<FloorGate | undefined>(undefined);
   const firstVersion = useRef<string | null>(null);
   const noticedVersion = useRef<string | null>(null);
   const status = useSyncExternalStore(subscribeStatus, getStreamStatus);
@@ -91,13 +188,36 @@ export function LiveProvider({ children }: LiveProviderProps) {
     }
     void client.invalidateQueries({ refetchType: "none" });
     void client.refetchQueries({ queryKey: [STATE_KEY_ROOT] });
-    if (document.visibilityState !== "hidden") {
-      void client.refetchQueries({
-        type: "active",
-        stale: true,
-        predicate: (query) => query.queryKey[0] !== STATE_KEY_ROOT,
-      });
+    if (document.visibilityState === "hidden") {
+      return;
     }
+    const others = { type: "active", stale: true } as const;
+    void client.refetchQueries({
+      ...others,
+      predicate: (query) => query.queryKey[0] !== STATE_KEY_ROOT && floorOf(query) === undefined,
+    });
+    for (const query of client.getQueryCache().findAll({
+      ...others,
+      predicate: (candidate) => floorOf(candidate) !== undefined,
+    })) {
+      floorGate.current?.request(query);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    const gate = createFloorGate(
+      client,
+      () => pausedRef.current,
+      () => {
+        pendingChange.current = true;
+      },
+    );
+    const stopWatching = gate.watch();
+    floorGate.current = gate;
+    return () => {
+      stopWatching();
+      floorGate.current = undefined;
+    };
   }, [client]);
 
   useEffect(() => {

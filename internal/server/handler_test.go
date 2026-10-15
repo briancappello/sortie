@@ -3818,6 +3818,8 @@ type fakeRunHistory struct {
 	outcomes    map[string]IssueOutcome
 	outcomesErr error
 	onQuery     func(RunHistoryQuery)
+	groups      []IssueGroupKey
+	onGroups    func(IssueGroupQuery)
 }
 
 func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error) {
@@ -3825,6 +3827,13 @@ func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunH
 		f.onQuery(q)
 	}
 	return f.rows, f.err
+}
+
+func (f *fakeRunHistory) QueryIssueGroups(_ context.Context, q IssueGroupQuery) ([]IssueGroupKey, error) {
+	if f.onGroups != nil {
+		f.onGroups(q)
+	}
+	return f.groups, f.err
 }
 
 func (f *fakeRunHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {

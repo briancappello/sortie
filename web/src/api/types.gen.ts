@@ -116,6 +116,7 @@ export interface ChainGroup {
   cost_usd: number | null;
   cost_per_succeeded_run_usd: number | null;
   tokens_unmeasured_runs: number;
+  cost_unpriced_runs: number;
   issue: string;
   stages: string[] | null;
   last_hop: string;
@@ -159,6 +160,7 @@ export interface Group {
   cost_usd: number | null;
   cost_per_succeeded_run_usd: number | null;
   tokens_unmeasured_runs: number;
+  cost_unpriced_runs: number;
 }
 
 export interface HealthCheckResponse {
@@ -212,6 +214,26 @@ export interface IssueDetailResponse {
   status_text: string;
   status_text_full: string;
   next_outcomes: NextOutcomeResponse[] | null;
+}
+
+export interface IssueGroupResponse {
+  issue_id: string;
+  issue_identifier: string;
+  display_identifier?: string;
+  issue_title?: string;
+  issue_url?: string;
+  status: string;
+  status_text: string;
+  status_text_full: string;
+  issue_outcome: IssueOutcomeResponse | null;
+  runs: RunResponse[] | null;
+  next_cursor: string | null;
+  totals: HistoryTotalsResponse;
+}
+
+export interface IssueGroupsResponse {
+  groups: IssueGroupResponse[] | null;
+  next_cursor: string | null;
 }
 
 export interface IssueHistoryResponse {

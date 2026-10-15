@@ -171,6 +171,7 @@ type groupAccum struct {
 	tokens            Tokens
 	costUSD           float64
 	pricedRuns        int
+	costUnpricedRuns  int
 	measuredRuns      int
 	unmeasuredRuns    int
 	succeededMeasured int
@@ -460,6 +461,9 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 				cost := priceOf(row, a.price)
 				if cost == nil {
 					a.total.costUnpricedRuns++
+					for _, g := range bumped {
+						g.costUnpricedRuns++
+					}
 				} else {
 					a.total.costUSD += *cost
 					a.total.pricedRuns++
@@ -678,6 +682,7 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 	if full {
 		stat.MeanTurns = new(round2(float64(g.turnSum) / float64(g.runs)))
 		stat.TokensUnmeasuredRuns = g.unmeasuredRuns
+		stat.CostUnpricedRuns = g.costUnpricedRuns
 		if g.measuredRuns > 0 {
 			stat.Tokens = new(g.tokens)
 		}

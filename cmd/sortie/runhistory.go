@@ -43,6 +43,26 @@ func (r runHistoryReader) QueryRuns(ctx context.Context, q server.RunHistoryQuer
 	return out, nil
 }
 
+// QueryIssueGroups returns the issues whose runs match q, newest first.
+func (r runHistoryReader) QueryIssueGroups(ctx context.Context, q server.IssueGroupQuery) ([]server.IssueGroupKey, error) {
+	groups, err := r.store.QueryIssueGroups(ctx, persistence.IssueGroupFilter{
+		IssueKey:    q.IssueKey,
+		RuleName:    q.RuleName,
+		Status:      q.Status,
+		StageTarget: q.StageTarget,
+		BeforeID:    q.BeforeID,
+		Limit:       q.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]server.IssueGroupKey, len(groups))
+	for i, g := range groups {
+		out[i] = server.IssueGroupKey{IssueID: g.IssueID, NewestRunID: g.NewestRunID}
+	}
+	return out, nil
+}
+
 // IssueTotals sums the issue's spend over all of its recorded runs. An issue
 // with no run yields zero totals.
 func (r runHistoryReader) IssueTotals(ctx context.Context, issueID string) (server.IssueRunTotals, error) {

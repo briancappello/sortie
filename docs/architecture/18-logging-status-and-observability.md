@@ -222,8 +222,10 @@ Enablement and configuration:
 #### 13.7.1 Dashboard
 
 - `GET /` redirects to `/ui/`, where the dashboard application runs (Section 13.7.4).
-- The dashboard is a client-side application that reads only the JSON API below and refetches when the change stream signals a change.
+- The dashboard is a client-side application that reads only the JSON API below and refetches when the change stream signals a change. History and Analytics refetch at most once per 5 seconds and once per 30 seconds respectively, because a History refetch rereads every loaded page through the orchestrator's store connection and an Analytics refetch rescans every run in its range. A fetch in flight is never canceled: a signal that arrives during it refetches once, its floor after the fetch ends. A hidden tab does not refetch either screen on a signal.
 - Overview is the first screen. It opens with a headline that says whether anything needs a person, then lists what needs a person (Needs attention), every active issue in the order and with the status the state route serves (Active), and the issues whose runs ended today (Ended today).
+- History lists finished runs grouped by issue, newest first, one group per issue however often it retried, a page of issues at a time. A group shows the issue's title and key, how the issue ended or what it is doing now in the sentences the server words, its run count, its tokens, and its estimated cost, and lists its newest runs with a way to read the rest. A run row shows the status, the dispatch rule and the hop it reached, the agent and model, the duration, the turns, the tokens, the estimated cost, and the finish time. Filters narrow the groups by issue key, dispatch rule, run status, and the rule a stage hop reached, and a key matches the form the dashboard shows, the qualified form of a GitHub, GitLab, or Gitea issue included. A workflow without dispatch rules or stage chains shows no rule filter, no hop filter, and no rule column.
+- Analytics shows the run statistics report for a chosen range: the last 24 hours, the last 7 days, or every run on record. It opens with the success rate, then the run and issue counts, the duration of succeeded runs, the turns per succeeded run, the tokens, and the estimated cost, and breaks the runs down by dispatch rule, stage chain, configured model, agent, run status, retry trigger, and what started each run. A breakdown the workflow cannot have is hidden. Every figure is a field of the report passed through a formatter, so the screen sums and divides nothing and matches `sortie stats --format json` for the same range. A group's tokens read "not measured" or "at least" when it holds runs that reported no usage, and its cost reads "unpriced" or "at least" when it holds runs whose agent kind no `token_rates` entry prices, with the count of those runs beside it.
 - Nothing in the dashboard assumes a stage, a dispatch rule, or a reaction. A workflow without them renders without those parts.
 - A figure Sortie does not know reads as unknown, never as zero. Every cost is labeled an estimate.
 - The dashboard holds still while a detail panel is open, and an operator can pause it. Read state stays in the browser.
@@ -841,6 +843,79 @@ Minimum endpoints:
     }
     ```
 
+- `GET /api/v1/runs/issues`
+  - Returns the finished runs of run history grouped by issue, one page of issues at a time, newest group first. A group holds one issue however many runs it has, so an issue that retried many times occupies one group and never fills the page, which a flat list cannot promise.
+  - Query parameters. Each is optional, an empty value is the same as an absent one, and filters combine with AND and match exactly, case included.
+    - `issue`: an issue key; selects the issues with a run whose `issue_identifier` or `display_identifier` equals it, so the qualified form a GitHub, GitLab, or Gitea tracker shows (`owner/repo#9`) finds its issue. A selected issue's group lists its runs whatever key each run recorded. This differs from `GET /api/v1/runs`, where `issue` matches `issue_identifier` alone.
+    - `rule`, `status`, and `stage`: as on `GET /api/v1/runs`, where `rule` is a dispatch rule name, `default`, or `<none>`. They select runs, so a group exists only while one of its issue's runs matches all of them given, and the group lists only matching runs.
+    - `cursor`: a `next_cursor` value from the previous page.
+    - `limit`: the page size in groups, an integer from 1 to 50, default 20.
+  - A group is one issue, by `issue_id`, with at least one matching run. Groups are ordered by the issue's newest matching run, descending `run_id`.
+  - The page's `next_cursor` is non-null exactly when a group exists below the page's last group. It is the `run_id` of that last group's newest matching run in decimal, opaque to a client. The next page holds the groups whose newest matching run is older and that have no matching run at or above the cursor, so a traversal serves each group once. A run recorded between two requests moves its issue's group to the first page and never repeats a group already served on a later page.
+  - A group carries these members:
+    - `issue_id`, `issue_identifier`, `display_identifier`, `issue_title`, and `issue_url` are those of the issue's newest run, under the run row rules: omitted when empty, and the title and link masked as Section 15.3 states, when the response is built.
+    - `status`, `status_text`, and `status_text_full` are what `GET /api/v1/<issue_identifier>` serves for the issue at the same instant. While a live entry of the snapshot holds the issue ID, they are that entry's status and sentence pair. Otherwise `status` is `history` and the pair is worded from the issue's outcome and its newest run's hop decision.
+    - `issue_outcome` is the issue's outcome in the run row shape, `null` when it has none.
+    - `runs` holds the issue's newest matching runs, at most 5, newest first, in the run row shape, none newer than the group's newest matching run.
+    - `next_cursor` is non-null exactly when the issue has an older matching run. It continues on `GET /api/v1/runs` with `issue_id` set to the group's `issue_id` and the request's `rule`, `status`, and `stage`.
+    - `totals` is the `history.totals` of the per-issue route, over every run of the issue, whatever the filters select.
+  - The orchestrator state is read before run history, as the per-issue route reads it, so a run that ends between the reads appears as live and in history, never in neither.
+  - A parameter this route does not define, a parameter given more than once, a `limit` that is not an integer from 1 to 50, and a `cursor` that is not an integer of 1 or more answer `400` with the error code `invalid_parameter`, whose message names the parameter and the rule, for example `parameter "limit" must be an integer from 1 to 50`. The route reads nothing in that case. A server without run history, and a run-history read that fails, the read of outcomes included, answer `503` with `history_unavailable`. A snapshot that fails answers `503` with `snapshot_unavailable`. Any method other than `GET` answers `405`. A client that disconnects gets no response, and the reads stop.
+  - Suggested response shape, abridged to one group with one run:
+
+    ```json
+    {
+      "groups": [
+        {
+          "issue_id": "abc123",
+          "issue_identifier": "9",
+          "display_identifier": "acme/web#9",
+          "issue_title": "Fix the flaky login test",
+          "issue_url": "https://github.com/acme/web/issues/9",
+          "status": "history",
+          "status_text": "Merged #936",
+          "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936.",
+          "issue_outcome": {
+            "kind": "merged",
+            "observed_at": "2026-02-24T21:02:10Z",
+            "merge_path": "auto_merge",
+            "pull_request": {"number": 936, "repository": "acme/web"},
+            "status_text": "Merged #936",
+            "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936."
+          },
+          "runs": [
+            {
+              "run_id": 42,
+              "issue_id": "abc123",
+              "issue_identifier": "9",
+              "display_identifier": "acme/web#9",
+              "attempt": 2,
+              "status": "succeeded",
+              "started_at": "2026-02-24T20:10:12Z",
+              "completed_at": "2026-02-24T20:31:47Z"
+            }
+          ],
+          "next_cursor": "37",
+          "totals": {
+            "run_count": 6,
+            "unmeasured_runs": 0,
+            "tokens": {
+              "input_tokens": 310000,
+              "output_tokens": 52000,
+              "total_tokens": 362000,
+              "cache_read_tokens": 150000,
+              "cache_write_tokens": 20000
+            },
+            "tokens_complete": true,
+            "estimated_cost_usd": 1.1425,
+            "cost_status": "estimated"
+          }
+        }
+      ],
+      "next_cursor": "31"
+    }
+    ```
+
 - `GET /api/v1/runs/{dispatch_id}/events`
   - Returns every retained agent event of one run, oldest first, in the event shape of Section 13.9. `{dispatch_id}` is the run's dispatch ID, one path segment matched exactly, as a running row and a run row serve it. The route answers a running run from its memory buffer and a finished run from the stored copy, and ignores the query string.
   - Response (`200 OK`) shape:
@@ -875,6 +950,7 @@ Minimum endpoints:
   - Prices use the rates `config.token_rates` serves, the rates the process started with. After an edit of `token_rates` in WORKFLOW.md the command and the route price differently until the process restarts. `warnings` lists the capability warning of an older database, if any, then the warnings of those rates.
   - `summary.issues` is the number of distinct issues among the runs `summary.runs` counts, `0` when no run is in range. `by_trigger` groups those runs by the retry trigger that started them, one group per stored value, named by the value. `<none>` names the empty trigger: runs dispatched from the poll tick, runs a reaction other than the CI fix started, and recorded CI results. `<unknown>` names a run whose row records no trigger: runs recorded before the trigger was kept, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, carry the figures `by_rule` computes, and sort like every other breakdown. `by_trigger` is `[]` when the database predates the trigger column, and `warnings` says so.
   - `by_origin` groups the same runs by what started each one, and the first rule that matches decides a run's group. `<unknown>` names a run whose row records no trigger. A non-empty trigger names the group (`error`, `continuation`, `stall`, or `ci_fix`), so a group named by a retry trigger holds the same runs, with the same figures, in `by_origin` and in `by_trigger`. A run with an empty trigger and a reaction kind takes the name of the kind (`review`, `bot-review`, `merge-conflict`, `label-review`, or `label-fix`). `<none>` names recorded CI results, which no dispatch started. `stage_hop` names the first run dispatched after a stage hop and no later run. `poll_tick` names every other run the poll tick dispatched, a later dispatch into a stage a hop led to included while the hop record stands, as after a restart, a released hold, or a lost retry. The groups partition the counted runs, carry the figures `by_rule` computes, and sort like every other breakdown. `by_origin` is `[]` when the database predates the first-run column, and `warnings` says so; `by_trigger` is `[]` beside it when the database also predates the trigger columns.
+  - Every entry of every breakdown, `by_chain` entries included, carries `cost_unpriced_runs`, counted as `summary.cost_unpriced_runs` counts it, over the group's runs: the measured runs, a recorded CI result excepted, whose agent kind no `token_rates` entry prices, which the group's `cost_usd` leaves out. It is `0` on the `base` tier and while no `token_rates` entry exists. A client reads a group's `cost_usd` as complete only while `cost_unpriced_runs` and `tokens_unmeasured_runs` are both `0`. The text form of `sortie stats` does not change.
   - `summary.succeeded`, `failed`, `stopped`, and `cancelled` count the runs by how they ended and add up to `summary.runs`. `failed` counts `failed` and `ci_failed` runs and any status the report does not know, `stopped` counts `needs_person` and `budget_stopped` runs, and `cancelled` counts `cancelled` runs.
   - With no run in range the route answers `200` with `summary.runs` and `summary.issues` at `0`, every breakdown `[]`, and `null` for every figure no run supplies.
   - The route refuses a request it cannot read exactly as asked, as `GET /api/v1/runs` does. A parameter this route does not define, a parameter given more than once, a value that is not a range bound, and a `since` that is not before `until` answer `400` with the error code `invalid_parameter`, whose message names the parameter and the rule, and the route reads nothing. A failed read, or a server without run history, answers `503` with `history_unavailable`. Any method other than `GET` answers `405`. A client that disconnects during the read gets no response, and the read stops.
@@ -921,7 +997,8 @@ Minimum endpoints:
           "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000},
           "cost_usd": 17.87,
           "cost_per_succeeded_run_usd": 5.96,
-          "tokens_unmeasured_runs": 0
+          "tokens_unmeasured_runs": 0,
+          "cost_unpriced_runs": 0
         }
       ],
       "by_adapter": [],
@@ -941,7 +1018,8 @@ Minimum endpoints:
           "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
           "cost_usd": 12.25,
           "cost_per_succeeded_run_usd": 6.13,
-          "tokens_unmeasured_runs": 1
+          "tokens_unmeasured_runs": 1,
+          "cost_unpriced_runs": 1
         }
       ],
       "by_origin": [
@@ -956,7 +1034,8 @@ Minimum endpoints:
           "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
           "cost_usd": 12.25,
           "cost_per_succeeded_run_usd": 6.13,
-          "tokens_unmeasured_runs": 1
+          "tokens_unmeasured_runs": 1,
+          "cost_unpriced_runs": 1
         }
       ],
       "self_review": {
@@ -1450,7 +1529,7 @@ API design notes:
     | `error` | `workflow_reload_failed`, `preflight_failed` | The check's `error` exactly as `health` serves it |
 
   - What clears each cause is the source's own rule. A park is released when a person removes its label after Sortie has seen it, or moves the issue to another tracker state. A hold leaves the set when the poll tick's rebuild no longer finds the issue at a ceiling or among its candidates. A reaction escalation ends on the facts of its kind (Sections 11A.7 to 11G.6). A reload failure ends with the next load that succeeds, and a preflight failure with the next preflight that passes.
-- A run row, on `GET /api/v1/runs` and in the `history.runs` array of the per-issue response, describes one finished run read from run history. The keys are additive; no existing key changes name, type, or meaning.
+- A run row, on `GET /api/v1/runs`, in the `runs` of each group of `GET /api/v1/runs/issues`, and in the `history.runs` array of the per-issue response, describes one finished run read from run history. The keys are additive; no existing key changes name, type, or meaning.
   - `run_id` is the run's key in run history and the paging key. `issue_id`, `issue_identifier`, `attempt`, `status`, `started_at`, and `completed_at` are always present. `display_identifier`, `issue_title`, `issue_url`, `rule_name`, `agent_kind`, `configured_model`, `configured_effort`, `model_name`, `workflow_file`, and the stage keys are omitted when the row holds none. Every value is served as recorded: the timestamps are RFC 3339 in UTC as the writer stored them, `dispatched_at` is the pass dispatch time as a running row defines it and `null` when the row holds none, `model_name` is the model the runtime reported, as on a running row, and `rule_name` is `default` for `dispatch.default` and omitted for the workflow-wide fallback.
   - `issue_title`, `issue_url`, `error`, and `self_review.final_verdict` are masked as Section 15.3 states, when the response is built rather than when the row is written, so a value registered as a secret after the run is masked too. Rule names, models, the workflow file, the session ID, and the SSH host are served unmasked, as running rows serve them. `error` is `null` when the run recorded none.
   - The members of `tokens` are `null` exactly when `tokens_measured` is false, and a measured zero is `0` (Section 13.5). `unaccounted_turns` counts the turns that issued a model request no token figure accounted for.
@@ -1462,12 +1541,12 @@ API design notes:
   - `trigger` is what started the retry whose fire dispatched the run: the `sortie_retries_total` label of the schedule that created that retry (`error`, `continuation`, `stall`, or `ci_fix`), kept through every put-back by the retry timer. The `timer` label stays on the retry row and the metric. It is `""` for a dispatch from the poll tick and for a retry a reaction other than the CI fix started, which `reaction_kind` names. `reaction_config_key` is present with the meaning a retry row gives it, and is `""` or `null` exactly when `reaction_kind` is. `session_id` is the agent session the run used, `""` when it started none, and `ssh_host` is the SSH worker the run executed on. The recorded CI result carries `""` in each origin key, because it records a verdict and nothing started it.
   - `issue_outcome` is how the issue's latest work ended, as Section 4.1.8 defines it, or `null` when Sortie observed no ending since it last picked the issue up. The key is always present. The value is the issue's, so every run of one issue on a page carries the same object, and it is never the outcome of one run. Sortie serves it as recorded, whatever the issue's live state: a handed-off issue that waits on a reaction or runs a reaction continuation serves its handoff beside its live members, and the live entry, not the outcome, says Sortie still holds the issue. A running issue picked up again after an earlier ending, and an issue that ended before outcomes were recorded, serve `null`.
   - An outcome holds `kind`, `observed_at`, `status_text`, and `status_text_full` always. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is the time Sortie made or observed the ending, RFC 3339 in UTC. `state` is present on `handed_off` and `terminal`: the state the handoff wrote, or the terminal state read. `merge_path` and `pull_request` are present on `merged`. `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key of WORKFLOW.md of the reaction that observed the merge, and `pull_request` holds `number` and `repository` in the shape a pending reaction row serves. `state` and `repository` are masked as Section 15.3 states, when the response is built. `status_text` and `status_text_full` are the sentence of how the issue ended, worded from the outcome alone, so a stage hop that was not made appears only in the top-level pair of a `history` response. A failed read of outcomes answers `503` with `history_unavailable` on both routes and is never served as `null`, which reads as no outcome observed.
-- `history.totals` sums all of the issue's runs, whatever the page holds, so it describes the issue where `history.runs` describes the page. The keys are additive; no existing key changes name, type, or meaning.
+- `history.totals`, which `totals` on each group of `GET /api/v1/runs/issues` repeats, sums all of the issue's runs, whatever the page holds, so it describes the issue where `history.runs` describes the page. The keys are additive; no existing key changes name, type, or meaning.
   - `run_count` counts every run, a recorded CI result included, which is the count `agent.max_sessions` is compared with. `unmeasured_runs` counts the runs whose usage was never recorded.
   - `tokens` holds the same members as a running row's `tokens`. `total_tokens` sums every run, an unmeasured run holding `0`, and the other members sum the measured runs. A member is `null` when its sum is `0` and `tokens_complete` is false, so unknown spend never reads as zero. `tokens_complete` is true exactly when no run is unmeasured and none recorded an unaccounted turn; when it is false, the sums are lower bounds.
   - `estimated_cost_usd` and `cost_status` follow the issue cost rule that `issue_estimated_cost_usd` and `issue_cost_status` apply, over the issue's runs alone with no running-session part. `partial` marks an unmeasured run beside priced spend.
 - `history.hops` lists the hop decisions of the runs on the page, newest first. A hop row holds `run_id`, `chain_id` (omitted when empty), `source_rule`, `target_rule`, `result`, and `completed_at`. `source_rule` is the deciding run's rule name, named as on a between-stages row, and `target_rule` is the rule the exit reached. `advanced` and `partial` made the hop, and `failed` and `ceiling` did not. The list is bounded to the runs on the page, so a client reads an older run's decision from the row's own `stage_target` and `stage_result` on the pages `next_cursor` continues.
-- History reads run on the request goroutine through the store's single connection, so a read delays the orchestrator's next store call by its own duration. An `issue` or `issue_id` filter and every per-issue read go through an index. No index serves the time range, so a request whose filters match fewer runs than the page holds below the cursor reads run history down to its start. A page of unfiltered or recent runs stops after the page.
+- History reads run on the request goroutine through the store's single connection, so a read delays the orchestrator's next store call by its own duration. An `issue` or `issue_id` filter and every per-issue read go through an index. No index serves the time range, so a request whose filters match fewer runs than the page holds below the cursor reads run history down to its start. A page of unfiltered or recent runs stops after the page. `GET /api/v1/runs/issues` reads one streamed selection that stops once it holds the page's groups plus one, and issues no other store read while that selection is open, because the store has one connection and a second read would wait for it forever. Then it reads each served issue's matching runs, newest run, and totals through the issue ID index. An `issue` key resolves first through the identifier index and the display identifier index, and the selection reads only the keyed issues' runs.
 - `active_estimated_cost_usd`, an implementation extension beyond the baseline shape above, sums the estimated cost of running, measured sessions whose agent kind has a configured token rate; it is omitted when no running, measured session prices. `cost_unpriced_running` sits beside it and counts the running, measured sessions the sum leaves out for want of a rate. It is present, zero included, whenever `token_rates` holds an entry for any agent kind, complete or not, and omitted otherwise, so its presence alone tells a consumer whether cost pricing is configured at all. While `token_rates` holds an entry for any agent kind, `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated` (and is absent when no row is), and `cost_unpriced_running` equals the count of rows whose `cost_status` is `unpriced`.
 - `config` on `GET /api/v1/state` is the workflow shape in effect, so a client draws the rules, stages, and reactions the workflow has and assumes none it lacks. The key is additive; no existing key changes name, type, or meaning.
   - `config` reports the configuration promoted at the last successful load, kept when a reload fails. A setting whose change needs a restart reports what the process applies: every reaction except `ci_failure` is the one built at startup, and `token_rates` are the rates the process started with. So `config` names no reaction a reload added and keeps naming one a reload removed, until the restart that applies the edit.

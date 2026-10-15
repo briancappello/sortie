@@ -47,6 +47,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The JSON API (`/api/v1/state`) now lists every active issue once (running, retrying, held by a budget, parked, waiting on its pull request, or between stages) with its title and link, a sentence saying what it is doing, and its dispatch rule, stage, agent, and model, in the order Sortie picked the issues up. An issue keeps its place as it moves from one of these to another, so a client shows one line per issue without merging lists itself. ([#1348](https://github.com/sortie-ai/sortie/issues/1348))
 
+- The dashboard has History and Analytics screens. History lists finished runs grouped by issue, one group per issue however often it retried, with how each issue ended or what it is doing now, page by page, filtered by issue key, rule, run status, and stage hop. Analytics shows the success rate, run and issue counts, durations, turns, tokens, and estimated cost for the last day, the last week, or every run, broken down by rule, stage chain, model, agent, run status, retry trigger, and what started each run; a figure Sortie did not measure or price reads as such instead of zero. ([#1299](https://github.com/sortie-ai/sortie/issues/1299))
+
+- The JSON API serves run history grouped by issue at `/api/v1/runs/issues`, a page of issues at a time, each with how it ended or what it is doing now, its newest runs, and its totals, filtered by issue key (the `owner/repo#9` form included), rule, status, and stage. Each breakdown of `sortie stats --format json` and `/api/v1/stats` now also counts the runs its cost leaves out for want of a `token_rates` price. ([#1299](https://github.com/sortie-ai/sortie/issues/1299))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -102,6 +106,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add the `reaction_escalations` table, which holds the escalation of each pull request reaction, one row per issue and reaction kind. An escalation standing at the upgrade's restart is not restored, and the next escalation of its kind records one. ([#1302](https://github.com/sortie-ai/sortie/issues/1302))
 
 - Add the `attention_acknowledgements` table, which keeps each acknowledged item's acknowledgement for as long as its cause lasts. ([#1303](https://github.com/sortie-ai/sortie/issues/1303))
+
+- Add an index on `run_history` by the qualified issue key (`owner/repo#9`), so filtering run history by that key does not scan every run. Sortie builds it on the first start after the upgrade, which takes longer on a long history. ([#1299](https://github.com/sortie-ai/sortie/issues/1299))
 
 ## [1.27.0] - 2026-10-11
 
