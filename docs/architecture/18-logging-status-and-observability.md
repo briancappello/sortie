@@ -75,7 +75,7 @@ The periodic workspace sweep emits exactly one summary record per pass, at `Info
 
 Each workspace removed by the age bound also emits its own `Info` record, message `"sweep: removed expired workspace"`, carrying `workspace_key`, `last_activity` (RFC3339), and `age_days`.
 
-The `"tick completed"` `Info` record carries four integer attributes for the blocker gate in addition to its existing ones: `held_by_blockers`, `blockers_unresolved`, `blockers_not_read`, and `blockers_incomplete`, each counting the candidates the tick held for that reason. It also carries `budget_exhausted`, the number of this tick's candidates in the per-issue budget-exhausted set after the rebuild.
+A tick that fetched its candidate issues ends with one `"tick completed"` record: `Info` on the first such tick after startup and on a tick whose attributes differ from those of the previous such tick, and `Debug` when every attribute is equal, so an idle orchestrator logs it at `Info` once after startup. A tick that ends on a failed dispatch preflight or a failed candidate fetch emits none and takes no part in the comparison. The record carries integer attributes for the blocker gate in addition to its existing ones: `held_by_blockers`, `blockers_unresolved`, `blockers_not_read`, and `blockers_incomplete`, each counting the candidates the tick held for that reason. It also carries `budget_exhausted`, the number of this tick's candidates in the per-issue budget-exhausted set after the rebuild.
 
 A candidate the dispatch gate holds for a blocker reason produces exactly one of five per-issue records, and a pass whose reads were refused by the forge produces exactly one pass-level record in addition:
 
