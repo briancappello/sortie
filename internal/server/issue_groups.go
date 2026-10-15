@@ -45,7 +45,7 @@ type issueGroupResponse struct {
 	Totals            historyTotalsResponse `json:"totals"`
 }
 
-var issueGroupsParams = []string{"issue", "rule", "status", "stage", "cursor", "limit"}
+var issueGroupsParams = []string{"issue", "q", "rule", "status", "stage", "cursor", "limit"}
 
 // parseIssueGroupsQuery validates every parameter of GET /api/v1/runs/issues
 // before any read. An empty value reads as absent, and Limit is the page size
@@ -57,6 +57,7 @@ func parseIssueGroupsQuery(values url.Values) (IssueGroupQuery, error) {
 
 	q := IssueGroupQuery{
 		IssueKey:    values.Get("issue"),
+		Search:      values.Get("q"),
 		Status:      values.Get("status"),
 		StageTarget: values.Get("stage"),
 		Limit:       defaultIssueGroupsLimit,

@@ -8,6 +8,7 @@ const ORIGIN_LABELS: Record<string, string> = {
   stall: "Retry after a stall",
   continuation: "Continuation",
   ci_fix: "CI fix",
+  ci: "CI fix",
   review: "Review fix",
   "bot-review": "Bot review fix",
   "merge-conflict": "Merge conflict fix",
@@ -24,6 +25,16 @@ const TRIGGER_LABELS: Record<string, string> = {
   ci_fix: "CI fix",
   [NONE]: "Not a retry",
   [UNKNOWN]: "Not recorded",
+};
+
+const REACTION_LABELS: Record<string, string> = {
+  ci_failure: "CI",
+  review_comments: "Review",
+  bot_review: "Bot review",
+  merge_conflicts: "Conflicts",
+  auto_merge: "Merge",
+  merge_completion: "Merge completion",
+  label_commands: "Label commands",
 };
 
 function worded(labels: Record<string, string>, name: string): string {
@@ -51,4 +62,9 @@ export function agentLabel(name: string): string {
 /** Words a retry trigger or a run origin; a name the client has no wording for reads as served. */
 export function startLabel(name: string, breakdown: "trigger" | "origin"): string {
   return worded(breakdown === "trigger" ? TRIGGER_LABELS : ORIGIN_LABELS, name);
+}
+
+/** Words a reaction config key; a key the client has no wording for reads as served. */
+export function reactionLabel(configKey: string): string {
+  return worded(REACTION_LABELS, configKey);
 }

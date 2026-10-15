@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Outlet, useMatch, useNavigate } from "react-router";
+import { Outlet, useLocation, useMatch, useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, postRefresh } from "@/api/client";
@@ -18,6 +18,7 @@ import { toast, Toaster } from "@/components/toaster";
 import { usePeek } from "@/components/use-peek";
 import { condition } from "@/lib/condition";
 import { buildEnded } from "@/lib/ended";
+import { backOf } from "@/lib/issue-link";
 import { localMidnight, now } from "@/lib/server-clock";
 import { cycleTheme } from "@/lib/theme";
 import { attentionKey, endedKey, markRead } from "@/lib/unread";
@@ -43,6 +44,7 @@ function ShellFrame({ screens }: ShellFrameProps) {
   const { data, status } = useStateQuery();
   const { togglePause, versionNotice, dismissVersionNotice } = useLive();
   const navigate = useNavigate();
+  const { state: routeState } = useLocation();
   const client = useQueryClient();
   const peek = usePeek();
   const isOverview = useMatch("/") !== null;
@@ -104,7 +106,7 @@ function ShellFrame({ screens }: ShellFrameProps) {
     if (peek.identifier !== null) {
       peek.close();
     } else if (isIssueRoute) {
-      void navigate("/");
+      void navigate(backOf(routeState));
     }
   };
 
@@ -156,6 +158,7 @@ function ShellFrame({ screens }: ShellFrameProps) {
         <NarrowBar onOpenPalette={handleOpenPalette} />
         <div className="mx-auto w-full max-w-[calc(var(--container-wide)+2*var(--spacing-xxxl))] px-xxxl pt-xl pb-xxxl max-xl:px-lg max-md:px-md max-md:pt-md">
           <TopBar
+            screens={screens}
             isHolding={isOverview && peek.identifier !== null}
             onTogglePause={handleTogglePause}
             onOpenPalette={handleOpenPalette}

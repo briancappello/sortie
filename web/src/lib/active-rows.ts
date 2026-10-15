@@ -63,7 +63,8 @@ export interface RuleOption {
   group: string | null;
 }
 
-type Deciding =
+/** The state row that decided an issue, tagged with the list it came from. */
+export type Deciding =
   | { kind: "running"; entry: RunningEntryResponse }
   | { kind: "retrying"; entry: RetryEntryResponse }
   | { kind: "budget_exhausted"; entry: BudgetExhaustedResponse }
@@ -142,7 +143,8 @@ export function ruleOf(entry: RuleSource): string | null {
   return isNamedRule(entry.rule_name) ? entry.rule_name : null;
 }
 
-function timeBaseOf(deciding: Deciding): string | null {
+/** Gives the instant a deciding entry's time is counted from or to. */
+export function timeBaseOf(deciding: Deciding): string | null {
   switch (deciding.kind) {
     case "running":
       return deciding.entry.started_at;
@@ -238,13 +240,18 @@ export function activeRows(state: StateResponse): ActiveRow[] {
   );
 }
 
-/** Words the time cell of a row on the server clock. */
-export function timeCell(row: ActiveRow, now: number): string {
-  const base = parseInstant(row.timeBase);
+/** Words the time of a deciding entry on the server clock: time left for a retry, time elapsed otherwise. */
+export function timeText(kind: RowKind, timeBase: string | null, now: number): string {
+  const base = parseInstant(timeBase);
   if (base === null) {
     return "unknown";
   }
-  return row.kind === "retrying" ? fmtDue((base - now) / 1000) : fmtDuration((now - base) / 1000);
+  return kind === "retrying" ? fmtDue((base - now) / 1000) : fmtDuration((now - base) / 1000);
+}
+
+/** Words the time cell of a row on the server clock. */
+export function timeCell(row: ActiveRow, now: number): string {
+  return timeText(row.kind, row.timeBase, now);
 }
 
 function countRows(rows: readonly ActiveRow[], matches: (rule: string | null) => boolean): number {
