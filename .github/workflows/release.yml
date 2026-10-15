@@ -17,7 +17,6 @@ on:
 permissions:
   contents: write
 
-# Only one release pipeline at a time.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -94,11 +93,6 @@ jobs:
           GOOS: ${{ matrix.goos }}
         with:
           version: latest
-          # Skip the action's analysis cache: stale entries cause flaky
-          # staticcheck false positives (golangci-lint#5979) that would otherwise
-          # masquerade as new 'latest' findings, and a cache shared across the
-          # matrix would carry a result over from the wrong GOOS. setup-go's
-          # caches are unaffected.
           skip-cache: true
 
   test-unit:
@@ -666,8 +660,6 @@ jobs:
           parameters: |
             version: ${{ toJSON(needs.validate.outputs.version) }}
 
-      # GoReleaser runs after the tag is published, so a signed file missing
-      # from the expected path must fail here, while the tag is still local.
       - name: Verify signed binaries
         if: ${{ !inputs.dry_run }}
         run: |
