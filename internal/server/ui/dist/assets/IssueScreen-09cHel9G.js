@@ -1,0 +1,1 @@
+import{r as e}from"./react-DZuLeV1f.js";import{u as t}from"./router-BrQBF10Z.js";import{r as n,s as r}from"./index-C2q4r2lT.js";var i=e();function a({identifier:e}){let t=r(e);return(0,i.jsx)(n,{identifier:e,row:t})}function o(){let{identifier:e}=t();return e===void 0?void 0:(0,i.jsx)(a,{identifier:e})}export{o as IssueScreen};

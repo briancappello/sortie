@@ -340,6 +340,7 @@ export interface PollHealthResponse {
   error?: string;
   outcome?: string;
   next_poll_at: string | null;
+  summary_text: string;
 }
 
 export interface PullRequestResponse {
