@@ -201,7 +201,7 @@ Enablement and configuration:
 
 Control authentication:
 
-- State-changing endpoints are `POST /api/v1/refresh` and the per-issue control routes `POST /api/v1/<issue_identifier>/hold`, `/release`, and `/escalate`. The plan routes, `POST /api/v1/plan/sync`, `GET /api/v1/plan/graph`, and `GET /api/v1/plan/capabilities`, take the control token too, the two reads included, because they reach the tracker with Sortie's credentials. Every other route, the dashboard, `GET /api/v1/state`, the per-issue detail, the health probes, and `/metrics`, keeps its access: no token is required.
+- State-changing endpoints are `POST /api/v1/refresh` and the per-issue control routes `POST /api/v1/<issue_identifier>/hold`, `/release`, and `/escalate`. The plan routes, `POST /api/v1/plan/sync`, `GET /api/v1/plan/graph`, `GET /api/v1/plan/capabilities`, and `GET` and `PUT /api/v1/plan/projects/<key>`, take the control token too, the reads included, because they reach the tracker with Sortie's credentials. Every other route, the dashboard, `GET /api/v1/state`, the per-issue detail, the health probes, and `/metrics`, keeps its access: no token is required.
 - A state-changing request carries `Authorization: Bearer <token>`. The control token is accepted on every state-changing route; tokens are compared in constant time.
 - For each work session, Sortie mints a session token, `_` followed by 32 random bytes in base64url without padding, and gives it to the agent process as `SORTIE_SESSION_TOKEN` (§10.7). A credential-verification session receives none. The token lives in memory only, on the running entry and in an index the server reads by the token's SHA-256 digest; it is registered for masking when minted, and withdrawn from both the index and the mask set when the running entry is removed, so it stops working when its run ends. It is never written to run history or logs.
 - A session token is accepted only on a per-issue control route whose path names the issue it was minted for. On any other state-changing route, refresh included, or for another issue, it receives `403`.
@@ -398,17 +398,26 @@ Minimum endpoints:
   - Body `{"message": "...", "kind": "question|permission|other", "url": "..."}`; `kind` defaults to `other`.
   - The event loop checks the message (`400` when empty or when the kind is unknown), the running worker (`409`, or `404` for an unknown identifier), and the issue's 60-second escalation window (`429`), then masks registered secrets in the message and URL and routes one `session.escalated` event (§10.4.7) through the notification router, delivered detached like the other orchestrator events. It answers `202` whether or not a destination lists the event; with none, it logs one `session escalation had no destination` record. The window is kept per issue in memory, starts at each accepted escalation, and does not survive a restart.
 
-- `POST /api/v1/plan/sync`
+- Plan project selection
+  - Every plan route serves one tracker project of the configured workspace. `?project=<key>` names it; without the parameter it is `tracker.project`. The configured project uses the orchestrator's tracker adapter. Another project gets an adapter of its own on first use, built from the current workflow with only the project replaced, and keeps it until Sortie stops.
+  - Projects other than `tracker.project` are served only when the tracker adapter can inspect and create projects (§11.7); otherwise naming one answers `422` (`projects_unsupported`). A project the workspace lacks answers `404` (`project_not_found`).
+  - Previews and the apply lock are per project: a `preview_id` applies only to the project that produced it.
+  - Sortie dispatches agents for `tracker.project` only. Other projects are planned and synced, never dispatched.
+- `POST /api/v1/plan/sync[?project=<key>]`
   - Body `{"graph": <plan graph document>, "apply": false|true, "preview_id": "..."}`. It runs the sync of `sortie plan sync` (workflow reference §4.6) outside the orchestrator: it changes no orchestrator state and no dispatch.
   - The graph is checked before the tracker is contacted: `400` (`invalid_graph`) names an unsupported `schema_version` with both versions, a malformed shape, or an edge to a missing node.
   - `apply: false` answers `200` with `preview_id`, the `preview` (counts; creates; updates; parents; relations added and removed; orphans; skipped drafts; unplanned changes; missing capabilities), and the tracker's `capabilities`. A preview writes nothing.
   - `apply: true` takes the `preview_id` of a preview of the same graph and answers `200` with the `result`. It answers `409` (`stale_preview`) when the preview is unknown or when the graph's source digest or the tracker's plan-keyed issues changed since it, `409` (`apply_in_progress`) while another apply runs, and `422` (`tracker_unsupported_operation`) when the tracker lacks a needed capability, all before the first write. A write that fails stops the apply: the response carries the `result` so far, with `failed` naming the write, and an error whose code is the tracker error kind (`502` for transport and API errors).
-- `GET /api/v1/plan/graph[?include_unkeyed=true]`
-  - Returns the configured project's plan-keyed issues as `nodes` (`id`, `identifier`, `plan_key`, `kind`, `title`, `state`, `terminal`, `url`, `parent_id`, `runtime`) and their blocking relations as `edges` (`blocker_id`, `blocked_id`), with `generated_at` and the tracker's `capabilities`. A field the tracker cannot supply is `null`, never omitted. `include_unkeyed=true` also returns issues without a plan key, with `plan_key` null.
-  - `terminal` compares the state with the workflow's `tracker.terminal_states`. `runtime` is `null`, or `{"status": "running", "turn_count", "last_message"}`, `{"status": "retrying", "attempt"}`, or `{"status": "budget_held"}`, from the orchestrator snapshot.
+- `GET /api/v1/plan/graph[?include_unkeyed=true][&project=<key>]`
+  - Returns `project`, the project served, and `dispatched`, whether Sortie dispatches agents for it, then the project's plan-keyed issues as `nodes` (`id`, `identifier`, `plan_key`, `kind`, `title`, `state`, `terminal`, `url`, `parent_id`, `runtime`) and their blocking relations as `edges` (`blocker_id`, `blocked_id`), with `generated_at` and the tracker's `capabilities`. A field the tracker cannot supply is `null`, never omitted. `include_unkeyed=true` also returns issues without a plan key, with `plan_key` null.
+  - `terminal` compares the state with the workflow's `tracker.terminal_states`. `runtime` is `null`, or `{"status": "running", "turn_count", "last_message"}`, `{"status": "retrying", "attempt"}`, or `{"status": "budget_held"}`, from the orchestrator snapshot. It is `null` on every node of a project that is not dispatched.
   - A tracker failure answers an error whose code is the tracker error kind, for example `502` with `tracker_transport_error`, and no nodes.
-- `GET /api/v1/plan/capabilities`
+- `GET /api/v1/plan/capabilities[?project=<key>]`
   - Returns `capabilities`, the write capabilities the tracker kind declares and implements (§11.7), and `plan_key_storage` (`custom_field`, `body_marker`, or `null`).
+- `GET /api/v1/plan/projects/<key>`
+  - Inspects one project of the workspace and answers `200` with `key`, `name`, `url`, `exists`, `created` (always `false`), `ready`, `dispatched`, and `problems`. A project the workspace lacks is not an error: `exists` is `false`. `problems` lists, for an operator, what keeps plan writes from working in the project, such as a task type or state its space type lacks; `ready` is `exists` with no problems. A malformed key answers `422` (`tracker_payload_error`).
+- `PUT /api/v1/plan/projects/<key>`
+  - Body `{"name": "..."}`, optional. Creates the project, named `name` or else `key`, when the workspace lacks it, then inspects it, and answers `200` with the same fields; `created` is `true` when this request created it. It never changes a project that exists, nor a space type, task type, or state that other projects share: what it cannot fix is reported in `problems`. Repeating the request is safe.
 
 Held runs:
 

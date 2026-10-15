@@ -60,6 +60,15 @@ Plan writes map the planning kinds `epic` and `story` to two task types of the p
 
 A change to the space type applies to every project of that type. The adapter resolves both names when it starts, compared without regard to letter case. If one is missing, the constructor fails and the error lists the project's task types. With neither key set, the adapter still reads and writes as before, and a plan write fails with `tracker_payload_error`. The same task types can be created through the transactor by replaying what the settings page sends: push the type's statuses into the space type's `statuses`, create a mixin class that extends `tracker:class:Issue`, create the `task:class:TaskType` document, and push its id into the space type's `tasks`.
 
+## Plan projects
+
+The adapter implements `PlanProjectEnsurer`, so the plan routes serve every project of the workspace through `?project=<key>`, and `GET` and `PUT /api/v1/plan/projects/<key>` inspect and create projects.
+
+- A key is the project identifier: a letter, then up to four letters or digits, upper case.
+- Creating sends a `TxCreateDoc` of `tracker:class:Project` in `core:space:Space`. The new project is public, has the caller's account as member and owner, and takes its space type and default issue status from `tracker.project`, so it has the same task types and workflow.
+- Inspection reports a project as not ready when its space type lacks a task type named by `huly.epic_type` or `huly.story_type`, or a state the workflow names. The message names the space type and how many projects share it. The adapter never changes a space type: add what is missing in Settings, as in "Plan task types". A change there applies to every project of that type.
+- Each other project gets its own adapter, and its own login, the first time a plan route names it.
+
 ## Kind mapping
 
 | Plan kind | Huly | Parent |

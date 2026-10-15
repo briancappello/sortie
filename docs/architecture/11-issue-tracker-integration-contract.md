@@ -325,4 +325,6 @@ A plan-keyed issue also reports a digest of the body the last plan write stored,
 - Plan sync, `sortie plan sync` and `POST /api/v1/plan/sync`, which makes the tracker match a validated plan graph (workflow reference §4.6).
 - The `tracker_api` tool's planning operations, `create_issue`, `update_issue`, `set_parent`, and `link_dependency`, each offered only when the adapter declares its capability (Section 10.4.5).
 
-**Implemented.** The Huly adapter declares all four, with `custom_field` plan-key storage. Every other adapter declares none.
+**Plan projects.** An adapter may also implement `PlanProjectEnsurer`, which inspects a project of the configured workspace by key and creates one that is missing. Inspection reports whether the project exists and lists, for an operator, what keeps plan writes from working in it, such as a missing task type or state. Creation never changes a project that exists, nor anything that other projects share. When the configured adapter implements it, plan sync serves other projects of the same workspace, each through an adapter of its own built from the workflow with only the project replaced; the orchestrator still polls and dispatches `tracker.project` alone (Section 13.7.2).
+
+**Implemented.** The Huly adapter declares all four, with `custom_field` plan-key storage. It also implements `PlanProjectEnsurer`. Every other adapter declares none, and implements neither.
