@@ -119,6 +119,17 @@ export function fmtMoney(usd: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+const RATE = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 20,
+  useGrouping: false,
+});
+
+/** Writes a configured USD rate unrounded, with at least two decimals and no thousands separator: 3 reads "$3.00", 0.3 "$0.30", 0.075 "$0.075". */
+export function fmtRate(usd: number): string {
+  return `$${RATE.format(usd)}`;
+}
+
 function toDate(at: Instant): Date | null {
   const date = at instanceof Date ? at : new Date(at);
   return Number.isNaN(date.getTime()) ? null : date;
@@ -185,6 +196,16 @@ export function fmtStamp(at: string): string {
   }
   const isToday = localMidnight(instant).getTime() === localMidnight(now()).getTime();
   return isToday ? fmtClock(instant) : `${fmtDate(instant)}, ${fmtClock(instant)}`;
+}
+
+/** Writes `HH:MM:SS` for an instant on the server's current day, else the date and `HH:MM:SS`, as fmtStamp does with `HH:MM`. */
+export function fmtStampSec(at: string): string {
+  const instant = parseInstant(at);
+  if (instant === null) {
+    return UNKNOWN;
+  }
+  const isToday = localMidnight(instant).getTime() === localMidnight(now()).getTime();
+  return isToday ? fmtClockSec(instant) : `${fmtDate(instant)}, ${fmtClockSec(instant)}`;
 }
 
 const DESCRIBE_SUFFIX = /-\d+-g[0-9a-f]+(-dirty)?$/;

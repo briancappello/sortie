@@ -125,7 +125,7 @@ export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
       <div className="mt-auto grid gap-xxs pt-md">
         <Button
           variant="ghost"
-          className="w-full justify-start"
+          className="w-full justify-start font-regular"
           onClick={onOpenPalette}
           title={keyTip("Commands", modifierLabel(), "K")}
         >
@@ -134,7 +134,7 @@ export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
         </Button>
         <Button
           variant="ghost"
-          className="w-full justify-start"
+          className="w-full justify-start font-regular"
           onClick={onOpenShortcuts}
           title={keyTip("Shortcuts", "?")}
         >

@@ -389,6 +389,12 @@ var table = map[string]parts{
 	"ctl_acknowledge":         {text: "Acknowledged{{if .Key}} {{.Key}} ({{.Reason}}){{else}}: {{.Reason}}{{end}}. It comes back only if a new cause appears."},
 	"ctl_acknowledge_already": {text: "Already acknowledged{{if .Key}} {{.Key}} ({{.Reason}}){{else}}: {{.Reason}}{{end}}. It comes back only if a new cause appears."},
 	"ctl_acknowledge_refused": {text: "Nothing acknowledged: Sortie is shutting down."},
+
+	"health_poll_unrun": {text: "Sortie has not polled the tracker yet."},
+	"health_poll_pass":  {text: "The latest poll read the tracker without an error."},
+	"health_poll_fail": {text: "{{if gt .Failures 1}}{{count .Failures}} polls in a row failed, and the latest{{else}}The latest poll{{end}} " +
+		"{{if .Preflight}}stopped at the dispatch preflight before reading the tracker{{else}}could not read the tracker{{end}}; " +
+		"{{if .HasSuccess}}the last successful poll was {{duration .Ago}} ago{{else}}no poll has succeeded since Sortie started{{end}}."},
 }
 
 // templates is the parsed table. A source that does not parse panics at

@@ -1095,7 +1095,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		resp.Config = toConfigResponse(*words.Shape, s.tokenRates)
 	}
 	if health != nil {
-		resp.Health = toStateHealthResponse(*health)
+		resp.Health = toStateHealthResponse(*health, words)
 	}
 	writeJSON(w, s.logger, http.StatusOK, resp)
 

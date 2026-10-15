@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 type stateHealthResponse struct {
@@ -30,8 +31,9 @@ type workflowHealthResponse struct {
 
 type pollHealthResponse struct {
 	healthCheckResponse
-	Outcome    string     `json:"outcome,omitempty"`
-	NextPollAt *time.Time `json:"next_poll_at"`
+	Outcome     string     `json:"outcome,omitempty"`
+	NextPollAt  *time.Time `json:"next_poll_at"`
+	SummaryText string     `json:"summary_text"`
 }
 
 type scmHealthResponse struct {
@@ -39,7 +41,7 @@ type scmHealthResponse struct {
 	healthCheckResponse
 }
 
-func toStateHealthResponse(h orchestrator.SnapshotHealth) *stateHealthResponse {
+func toStateHealthResponse(h orchestrator.SnapshotHealth, words sentence.Context) *stateHealthResponse {
 	resp := &stateHealthResponse{
 		Database:  toHealthCheckResponse(h.Database),
 		Preflight: toHealthCheckResponse(h.Preflight.SnapshotHealthCheck),
@@ -51,6 +53,7 @@ func toStateHealthResponse(h orchestrator.SnapshotHealth) *stateHealthResponse {
 			healthCheckResponse: toHealthCheckResponse(h.Poll.SnapshotHealthCheck),
 			Outcome:             h.Poll.Outcome,
 			NextPollAt:          utcOrNil(h.Poll.NextPollAt),
+			SummaryText:         sentence.PollHealth(h.Poll, words),
 		},
 	}
 	if h.SCM != nil {

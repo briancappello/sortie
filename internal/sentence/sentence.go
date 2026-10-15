@@ -4,12 +4,12 @@
 // wording instead of reading Sortie state itself.
 //
 // Start with [For] for an issue, [NextOutcomes] for what Sortie does next for
-// an issue, [Attention] for what needs a person, and [RefreshOutcome],
-// [RetryNowOutcome], [CheckNowOutcome], and [AcknowledgeOutcome] for a
-// refresh, a retry-now, a check-now, and an acknowledge request. All are
-// safe for concurrent use and never fail: a template that cannot render
-// yields a fixed fallback text, or leaves out the one next outcome it belongs
-// to, and logs one record.
+// an issue, [Attention] for what needs a person, [PollHealth] for the tracker
+// poll check, and [RefreshOutcome], [RetryNowOutcome], [CheckNowOutcome], and
+// [AcknowledgeOutcome] for a refresh, a retry-now, a check-now, and an
+// acknowledge request. All are safe for concurrent use and never fail: a
+// template that cannot render yields a fixed fallback text, or leaves out the
+// one next outcome it belongs to, and logs one record.
 package sentence
 
 import (

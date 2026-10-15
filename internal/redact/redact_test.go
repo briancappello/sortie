@@ -193,7 +193,7 @@ func TestAddNamed_UsesNameConventionToChooseWholeOrURLCredentials(t *testing.T) 
 func TestAddURLCredentials(t *testing.T) {
 	t.Parallel()
 
-	t.Run("scheme with user and password registers the whole userinfo and the password", func(t *testing.T) {
+	t.Run("scheme with user and password registers the whole userinfo, the username and the password", func(t *testing.T) {
 		t.Parallel()
 		user := randomSecret(t)
 		pass := randomSecret(t)
@@ -205,6 +205,9 @@ func TestAddURLCredentials(t *testing.T) {
 		}
 		if got := Mask(pass); got == pass {
 			t.Errorf("Mask(%q) = %q, want the password masked", pass, got)
+		}
+		if got := Mask(user + ":***"); strings.Contains(got, user) {
+			t.Errorf("Mask(%q) = %q, want the username masked", user+":***", got)
 		}
 	})
 
