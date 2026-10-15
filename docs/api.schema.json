@@ -2304,6 +2304,19 @@
             }
           ]
         },
+        "stage_chain": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "stage_previous": {
           "type": "string"
         },
@@ -2371,6 +2384,7 @@
         "reaction_config_key",
         "session_id",
         "ssh_host",
+        "stage_chain",
         "issue_outcome"
       ],
       "type": "object"

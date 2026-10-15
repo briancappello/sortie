@@ -49,9 +49,9 @@ export function ruleLabel(name: string | undefined): string {
   return name === "default" ? "dispatch.default" : name;
 }
 
-/** Words a configured model name; a run that set none reads "Agent default". */
+/** Words a model name; a run that neither configured nor reported one reads "Not reported". */
 export function modelLabel(name: string): string {
-  return name === NONE ? "Agent default" : name;
+  return name === NONE ? "Not reported" : name;
 }
 
 /** Words an agent kind; a run with none reads "No agent". */
@@ -67,4 +67,18 @@ export function startLabel(name: string, breakdown: "trigger" | "origin"): strin
 /** Words a reaction config key; a key the client has no wording for reads as served. */
 export function reactionLabel(configKey: string): string {
   return worded(REACTION_LABELS, configKey);
+}
+
+const REACTION_SHORT_LABELS: Record<string, string> = {
+  bot_review: "Bot",
+  merge_conflicts: "Confl.",
+  merge_completion: "Completion",
+  label_commands: "Commands",
+};
+
+/** Words a reaction config key in the form a narrow station header uses; a key whose label is already short has none. */
+export function reactionShortLabel(configKey: string): string | undefined {
+  return Object.hasOwn(REACTION_SHORT_LABELS, configKey)
+    ? REACTION_SHORT_LABELS[configKey]
+    : undefined;
 }

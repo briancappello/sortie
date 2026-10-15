@@ -1247,7 +1247,7 @@ func historyOnlyDetail(issueID string, newest RunHistoryEntry) *issueDetailRespo
 func issueHistoryOf(page []RunHistoryEntry, totals IssueRunTotals, rates TokenRates, chains [][]string) *issueHistoryResponse {
 	rows, next := cutPage(page, issueHistoryPageSize)
 	return &issueHistoryResponse{
-		Runs:       toRunResponses(rows, rates),
+		Runs:       toRunResponses(rows, rates, chains),
 		NextCursor: next,
 		Totals:     historyTotalsOf(totals, rates),
 		Hops:       hopRowsOf(rows),
