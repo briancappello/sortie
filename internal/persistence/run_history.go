@@ -492,6 +492,161 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 	return entries, nil
 }
 
+// IssueGroupFilter selects the issues [Store.QueryIssueGroups] groups; a zero
+// field matches every run.
+type IssueGroupFilter struct {
+	// IssueKey keeps the issues with a run whose identifier or
+	// display_identifier equals it.
+	IssueKey string
+
+	// RuleName nil matches every run; a pointer to "" selects the runs whose
+	// rule_name is empty.
+	RuleName    *string
+	Status      string
+	StageTarget string
+
+	// BeforeID continues after the group whose newest matching run has this
+	// id; 0 starts at the newest group.
+	BeforeID int64
+
+	// Limit is the most groups returned; below 1 reads as 1.
+	Limit int
+}
+
+// IssueGroup is one issue with a run the filter matched, and the id of its
+// newest such run.
+type IssueGroup struct {
+	IssueID     string
+	NewestRunID int64
+}
+
+// QueryIssueGroups returns the issues whose runs match f, each with the id of
+// its newest matching run, newest first, or an empty non-nil slice when none
+// match. With BeforeID set it skips every issue that has a matching run at or
+// above it, so a traversal serves each issue once.
+//
+// The selection is one streamed statement that stops once it holds the page,
+// and no other read runs while it is open: the store holds one connection, so
+// a nested read would wait on it forever.
+func (s *Store) QueryIssueGroups(ctx context.Context, f IssueGroupFilter) ([]IssueGroup, error) {
+	var keyed []string
+	if f.IssueKey != "" {
+		ids, err := s.issueIDsByKey(ctx, f.IssueKey)
+		if err != nil {
+			return nil, err
+		}
+		if len(ids) == 0 {
+			return []IssueGroup{}, nil
+		}
+		keyed = ids
+	}
+	return s.streamIssueGroups(ctx, f, keyed)
+}
+
+// issueIDsByKey returns the issues with a run whose identifier or
+// display_identifier equals key, and closes its statement before it returns.
+func (s *Store) issueIDsByKey(ctx context.Context, key string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT issue_id FROM run_history WHERE identifier = ?
+		UNION
+		SELECT issue_id FROM run_history WHERE display_identifier = ?`, key, key)
+	if err != nil {
+		return nil, fmt.Errorf("query issue groups: resolve key: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("query issue groups: scan issue id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query issue groups: resolve key: %w", err)
+	}
+	return ids, nil
+}
+
+// issueGroupRunPredicates returns the fixed predicates of f's rule, status,
+// and stage on the run_history table aliased as alias, with their bound
+// values.
+func issueGroupRunPredicates(alias string, f IssueGroupFilter) ([]string, []any) {
+	var conds []string
+	var args []any
+	if f.RuleName != nil {
+		conds = append(conds, alias+".rule_name = ?")
+		args = append(args, *f.RuleName)
+	}
+	if f.Status != "" {
+		conds = append(conds, alias+".status = ?")
+		args = append(args, f.Status)
+	}
+	if f.StageTarget != "" {
+		conds = append(conds, alias+".stage_target = ?")
+		args = append(args, f.StageTarget)
+	}
+	return conds, args
+}
+
+// streamIssueGroups reads matching runs newest first and stops, closing its
+// statement, once it holds the page of distinct issues. keyed, when non-nil,
+// limits the runs to those issues.
+func (s *Store) streamIssueGroups(ctx context.Context, f IssueGroupFilter, keyed []string) ([]IssueGroup, error) {
+	conds, args := issueGroupRunPredicates("r", f)
+	if keyed != nil {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keyed)), ",")
+		conds = append([]string{"r.issue_id IN (" + placeholders + ")"}, conds...)
+		keyedArgs := make([]any, 0, len(keyed)+len(args))
+		for _, id := range keyed {
+			keyedArgs = append(keyedArgs, id)
+		}
+		args = append(keyedArgs, args...)
+	}
+	if f.BeforeID > 0 {
+		subConds, subArgs := issueGroupRunPredicates("s", f)
+		subConds = append([]string{"s.issue_id = r.issue_id"}, subConds...)
+		subConds = append(subConds, "s.id >= ?")
+		conds = append(conds, "r.id < ?",
+			"NOT EXISTS (SELECT 1 FROM run_history AS s WHERE "+strings.Join(subConds, " AND ")+")")
+		args = append(args, f.BeforeID)
+		args = append(args, subArgs...)
+		args = append(args, f.BeforeID)
+	}
+
+	query := "SELECT r.id, r.issue_id FROM run_history AS r"
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ") //nolint:gosec // conds holds only fixed predicates with ? placeholders; values are bound via args
+	}
+	query += " ORDER BY r.id DESC"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query issue groups: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+
+	limit := max(f.Limit, 1)
+	groups := []IssueGroup{}
+	served := make(map[string]struct{}, limit)
+	for len(groups) < limit && rows.Next() {
+		var g IssueGroup
+		if err := rows.Scan(&g.NewestRunID, &g.IssueID); err != nil {
+			return nil, fmt.Errorf("query issue groups: scan: %w", err)
+		}
+		if _, dup := served[g.IssueID]; dup {
+			continue
+		}
+		served[g.IssueID] = struct{}{}
+		groups = append(groups, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query issue groups: %w", err)
+	}
+	return groups, nil
+}
+
 // RecordRunStageResult sets the hop decision on the run_history row with the
 // given id. It is a no-op, not an error, when no row has that id.
 func (s *Store) RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error {

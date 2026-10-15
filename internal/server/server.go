@@ -139,6 +139,29 @@ type RunHistoryQuery struct {
 	Limit int
 }
 
+// IssueGroupQuery selects the issues of run history by issue; a zero field
+// matches every run.
+type IssueGroupQuery struct {
+	// IssueKey keeps the issues with a run whose identifier or display
+	// identifier equals it.
+	IssueKey, Status, StageTarget string
+	// RuleName nil matches every run; a pointer to "" selects the runs that
+	// record no rule name.
+	RuleName *string
+	// BeforeID continues after the group whose newest matching run has this
+	// ID; 0 starts at the newest group.
+	BeforeID int64
+	// Limit is the most groups returned.
+	Limit int
+}
+
+// IssueGroupKey is one issue with a matching run and the ID of its newest
+// matching run.
+type IssueGroupKey struct {
+	IssueID     string
+	NewestRunID int64
+}
+
 // IssueOutcome is how an issue's latest work ended, as the orchestrator
 // observed it. State is empty for a merged outcome; MergeReactionKind,
 // PRNumber, and PRRepository are set only for a merged outcome.
@@ -170,6 +193,9 @@ type IssueRunTotals struct {
 // an implementation is safe for concurrent use.
 type RunHistoryReader interface {
 	QueryRuns(ctx context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error)
+	// QueryIssueGroups returns the issues whose runs match q, ordered by their
+	// newest matching run, newest first.
+	QueryIssueGroups(ctx context.Context, q IssueGroupQuery) ([]IssueGroupKey, error)
 	IssueTotals(ctx context.Context, issueID string) (IssueRunTotals, error)
 	// IssueOutcomes returns the outcome of each listed issue that has one,
 	// keyed by issue ID.
@@ -346,6 +372,7 @@ func New(params Params) *Server {
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
 	mux.HandleFunc("/api/v1/runs", s.routeRuns)
+	mux.HandleFunc("/api/v1/runs/issues", s.routeIssueGroups)
 	mux.HandleFunc("/api/v1/stats", s.routeStats)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
 	mux.HandleFunc("/api/v1/retries/{identifier}/run", s.routeRetryNow)

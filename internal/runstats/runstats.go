@@ -89,7 +89,10 @@ type Tokens struct {
 // CostPerSucceededRunUSD are also null when the group holds no priced
 // run. In by_status, Succeeded and SuccessRate are structural rather
 // than informative: the "succeeded" row necessarily reports Succeeded
-// equal to Runs.
+// equal to Runs. CostUnpricedRuns counts the group's measured runs, other
+// than ci_failed, whose agent kind no configured rate prices; it is 0 on
+// the base tier and while no rates are configured, and CostUSD leaves
+// those runs out.
 type Group struct {
 	Name                   string   `json:"name"`
 	Runs                   int      `json:"runs"`
@@ -102,6 +105,7 @@ type Group struct {
 	CostUSD                *float64 `json:"cost_usd"`
 	CostPerSucceededRunUSD *float64 `json:"cost_per_succeeded_run_usd"`
 	TokensUnmeasuredRuns   int      `json:"tokens_unmeasured_runs"`
+	CostUnpricedRuns       int      `json:"cost_unpriced_runs"`
 }
 
 // ChainGroup is one by_chain entry; Name is the chain identifier.

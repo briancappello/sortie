@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -685,54 +686,44 @@ func TestAppendRunHistory_MultipleAppendsAutoIncrement(t *testing.T) {
 func TestQueryRunHistoryByIssue(t *testing.T) {
 	t.Parallel()
 
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	// Insert runs for two different issues.
-	r1 := newTestRun(1)
-	r1.IssueID = "ISS-A"
-	r2 := newTestRun(2)
-	r2.IssueID = "ISS-A"
-	r3 := newTestRun(3)
-	r3.IssueID = "ISS-B"
-
-	a1 := appendOrFatal(t, s, r1)
-	a2 := appendOrFatal(t, s, r2)
-	appendOrFatal(t, s, r3)
-
-	entries, err := s.QueryRunHistoryByIssue(ctx, "ISS-A")
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
+	tests := []struct {
+		name     string
+		issueID  string
+		wantRuns []int
+	}{
+		{name: "newest first, other issues left out", issueID: "ISS-A", wantRuns: []int{2, 1}},
+		{name: "unknown issue is an empty slice", issueID: "no-such-issue", wantRuns: []int{}},
 	}
-	if len(entries) != 2 {
-		t.Fatalf("got %d entries, want 2", len(entries))
-	}
-	// Most recent first (descending id).
-	if entries[0].ID != a2.ID {
-		t.Errorf("entries[0].ID = %d, want %d", entries[0].ID, a2.ID)
-	}
-	if entries[1].ID != a1.ID {
-		t.Errorf("entries[1].ID = %d, want %d", entries[1].ID, a1.ID)
-	}
-}
 
-func TestQueryRunHistoryByIssue_Empty(t *testing.T) {
-	t.Parallel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			ids := make([]int64, 0, 3)
+			for i, issueID := range []string{"ISS-A", "ISS-A", "ISS-B"} {
+				run := newTestRun(i + 1)
+				run.IssueID = issueID
+				ids = append(ids, appendOrFatal(t, s, run).ID)
+			}
 
-	entries, err := s.QueryRunHistoryByIssue(ctx, "no-such-issue")
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
-	}
-	if entries == nil {
-		t.Fatal("returned nil slice, want non-nil empty slice")
-	}
-	if len(entries) != 0 {
-		t.Fatalf("got %d entries, want 0", len(entries))
+			got, err := s.QueryRunHistoryByIssue(context.Background(), tt.issueID)
+			if err != nil {
+				t.Fatalf("QueryRunHistoryByIssue(%q): %v", tt.issueID, err)
+			}
+
+			if got == nil {
+				t.Fatalf("QueryRunHistoryByIssue(%q) = nil, want a non-nil slice", tt.issueID)
+			}
+			gotRuns := []int{}
+			for _, r := range got {
+				gotRuns = append(gotRuns, slices.Index(ids, r.ID)+1)
+			}
+			if !slices.Equal(gotRuns, tt.wantRuns) {
+				t.Errorf("QueryRunHistoryByIssue(%q) runs = %v, want %v", tt.issueID, gotRuns, tt.wantRuns)
+			}
+		})
 	}
 }
 
@@ -802,6 +793,125 @@ func TestQueryRunHistory_Paging(t *testing.T) {
 			}
 			if !slices.Equal(gotRows, tt.want) {
 				t.Errorf("QueryRunHistory(before=%d, limit=%d) rows = %v, want %v", tt.before, tt.limit, gotRows, tt.want)
+			}
+		})
+	}
+}
+
+type issueGroupSeed struct {
+	issue, identifier, display, status string
+}
+
+func TestQueryIssueGroups(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		seeds       []issueGroupSeed
+		filter      IssueGroupFilter
+		between     *issueGroupSeed
+		wantPages   [][]string
+		wantRestart []string
+	}{
+		{
+			name:      "an issue holding most runs is served once",
+			seeds:     []issueGroupSeed{{issue: "A"}, {issue: "B"}, {issue: "A"}, {issue: "C"}, {issue: "A"}, {issue: "D"}, {issue: "A"}, {issue: "A"}},
+			filter:    IssueGroupFilter{Limit: 2},
+			wantPages: [][]string{{"A:8", "D:6"}, {"C:4", "B:2"}},
+		},
+		{
+			name:        "a run appended between pages moves its issue to the first page only",
+			seeds:       []issueGroupSeed{{issue: "A"}, {issue: "B"}, {issue: "C"}, {issue: "D"}},
+			filter:      IssueGroupFilter{Limit: 2},
+			between:     &issueGroupSeed{issue: "B"},
+			wantPages:   [][]string{{"D:4", "C:3"}, {"A:1"}},
+			wantRestart: []string{"B:5", "D:4"},
+		},
+		{
+			name:      "a status filter keys a group on its newest matching run",
+			seeds:     []issueGroupSeed{{issue: "A", status: "failed"}, {issue: "B", status: "failed"}, {issue: "A", status: "succeeded"}},
+			filter:    IssueGroupFilter{Status: "failed", Limit: 10},
+			wantPages: [][]string{{"B:2", "A:1"}},
+		},
+		{
+			name:      "an identifier selects its issue",
+			seeds:     []issueGroupSeed{{issue: "A", identifier: "9", display: "o/r#9"}, {issue: "B", identifier: "10", display: "o/r#10"}},
+			filter:    IssueGroupFilter{IssueKey: "9", Limit: 10},
+			wantPages: [][]string{{"A:1"}},
+		},
+		{
+			name:      "a display identifier selects its issue",
+			seeds:     []issueGroupSeed{{issue: "A", identifier: "9", display: "o/r#9"}, {issue: "B", identifier: "10", display: "o/r#10"}},
+			filter:    IssueGroupFilter{IssueKey: "o/r#10", Limit: 10},
+			wantPages: [][]string{{"B:2"}},
+		},
+		{
+			name:      "a key recorded on an older run still keys the group on the newest run",
+			seeds:     []issueGroupSeed{{issue: "A", identifier: "OLD-1"}, {issue: "B", identifier: "OTHER"}, {issue: "A", identifier: "NEW-1"}},
+			filter:    IssueGroupFilter{IssueKey: "OLD-1", Limit: 10},
+			wantPages: [][]string{{"A:3"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			var ids []int64
+			appendSeed := func(seed issueGroupSeed) {
+				run := newTestRun(1)
+				run.IssueID = seed.issue
+				run.Identifier = cmp.Or(seed.identifier, "PROJ-"+seed.issue)
+				run.DisplayID = seed.display
+				run.Status = cmp.Or(seed.status, "succeeded")
+				ids = append(ids, appendOrFatal(t, s, run).ID)
+			}
+			readPage := func(f IssueGroupFilter) []IssueGroup {
+				page, err := s.QueryIssueGroups(ctx, f)
+				if err != nil {
+					t.Fatalf("QueryIssueGroups(%+v): %v", f, err)
+				}
+				if page == nil {
+					t.Fatalf("QueryIssueGroups(%+v) = nil, want a non-nil slice", f)
+				}
+				return page
+			}
+			labels := func(page []IssueGroup) []string {
+				out := []string{}
+				for _, g := range page {
+					out = append(out, fmt.Sprintf("%s:%d", g.IssueID, slices.Index(ids, g.NewestRunID)+1))
+				}
+				return out
+			}
+			for _, seed := range tt.seeds {
+				appendSeed(seed)
+			}
+
+			var gotPages [][]string
+			f := tt.filter
+			for range len(tt.seeds) + 2 {
+				page := readPage(f)
+				if len(page) == 0 {
+					break
+				}
+				gotPages = append(gotPages, labels(page))
+				f.BeforeID = page[len(page)-1].NewestRunID
+				if tt.between != nil && len(gotPages) == 1 {
+					appendSeed(*tt.between)
+				}
+			}
+
+			if !reflect.DeepEqual(gotPages, tt.wantPages) {
+				t.Errorf("QueryIssueGroups(%+v) pages = %v, want %v", tt.filter, gotPages, tt.wantPages)
+			}
+			if tt.between != nil {
+				if got := labels(readPage(tt.filter)); !slices.Equal(got, tt.wantRestart) {
+					t.Errorf("QueryIssueGroups(%+v) restarted = %v, want %v", tt.filter, got, tt.wantRestart)
+				}
 			}
 		})
 	}

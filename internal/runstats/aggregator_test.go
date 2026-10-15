@@ -203,6 +203,19 @@ func TestStatsGroupDisclosure(t *testing.T) {
 		CompletedAt:    "2026-01-01T00:00:00Z",
 		TokensMeasured: true,
 	})
+	for _, adapter := range []string{"mock", "unrated"} {
+		addRows(t, agg, persistence.RunStatsRow{
+			Status:         "succeeded",
+			AgentAdapter:   adapter,
+			RuleName:       "review",
+			TemplateID:     "review",
+			StartedAt:      "2026-01-01T00:00:00Z",
+			CompletedAt:    "2026-01-01T00:01:00Z",
+			InputTokens:    1_000_000,
+			TotalTokens:    1_000_000,
+			TokensMeasured: true,
+		})
+	}
 
 	report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
 
@@ -224,6 +237,16 @@ func TestStatsGroupDisclosure(t *testing.T) {
 	if ruleGroup.Runs != 1 {
 		t.Errorf("<none> rule group Runs = %d, want 1", ruleGroup.Runs)
 	}
+	if ruleGroup.CostUnpricedRuns != 0 {
+		t.Errorf("<none> rule group CostUnpricedRuns = %d, want 0 (a ci_failed row is never unpriced)", ruleGroup.CostUnpricedRuns)
+	}
+	pricedRuleGroup := findGroup(t, report.ByRule, "review")
+	if pricedRuleGroup.CostUnpricedRuns != 1 {
+		t.Errorf("review rule group CostUnpricedRuns = %d, want 1", pricedRuleGroup.CostUnpricedRuns)
+	}
+	if pricedRuleGroup.CostUSD == nil || *pricedRuleGroup.CostUSD != 10 {
+		t.Errorf("review rule group CostUSD = %v, want 10 (the priced run only)", pricedRuleGroup.CostUSD)
+	}
 	templateGroup := findGroup(t, report.ByTemplate, "<none>")
 	if templateGroup.Runs != 1 {
 		t.Errorf("<none> template group Runs = %d, want 1", templateGroup.Runs)
@@ -232,8 +255,8 @@ func TestStatsGroupDisclosure(t *testing.T) {
 	if report.Summary.ZeroDurationRuns != 1 {
 		t.Errorf("Summary.ZeroDurationRuns = %d, want 1", report.Summary.ZeroDurationRuns)
 	}
-	if report.Summary.CostUnpricedRuns != 0 {
-		t.Errorf("Summary.CostUnpricedRuns = %d, want 0 (a ci_failed row records a CI verdict, not an agent session)", report.Summary.CostUnpricedRuns)
+	if report.Summary.CostUnpricedRuns != 1 {
+		t.Errorf("Summary.CostUnpricedRuns = %d, want 1 (the unrated run; a ci_failed row records a CI verdict, not an agent session)", report.Summary.CostUnpricedRuns)
 	}
 }
 

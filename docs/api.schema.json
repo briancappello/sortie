@@ -442,6 +442,9 @@
             }
           ]
         },
+        "cost_unpriced_runs": {
+          "type": "integer"
+        },
         "cost_usd": {
           "anyOf": [
             {
@@ -525,6 +528,7 @@
         "cost_usd",
         "cost_per_succeeded_run_usd",
         "tokens_unmeasured_runs",
+        "cost_unpriced_runs",
         "issue",
         "stages",
         "last_hop"
@@ -658,6 +662,9 @@
             }
           ]
         },
+        "cost_unpriced_runs": {
+          "type": "integer"
+        },
         "cost_usd": {
           "anyOf": [
             {
@@ -721,7 +728,8 @@
         "tokens",
         "cost_usd",
         "cost_per_succeeded_run_usd",
-        "tokens_unmeasured_runs"
+        "tokens_unmeasured_runs",
+        "cost_unpriced_runs"
       ],
       "type": "object"
     },
@@ -1037,6 +1045,114 @@
         "status_text",
         "status_text_full",
         "next_outcomes"
+      ],
+      "type": "object"
+    },
+    "IssueGroupResponse": {
+      "properties": {
+        "display_identifier": {
+          "type": "string"
+        },
+        "issue_id": {
+          "type": "string"
+        },
+        "issue_identifier": {
+          "type": "string"
+        },
+        "issue_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssueOutcomeResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "issue_title": {
+          "type": "string"
+        },
+        "issue_url": {
+          "type": "string"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RunResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "status_text": {
+          "type": "string"
+        },
+        "status_text_full": {
+          "type": "string"
+        },
+        "totals": {
+          "$ref": "#/$defs/HistoryTotalsResponse"
+        }
+      },
+      "required": [
+        "issue_id",
+        "issue_identifier",
+        "status",
+        "status_text",
+        "status_text_full",
+        "issue_outcome",
+        "runs",
+        "next_cursor",
+        "totals"
+      ],
+      "type": "object"
+    },
+    "IssueGroupsResponse": {
+      "properties": {
+        "groups": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/IssueGroupResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "groups",
+        "next_cursor"
       ],
       "type": "object"
     },
