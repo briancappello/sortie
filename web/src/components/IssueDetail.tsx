@@ -191,7 +191,7 @@ function Kicker({ issueKey, detail }: KickerProps) {
 
 function agentText(detail: IssueDetailResponse): string | undefined {
   const { running } = detail;
-  const last = detail.history?.runs?.at(-1);
+  const last = detail.history?.runs?.[0];
   const kind = running?.agent_kind ?? last?.agent_kind;
   const model =
     running?.model_name || running?.configured_model || last?.model_name || last?.configured_model;
