@@ -110,6 +110,8 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 - each running row should include the issue's spend and the limits it runs against: the usage of the issue's completed sessions, read from run history at every dispatch whether or not a token ceiling is set and refreshed by each confirming read of the in-flight token ceiling; whether the issue's token sum is its whole spend, which counts the running session's unaccounted turns as its worker reports them while the session runs; the token ceiling and the session budget in force as of the latest poll tick; and the estimated cost of the running session and of the whole issue, each with a state that names why a figure is partial or absent. Section 13.7.2 gives the keys and how to read them
 - each running row should include `rule_name`, `configured_model`, and `configured_effort`, the dispatch rule the session runs under and the model and reasoning level its resolved settings block carries, empty (and omitted from the JSON form) when unset; `model_name` keeps the model the runtime reported, which can differ from the configured one under routing aliases and runtime fallbacks
 - each running row should include `dispatched_at`, when Sortie dispatched the first run of the issue's current pass, in UTC. A pass is the runs that share a stage chain identifier: a retry, a reaction continuation, the next stage of a stage hop, and a restart continue the pass of the run they follow, so `dispatched_at` stays fixed across them while `started_at` is the start of the session in flight. It is never empty on a running row
+- each running row should include `dispatch_id`, the dispatch ID Sortie minted for the run when it dispatched it. A dispatch ID names one run, is never reused, across restarts included, and is the key under which the run's agent events are retained and streamed (Section 13.9). It is never empty on a running row
+- each running row should include `last_event_at`, `quiet_at`, and `stall_at`, so every client shows the same stall indication from the same rule. `last_event_at` is the time of the run's latest agent event of any type, liveness pings and events that are not retained included, and `null` before the first event. The reference point is `last_event_at`, else `started_at`, the same reference the stall check of Section 8.5 measures from. `quiet_at` is the reference point plus half of `agent.stall_timeout_ms`, and `stall_at` is the reference point plus `agent.stall_timeout_ms`, the value the stall check compares with as of the latest poll tick; the stall check stops the run on the first poll tick after `stall_at`. Both are `null` when stall detection is off (`agent.stall_timeout_ms` of zero or less). The rule lives in the server: a client computes no threshold and only compares its clock with these times
 - each running row should include `stage_lineage` and `stage_position`, where the row's dispatch rule stands on the stage chains. `stage_lineage` names the chain and the stage hop that reached the run, as on a retry row, and is `null` unless a hop reached the run. `stage_position` places the rule on its chain with the hop count against the hop ceiling, and is `null` when the rule is on no chain, so a workflow without stage chains serves `null` on every row. Section 13.7.2 gives the keys
 - each running row that is a reaction continuation should include `reaction_kind` and `reaction_config_key`, the kind of the continuation and the `reactions` key of WORKFLOW.md it is configured under, with `pull_request` (the number and repository of the pull request it works on) and, for a kind that counts tries, `reaction_attempt`, which try of its reaction the session is. A session that is no continuation carries none of the four
 - each running row should include `issue_title`, `issue_url`, and `issue_labels`, the issue's title, web link, and labels as the session was dispatched with them, unchanged for the whole run and the same text the agent's prompt received. `issue_title` and `issue_url` are empty (and omitted from the JSON form) when the tracker returned none; `issue_labels` is always present, an empty list when the issue carries none, lowercase in the tracker's order as Section 11 normalizes them
@@ -199,6 +201,8 @@ If implemented:
 - Treat them as observability-only output.
 - Do not make orchestrator logic depend on humanized strings.
 
+The `text` member of a retained agent event (Section 13.9) is such a summary: one sentence the server words from the event's type and fields each time it serves the event. It is never stored, and a client renders it rather than wording the event itself.
+
 ### 13.7 HTTP Server
 
 Sortie includes an embedded HTTP server for observability and operational control. The server starts unconditionally on port **7678** unless explicitly disabled. It is not required for orchestrator correctness, but its absence silently removes health probes, Prometheus metrics, and the dashboard.
@@ -224,6 +228,8 @@ Enablement and configuration:
 - A figure Sortie does not know reads as unknown, never as zero. Every cost is labeled an estimate.
 - The dashboard holds still while a detail panel is open, and an operator can pause it. Read state stays in the browser.
 - A run in an issue's detail shows its rule and, when its exit reached a hop decision, the target rule and the result.
+- A run's agent events are live in the view that shows the run: the dashboard subscribes to that run on the change stream it already holds and opens no second stream (Section 13.7.2). A gap the server reports, earlier events evicted or a run not retained, reads as a gap, never as continuity.
+- A running run shows a neutral quiet marker once the browser's clock, corrected by the offset between it and the state response's `generated_at`, reaches the row's `quiet_at`. A local timer fires the marker, because silence produces no signal. The marker reads "no events for <silence>; Sortie stops it at <timeout>", where `<silence>` runs from `last_event_at`, else from `started_at`, and `<timeout>` is `stall_at`. With `quiet_at` `null` there is no marker, only the time of the last event.
 
 #### 13.7.2 JSON REST API (`/api/v1/*`)
 
@@ -266,7 +272,10 @@ Minimum endpoints:
           "last_message": "",
           "started_at": "2026-02-24T20:10:12Z",
           "dispatched_at": "2026-02-24T19:48:20Z",
+          "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
           "last_event_at": "2026-02-24T20:14:59Z",
+          "quiet_at": "2026-02-24T20:17:29Z",
+          "stall_at": "2026-02-24T20:19:59Z",
           "tokens": {
             "input_tokens": 1200,
             "output_tokens": 800,
@@ -816,6 +825,7 @@ Minimum endpoints:
           "reaction_kind": "ci",
           "reaction_config_key": "ci_failure",
           "session_id": "thread-1-turn-1",
+          "dispatch_id": "ZYFOD7WNYR3TGMMZBTOKQ6ZS5A",
           "ssh_host": "",
           "issue_outcome": {
             "kind": "merged",
@@ -830,6 +840,30 @@ Minimum endpoints:
       "next_cursor": "42"
     }
     ```
+
+- `GET /api/v1/runs/{dispatch_id}/events`
+  - Returns every retained agent event of one run, oldest first, in the event shape of Section 13.9. `{dispatch_id}` is the run's dispatch ID, one path segment matched exactly, as a running row and a run row serve it. The route answers a running run from its memory buffer and a finished run from the stored copy, and ignores the query string.
+  - Response (`200 OK`) shape:
+
+    ```json
+    {
+      "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
+      "first_seq": 1,
+      "events": [
+        {
+          "seq": 1,
+          "at": "2026-02-24T20:10:14Z",
+          "event": "session_started",
+          "message": "",
+          "text": "Session started.",
+          "session_id": "thread-1-turn-1"
+        }
+      ]
+    }
+    ```
+
+  - `first_seq` is the `seq` of the oldest event served. A value above `1` says the run's earlier events were evicted, and a client says so instead of showing the list as the whole run. It is `null` when `events` is `[]`, which only a running run that has retained no event yet serves.
+  - `404 Not Found` with code `run_events_not_retained` answers a dispatch ID whose events are not retained: an unknown ID, a run whose stored events were pruned, a run lost in a crash, a run recorded before retention existed, and a finished run that retained no event. A run-history read that fails answers `503` with `history_unavailable`, as does a server without run history for a run that is not running. Any method other than `GET` answers `405`.
 
 - `GET /api/v1/stats`
   - Returns the run statistics report that `sortie stats --format json` prints, over the finished runs of run history in a range. The route serves that report unchanged and computes it through the same aggregation as the command, so no figure is computed twice and no second shape exists.
@@ -971,9 +1005,12 @@ Minimum endpoints:
         "state": "In Progress",
         "started_at": "2026-02-24T20:10:12Z",
         "dispatched_at": "2026-02-24T19:48:20Z",
+        "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
         "last_event": "notification",
         "last_message": "Working on tests",
         "last_event_at": "2026-02-24T20:14:59Z",
+        "quiet_at": "2026-02-24T20:17:29Z",
+        "stall_at": "2026-02-24T20:19:59Z",
         "tokens": {
           "input_tokens": 1200,
           "output_tokens": 800,
@@ -1057,6 +1094,7 @@ Minimum endpoints:
             "reaction_kind": "",
             "reaction_config_key": "",
             "session_id": "thread-1-turn-1",
+            "dispatch_id": "NTGPSQBPYLYSE2ULN22IDBX7HX",
             "ssh_host": "",
             "issue_outcome": null
           }
@@ -1088,20 +1126,37 @@ Minimum endpoints:
         ],
         "issue_outcome": null
       },
-      "logs": {
-        "agent_session_logs": [
-          {
-            "label": "latest",
-            "path": "/var/log/sortie/agent/MT-649/latest.log",
-            "url": null
-          }
-        ]
-      },
       "recent_events": [
         {
+          "seq": 41,
+          "at": "2026-02-24T20:14:31Z",
+          "event": "tool_result",
+          "message": "",
+          "text": "Ran Bash in 2.4 s.",
+          "tool_name": "Bash",
+          "duration_ms": 2400,
+          "tool_error": false
+        },
+        {
+          "seq": 42,
+          "at": "2026-02-24T20:14:52Z",
+          "event": "turn_completed",
+          "message": "",
+          "text": "Turn 7 completed.",
+          "usage": {
+            "input_tokens": 1200,
+            "output_tokens": 800,
+            "total_tokens": 2000,
+            "cache_read_tokens": 400,
+            "cache_write_tokens": 100
+          }
+        },
+        {
+          "seq": 43,
           "at": "2026-02-24T20:14:59Z",
           "event": "notification",
-          "message": "Working on tests"
+          "message": "Working on tests",
+          "text": "Working on tests"
         }
       ],
       "last_error": null,
@@ -1111,6 +1166,7 @@ Minimum endpoints:
 
   - `status` is `"running"` when the issue has a running session, otherwise `"retrying"` when it has a pending retry, otherwise `"budget_exhausted"` when it is held out of dispatch by a per-issue budget ceiling, otherwise `"parked"` when it is parked, otherwise `"pending_reactions"` when it is known only through a pending reaction, otherwise `"between_stages"` when it is known only through a stage hop whose next stage is not yet dispatched, otherwise `"history"` when it has run history and no live entry; `budget_exhausted` in the response body carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state` and is `null` when the issue is not in that set, and `parked` carries the record shape of the `parked` array and is `null` when the issue is not parked. `between_stages` carries the row shape of the `between_stages` array and is `null` when the issue is not between stages, whatever the status. `pending_reactions` is always present and holds the issue's rows in the record shape and order of the `pending_reactions` array, `[]` when the issue has none, whatever the status. An issue that is only parked, known only through a pending reaction, only between stages, or only through run history answers with a `null` workspace, zero attempts, and a `null` `last_error`, as a budget-held one does. A `history` response carries `[]` for `pending_reactions` and `null` for every other live member. `status_text` and `status_text_full` on the response are the pair of the row that decides `status`; for `pending_reactions` they are the pair of the first served row whose `escalated_at` is non-null, else of the first served row, and for `history` they word how the issue ended from its outcome and the newest run's hop decision, and say so when Sortie recorded no ending. `last_error` is the retry row's error, so after the retry timer reschedules a retry it is the reschedule reason.
   - `history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs in the row shape of `GET /api/v1/runs`, newest first, beside live detail when the issue is also live. A running issue with earlier runs serves both. It holds `runs`, `next_cursor`, `totals`, `hops`, and `issue_outcome`. `runs` is bounded to a page, because an issue looping on retries has no bound on its runs. `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the rows the page was cut from. `totals` covers all of the issue's runs, not the page. `hops` holds the hop decisions of the runs in `runs`, newest first; an older run's decision arrives with its row on the pages `next_cursor` continues. `issue_outcome` is how the issue's latest work ended, the object every run in `runs` carries, or `null`. The API design notes give the keys and how to read them.
+  - `recent_events` is present on every `200` response: the newest 50 retained events of one run, oldest first, in the event shape of Section 13.9. The run is the issue's running run, the one `running.dispatch_id` names; else the issue's newest run in run history that carries a dispatch ID, so the recorded CI result, which has none, is passed over. It is `[]` when no such run exists or the run's events are not retained. The route is refetched up to once per second, so it carries 50 events and not the whole buffer; `GET /api/v1/runs/{dispatch_id}/events` serves every retained event of the run, and the change stream serves them live.
   - Resolution runs in this order. The orchestrator state is read first, then run history, so a run that ends between the two reads can appear both as the running session and as the newest run, where the opposite order could hide it from both. An identifier that no live entry holds resolves through run history: the issue ID of the newest run recorded under that identifier is looked up in live state, so an identifier the issue no longer carries (a tracker move keeps the issue ID) answers with the live detail of the issue under the identifier it carries now. `issue_identifier` is the identifier of the entry that decides `status`, and on a `history` response that of the newest run. History is scoped by issue ID, so runs recorded under an older identifier stay on the issue's page.
   - `issue` is present on every `200` response and holds the issue's tracker facts under the names the prompt template's `issue` variable uses: `title`, `url`, `issue_type`, `labels`, and `state`. It is built from the entry that decides `status`, and each member is omitted when that entry holds none. For `running`, `retrying`, and `budget_exhausted` it carries the row's `issue_title`, `issue_url`, `issue_type`, `issue_labels`, and `state`; `labels` is `[]` when the row holds labels and the issue carries none, and absent while the row holds no read of them. For `parked` it carries the record's title, link, type, labels, and `parked_state` as `state`. For `pending_reactions` it carries the same members of the issue's first row, and for `between_stages` those of the issue's row. For `history` it carries the title and link of the issue's newest run, each omitted when empty.
   - `next_outcomes` is present on every `200` response: a list of condition and sentence pairs that say what Sortie does next for the issue, `[]` when no pair applies, a `history` response included. The API design notes give the rules.
@@ -1188,25 +1244,50 @@ Minimum endpoints:
   - Sortie's HTTP server has no authentication, so anyone who can reach it can acknowledge an attention item and take it out of the attention count. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
 
 - `GET /api/v1/events`
-  - Opens a server-sent event stream that signals each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. A signal is never a payload: it names no issue, agent message, or figure, and the stream exposes nothing that `GET /api/v1/state` does not.
-  - Answers `200` with `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` so a default nginx does not buffer. The route takes no parameters and ignores the query string. A method other than `GET` answers `405` with `Allow: GET` and the JSON error envelope.
+  - Opens a server-sent event stream that signals each time anything the JSON API serves changes, so a client refetches what it shows instead of polling, and that carries the agent events of the runs the client subscribes to. A change signal is never a payload: it names no issue, agent message, or figure, and change signals expose nothing that `GET /api/v1/state` does not. An agent-event frame carries an event as the run-events route serves it, so the stream as a whole exposes nothing that the JSON API does not.
+  - Answers `200` with `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` so a default nginx does not buffer. The route reads the `run` query parameter and ignores every other one. A method other than `GET` answers `405` with `Allow: GET` and the JSON error envelope.
   - The change signal is one frame:
 
     ```
-    id: <revision>
+    id: <frame id>
     event: change
     data: {}
 
     ```
 
-    `<revision>` is an unsigned decimal counter that rises with every change. It starts from the wall-clock time at server start in nanoseconds, so a restarted process does not repeat the revisions of the previous one. `data` is the empty JSON object, because a browser dispatches no event whose data is empty; a client ignores members it does not know.
+    The revision is an unsigned decimal counter that rises with every change. It starts from the wall-clock time at server start in nanoseconds, so a restarted process does not repeat the revisions of the previous one. `data` is the empty JSON object, because a browser dispatches no event whose data is empty; a client ignores members it does not know.
+  - Every frame the stream writes, a change signal, a heartbeat, and each run frame below, carries the frame id: the revision, followed by `;<dispatch_id>:<seq>` for each subscribed run in the order of its `run` parameter, where `<seq>` is the `seq` of the run's last event the stream wrote, or the run's cursor while it wrote none (`0` for a subscription without one). The revision part is that of the last change signal the stream wrote or, when it wrote none, the revision part of the frame id the stream opened with, so a run frame never advances the revision a client has seen. A stream with no run subscribed carries the revision alone. A dispatch ID contains neither `;` nor `:`.
   - A signal follows each change after the change is applied, so a refetch made after a signal sees every change the signal counted. Signals come from every event-loop iteration that ends a tick, a refresh, a worker exit, a retry, a request that makes a retry due, or a request that records an acknowledgement; from every message of a running agent session (an agent event, a turn start, a self-review progress report, or an unaccounted-turn count); from the start of shutdown; and from every load of the workflow file by the watcher, whether it succeeds or fails. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, the elapsed times a client computes from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
   - A stream writes at most one change signal per second. The first change after a quiet second is written at once; the changes made during a second are written together as one signal when it ends, and none is dropped. Two consecutive signals on one stream never carry the same `id`.
-  - Reconnect is decided by exact string equality of the `Last-Event-ID` request header with the current revision, never by ordering. An equal value opens a stream with no signal until the next change. An absent header, an earlier revision, a revision of an earlier process, or any other string gets one signal at once.
+  - Reconnect is decided by exact string equality of the revision part of the `Last-Event-ID` request header, the text before its first `;`, with the current revision, never by ordering. An equal value opens a stream with no signal until the next change. An absent header, an earlier revision, a revision of an earlier process, or any other string gets one signal at once.
+  - A client subscribes to the agent events of a run with `run=<dispatch_id>` or `run=<dispatch_id>:<seq>`, repeatable, at most 16 per connection. Without `<seq>` the stream replays every retained event of the run; with it, replay starts after that `seq`. The cursor is a query parameter because `EventSource` cannot set a header on its first connection. A `run` value that is not a dispatch ID optionally followed by `:` and a decimal `seq`, a dispatch ID given twice, and more than 16 `run` parameters answer `400` with the error code `invalid_parameter` and open no stream.
+  - On reconnect the cursors of `Last-Event-ID` take precedence over those of the query: for each run the `run` parameters name, a cursor the header carries for that dispatch ID replaces the query's cursor. The query alone decides which runs are subscribed, and a header cursor for a run the query does not name is ignored. The cursors so resolved are those of the frame id the stream opens with.
+  - A subscribed run gets these frames, beside the change signals:
+
+    ```
+    id: <frame id>
+    event: agent_event
+    data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","seq":43,"at":"2026-02-24T20:14:59Z","event":"notification","message":"Working on tests","text":"Working on tests"}
+
+    id: <frame id>
+    event: run_ended
+    data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","last_seq":43}
+
+    id: <frame id>
+    event: reset
+    data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","reason":"cursor_expired","first_seq":12}
+
+    ```
+
+    - `agent_event` carries one retained event: the run's `dispatch_id` and the members of the event shape of Section 13.9.
+    - `run_ended` follows the run's last event, once the run has ended and the stream has written every retained event after the cursor. `last_seq` is the `seq` of the run's newest retained event. The stream drops the subscription and keeps the run's final cursor in the frame id, so a reconnect with the same query replays nothing and gets `run_ended` again.
+    - `reset` with `reason` `cursor_expired` says the cursor fell behind retention: the events between the cursor and `first_seq` were evicted. The same stream then writes every retained event of the run from `first_seq`, and the reset's frame id carries `first_seq` minus one as the run's cursor. A client keeps what it holds and marks the gap; it fetches nothing.
+    - `reset` with `reason` `not_retained` says the run's events are not retained, by the rule of the run-events route's `404`. It carries no `first_seq`, the stream drops the subscription, the run leaves the frame id, and no other frame of the run follows.
+  - Run frames are never coalesced and are written only for subscribed runs, as soon as the stream is woken, outside the one-per-second bound of change signals, in `seq` order within a run. Subscriptions leave change signals as they are: payload-free, coalesced, at most one per second, and produced by every agent event.
   - A heartbeat is written every 15 seconds, counted from the stream's start.
-  - The server's per-request write timeout does not end a stream. Each frame carries its own write deadline of 2 seconds, set before the write and cleared after it, so an idle stream holds none. A client that stops reading is dropped once a frame cannot be written within 2 seconds; until then it holds one pending change at most and slows no other client and not the event loop.
+  - The server's per-request write timeout does not end a stream. Each frame carries its own write deadline of 2 seconds, set before the write and cleared after it, so an idle stream holds none. A client that stops reading is dropped once a frame cannot be written within 2 seconds; until then it holds one pending change at most and no queue of agent events, and slows no other client and not the event loop. A write of run frames is one batch under one such deadline (Section 13.9).
   - Shutdown ends every open stream as soon as it begins, and the connection stops counting as active, so graceful shutdown does not wait for a stream. A stream opened during shutdown answers `200` with headers only and ends. The route never answers `503`, because a browser does not reconnect after a non-`200` answer. Browser reconnects to the restarting process reach a closed listener and are refused until the restarted process listens; behind a reverse proxy they get `502`, which closes the stream for good.
-  - Reconnect with backoff: a client whose stream is closed (`EventSource.readyState` is `CLOSED` after an `error` event, as a non-`200` answer or a wrong `Content-Type` leaves it) opens a new stream after a delay that doubles from 1 second up to 30 seconds while new streams keep failing, and returns to 1 second once one opens. A new stream carries no `Last-Event-ID`, so its opening change signal makes the client refetch.
+  - Reconnect with backoff: a client whose stream is closed (`EventSource.readyState` is `CLOSED` after an `error` event, as a non-`200` answer or a wrong `Content-Type` leaves it) opens a new stream after a delay that doubles from 1 second up to 30 seconds while new streams keep failing, and returns to 1 second once one opens. A new stream carries no `Last-Event-ID`, so its opening change signal makes the client refetch, and the client writes the last `seq` it holds of each run into that run's `run` parameter, so no event is replayed twice or missed.
   - The heartbeat is an event frame:
 
     ```
@@ -1216,7 +1297,7 @@ Minimum endpoints:
 
     ```
 
-    `<last>` is the `id` of the last change signal the stream wrote or, when it wrote none, the `Last-Event-ID` it opened with. A heartbeat without an `id` line would clear the cursor the reconnect rule reads. `data` is the empty JSON object. A browser dispatches the heartbeat only to `heartbeat` listeners, never to `message` or `change` listeners. On a healthy stream at most 16 seconds pass between two frames.
+    `<last>` is the frame id as of the heartbeat: the revision part of the last change signal the stream wrote, or of the frame id it opened with, and the current cursor of every subscribed run. A heartbeat without an `id` line would clear the cursors the reconnect rule reads. `data` is the empty JSON object. A browser dispatches the heartbeat only to `heartbeat` listeners, never to `message` or `change` listeners. On a healthy stream at most 16 seconds pass between two frames.
   - Idle timeout: a client whose open stream delivers no event, change signal or heartbeat, for 45 seconds closes it and opens a new one with the same backoff. This recovers a stream that died without the browser receiving a FIN or RST, for example a laptop that wakes holding a connection the server dropped while it slept.
 
 API design notes:
@@ -1376,6 +1457,7 @@ API design notes:
   - `estimated_cost_usd` is the run's estimate under `token_rates` for its agent kind, and `cost_status` says why it is absent or partial. `unmeasured` marks a run that reported no usage. `estimated` marks a priced run, and a measured run that spent nothing, classes and total alike, is `0` and `estimated` whether or not its kind has a rate, because a finished run's figure is final: this is how the recorded CI result, which has no agent kind, reads. `unpriced` marks a run that spent tokens under a kind with no complete rate entry, including spend reported as a total without classes, which is never a free estimate. `partial` marks an estimate that is a lower bound because the run recorded an unaccounted turn. A running row prices a measured session that has spent nothing as `unpriced` when its kind has no rate, because that session can still spend.
   - `self_review` is `null` when the run carries no review metadata or the metadata cannot be decoded. Otherwise it holds `final_verdict`, which is `none` when the run recorded an empty verdict, `total_iterations`, and `cap_reached`.
   - `chain_id`, `stage_previous`, and `stage_previous_outcome` are the stage lineage the run was dispatched with. `stage_target` and `stage_result` are the hop decision the run's exit reached, recorded after the row is appended, so a read between the two serves the run without its decision and the next read serves it.
+  - `dispatch_id` is the dispatch ID of the run, the key of its retained events (Section 13.9). It is `""` on the recorded CI result, which no dispatch produced, and `null` on a run recorded before run history held dispatch IDs. Neither has retained events, and a client offers no event view for them.
   - `origin_recorded` is false for a run recorded before the origin columns existed, and `trigger`, `reaction_kind`, `reaction_config_key`, `session_id`, and `ssh_host` are all `null` on such a run. Where `origin_recorded` is true, each key is `""` when the run has none: no retry trigger, no reaction, no session, or a local run. `trigger` alone is `null` on a run dispatched by a retry whose row never stored what started it, as a retry queued before the origin was recorded can be. A client never reads an unrecorded origin as a local poll-tick dispatch.
   - `trigger` is what started the retry whose fire dispatched the run: the `sortie_retries_total` label of the schedule that created that retry (`error`, `continuation`, `stall`, or `ci_fix`), kept through every put-back by the retry timer. The `timer` label stays on the retry row and the metric. It is `""` for a dispatch from the poll tick and for a retry a reaction other than the CI fix started, which `reaction_kind` names. `reaction_config_key` is present with the meaning a retry row gives it, and is `""` or `null` exactly when `reaction_kind` is. `session_id` is the agent session the run used, `""` when it started none, and `ssh_host` is the SSH worker the run executed on. The recorded CI result carries `""` in each origin key, because it records a verdict and nothing started it.
   - `issue_outcome` is how the issue's latest work ended, as Section 4.1.8 defines it, or `null` when Sortie observed no ending since it last picked the issue up. The key is always present. The value is the issue's, so every run of one issue on a page carries the same object, and it is never the outcome of one run. Sortie serves it as recorded, whatever the issue's live state: a handed-off issue that waits on a reaction or runs a reaction continuation serves its handoff beside its live members, and the live entry, not the outcome, says Sortie still holds the issue. A running issue picked up again after an earlier ending, and an issue that ended before outcomes were recorded, serve `null`.
@@ -1512,3 +1594,48 @@ The document answers every path under `/ui/` that is not an asset, so a deep lin
 A run that ends on the `needs-human-review` status signal, or on a `no-change-needed` declaration, and passes through the self-review phase records review metadata on `run_history` exactly as a run that reached the phase by exhausting the turn budget does: the JSON document under `review_metadata`, described in Section 19, carries a value rather than null for this population.
 
 The `after_run` hook on that path receives the run's real `SORTIE_SELF_REVIEW_STATUS` value (`passed`, `cap_reached`, or `error`) instead of the `disabled` value it receives when self-review is not configured or the run did not reach the phase. `SORTIE_SELF_REVIEW_SUMMARY_PATH` is populated on the same terms as on any other path that ran the phase. A declared run supplies both values on these same terms whether the phase confirms the declaration or retracts it: the retraction is a separate outcome recorded in the run's own log, not a change to what this section populates.
+
+### 13.9 Agent event retention
+
+Sortie retains the agent events of each run, so an operator sees what an agent does while it runs and what a run did before they looked. The unit is one run, one dispatch, keyed by its dispatch ID. Dispatch IDs are minted per dispatch and never reused, across restarts included, so a cursor can never match another run. Each run numbers its retained events with `seq`, from 1, rising by one per retained event; eviction never renumbers.
+
+Retention has two tiers, bounded by count and by bytes:
+
+- **Memory.** Each running run keeps its newest 1,000 retained events, and at most 256 KiB measured as the sum of the encoded events, whichever bound is reached first. The oldest events are evicted, and `seq` keeps rising.
+- **Store.** At worker exit the run's buffer is written to the `run_events` table once, in the transaction that appends the run's `run_history` row (Section 19.2), and the memory buffer is then released. A failed write is logged at `Warn` and the events are dropped, with no retry. No event is written to the store while the run is running.
+- **Limits.** A finished run's events stay readable for 7 days after the run's `completed_at`. The stored events of every run together hold at most 64 MiB of encoded events. Each write first deletes the events of runs that ended more than 7 days ago, then deletes whole runs, oldest `completed_at` first, until the total is within 64 MiB.
+- **Durability** is that of the run's `run_history` row: a graceful shutdown ends every worker and keeps both, and a crash loses both for every run in flight.
+
+A run's events are not retained when its stored events were pruned, when it was lost in a crash, when it was recorded before retention existed, when it retained no event, and when no run carries the dispatch ID. Every surface says so explicitly: the run-events route answers `404`, the change stream answers a subscription with a `not_retained` reset, and `recent_events` is `[]`. A run that kept only the tail of its events serves `first_seq` above 1, so a client says that earlier events are gone.
+
+Every normalized event type of Section 10.3 is retained, except:
+
+- a `notification` or `other_message` with an empty message, which is a liveness ping;
+- `token_usage`, whose run totals attach to the turn-ending events instead;
+- a `notification`, `other_message`, or `malformed` event whose type and message equal those of the run's newest retained event.
+
+An event that is not retained still advances `last_event_at` and still produces a change signal.
+
+A retained event, as every surface serves it:
+
+| Key | Present on | Value |
+|---|---|---|
+| `seq` | every event | The event's number within the run |
+| `at` | every event | The event's timestamp, RFC 3339 in UTC |
+| `event` | every event | The normalized event type |
+| `message` | every event | The event's message, masked as Section 15.3 states when it is stored and again when it is served, then cut to its first 1,000 runes; `""` when the event carries none |
+| `text` | every event | One operator-facing sentence the server words from the event when it serves it (Section 13.6); never stored |
+| `session_id` | `session_started` | The session the run started |
+| `tool_name`, `duration_ms`, `tool_error` | `tool_result` | The tool, its duration in milliseconds, and whether it returned an error; `tool_name` and `duration_ms` are omitted when the adapter reported none |
+| `usage` | `turn_completed`, `turn_failed`, `turn_cancelled`, `turn_ended_with_error`, `turn_input_required` | The run's token totals after the event, with the members of a running row's `tokens`; `null` when the run has measured no usage, as a run whose resolved `usage_arrival` is `none` never has, so an unmeasured figure never reads as zero |
+
+Masking precedes the cut, so a secret straddling the bound is never half revealed. The agent process ID, rate limits, the model name, and the API duration are not retained: the process ID and the model say nothing about the run's progress, rate limits are opaque and their latest value is already in the snapshot, and the API duration is part of a total the run already reports.
+
+No surface exposes per-session log files or their host paths. Sortie writes no per-session log file, a host path on an unauthenticated API discloses the host's layout, and a raw runtime transcript bypasses the normalized vocabulary.
+
+A client that stops reading never delays the event loop:
+
+- The event loop appends an event to the run's buffer under the buffer's own lock, which is never held across I/O, and then wakes the run's subscribers through a flag of capacity 1 with a non-blocking send, the mechanism change signals use.
+- Each stream registers its flag before its first read. It then copies the events after its cursor, from memory while the run runs and from the stored copy once it has ended, writes them as one batch under the 2-second per-frame write deadline, waits on its flag, and repeats. Registration before the first read and reads by cursor leave no window in which an event is lost or written twice, and at worker exit the stored copy is written before memory is released, so a stream moving from one to the other finds every event in one place or the other.
+- A stream whose cursor fell behind retention gets a `cursor_expired` reset. A stream that misses its write deadline is closed, and its client reconnects with its cursor. No stream holds a queue of its own.
+- A stream that never reads, while 10,000 events are appended to its run, leaves every append wait-free, and is closed within 2 seconds of its blocked write.

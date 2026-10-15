@@ -107,7 +107,7 @@ Three invariants bind every declared pair and every rule pair a kind states:
   - MUST: every value a kind's declaration or rule set can resolve to lies inside the declared vocabulary, so a consumer never receives a pair no test could have covered.
 
 A kind declaring `turn_end` reports each figure a turn settles as exactly one `token_usage` event, after the turn's work and before its terminal event, carrying the run-cumulative snapshot that the terminal event and `TurnResult.Usage` also carry, the model when the figure's source names one, and no `api_duration_ms`. Its `UsageMeasured` is true from the first turn whose recovery produced a figure to the end of the session. The adapter layer implements this report once for every `turn_end` kind, which supplies the figure and the model and emits no `token_usage` event of its own.
-- `tool_result`: a tool call completed. Optional fields: `tool_name` (string), `duration_ms` (int64).
+- `tool_result`: a tool call completed. Optional fields: `tool_name` (string), `duration_ms` (int64), `tool_error` (bool, true when the call returned an error).
 - `notification`: informational message from the agent
 - `other_message`: unclassified message
 - `malformed`: unparseable or unrecognized message
