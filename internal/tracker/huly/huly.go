@@ -50,6 +50,19 @@ type HulyAdapter struct {
 	socialID     string
 	issueURLBase string
 
+	// accountUUID is the caller's account, made member and owner of the
+	// projects plan sync creates.
+	accountUUID string
+
+	// requiredStates are the configured state names a project's workflow
+	// must have; planNames are the configured epic and story task type
+	// names. Plan project inspection checks both.
+	requiredStates []string
+	planNames      [2]string
+
+	// ensureMu serializes project creation.
+	ensureMu sync.Mutex
+
 	// StateSource supplies the workflow's current state lists.
 	*issuekit.StateSource
 	log *slog.Logger
@@ -143,6 +156,7 @@ func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 	if err := a.resolvePlanTypes(ctx, fields["epic_type"], fields["story_type"]); err != nil {
 		return nil, err
 	}
+	a.accountUUID = conn.accountUUID
 	return a, nil
 }
 
@@ -172,6 +186,7 @@ func newAdapter(ctx context.Context, rpc rpcClient, projectIdentifier, socialID,
 		socialID:        socialID,
 		issueURLBase:    issueURLBase,
 		log:             log,
+		requiredStates:  configured,
 		projectStatuses: map[string][]string{},
 		statuses:        map[string]hulyStatus{},
 	}

@@ -77,6 +77,7 @@ type hulyTaskType struct {
 // lists the project's task types.
 func (a *HulyAdapter) resolvePlanTypes(ctx context.Context, epicName, storyName string) error {
 	epicName, storyName = strings.TrimSpace(epicName), strings.TrimSpace(storyName)
+	a.planNames = [2]string{epicName, storyName}
 	if epicName == "" && storyName == "" {
 		return nil
 	}

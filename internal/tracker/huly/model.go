@@ -40,6 +40,7 @@ type hulyProject struct {
 
 type hulyProjectType struct {
 	ID       string `json:"_id"`
+	Name     string `json:"name"`
 	Statuses []struct {
 		ID string `json:"_id"`
 	} `json:"statuses"`

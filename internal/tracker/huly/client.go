@@ -94,6 +94,7 @@ type connection struct {
 	rpc          *httpRPC
 	login        workspaceLogin
 	socialID     string
+	accountUUID  string
 	frontBaseURL string
 }
 
@@ -151,7 +152,7 @@ func connect(ctx context.Context, frontURL, token, workspace, userAgent string) 
 		return nil, payloadError("decode account", err)
 	}
 
-	return &connection{rpc: rpc, login: login, socialID: acct.PrimarySocialID, frontBaseURL: frontURL}, nil
+	return &connection{rpc: rpc, login: login, socialID: acct.PrimarySocialID, accountUUID: acct.UUID, frontBaseURL: frontURL}, nil
 }
 
 // accountRPC calls one method of the account service's JSON-RPC endpoint.
