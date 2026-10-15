@@ -58,47 +58,66 @@ function Step({ marker, hasNext, title, aside, detail }: StepProps) {
   );
 }
 
-interface Listed {
+interface Join {
   chain: number;
+  stage: string;
   position: number;
   length: number;
 }
 
-interface ChainListProps {
+interface ChainPlan {
   number: number;
+  /** The stages this chain lists itself, from its entry up to the stage where it joins another. */
   stages: readonly string[];
+  length: number;
+  join?: Join;
+}
+
+// A chain whose second stage an earlier chain already lists shows as that
+// stage's "also entered from" line rather than as a chain of its own.
+function planChains(chains: readonly (readonly string[])[]): ChainPlan[] {
+  const listed = new Map<string, Omit<Join, "stage">>();
+  const plans: ChainPlan[] = [];
+  for (const chain of chains) {
+    if (chain.length > 1 && listed.has(chain[1])) {
+      continue;
+    }
+    const number = plans.length + 1;
+    const stages: string[] = [];
+    let join: Join | undefined;
+    for (const [index, name] of chain.entries()) {
+      const earlier = listed.get(name);
+      if (index > 0 && earlier !== undefined) {
+        join = { ...earlier, stage: name };
+        break;
+      }
+      listed.set(name, { chain: number, position: index + 1, length: chain.length });
+      stages.push(name);
+    }
+    plans.push(
+      join === undefined
+        ? { number, stages, length: chain.length }
+        : { number, stages, length: chain.length, join },
+    );
+  }
+  return plans;
+}
+
+interface ChainListProps {
+  plan: ChainPlan;
   rules: readonly ShapeRule[];
-  listed: Map<string, Listed>;
   handoff: string;
   hasReactions: boolean;
 }
 
-function ChainList({ number, stages, rules, listed, handoff, hasReactions }: ChainListProps) {
-  const steps: ReactNode[] = [];
-  for (const [index, name] of stages.entries()) {
-    const joined = listed.get(name);
-    if (index > 0 && joined !== undefined) {
-      steps.push(
-        <Step
-          key={name}
-          marker={<ArrowRightIcon />}
-          hasNext={false}
-          title={
-            <>
-              Joins chain {joined.chain} at <span className="font-mono">{name}</span>
-            </>
-          }
-          detail={`Stage ${joined.position} of ${joined.length}`}
-        />,
-      );
-      break;
-    }
-    listed.set(name, { chain: number, position: index + 1, length: stages.length });
+function ChainList({ plan, rules, handoff, hasReactions }: ChainListProps) {
+  const { stages, join } = plan;
+  const steps: ReactNode[] = stages.map((name, index) => {
     const rule = rules.find((candidate) => candidate.name === name);
     const previous = stages[index - 1];
     const alsoFrom =
       index === 0 ? [] : rules.filter((other) => other.next === name && other.name !== previous);
-    steps.push(
+    return (
       <Step
         key={name}
         marker={index + 1}
@@ -115,32 +134,44 @@ function ChainList({ number, stages, rules, listed, handoff, hasReactions }: Cha
                 {alsoFrom.map((other, at) => (
                   <Fragment key={at}>
                     {at === 0 ? undefined : ", "}
-                    {ruleName(other)} ({selectionText(other)})
+                    {ruleName(other)} ({selectionText(other)}, {other.agent_kind} agent)
                   </Fragment>
                 ))}
               </span>
             )}
           </>
         }
-      />,
+      />
     );
-    if (index === stages.length - 1) {
-      steps.push(
-        <Step
-          key="handoff"
-          marker={<ArrowRightIcon />}
-          hasNext={false}
-          title={handoff}
-          detail={`Handoff state, then ${hasReactions ? "the reactions take over" : "a person takes it from there"}`}
-        />,
-      );
-    }
-  }
+  });
+  steps.push(
+    join === undefined ? (
+      <Step
+        key="handoff"
+        marker={<ArrowRightIcon />}
+        hasNext={false}
+        title={handoff}
+        detail={`Handoff state, then ${hasReactions ? "the reactions take over" : "a person takes it from there"}`}
+      />
+    ) : (
+      <Step
+        key="join"
+        marker={<ArrowRightIcon />}
+        hasNext={false}
+        title={
+          <>
+            Joins chain {join.chain} at <span className="font-mono">{join.stage}</span>
+          </>
+        }
+        detail={`Stage ${join.position} of ${join.length}`}
+      />
+    ),
+  );
   return (
     <div className="flex flex-col gap-sm">
       <h3 className="text-body-md font-medium text-ink">
-        Chain {number}
-        <span className="ml-xs font-regular text-ink-muted">{fmtCount(stages.length)} stages</span>
+        Chain {plan.number}
+        <span className="ml-xs font-regular text-ink-muted">{fmtCount(plan.length)} stages</span>
       </h3>
       <ol>{steps}</ol>
     </div>
@@ -190,24 +221,15 @@ export function DispatchSection({
   const inChains = new Set(chains.flat());
   const others = rules.filter((rule) => rule.name === undefined || !inChains.has(rule.name));
   const hasCatchAll = rules.some((rule) => rule.selected_by === "catch_all");
-  const listed = new Map<string, Listed>();
-  const lists: ReactNode[] = [];
-  for (const stages of chains) {
-    if (stages.length > 1 && listed.has(stages[1])) {
-      continue;
-    }
-    lists.push(
-      <ChainList
-        key={lists.length}
-        number={lists.length + 1}
-        stages={stages}
-        rules={rules}
-        listed={listed}
-        handoff={handoff}
-        hasReactions={hasReactions}
-      />,
-    );
-  }
+  const lists = planChains(chains).map((plan) => (
+    <ChainList
+      key={plan.number}
+      plan={plan}
+      rules={rules}
+      handoff={handoff}
+      hasReactions={hasReactions}
+    />
+  ));
 
   return (
     <Panel title="Dispatch">
