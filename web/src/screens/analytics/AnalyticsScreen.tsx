@@ -14,7 +14,7 @@ import { GroupTable } from "./GroupTable";
 import { SummaryTiles } from "./SummaryTiles";
 
 import type { AnalyticsRange } from "@/api/queries";
-import type { ChainGroup, Group, Report } from "@/api/types.gen";
+import type { Group, Report } from "@/api/types.gen";
 import type { NameColumn } from "./GroupTable";
 
 const RANGE_PARAM = "range";
@@ -52,13 +52,6 @@ const RULE_COLUMN: NameColumn<Group> = {
   header: "Rule",
   cell: (row) => <NameText name={row.name} label={ruleLabel(row.name)} />,
 };
-const CHAIN_COLUMNS: NameColumn<ChainGroup>[] = [
-  {
-    header: "Pass",
-    cell: (row) => <ServedText text={`${row.issue} · ${(row.stages ?? []).join(" → ")}`} />,
-  },
-  { header: "Last hop", cell: (row) => <ServedText text={row.last_hop || "none"} /> },
-];
 const MODEL_COLUMN: NameColumn<Group> = {
   header: "Model",
   cell: (row) => <NameText name={row.name} label={modelLabel(row.name)} />,
@@ -90,15 +83,13 @@ const ORIGIN_COLUMN: NameColumn<Group> = {
 interface BreakdownsProps {
   report: Report;
   hasRules: boolean;
-  hasChains: boolean;
   hasRates: boolean;
 }
 
-function Breakdowns({ report, hasRules, hasChains, hasRates }: BreakdownsProps) {
+function Breakdowns({ report, hasRules, hasRates }: BreakdownsProps) {
   const tier = report.schema_tier;
   const common = { tier, hasRates };
   const byRule = report.by_rule ?? [];
-  const byChain = report.by_chain ?? [];
   const byModel = report.by_model ?? [];
   const byAdapter = report.by_adapter ?? [];
   const byStatus = report.by_status ?? [];
@@ -109,9 +100,6 @@ function Breakdowns({ report, hasRules, hasChains, hasRates }: BreakdownsProps) 
     <>
       {hasRules && byRule.length > 0 ? (
         <GroupTable title="By rule" nameColumns={[RULE_COLUMN]} rows={byRule} {...common} />
-      ) : undefined}
-      {hasChains && byChain.length > 0 ? (
-        <GroupTable title="By stage chain" nameColumns={CHAIN_COLUMNS} rows={byChain} {...common} />
       ) : undefined}
       {byModel.length > 0 ? (
         <GroupTable
@@ -219,7 +207,6 @@ export function AnalyticsScreen() {
               <Breakdowns
                 report={report}
                 hasRules={(config?.dispatch.rules ?? []).length > 0}
-                hasChains={(config?.dispatch.chains ?? []).length > 0}
                 hasRates={config?.token_rates != null}
               />
             </div>
