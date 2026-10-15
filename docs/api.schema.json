@@ -1637,6 +1637,9 @@
         },
         "status": {
           "type": "string"
+        },
+        "summary_text": {
+          "type": "string"
         }
       },
       "required": [
@@ -1645,7 +1648,8 @@
         "last_success_at",
         "consecutive_failures",
         "failing_since",
-        "next_poll_at"
+        "next_poll_at",
+        "summary_text"
       ],
       "type": "object"
     },

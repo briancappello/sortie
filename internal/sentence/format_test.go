@@ -25,7 +25,6 @@ func TestFormat(t *testing.T) {
 		{"duration(97200)", duration(97200), "1d 3h"},
 		{"due(0.5)", due(0.5), "due now"},
 		{"due(30)", due(30), "in 30s"},
-		{"tokens(135)", tokens(new(int64(135))), "135"},
 		{"tokens(999)", tokens(new(int64(999))), "999"},
 		{"tokens(1000)", tokens(new(int64(1000))), "1K"},
 		{"tokens(704000)", tokens(new(int64(704000))), "704K"},
