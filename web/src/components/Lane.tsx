@@ -29,7 +29,8 @@ const MARKER: Record<LaneMarker, string> = {
   failed: "size-3.5 border-2 border-error-fill bg-canvas",
   degraded: "size-3.5 border-2 border-error-fill bg-canvas",
   clear: "size-3.5 bg-track-done",
-  ended: "size-3.5 border-2 border-track-done bg-canvas",
+  ended:
+    "size-3.5 border-2 border-track-done bg-[radial-gradient(circle,var(--color-track-done)_0_3px,var(--color-canvas)_3px)]",
 };
 
 const DOT: Record<StationState, string> = {

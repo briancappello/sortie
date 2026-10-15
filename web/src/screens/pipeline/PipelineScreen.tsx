@@ -108,7 +108,13 @@ function Legend({ hasReactions, hasChains }: LegendProps) {
         needs attention
       </span>
       <span className="inline-flex items-center gap-xs">
-        <i aria-hidden="true" className={cn(swatch, "border-2 border-track-done bg-canvas")} />
+        <i
+          aria-hidden="true"
+          className={cn(
+            swatch,
+            "border-2 border-track-done bg-[radial-gradient(circle,var(--color-track-done)_0_2.5px,var(--color-canvas)_2.5px)]",
+          )}
+        />
         ended today
       </span>
       {hasReactions ? (
@@ -119,6 +125,13 @@ function Legend({ hasReactions, hasChains }: LegendProps) {
               className={cn(swatch, "border-[1.5px] border-dashed border-track-done")}
             />
             a reaction waiting
+          </span>
+          <span className="inline-flex items-center gap-xs">
+            <i
+              aria-hidden="true"
+              className={cn(swatch, "border-[1.5px] border-track-todo bg-canvas")}
+            />
+            nothing waiting
           </span>
           <span className="inline-flex items-center gap-xs">
             <XIcon aria-hidden="true" className="size-3 text-ink-body" />
