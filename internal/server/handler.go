@@ -70,7 +70,7 @@ type runningEntryResponse struct {
 	LastMessage         string                 `json:"last_message"`
 	StartedAt           time.Time              `json:"started_at"`
 	DispatchedAt        *time.Time             `json:"dispatched_at"`
-	LastEventAt         time.Time              `json:"last_event_at"`
+	LastEventAt         *time.Time             `json:"last_event_at"`
 	WorkspacePath       string                 `json:"workspace_path"`
 	SSHHost             string                 `json:"ssh_host,omitempty"`
 	Tokens              tokenInfo              `json:"tokens"`
@@ -120,6 +120,20 @@ type runningEntryResponse struct {
 
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
+
+	// DispatchID keys the run's retained events.
+	DispatchID string `json:"dispatch_id"`
+
+	// QuietAt and StallAt are half and all of agent.stall_timeout_ms after
+	// the last event, else after the start; both are null with stall
+	// detection off. StallText and StallTextFull are null until QuietAt
+	// has passed and with stall detection off, and StallOffText is null
+	// while it is on.
+	QuietAt       *time.Time `json:"quiet_at"`
+	StallAt       *time.Time `json:"stall_at"`
+	StallText     *string    `json:"stall_text"`
+	StallTextFull *string    `json:"stall_text_full"`
+	StallOffText  *string    `json:"stall_off_text"`
 }
 
 // tokenInfo carries a running row's five token figures. The members
@@ -424,7 +438,7 @@ type issueDetailResponse struct {
 	Parked           *parkedEntryResponse      `json:"parked"`
 	PendingReactions []pendingReactionResponse `json:"pending_reactions"`
 	BetweenStages    *stageHopResponse         `json:"between_stages"`
-	RecentEvents     []any                     `json:"recent_events"`
+	RecentEvents     []runEventResponse        `json:"recent_events"`
 	LastError        *string                   `json:"last_error"`
 	Tracked          map[string]any            `json:"tracked"`
 	History          *issueHistoryResponse     `json:"history"`
@@ -525,7 +539,10 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 		LastMessage:         e.LastAgentMessage,
 		StartedAt:           e.StartedAt.UTC(),
 		DispatchedAt:        utcOrNil(e.StageLineage.DispatchedAt),
-		LastEventAt:         e.LastAgentTimestamp.UTC(),
+		LastEventAt:         utcOrNil(e.LastAgentTimestamp),
+		DispatchID:          e.DispatchID,
+		QuietAt:             utcOrNil(e.QuietAt),
+		StallAt:             utcOrNil(e.StallAt),
 		WorkspacePath:       e.WorkspacePath,
 		SSHHost:             e.SSHHost,
 		ModelName:           e.ModelName,
@@ -848,6 +865,18 @@ func toPendingReactionResponses(rows []orchestrator.SnapshotPendingReaction, wor
 	return responses
 }
 
+// setRunningSentences sets the status pair, the stall pair, and the stall-off
+// sentence of a running row.
+func setRunningSentences(row *runningEntryResponse, e orchestrator.SnapshotRunningEntry, words sentence.Context) {
+	row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Running: &e}, words)
+	if stall, quiet := sentence.Stall(&e, words); quiet {
+		row.StallText, row.StallTextFull = &stall.Short, &stall.Long
+	}
+	if text, off := sentence.StallOff(&e); off {
+		row.StallOffText = &text
+	}
+}
+
 // sentencesOf returns the short and long status sentence of one entry.
 func sentencesOf(entry sentence.Entry, words sentence.Context) (short, long string) {
 	status := sentence.For(entry, words)
@@ -910,7 +939,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRa
 	running := make([]runningEntryResponse, 0, len(snap.Running))
 	for _, e := range snap.Running {
 		row := toServedRunningEntry(e, snap, tokenRates)
-		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Running: &e}, words)
+		setRunningSentences(&row, e, words)
 		running = append(running, row)
 	}
 
@@ -1147,6 +1176,10 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("issue identifier %q not found in %s", identifier, notFoundIn))
 		return
 	}
+	if detail.RecentEvents, err = s.recentEvents(r.Context(), detail); err != nil {
+		s.historyReadFailed(w, r, err)
+		return
+	}
 
 	for _, outcome := range sentence.NextOutcomes(detail.situation, words) {
 		detail.NextOutcomes = append(detail.NextOutcomes, nextOutcomeResponse(outcome))
@@ -1236,7 +1269,7 @@ func historyOnlyDetail(issueID string, newest RunHistoryEntry) *issueDetailRespo
 		Issue:            issueResponse{Title: redact.Mask(newest.IssueTitle), URL: redact.Mask(newest.IssueURL)},
 		Attempts:         &attemptsInfo{},
 		PendingReactions: []pendingReactionResponse{},
-		RecentEvents:     []any{},
+		RecentEvents:     []runEventResponse{},
 		Tracked:          map[string]any{},
 		NextOutcomes:     []nextOutcomeResponse{},
 	}
@@ -1560,7 +1593,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		if matches(e.Identifier, e.IssueID) {
 			situation.Running = &e
 			runEntry = new(toServedRunningEntry(e, snap, rates))
-			runEntry.StatusText, runEntry.StatusTextFull = sentencesOf(sentence.Entry{Running: &e}, words)
+			setRunningSentences(runEntry, e, words)
 			break
 		}
 	}
@@ -1736,7 +1769,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		Parked:           parkedEntry,
 		PendingReactions: pending,
 		BetweenStages:    hopEntry,
-		RecentEvents:     []any{},
+		RecentEvents:     []runEventResponse{},
 		LastError:        lastError,
 		Tracked:          map[string]any{},
 		StatusText:       statusText,

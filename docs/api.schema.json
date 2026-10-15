@@ -1001,7 +1001,9 @@
         "recent_events": {
           "anyOf": [
             {
-              "items": {},
+              "items": {
+                "$ref": "#/$defs/RunEventResponse"
+              },
               "type": "array"
             },
             {
@@ -2164,6 +2166,92 @@
       ],
       "type": "object"
     },
+    "RunEventResponse": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "event": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "tool_error": {
+          "type": "boolean"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "event",
+        "message",
+        "text"
+      ],
+      "type": "object"
+    },
+    "RunEventsResponse": {
+      "properties": {
+        "dispatch_id": {
+          "type": "string"
+        },
+        "events": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RunEventResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_seq": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "dispatch_id",
+        "first_seq",
+        "events"
+      ],
+      "type": "object"
+    },
     "RunResponse": {
       "properties": {
         "agent_kind": {
@@ -2186,6 +2274,16 @@
         },
         "cost_status": {
           "type": "string"
+        },
+        "dispatch_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "dispatched_at": {
           "anyOf": [
@@ -2384,6 +2482,7 @@
         "reaction_config_key",
         "session_id",
         "ssh_host",
+        "dispatch_id",
         "stage_chain",
         "issue_outcome"
       ],
@@ -2444,6 +2543,9 @@
           "type": "string"
         },
         "cost_status": {
+          "type": "string"
+        },
+        "dispatch_id": {
           "type": "string"
         },
         "dispatched_at": {
@@ -2525,8 +2627,15 @@
           "type": "string"
         },
         "last_event_at": {
-          "format": "date-time",
-          "type": "string"
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "last_message": {
           "type": "string"
@@ -2536,6 +2645,17 @@
         },
         "pull_request": {
           "$ref": "#/$defs/PullRequestResponse"
+        },
+        "quiet_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "reaction_attempt": {
           "type": "integer"
@@ -2581,6 +2701,47 @@
           "anyOf": [
             {
               "$ref": "#/$defs/StagePositionResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stall_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stall_off_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stall_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stall_text_full": {
+          "anyOf": [
+            {
+              "type": "string"
             },
             {
               "type": "null"
@@ -2710,7 +2871,13 @@
         "issue_estimated_cost_usd",
         "issue_cost_status",
         "status_text",
-        "status_text_full"
+        "status_text_full",
+        "dispatch_id",
+        "quiet_at",
+        "stall_at",
+        "stall_text",
+        "stall_text_full",
+        "stall_off_text"
       ],
       "type": "object"
     },

@@ -911,6 +911,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
 			TokenRates:       tokenRates,
 			RunHistory:       runHistoryReader{store: store},
+			RunEventsFn:      o.RunEvents,
 			Stats:            statsSource{dbPath: dbPath, workflowPath: br.path, rates: tokenRates, rateWarnings: rateWarnings}.report,
 		})
 		o.AddObserver(srv)

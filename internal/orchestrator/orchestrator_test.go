@@ -193,6 +193,14 @@ func (s *stubStore) AppendRunHistory(_ context.Context, run persistence.RunHisto
 	return run, nil
 }
 
+func (s *stubStore) AppendRunHistoryWithEvents(ctx context.Context, run persistence.RunHistory, _ []persistence.RunEvent, _ persistence.RunEventLimits) (persistence.RunHistory, error) {
+	return s.AppendRunHistory(ctx, run)
+}
+
+func (s *stubStore) AppendRunEvents(context.Context, string, string, []persistence.RunEvent, persistence.RunEventLimits) error {
+	return nil
+}
+
 func (s *stubStore) UpsertAggregateMetrics(_ context.Context, m persistence.AggregateMetrics) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

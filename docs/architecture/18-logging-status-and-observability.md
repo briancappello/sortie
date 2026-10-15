@@ -113,7 +113,7 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 - each running row should include `rule_name`, `configured_model`, and `configured_effort`, the dispatch rule the session runs under and the model and reasoning level its resolved settings block carries, empty (and omitted from the JSON form) when unset; `model_name` keeps the model the runtime reported, which can differ from the configured one under routing aliases and runtime fallbacks
 - each running row should include `dispatched_at`, when Sortie dispatched the first run of the issue's current pass, in UTC. A pass is the runs that share a stage chain identifier: a retry, a reaction continuation, the next stage of a stage hop, and a restart continue the pass of the run they follow, so `dispatched_at` stays fixed across them while `started_at` is the start of the session in flight. It is never empty on a running row
 - each running row should include `dispatch_id`, the dispatch ID Sortie minted for the run when it dispatched it. A dispatch ID names one run, is never reused, across restarts included, and is the key under which the run's agent events are retained and streamed (Section 13.9). It is never empty on a running row
-- each running row should include `last_event_at`, `quiet_at`, and `stall_at`, so every client shows the same stall indication from the same rule. `last_event_at` is the time of the run's latest agent event of any type, liveness pings and events that are not retained included, and `null` before the first event. The reference point is `last_event_at`, else `started_at`, the same reference the stall check of Section 8.5 measures from. `quiet_at` is the reference point plus half of `agent.stall_timeout_ms`, and `stall_at` is the reference point plus `agent.stall_timeout_ms`, the value the stall check compares with as of the latest poll tick; the stall check stops the run on the first poll tick after `stall_at`. Both are `null` when stall detection is off (`agent.stall_timeout_ms` of zero or less). The rule lives in the server: a client computes no threshold and only compares its clock with these times
+- each running row should include `last_event_at`, `quiet_at`, and `stall_at`, so every client shows the same stall indication from the same rule. `last_event_at` is the time of the run's latest agent event of any type, liveness pings and events that are not retained included, and `null` before the first event. The reference point is `last_event_at`, else `started_at`, the same reference the stall check of Section 8.5 measures from. `quiet_at` is the reference point plus half of `agent.stall_timeout_ms`, and `stall_at` is the reference point plus `agent.stall_timeout_ms`, the value the stall check compares with as of the latest poll tick; the stall check stops the run on the first poll tick after `stall_at`. Both are `null` when stall detection is off (`agent.stall_timeout_ms` of zero or less). Each running row also serves its stall sentence as `stall_text` and `stall_text_full`, once `generated_at` reaches `quiet_at`; both are `null` before that and with stall detection off. The silence in the sentence is rounded down, so a served sentence is true when served and stays true until the next event. With stall detection off the row serves `stall_off_text`, the sentence that says Sortie will not stop the session as stalled; it is `null` while stall detection is on. The rule lives in the server: a client computes no threshold and only compares its clock with these times
 - each running row should include `stage_lineage` and `stage_position`, where the row's dispatch rule stands on the stage chains. `stage_lineage` names the chain and the stage hop that reached the run, as on a retry row, and is `null` unless a hop reached the run. `stage_position` places the rule on its chain with the hop count against the hop ceiling, and is `null` when the rule is on no chain, so a workflow without stage chains serves `null` on every row. Section 13.7.2 gives the keys
 - each running row that is a reaction continuation should include `reaction_kind` and `reaction_config_key`, the kind of the continuation and the `reactions` key of WORKFLOW.md it is configured under, with `pull_request` (the number and repository of the pull request it works on) and, for a kind that counts tries, `reaction_attempt`, which try of its reaction the session is. A session that is no continuation carries none of the four
 - each running row should include `issue_title`, `issue_url`, and `issue_labels`, the issue's title, web link, and labels as the session was dispatched with them, unchanged for the whole run and the same text the agent's prompt received. `issue_title` and `issue_url` are empty (and omitted from the JSON form) when the tracker returned none; `issue_labels` is always present, an empty list when the issue carries none, lowercase in the tracker's order as Section 11 normalizes them
@@ -203,7 +203,7 @@ If implemented:
 - Treat them as observability-only output.
 - Do not make orchestrator logic depend on humanized strings.
 
-The `text` member of a retained agent event (Section 13.9) is such a summary: one sentence the server words from the event's type and fields each time it serves the event. It is never stored, and a client renders it rather than wording the event itself.
+The `text` member of a retained agent event (Section 13.9) is such a summary: one sentence the server words from the event's type and fields each time it serves the event. It is never stored, and a client renders it rather than wording the event itself. The `text` of a `notification` and an `other_message` is the message itself, never quoted as the agent's words, because adapters also put their own descriptions in these types.
 
 ### 13.7 HTTP Server
 
@@ -225,19 +225,19 @@ Enablement and configuration:
 
 - `GET /` redirects to `/ui/`, where the dashboard application runs (Section 13.7.4).
 - The dashboard is a client-side application that reads only the JSON API below and refetches when the change stream signals a change. Every run-history read, which is History, the older runs of an issue page, and the issue lookup of the command palette, refetches at most once per 5 seconds, and Analytics at most once per 30 seconds, because a run-history refetch rereads every loaded page through the orchestrator's store connection and an Analytics refetch rescans every run in its range. A fetch in flight is never canceled: a signal that arrives during it refetches once, its floor after the fetch ends. A hidden tab does not refetch either screen on a signal.
-- Overview is the first screen. It opens with a headline that says whether anything needs a person, then lists what needs a person (Needs attention), every active issue in the order and with the status the state route serves (Active), and the issues whose runs ended today (Ended today).
-- Pipeline draws the issues Active lists, in its order, and the issues whose work ended today, as one lane each across one row of stations, so an operator sees where along the configured path every issue stands. Lanes keep a stable order: active lanes keep the order of Active, and ended lanes follow them, oldest ending first. The stations are those of the issue page lane and are the same for every issue. A header above the lanes gives each station the number of lanes standing at it, and a station holding a lane that needs a person reads as needing attention. A lane carries one marker for the state of its issue, the time the issue has stood at its station, the status sentence the server words, the pull request number under the handoff station once the issue has reached it, and a lamp on each reaction station that reads waiting or escalated while the issue has a pending reaction of that kind and idle otherwise. An issue on a stage chain shows its place as a meter under the agent station, and an ended issue draws the meter from the `stage_chain` of its last stage run. The screen opens with the attention line, which names the issues that need a person and links to Overview. Lifecycle chips, which include Ended today, and the Rule menu narrow the lanes as on Overview, and every count reads the lanes that pass the filters. Above 24 lanes the view compresses: each station with lanes becomes one collapsed line that gives its lane count and how many need a person, and opens to its lanes in dense form. Once a lifecycle chip or a rule is chosen, the view shows the matching lanes in dense form instead of the station lines. A legend names the markers and lamps the workflow can draw. The screen takes the full width of the working area and never scrolls sideways, so station names shrink to a short form and then to an ellipsis. List and Pipeline are two views of the one Active list: a switch on the Active head moves between them, and `L` does the same from either screen, carrying the lifecycle chip and the rule. The peek, the selection keys, and the holding behavior of Overview apply on the Pipeline, and the Pipeline subscribes to no run on the change stream.
+- Overview is the first screen. It opens with a headline that says whether anything needs a person, then lists what needs a person (Needs attention), every active issue in the order and with the status the state route serves (Active), and every issue whose run ended today, newest ending first, with a dot on each one the reader has not opened (Ended today).
+- Pipeline draws the issues Active lists, in its order, and the issues whose work ended today, as one lane each across one row of stations, so an operator sees where along the configured path every issue stands. Lanes keep a stable order: active lanes keep the order of Active, and ended lanes follow them, oldest ending first. The stations are those of the issue page lane and are the same for every issue. A header above the lanes gives each station the number of lanes standing at it, and a station holding a lane that needs a person reads as needing attention. A lane carries one marker for the state of its issue, the time the issue has stood at its station, the status sentence the server words, the pull request number under the handoff station once the issue has reached it, and a lamp on each reaction station that reads waiting or escalated while the issue has a pending reaction of that kind and idle otherwise. An issue on a stage chain shows its place as a meter under the agent station, and an ended issue draws the meter from the `stage_chain` of its last stage run. The screen opens with the attention line, which names the issues that need a person and links to Overview; while nothing needs a person, the line shows nothing and keeps its place, so the lanes do not shift. Lifecycle chips, which include Ended today, and the Rule menu narrow the lanes as on Overview, and every count reads the lanes that pass the filters. Above 24 lanes the view compresses: each station with lanes becomes one collapsed line that gives its lane count and how many need a person, and opens to its lanes in dense form. Once a lifecycle chip or a rule is chosen, the view shows the matching lanes in dense form instead of the station lines. A legend names the markers and lamps the workflow can draw. The screen takes the full width of the working area and never scrolls sideways, so station names shrink to a short form and then to an ellipsis. List and Pipeline are two views of the one Active list: a switch on the Active head moves between them, and `L` does the same from either screen, carrying the lifecycle chip and the rule. The peek, the selection keys, and the holding behavior of Overview apply on the Pipeline, and the Pipeline subscribes to no run on the change stream.
 - History lists finished runs grouped by issue, newest first, one group per issue however often it retried, a page of issues at a time. A group shows the issue's title and key, how the issue ended or what it is doing now in the sentences the server words, its run count, its tokens, and its estimated cost, and lists its newest runs with a way to read the rest. A run row shows the status, the dispatch rule and the hop it reached, the agent and model, the duration, the turns, the tokens, the estimated cost, and the finish time. Filters narrow the groups by issue key, dispatch rule, run status, and the rule a stage hop reached, and a key matches the form the dashboard shows, the qualified form of a GitHub, GitLab, or Gitea issue included. A workflow without dispatch rules or stage chains shows no rule filter, no hop filter, and no rule column.
 - Analytics shows the run statistics report for a chosen range: the last 24 hours, the last 7 days, or every run on record. It opens with the success rate, then the run and issue counts, the duration of succeeded runs, the turns per succeeded run, the tokens, and the estimated cost, and breaks the runs down by dispatch rule, model (the one the agent reported running, else the configured one), agent, run status, retry trigger, and what started each run. A breakdown the workflow cannot have is hidden. Every figure is a field of the report passed through a formatter, so the screen sums and divides nothing and matches `sortie stats --format json` for the same range. A group's tokens read "not measured" or "at least" when it holds runs that reported no usage, and its cost reads "unpriced" or "at least" when it holds runs whose agent kind no `token_rates` entry prices, with the count of those runs beside it.
 - Health lists Sortie's own checks in a fixed order, each with one line on its state: a passing check says so, and a failing one gives the runs in a row that failed, when the first of those failed, its last success, and its error. Beside the checks, the poll loop gives the interval, the last poll, the last good poll, the next poll, and the polls in a row that failed, and the process gives the version, the start time, the agents running, and when the configuration in effect loaded. A check that has not run reads as not run, never as passing, and a mark follows the served status and whether the check has run, never the outcome or the error text. An edit of the workflow file that failed to load reads as failing: poll ticks dispatch nothing until the file loads, and the configuration from the last successful load stays in effect. The tracker poll shows the sentence the server words (Section 13.7.2) and the last tracker error.
 - Workflow shows the configuration in effect: the members the state route's `config` serves and nothing else. Its standfirst says when the configuration in effect loaded and, while the latest load failed, that the newer edit did not load and poll ticks dispatch nothing until it does. Rules outside any stage chain form one table, and each chain reads as numbered steps from its entry rule to the handoff state, with tracker labels shown as chips; reactions form one table of kind, limit and escalation. A workflow without dispatch rules, stage chains, reactions, SSH hosts, or token rates shows the empty form of that part, and an unset limit reads as unset, never as zero.
-- The issue page at `/ui/issues/{identifier}` and the peek, the drawer that opens over Overview and Pipeline, show one issue's whole story. The page opens with the key, the tracker state as a chip colored by where the state sits in `tracker` (done for a terminal state, in progress for the in-progress state, the handoff state, and an active state after the first, otherwise idle), and the issue type over the title, then the status sentence, the links to the issue and its pull request, and the lane. Below them the story sits beside a margin. The margin holds the attention items that concern the issue, each in the attention item form Overview uses with its action and Acknowledge until a person acknowledges it and the time of the acknowledgement after; a scheduled retry's due time, trigger, and error with Retry now; what happens next; one panel per pull request with its repository, branch, and head and one line per pending reaction with Check now; the budget and cost; the route; and the issue's tracker state, type, and labels. The lane draws the stations the workflow in effect defines: the tracker, the agent, the handoff state, one per configured reaction, and, once the workflow configures a reaction, the end. The end station carries the name of the tracker's terminal state when the workflow lists exactly one terminal state and every merge Sortie records moves the issue into it, which holds without `auto_merge` or with `merge_completion`; otherwise it reads End, because an issue that reaches a terminal state without an observed merge also ends there. It marks where the issue stands, so every issue of one workflow gets the same stations whatever its stage chain, and a stage never becomes a station. An issue on a stage chain shows its place in the chain as a meter under the agent station, captioned with the stage and its place while the issue stands at the agent and with the count of stages done elsewhere. Above the story, a one-line summary counts the stages done, names the current stage or the hop that was not made, and counts the stages ahead, with a control that lists every stage and its time span; for a finished issue the chain comes from `history.last_stage` (Section 13.7.2). The story is one chapter per stage, or per stretch of work on the pull request, each a timeline of run cards: the run's number, status, what started it, its time span and duration, its error, and its turns, tokens, and estimated cost. Every chapter but the current one folds to one line, and the current one ends on the issue's status sentence. A run's number is its position among the issue's runs ordered by start time, so the oldest is Run 1, and the run in progress reads Live run; the number is independent of `attempt`, which counts retries and which reaction runs copy or advance. A workflow without stages tells its runs as one chapter. Older runs load on request, a page at a time. The budget shows sessions and tokens used against their limits as meters, and the estimated cost split into stage runs and pull request fixes. A running issue takes its figures from its running row, and any other issue takes its usage from `history.totals` and its limits from `agent` in `config`. The peek shows the same head and lane over the issue's facts, what happens next, and its last four runs. Retry now and Check now each state their effect before they run and report the answer, and neither asks for confirmation. The page opens from Overview, from Pipeline, from History, and from the command palette, which lists the issues matching its query, active and finished alike, by any part of the key or the title. The breadcrumb and `Esc` return to the screen the page was opened from, and to Overview after a deep link. The page and the peek follow every change signal while open, and the times on them tick each second.
+- The issue page at `/ui/issues/{identifier}` and the peek, the drawer that opens over Overview and Pipeline, show one issue's whole story. The breadcrumb names the key, and the page opens with the tracker state as a chip colored by where the state sits in `tracker` (done for a terminal state, in progress for the in-progress state, the handoff state, and an active state after the first, otherwise idle), and the issue type over the title, then the status sentence, the links to the issue and its pull request, and the lane. Below them the story sits beside a margin. The margin holds the attention items that concern the issue, each in the attention item form Overview uses with its action and Acknowledge until a person acknowledges it and the time of the acknowledgement after; a scheduled retry's due time, trigger, and error with Retry now; what happens next; one panel per pull request with its repository, branch, and head and one line per pending reaction, naming the reaction and where its watch stands with the fixes used beneath, with Check now; the budget and cost; the route; and the issue's tracker state, type, and labels. The lane draws the stations the workflow in effect defines: the tracker, the agent, the handoff state, one per configured reaction, and, once the workflow configures a reaction, the end. The end station carries the name of the tracker's terminal state when the workflow lists exactly one terminal state and every merge Sortie records moves the issue into it, which holds without `auto_merge` or with `merge_completion`; otherwise it reads End, because an issue that reaches a terminal state without an observed merge also ends there. It marks where the issue stands, so every issue of one workflow gets the same stations whatever its stage chain, and a stage never becomes a station. An issue on a stage chain shows its place in the chain as a meter under the agent station, captioned with the stage and its place while the issue stands at the agent and with the count of stages done elsewhere. Above the story, a one-line summary counts the stages done, names the current stage or the hop that was not made, and counts the stages ahead, with a control that lists every stage and its time span; for a finished issue the chain comes from `history.last_stage` (Section 13.7.2). The story is one chapter per stage, or per stretch of work on the pull request, each a timeline of run cards: the run's number, status, what started it, its time span and duration, its error, and its turns, tokens, and estimated cost. Every chapter but the current one folds to one line, and the current one ends on the issue's status sentence. A run's number is its position among the issue's runs ordered by start time, so the oldest is Run 1, and the run in progress reads Live run; the number is independent of `attempt`, which counts retries and which reaction runs copy or advance. A workflow without stages tells its runs as one chapter. Older runs load on request, a page at a time. The budget shows sessions and tokens used against their limits as meters, and the estimated cost split into stage runs and pull request fixes. A running issue takes its figures from its running row, and any other issue takes its usage from `history.totals` and its limits from `agent` in `config`. The peek shows the same head and lane over the issue's facts, what happens next, and its last four runs. Retry now and Check now each state their effect before they run and report the answer, and neither asks for confirmation. The page opens from Overview, from Pipeline, from History, and from the command palette, which lists the issues matching its query, active and finished alike, by any part of the key or the title. The breadcrumb and `Esc` return to the screen the page was opened from, and to Overview after a deep link. The page and the peek follow every change signal while open, and the times on them tick each second.
 - Nothing in the dashboard assumes a stage, a dispatch rule, or a reaction. A workflow without them renders without those parts.
 - A figure Sortie does not know reads as unknown, never as zero. Every cost is labeled an estimate.
 - The dashboard holds still while a detail panel is open, and an operator can pause it. Read state stays in the browser.
 - A run in an issue's detail shows its rule and, when its exit reached a hop decision, the target rule and the result.
 - A run's agent events are live in the view that shows the run: the dashboard subscribes to that run on the change stream it already holds and opens no second stream (Section 13.7.2). A gap the server reports, earlier events evicted or a run not retained, reads as a gap, never as continuity.
-- A running run shows a neutral quiet marker once the browser's clock, corrected by the offset between it and the state response's `generated_at`, reaches the row's `quiet_at`. A local timer fires the marker, because silence produces no signal. The marker reads "no events for <silence>; Sortie stops it after <timeout>", where `<silence>` runs from `last_event_at`, else from `started_at`, and `<timeout>` is `stall_at`, the threshold after which the next poll tick stops the run. With `quiet_at` `null` there is no marker, only the time of the last event.
+- A running run shows a neutral quiet marker, the row's `stall_text`. The browser refetches the state when its clock, corrected by the offset between it and the state response's `generated_at`, reaches the row's `quiet_at`, because silence produces no signal and the server words the marker. While `stall_text` is `null` there is no marker, only the time of the last event. The text is as of the state response's `generated_at`; every poll tick ends with a change signal, and the refetch it triggers updates the silence. With stall detection off, list rows show no marker and the session view shows `stall_off_text`.
 
 #### 13.7.2 JSON REST API (`/api/v1/*`)
 
@@ -284,6 +284,9 @@ Minimum endpoints:
           "last_event_at": "2026-02-24T20:14:59Z",
           "quiet_at": "2026-02-24T20:17:29Z",
           "stall_at": "2026-02-24T20:19:59Z",
+          "stall_text": null,
+          "stall_text_full": null,
+          "stall_off_text": null,
           "tokens": {
             "input_tokens": 1200,
             "output_tokens": 800,
@@ -334,7 +337,7 @@ Minimum endpoints:
           "issue_estimated_cost_usd": 0.235095,
           "issue_cost_status": "estimated",
           "status_text": "Fixing CI on #936, fix 1 of 2",
-          "status_text_full": "MT-649 is fixing CI on PR #936, fix 1 of 2."
+          "status_text_full": "Fixing CI on PR #936, fix 1 of 2."
         }
       ],
       "retrying": [
@@ -362,7 +365,7 @@ Minimum endpoints:
           "stage_position": null,
           "paused": false,
           "status_text": "Retry 3 in 30s: no agent slot was free",
-          "status_text_full": "MT-650's retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
+          "status_text_full": "The retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
         }
       ],
       "budget_exhausted": [
@@ -389,7 +392,7 @@ Minimum endpoints:
           "agent_kind": "claude-code",
           "configured_model": "claude-sonnet-4-20250514",
           "status_text": "Held: session budget reached",
-          "status_text_full": "MT-651 is held at its session budget of 3. Sessions used: 3."
+          "status_text_full": "Held at the session budget of 3. Sessions used: 3."
         }
       ],
       "parked": [
@@ -412,7 +415,7 @@ Minimum endpoints:
           "agent_kind": "claude-code",
           "configured_model": "claude-sonnet-4-20250514",
           "status_text": "Parked: the agent needs a person",
-          "status_text_full": "MT-652 is parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
+          "status_text_full": "Parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
         }
       ],
       "pending_reactions": [
@@ -456,7 +459,7 @@ Minimum endpoints:
           "agent_kind": "claude-code",
           "configured_model": "claude-sonnet-4-20250514",
           "status_text": "CI escalated on #931",
-          "status_text_full": "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
+          "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
         },
         {
           "issue_id": "mno345",
@@ -493,7 +496,7 @@ Minimum endpoints:
           "agent_kind": "claude-code",
           "configured_model": "claude-sonnet-4-20250514",
           "status_text": "1 new review comment on #931; next check in 35s",
-          "status_text_full": "MT-653 has 1 new review comment on PR #931 (3 actionable) and waits for the comments to settle; next check in 35s. Review fix runs used: 1 of 3."
+          "status_text_full": "Waiting for 1 new review comment on PR #931 (3 actionable) to settle; next check in 35s. Review fix runs used: 1 of 3."
         }
       ],
       "between_stages": [
@@ -520,7 +523,7 @@ Minimum endpoints:
           "agent_kind": "claude-code",
           "configured_model": "claude-sonnet-4-20250514",
           "status_text": "Between stages: specify to implement",
-          "status_text_full": "MT-654 moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
+          "status_text_full": "Moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
         }
       ],
       "active": [
@@ -536,7 +539,7 @@ Minimum endpoints:
           "configured_model": "claude-sonnet-4-20250514",
           "dispatched_at": "2026-02-24T19:31:07Z",
           "status_text": "Held: session budget reached",
-          "status_text_full": "MT-651 is held at its session budget of 3. Sessions used: 3."
+          "status_text_full": "Held at the session budget of 3. Sessions used: 3."
         },
         {
           "issue_id": "jkl012",
@@ -550,7 +553,7 @@ Minimum endpoints:
           "configured_model": "claude-sonnet-4-20250514",
           "dispatched_at": "2026-02-24T19:40:12Z",
           "status_text": "Parked: the agent needs a person",
-          "status_text_full": "MT-652 is parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
+          "status_text_full": "Parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
         },
         {
           "issue_id": "abc123",
@@ -569,7 +572,7 @@ Minimum endpoints:
           "configured_model": "claude-sonnet-4-20250514",
           "dispatched_at": "2026-02-24T19:48:20Z",
           "status_text": "Fixing CI on #936, fix 1 of 2",
-          "status_text_full": "MT-649 is fixing CI on PR #936, fix 1 of 2."
+          "status_text_full": "Fixing CI on PR #936, fix 1 of 2."
         },
         {
           "issue_id": "mno345",
@@ -584,7 +587,7 @@ Minimum endpoints:
           "reaction_kind": "ci",
           "dispatched_at": "2026-02-24T19:58:03Z",
           "status_text": "CI escalated on #931",
-          "status_text_full": "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
+          "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
         },
         {
           "issue_id": "pqr678",
@@ -603,7 +606,7 @@ Minimum endpoints:
           "configured_model": "claude-sonnet-4-20250514",
           "dispatched_at": "2026-02-24T20:01:17Z",
           "status_text": "Between stages: specify to implement",
-          "status_text_full": "MT-654 moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
+          "status_text_full": "Moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
         },
         {
           "issue_id": "def456",
@@ -617,7 +620,7 @@ Minimum endpoints:
           "configured_model": "claude-sonnet-4-20250514",
           "dispatched_at": "2026-02-24T20:02:41Z",
           "status_text": "Retry 3 in 30s: no agent slot was free",
-          "status_text_full": "MT-650's retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
+          "status_text_full": "The retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
         }
       ],
       "attention": [
@@ -647,8 +650,8 @@ Minimum endpoints:
           "issue_title": "Rotate the signing keys",
           "issue_url": "https://tracker.example.com/browse/MT-652",
           "reason_text": "Parked: the agent needs a person",
-          "why_text": "The agent stopped because it cannot go on without a person, so Sortie parked MT-652 under the label `needs-human`.",
-          "clears_text": "Clears when a poll tick finds `needs-human` removed from MT-652, or MT-652 moved out of In Progress.",
+          "why_text": "The agent stopped because it cannot go on without a person, so Sortie parked the issue under the label `needs-human`.",
+          "clears_text": "Clears when a poll tick finds `needs-human` removed from the issue, or the issue moved out of In Progress.",
           "action": {"kind": "open_issue", "url": "https://tracker.example.com/browse/MT-652"},
           "evidence": {
             "reason": "agent_blocked",
@@ -666,8 +669,8 @@ Minimum endpoints:
           "issue_title": "Migrate the billing tables",
           "issue_url": "https://tracker.example.com/browse/MT-651",
           "reason_text": "Session budget reached",
-          "why_text": "MT-651 has used 3 sessions of its budget of 3.",
-          "clears_text": "Clears on the next poll tick after `agent.max_sessions` is raised above 3 or is removed, or after MT-651 leaves the active tracker states.",
+          "why_text": "The issue has used 3 sessions of its budget of 3.",
+          "clears_text": "Clears on the next poll tick after `agent.max_sessions` is raised above 3 or is removed, or after the issue leaves the active tracker states.",
           "action": {"kind": "acknowledge"},
           "evidence": {
             "reason": "session_budget",
@@ -687,7 +690,7 @@ Minimum endpoints:
           "issue_url": "https://tracker.example.com/browse/MT-653",
           "reason_text": "CI escalated on #931",
           "why_text": "Sortie escalated failing CI on PR #931 after 2 of 2 CI fixes; the latest check found Test failing.",
-          "clears_text": "Clears when a check of PR #931 passes, a new commit lands on it, it merges or closes, `reactions.ci_failure.max_retries` rises above 2, or MT-653 reaches a terminal tracker state or leaves In Review.",
+          "clears_text": "Clears when a check of PR #931 passes, a new commit lands on it, it merges or closes, `reactions.ci_failure.max_retries` rises above 2, or the issue reaches a terminal tracker state or leaves In Review.",
           "action": {"kind": "open_pull_request", "url": "https://github.com/acme/web/pull/931"},
           "evidence": {
             "reaction_kind": "ci",
@@ -842,7 +845,7 @@ Minimum endpoints:
             "merge_path": "auto_merge",
             "pull_request": {"number": 936, "repository": "acme/web"},
             "status_text": "Merged #936",
-            "status_text_full": "MT-649 ended merged: auto-merge merged PR #936."
+            "status_text_full": "Ended merged: auto-merge merged PR #936."
           }
         }
       ],
@@ -882,14 +885,14 @@ Minimum endpoints:
           "issue_url": "https://github.com/acme/web/issues/9",
           "status": "history",
           "status_text": "Merged #936",
-          "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936.",
+          "status_text_full": "Ended merged: auto-merge merged PR #936.",
           "issue_outcome": {
             "kind": "merged",
             "observed_at": "2026-02-24T21:02:10Z",
             "merge_path": "auto_merge",
             "pull_request": {"number": 936, "repository": "acme/web"},
             "status_text": "Merged #936",
-            "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936."
+            "status_text_full": "Ended merged: auto-merge merged PR #936."
           },
           "runs": [
             {
@@ -946,7 +949,7 @@ Minimum endpoints:
     ```
 
   - `first_seq` is the `seq` of the oldest event served. A value above `1` says the run's earlier events were evicted, and a client says so instead of showing the list as the whole run. It is `null` when `events` is `[]`, which only a running run that has retained no event yet serves.
-  - `404 Not Found` with code `run_events_not_retained` answers a dispatch ID whose events are not retained: an unknown ID, a run whose stored events were pruned, a run lost in a crash, a run recorded before retention existed, and a finished run that retained no event. A run-history read that fails answers `503` with `history_unavailable`, as does a server without run history for a run that is not running. Any method other than `GET` answers `405`.
+  - `404 Not Found` with code `run_events_not_retained` answers a dispatch ID whose events are not retained: an unknown ID, a run whose stored events were pruned, a run whose events were not written, a run lost in a crash, a run recorded before retention existed, and a finished run that retained no event. A run-history read that fails answers `503` with `history_unavailable`, as does a server without run history for a run that is not running. Any method other than `GET` answers `405`.
 
 - `GET /api/v1/stats`
   - Returns the run statistics report that `sortie stats --format json` prints, over the finished runs of run history in a range. The route serves that report unchanged and computes it through the same aggregation as the command, so no figure is computed twice and no second shape exists.
@@ -1066,7 +1069,7 @@ Minimum endpoints:
       "issue_id": "abc123",
       "status": "running",
       "status_text": "Fixing CI on #936, fix 1 of 2",
-      "status_text_full": "MT-649 is fixing CI on PR #936, fix 1 of 2.",
+      "status_text_full": "Fixing CI on PR #936, fix 1 of 2.",
       "next_outcomes": [],
       "issue": {
         "title": "Fix the flaky login test",
@@ -1098,6 +1101,9 @@ Minimum endpoints:
         "last_event_at": "2026-02-24T20:14:59Z",
         "quiet_at": "2026-02-24T20:17:29Z",
         "stall_at": "2026-02-24T20:19:59Z",
+        "stall_text": null,
+        "stall_text_full": null,
+        "stall_off_text": null,
         "tokens": {
           "input_tokens": 1200,
           "output_tokens": 800,
@@ -1139,7 +1145,7 @@ Minimum endpoints:
         "issue_estimated_cost_usd": 0.235095,
         "issue_cost_status": "estimated",
         "status_text": "Fixing CI on #936, fix 1 of 2",
-        "status_text_full": "MT-649 is fixing CI on PR #936, fix 1 of 2."
+        "status_text_full": "Fixing CI on PR #936, fix 1 of 2."
       },
       "retry": null,
       "budget_exhausted": null,
@@ -1224,7 +1230,7 @@ Minimum endpoints:
           "at": "2026-02-24T20:14:31Z",
           "event": "tool_result",
           "message": "",
-          "text": "Ran Bash in 2.4 s.",
+          "text": "Ran Bash in 2.4s.",
           "tool_name": "Bash",
           "duration_ms": 2400,
           "tool_error": false
@@ -1234,7 +1240,7 @@ Minimum endpoints:
           "at": "2026-02-24T20:14:52Z",
           "event": "turn_completed",
           "message": "",
-          "text": "Turn 7 completed.",
+          "text": "Turn completed.",
           "usage": {
             "input_tokens": 1200,
             "output_tokens": 800,
@@ -1627,15 +1633,18 @@ API design notes:
 - The key is additive; no existing key changes name, type, or meaning: `version` is the Sortie version the readiness probe serves, and `started_at` is the time the process started, in UTC. The process start is taken before the startup work, so `started_at` and the readiness probe's `uptime_seconds` name one instant, and both count the startup duration.
 - Every row of `running`, `retrying`, `budget_exhausted`, `parked`, `pending_reactions`, and `between_stages`, on `GET /api/v1/state` and in the per-issue response, every entry of `active`, the per-issue response itself, and every `issue_outcome` carry `status_text` and `status_text_full`: a plain English sentence that says what the issue is doing, what it waits on, or how it ended. `status_text` is short, for a row or a lane; `status_text_full` is long, for the issue page. The keys are additive; no existing key changes name, type, or meaning, and every structured field a sentence is built from stays served, so a client that needs data does not parse text.
   - Both keys are always present and never empty. A short sentence ends without a period and a long one with a period. Sentences are English and are not translated.
+  - A sentence does not name what the response carrying it already shows. No long sentence, next outcome, or attention item's `why_text` or `clears_text` names the issue key, so the issue reads as "the issue" or is left implied. Only an operator action's `outcome_text`, which a client shows on its own, names the issue.
   - Sortie renders each sentence on the request, from the snapshot, the `config` the state route serves, and run history, and stores none. A relative time in a sentence, such as "in 40s", is measured from `generated_at`.
   - A sentence states only a fact Sortie records for the row, in `config`, or in run history. A figure Sortie does not have reads as not measured, never as zero, and a figure that is only a lower bound reads as at least. A sentence states no cost (one that did would word it as an estimate) and no clock time or date. It uses stage wording only when the workflow has stage chains.
   - Every sentence is masked as Section 15.3 states, so a value registered as a secret after it was stored is masked too.
   - A sentence that fails to render is served as `Status not available` and the failure is logged. The route answers as it would otherwise.
-  - Attention items, agent session events, operator action outcomes, next outcomes, and the poll check's sentence take their wording from the same table of templates. Notification bodies keep the text their builders write.
+  - Attention items, agent session events, operator action outcomes, next outcomes, the poll check's sentence, and the stall sentences take their wording from the same table of templates. Notification bodies keep the text their builders write.
+- Every row of `running`, on `GET /api/v1/state` and in the per-issue response, carries `stall_text`, `stall_text_full`, and `stall_off_text`, so every client states a stall in the same words. `stall_text` is short and `stall_text_full` long, and both are `null` until `generated_at` reaches `quiet_at` and while stall detection is off. They read the silence from the row's reference point (`last_event_at`, else `started_at`) to `generated_at`, rounded down, and the timeout as `stall_at` less the reference point. The short form reads "No events for <silence>; Sortie stops it after <timeout>". `stall_off_text` is `null` whenever `quiet_at` is not, and otherwise says that stall detection is off and Sortie will not stop the session as stalled. The text is true as of `generated_at` and stays true until the next event; a client refetches at `quiet_at` to get it. A list row shows `stall_text` and so keeps no marker with stall detection off.
 - `next_outcomes` on `GET /api/v1/<issue_identifier>` lists what Sortie does next for the issue, so a client shows the branches ahead and interprets no Sortie state. The key is additive; no existing key changes name, type, or meaning. Each member holds `condition`, a capitalized phrase without a final period, and `text`, one or two sentences that each end with a period.
   - Sortie renders the list on the request, in English, from the snapshot, the `config` the state route serves, and run history, and stores none. Every member is masked as Section 15.3 states, and the same rules as for a status sentence apply: only a fact recorded for the row, in `config`, or in run history, no cost, no clock time or date, and stage wording only when the workflow has stage chains.
   - The list is derived from the work session's exit, the issue's retry, the wait for a stage label, and each pending reaction of the issue, in that order. A running reaction continuation or label command run contributes no exit pair; the pending rows of the issue say what follows it. A held or finished issue lists only the pairs of its pending reactions, and `[]` when it has none.
   - A pair never names a reaction whose `config` member is absent, nor a stage the workflow's rules do not hold.
+  - A pair names the pull request it watches as "the pull request", and by number only when the issue's pending reactions watch more than one pull request.
   - A condition on a watched reaction is worded as what a check finds, and carries the time left in which a check can still lead to the outcome, measured from `generated_at`: the time to `watch_ends_at`, less what a found event still waits for. A reaction with no time left yields no pair.
   - An outcome that starts a session names the budget hold, the session budget or the token budget, when a budget gate would stop it. An outcome that a configured triage command replaces says that the triage command runs, and an outcome that a spent count replaces says that the reaction escalates, in the order the kind's pass decides them.
   - The list is not exhaustive. It leaves out what the configuration does not decide: a stop the agent requests, a person's tracker or pull request edit other than a label command, a failed tracker, forge, or store call, a withheld handoff and the park it leads to, and a wait for a free agent slot. A client does not read a missing branch as one that cannot happen.
@@ -1728,17 +1737,19 @@ Sortie retains the agent events of each run, so an operator sees what an agent d
 Retention has two tiers, bounded by count and by bytes:
 
 - **Memory.** Each running run keeps its newest 1,000 retained events, and at most 256 KiB measured as the sum of the encoded events, whichever bound is reached first. The oldest events are evicted, and `seq` keeps rising.
-- **Store.** At worker exit the run's buffer is written to the `run_events` table once, in the transaction that appends the run's `run_history` row (Section 19.2), and the memory buffer is then released. A failed write is logged at `Warn` and the events are dropped, with no retry. No event is written to the store while the run is running.
-- **Limits.** A finished run's events stay readable for at least 7 days after the run's `completed_at`; pruning runs only when a later run is written, so an instance that writes none keeps serving them. The stored events of every run together hold at most 64 MiB of encoded events. Each write first deletes the events of runs that ended more than 7 days ago, then deletes whole runs, oldest `completed_at` first, until the total is within 64 MiB.
+- **Store.** At worker exit the run's buffer is written to the `run_events` table once, in the transaction that appends the run's `run_history` row (Section 19.2), and the memory buffer is then released. When the events cannot be written, the history row is still stored, and Sortie holds the events in memory and retries writing them up to five times, off the event loop, waiting 4, 8, 16, 32, and 64 seconds before the successive retries. Held events total at most 4 MiB of encoded events; holding a run that would exceed that drops the oldest held run first. Events the last retry fails to write, events dropped for room, and events still held when Sortie stops are lost and logged at `Warn`; such a run, like one whose events are still held, is not retained. No event is written to the store while the run is running.
+- **Limits.** A finished run's events stay readable for at least 365 days after the run's `completed_at`; pruning runs only when a later run is written, so an instance that writes none keeps serving them. The stored events of every run together hold at most 2 GiB of encoded events. Each write first deletes the events of at most 4 runs that ended more than 365 days ago, so expired events can outlast 365 days until later writes reach them, then deletes whole runs, oldest `completed_at` first, until the total is within 2 GiB, never the run being written.
 - **Durability** is that of the run's `run_history` row: a graceful shutdown ends every worker and keeps both, and a crash loses both for every run in flight.
 
-A run's events are not retained when its stored events were pruned, when it was lost in a crash, when it was recorded before retention existed, when it retained no event, and when no run carries the dispatch ID. Every surface says so explicitly: the run-events route answers `404`, the change stream answers a subscription with a `not_retained` reset, and `recent_events` is `[]`. A run that kept only the tail of its events serves `first_seq` above 1, so a client says that earlier events are gone.
+A run's events are not retained when its stored events were pruned, when they were not written, when it was lost in a crash, when it was recorded before retention existed, when it retained no event, and when no run carries the dispatch ID. Every surface says so explicitly: the run-events route answers `404`, the change stream answers a subscription with a `not_retained` reset, and `recent_events` is `[]`. A run that kept only the tail of its events serves `first_seq` above 1, so a client says that earlier events are gone.
 
 Every normalized event type of Section 10.3 is retained, except:
 
-- a `notification` or `other_message` with an empty message, which is a liveness ping;
+- a `notification` or `other_message` with a blank message, which is a liveness ping;
 - `token_usage`, whose run totals attach to the turn-ending events instead;
 - a `notification`, `other_message`, or `malformed` event whose type and message equal those of the run's newest retained event.
+
+A session that fails to start gets a `startup_failed` event from Sortie when its adapter emitted none, its message the start error. A session stopped by Sortie while starting retains none, and a run never retains two.
 
 An event that is not retained still advances `last_event_at` and still produces a change signal.
 
@@ -1749,7 +1760,7 @@ A retained event, as every surface serves it:
 | `seq` | every event | The event's number within the run |
 | `at` | every event | The event's timestamp, RFC 3339 in UTC |
 | `event` | every event | The normalized event type |
-| `message` | every event | The event's message, masked as Section 15.3 states when it is stored and again when it is served, then cut to its first 1,000 runes; `""` when the event carries none |
+| `message` | every event | The event's message, masked as Section 15.3 states and cut to 999 runes followed by `…` when it is retained, so it never exceeds 1,000 runes, and masked again when it is served; `""` when the event carries none |
 | `text` | every event | One operator-facing sentence the server words from the event when it serves it (Section 13.6); never stored |
 | `session_id` | `session_started` | The session the run started |
 | `tool_name`, `duration_ms`, `tool_error` | `tool_result` | The tool, its duration in milliseconds, and whether it returned an error; `tool_name` and `duration_ms` are omitted when the adapter reported none |

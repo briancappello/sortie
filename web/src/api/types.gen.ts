@@ -218,7 +218,7 @@ export interface IssueDetailResponse {
   parked: ParkedEntryResponse | null;
   pending_reactions: PendingReactionResponse[] | null;
   between_stages: StageHopResponse | null;
-  recent_events: unknown[] | null;
+  recent_events: RunEventResponse[] | null;
   last_error: string | null;
   tracked: Record<string, unknown> | null;
   history: IssueHistoryResponse | null;
@@ -441,6 +441,25 @@ export interface RetryNowResponse {
   outcome_text: string;
 }
 
+export interface RunEventResponse {
+  seq: number;
+  at: string;
+  event: string;
+  message: string;
+  text: string;
+  session_id?: string;
+  tool_name?: string;
+  duration_ms?: number;
+  tool_error?: boolean;
+  usage?: TokenInfo | null;
+}
+
+export interface RunEventsResponse {
+  dispatch_id: string;
+  first_seq: number | null;
+  events: RunEventResponse[] | null;
+}
+
 export interface RunResponse {
   run_id: number;
   issue_id: string;
@@ -478,6 +497,7 @@ export interface RunResponse {
   reaction_config_key: string | null;
   session_id: string | null;
   ssh_host: string | null;
+  dispatch_id: string | null;
   stage_chain: string[] | null;
   issue_outcome: IssueOutcomeResponse | null;
 }
@@ -499,7 +519,7 @@ export interface RunningEntryResponse {
   last_message: string;
   started_at: string;
   dispatched_at: string | null;
-  last_event_at: string;
+  last_event_at: string | null;
   workspace_path: string;
   ssh_host?: string;
   tokens: TokenInfo;
@@ -538,6 +558,12 @@ export interface RunningEntryResponse {
   issue_cost_status: string;
   status_text: string;
   status_text_full: string;
+  dispatch_id: string;
+  quiet_at: string | null;
+  stall_at: string | null;
+  stall_text: string | null;
+  stall_text_full: string | null;
+  stall_off_text: string | null;
 }
 
 export interface RunsResponse {

@@ -770,6 +770,7 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 		TokenCeilingCancelFunc: tokenCeilingCancelFn,
 		WorkerDone:             workerCtx.Done(),
 		SSHHost:                sshHost,
+		events:                 state.RetainedEvents.register(dispatchID),
 	}
 
 	CancelRetry(state, issue.ID)

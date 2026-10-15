@@ -76,6 +76,10 @@ type runResponse struct {
 	SessionID            *string             `json:"session_id"`
 	SSHHost              *string             `json:"ssh_host"`
 
+	// DispatchID is "" on the recorded CI result and null for a run recorded
+	// before the dispatch ID existed.
+	DispatchID *string `json:"dispatch_id"`
+
 	// StageChain is the chain the run's rule stood on; null when the run has
 	// no rule, its rule is on no chain, or no workflow shape is held.
 	StageChain []string `json:"stage_chain"`
@@ -261,6 +265,7 @@ func toRunResponse(e RunHistoryEntry, rates TokenRates, chains [][]string) runRe
 		SelfReview:           toSelfReviewResponse(e.ReviewMetadata),
 		OriginRecorded:       e.OriginRecorded,
 		StageChain:           orchestrator.StageChainOf(chains, e.RuleName, e.StagePrevious),
+		DispatchID:           copyText(e.DispatchID),
 	}
 	if e.Error != nil {
 		resp.Error = new(redact.Mask(*e.Error))

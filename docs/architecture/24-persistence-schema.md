@@ -295,9 +295,18 @@ One row per acknowledged item, holding current state rather than history. The or
 | `event`       | TEXT NOT NULL    | The normalized event type                                                                              |
 | `payload`     | TEXT NOT NULL    | The event's retained members other than the three above, as a JSON object: the masked and cut `message`, and the type's own members (§13.9). `text` is never stored |
 | `completed_at`| TEXT NOT NULL    | The run's `run_history.completed_at`, repeated on each row so pruning reads no other table            |
-| `size`        | INTEGER NOT NULL | Encoded size of the event in bytes, the measure of the 64 MiB bound                                     |
+| `size`        | INTEGER NOT NULL | The byte length of `at`, `event`, and `payload` together, the measure of the 2 GiB bound                |
 
-The rows of a run are written once, at worker exit, in the transaction that appends the run's `run_history` row, so a run's events and its history row are stored together or not at all; a running run's events live only in memory. Each write first deletes the rows of runs whose `completed_at` is more than 7 days old, then deletes the rows of whole runs, oldest `completed_at` first, until the sum of `size` is at most 64 MiB. Pruning runs only on these writes, so 7 days is the least a finished run's events stay readable, not an expiry. A run with no rows is not retained (§13.9): a pruned run, a run lost in a crash, a run whose history row predates the `dispatch_id` column, the `ci_failed` row, and a run that retained no event. An index on `completed_at` serves pruning. Reads go through the store's single connection on the request goroutine, as history reads do.
+The rows of a run are written once, at worker exit, in the transaction that appends the run's `run_history` row, so a run's events are never stored without its history row; a running run's events live only in memory. When writing the events fails, the history row is kept and Sortie retries the events from memory, each retry in a transaction of its own (§13.9). Each write first deletes the rows of at most 4 runs whose `completed_at` is more than 365 days older than the run being written, then deletes the rows of whole runs, oldest `completed_at` first, until the sum of `size` is at most 2 GiB; size pruning never deletes the run being written. Pruning runs only on these writes, so 365 days is the least a finished run's events stay readable, not an expiry, and expired events can outlast it until later writes reach them. A run with no rows is not retained (§13.9): a pruned run, a run whose events were not written, a run lost in a crash, a run whose history row predates the `dispatch_id` column, the `ci_failed` row, and a run that retained no event. An index on (`completed_at`, `dispatch_id`, `size`) serves pruning: the walk that picks the runs to delete reads the index alone, never `payload`. Reads go through the store's single connection on the request goroutine, as history reads do.
+
+**`run_events_total`**: the sum of `run_events.size`
+
+| Column  | Type                            | Notes                                                                 |
+| ------- | ------------------------------- | --------------------------------------------------------------------- |
+| `id`    | INTEGER PRIMARY KEY, CHECK = 1  | The table holds one row                                               |
+| `bytes` | INTEGER NOT NULL                | The sum of `size` over `run_events`                                   |
+
+Every write of `run_events` updates `bytes` in its own transaction, so the figure the 2 GiB bound reads is exact and a write never sums the table, a cost that grows with the stored volume. The migration creates the row at 0 beside the empty table.
 
 ### 19.3 Migration Strategy
 

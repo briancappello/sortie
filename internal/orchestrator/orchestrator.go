@@ -36,6 +36,8 @@ type WorkflowManager interface {
 type OrchestratorStore interface {
 	Ping(ctx context.Context) error
 	AppendRunHistory(ctx context.Context, run persistence.RunHistory) (persistence.RunHistory, error)
+	AppendRunHistoryWithEvents(ctx context.Context, run persistence.RunHistory, events []persistence.RunEvent, limits persistence.RunEventLimits) (persistence.RunHistory, error)
+	AppendRunEvents(ctx context.Context, dispatchID, completedAt string, events []persistence.RunEvent, limits persistence.RunEventLimits) error
 	UpsertAggregateMetrics(ctx context.Context, metrics persistence.AggregateMetrics) error
 	UpsertSessionMetadata(ctx context.Context, meta persistence.SessionMetadata) error
 	SaveRetryEntry(ctx context.Context, entry persistence.RetryEntry) error
@@ -86,6 +88,7 @@ type OrchestratorStore interface {
 }
 
 var _ OrchestratorStore = (*persistence.Store)(nil)
+var _ RunEventStore = (*persistence.Store)(nil)
 
 // Observer receives notifications when orchestrator state changes.
 // Implementations must not block and must not mutate state.
@@ -279,6 +282,7 @@ type Orchestrator struct {
 	agentAdapterByKind func(kind string) (domain.AgentAdapter, error)
 	workflowManager    WorkflowManager
 	store              OrchestratorStore
+	runEventRetry      *RunEventRetry
 	metrics            domain.Metrics
 	blockerResolver    BlockerResolver
 	abandonCh          <-chan struct{}
@@ -452,6 +456,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		agentAdapterByKind:                agentAdapterByKind,
 		workflowManager:                   params.WorkflowManager,
 		store:                             params.Store,
+		runEventRetry:                     NewRunEventRetry(params.Store, logger),
 		metrics:                           metrics,
 		workerExitCh:                      make(chan WorkerResult, exitBuf),
 		retryTimerCh:                      make(chan string, retryBuf),
@@ -511,6 +516,13 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 	// Startup preflight must have passed for construction to reach here.
 	o.preflightOK.Store(true)
 	return o
+}
+
+// RunEvents returns a copy of a running run's retained events, oldest first,
+// and false when no running run carries dispatchID. It is safe to call from
+// any goroutine.
+func (o *Orchestrator) RunEvents(dispatchID string) ([]RunEvent, bool) {
+	return o.state.RetainedEvents.Events(dispatchID)
 }
 
 // applyQueued calls apply for each message ch holds, in order, without
@@ -617,6 +629,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 	for _, result := range exits {
 		HandleWorkerExit(o.state, result, HandleWorkerExitParams{
 			Store:                             o.store,
+			RunEventRetry:                     o.runEventRetry,
 			MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
 			MaxConsecutiveAbsences:            cfg.Agent.MaxConsecutiveAbsences,
 			HandoffParkingLabel:               o.handoffParkingLabel,
@@ -665,6 +678,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	o.state.StageChains = startCfg.Dispatch.Chains()
 	o.state.RuleAgents = o.ruleAgents(startCfg)
 	o.state.HopCeiling = startCfg.Dispatch.HopCeiling()
+	o.state.StallTimeoutMS = startCfg.Agent.StallTimeoutMS
 	o.activateReconstructedRetries()
 
 	tickTimer := time.NewTimer(0)
@@ -680,6 +694,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			o.pollHealth.schedule(time.Time{})
 			o.notifyObservers()
 			o.drainRunningWorkers()
+			o.runEventRetry.Stop()
 			o.drainTriageRuns()
 			o.drainTrackerOps()
 			o.cancelRetryTimers()
@@ -913,6 +928,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.PollIntervalMS = cfg.Polling.IntervalMS
 	o.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
 	o.state.MaxTokens = cfg.Agent.MaxTokens
+	o.state.StallTimeoutMS = cfg.Agent.StallTimeoutMS
 	o.state.MaxSessions = cfg.Agent.MaxSessions
 	o.state.StageChains = cfg.Dispatch.Chains()
 	o.state.RuleAgents = o.ruleAgents(cfg)

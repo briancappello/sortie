@@ -30,6 +30,7 @@ func (r runHistoryReader) QueryRuns(ctx context.Context, q server.RunHistoryQuer
 		CompletedBefore: q.Until,
 		EndedSince:      q.EndedSince,
 		EndedBefore:     q.EndedUntil,
+		HasDispatchID:   q.HasDispatchID,
 		BeforeID:        q.BeforeID,
 		Limit:           q.Limit,
 	})
@@ -80,6 +81,16 @@ func (r runHistoryReader) IssueTotals(ctx context.Context, issueID string) (serv
 			CacheWriteTokens: usage.CacheWriteTokens,
 		},
 	}, nil
+}
+
+// RunEvents returns one run's stored events, decoded, ascending by seq: all
+// when newest is 0, else the newest up to newest.
+func (r runHistoryReader) RunEvents(ctx context.Context, dispatchID string, newest int) ([]orchestrator.RunEvent, error) {
+	rows, err := r.store.RunEvents(ctx, dispatchID, newest)
+	if err != nil {
+		return nil, err
+	}
+	return orchestrator.RunEventsFromRows(rows)
 }
 
 // IssueOutcomes returns the outcome of each listed issue that has one.
@@ -143,5 +154,6 @@ func runHistoryEntry(r persistence.RunHistory) server.RunHistoryEntry {
 		ReactionKind:         r.ReactionKind,
 		SessionID:            r.SessionID,
 		SSHHost:              r.SSHHost,
+		DispatchID:           r.DispatchID,
 	}
 }

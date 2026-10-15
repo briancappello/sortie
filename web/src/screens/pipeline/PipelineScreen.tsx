@@ -38,11 +38,8 @@ interface AttentionLineProps {
 function AttentionLine({ items }: AttentionLineProps) {
   const location = useLocation();
   if (items.length === 0) {
-    return (
-      <p className="mb-lg rounded-xl border border-dashed border-line-strong bg-surface px-md py-sm text-body-md text-ink-body">
-        Nothing needs attention.
-      </p>
-    );
+    // Holds the line's place so the lanes do not shift when attention comes and goes.
+    return <div aria-hidden="true" className="mb-lg min-h-lh text-body-md" />;
   }
   const firstOfIssue = new Map<string, AttentionItemResponse>();
   for (const item of items) {
@@ -364,16 +361,16 @@ function PipelineBody({ state }: PipelineBodyProps) {
             <PhaseFilter rows={ruleLanes} />
             <RuleFilter config={config} rows={lanes} />
           </div>
-          {visible.length === 0 ? (
+          {lanes.length === 0 ? (
+            // Holds the lanes' place so the page does not shift when work starts.
+            <div
+              aria-hidden="true"
+              className="min-h-lh border border-transparent py-lg text-body-md"
+            />
+          ) : visible.length === 0 ? (
             <div className="flex flex-wrap items-center gap-sm rounded-lg border border-line bg-canvas px-md py-lg text-body-md text-ink-body">
-              {lanes.length === 0 ? (
-                "No issue is active."
-              ) : (
-                <>
-                  No issue matches these filters.
-                  <Button onClick={handleShowAll}>Show all</Button>
-                </>
-              )}
+              No issue matches these filters.
+              <Button onClick={handleShowAll}>Show all</Button>
             </div>
           ) : (
             <div className="-mx-md mt-xs">

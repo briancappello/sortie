@@ -35,7 +35,7 @@ const continuationDelayMS int64 = 1_000
 // WorkerExitStore is the persistence interface required by
 // [HandleWorkerExit].
 type WorkerExitStore interface {
-	AppendRunHistory(ctx context.Context, run persistence.RunHistory) (persistence.RunHistory, error)
+	AppendRunHistoryWithEvents(ctx context.Context, run persistence.RunHistory, events []persistence.RunEvent, limits persistence.RunEventLimits) (persistence.RunHistory, error)
 	UpsertAggregateMetrics(ctx context.Context, metrics persistence.AggregateMetrics) error
 	UpsertSessionMetadata(ctx context.Context, meta persistence.SessionMetadata) error
 	SaveRetryEntry(ctx context.Context, entry persistence.RetryEntry) error
@@ -57,6 +57,11 @@ type WorkerExitStore interface {
 // are not part of the core [State], separating pure state mutation from I/O.
 type HandleWorkerExitParams struct {
 	Store WorkerExitStore
+
+	// RunEventRetry holds the events of a run whose events part failed to
+	// store and retries them. Nil holds nothing: a failed events part ends
+	// at its warning.
+	RunEventRetry *RunEventRetry
 
 	MaxRetryBackoffMS int
 
@@ -172,6 +177,21 @@ func resolveExitTarget(params HandleWorkerExitParams, workerResult WorkerResult)
 		return params.NoChangeState, declared
 	}
 	return params.HandoffState, declared
+}
+
+// retainStartupFailure retains a startup_failed event carrying the start
+// error when the session failed to start and its adapter emitted none. A
+// start that ended in cancellation retains none, because Sortie stopped it.
+func retainStartupFailure(entry *RunningEntry, result WorkerResult, at time.Time) {
+	if result.StartupError == nil || result.ExitKind != WorkerExitError ||
+		entry.events == nil || entry.events.hasStartupFailed() {
+		return
+	}
+	retainEvent(entry, domain.AgentEvent{
+		Type:      domain.EventStartupFailed,
+		Timestamp: at,
+		Message:   result.StartupError.Error(),
+	})
 }
 
 // HandleWorkerExit processes a worker's terminal outcome: removes the running
@@ -512,16 +532,43 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		)
 	}
 
+	retainStartupFailure(entry, workerResult, now)
+	var eventRows []persistence.RunEvent
+	if entry.events != nil {
+		eventRows = entry.events.storeRows()
+	}
+	runHistory.DispatchID = new(entry.DispatchID)
+
 	runHistoryPersisted := true
 	var runID int64
-	if row, err := params.Store.AppendRunHistory(ctx, runHistory); err != nil {
+	row, appendErr := params.Store.AppendRunHistoryWithEvents(ctx, runHistory, eventRows, runEventStoreLimits)
+	var eventsErr *persistence.RunEventsError
+	switch {
+	case errors.As(appendErr, &eventsErr):
+		log.Warn("failed to persist run events",
+			slog.String("dispatch_id", entry.DispatchID),
+			slog.Int("events", len(eventRows)),
+			slog.Any("error", eventsErr),
+		)
+		runID = row.ID
+		if params.RunEventRetry != nil {
+			params.RunEventRetry.Hold(HeldRunEvents{
+				IssueID:     workerResult.IssueID,
+				Identifier:  workerResult.Identifier,
+				DispatchID:  entry.DispatchID,
+				CompletedAt: runHistory.CompletedAt,
+				Events:      eventRows,
+			})
+		}
+	case appendErr != nil:
 		runHistoryPersisted = false
 		log.Error("failed to persist run history",
-			slog.Any("error", err),
+			slog.Any("error", appendErr),
 		)
-	} else {
+	default:
 		runID = row.ID
 	}
+	state.RetainedEvents.release(entry.DispatchID)
 
 	identity := sessionEvent{
 		IssueID:    workerResult.IssueID,
