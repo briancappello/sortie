@@ -87,6 +87,10 @@ function NavFilter({ query, firstMatch, onQueryChange }: NavFilterProps) {
   const navigate = useNavigate();
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    // Enter and Escape during IME composition confirm or cancel a candidate.
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
     if (event.key === "Enter" && firstMatch !== undefined) {
       onQueryChange("");
       void navigate(firstMatch.path);
