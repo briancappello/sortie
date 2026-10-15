@@ -34,7 +34,10 @@ export function ThemeMenu() {
 
   return (
     <Menu>
-      <MenuTrigger className={buttonStyles("ghost", "w-full justify-start")} title="Theme (T)">
+      <MenuTrigger
+        className={buttonStyles("ghost", "w-full justify-start font-regular")}
+        title="Theme (T)"
+      >
         <current.Icon />
         Theme
         <span className="ml-auto text-ink-body">{current.label}</span>
