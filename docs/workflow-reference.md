@@ -1897,11 +1897,12 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | Method | Path                     | Description                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------ |
 | GET    | `/`                      | Redirects to `/ui/` with `302 Found`. |
-| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change. |
+| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change, History at most once per 5 seconds and Analytics at most once per 30 seconds. |
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, one entry per active issue in a stable order, the list of what needs a person, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
+| GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger and by what started them, priced at the `token_rates` the process started with. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
@@ -3297,6 +3298,117 @@ The recorded CI result of a failing check is a run with `status` `ci_failed`, no
 
 A request whose filters match fewer runs than the page holds reads run history down to its start, and a read waits for the database connection the orchestrator uses, so a narrow filter on a long history takes longer than a page of recent runs.
 
+#### `GET /api/v1/runs/issues`: run history by issue
+
+Returns the finished runs of run history grouped by issue, one page of issues at a time, the issue with the newest matching run first. A group holds one issue however many runs it has, so an issue that retried many times is one group and never fills the page. Each group says how its issue ended or what it is doing now, lists the issue's newest runs, and carries the issue's totals.
+
+**Query parameters.** Every parameter is optional. An empty value is the same as an absent one, a parameter given twice is refused, and so is any parameter not in this table. Filters combine with AND and match exactly, case included.
+
+| Parameter | Value                                          | Selects |
+| --------- | ---------------------------------------------- | ------- |
+| `issue`   | An issue key                                   | The issues with a run whose `issue_identifier` or `display_identifier` equals it, so the `owner/repo#9` form a GitHub, GitLab, or Gitea tracker shows finds its issue. A selected issue's group lists its runs whatever key each run recorded. On [`GET /api/v1/runs`](#get-apiv1runs-run-history), `issue` matches `issue_identifier` alone. |
+| `rule`    | A dispatch rule name, `default`, or `<none>`   | The runs whose `rule_name` equals it, as on `GET /api/v1/runs`. |
+| `status`  | A run status                                   | The runs whose `status` equals it. |
+| `stage`   | A dispatch rule name                           | The runs whose exit reached a stage hop decision targeting that rule, whatever its result. |
+| `cursor`  | A `next_cursor` value                          | The groups after the previous page. |
+| `limit`   | An integer from 1 to 50, default 20            | The page size, in groups. |
+
+A group is one issue with at least one run that matches `rule`, `status`, and `stage`, and the groups are ordered by each issue's newest matching run, descending `run_id`. `next_cursor` is `null` on the last page and otherwise the `run_id` of the page's last group's newest matching run, as a string. A client treats it as opaque and passes it back with any filters. The next page holds the groups whose newest matching run is older and that have no matching run at or above the cursor, so a traversal serves each group once. A run recorded between two requests moves its issue's group to the first page and never repeats a group already served on a later page.
+
+```json
+{
+  "groups": [
+    {
+      "issue_id": "abc123",
+      "issue_identifier": "9",
+      "display_identifier": "acme/web#9",
+      "issue_title": "Fix the flaky login test",
+      "issue_url": "https://github.com/acme/web/issues/9",
+      "status": "history",
+      "status_text": "Merged #936",
+      "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936.",
+      "issue_outcome": {
+        "kind": "merged",
+        "observed_at": "2026-02-24T21:02:10Z",
+        "merge_path": "auto_merge",
+        "pull_request": {"number": 936, "repository": "acme/web"},
+        "status_text": "Merged #936",
+        "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936."
+      },
+      "runs": [
+        {
+          "run_id": 42,
+          "issue_id": "abc123",
+          "issue_identifier": "9",
+          "display_identifier": "acme/web#9",
+          "issue_title": "Fix the flaky login test",
+          "issue_url": "https://github.com/acme/web/issues/9",
+          "attempt": 2,
+          "status": "succeeded",
+          "error": null,
+          "rule_name": "implement",
+          "agent_kind": "claude-code",
+          "started_at": "2026-02-24T20:10:12Z",
+          "completed_at": "2026-02-24T20:31:47Z",
+          "turns_completed": 9,
+          "tokens_measured": true,
+          "estimated_cost_usd": 0.1923,
+          "cost_status": "estimated"
+        }
+      ],
+      "next_cursor": "37",
+      "totals": {
+        "run_count": 6,
+        "unmeasured_runs": 0,
+        "tokens": {
+          "input_tokens": 310000,
+          "output_tokens": 52000,
+          "total_tokens": 362000,
+          "cache_read_tokens": 150000,
+          "cache_write_tokens": 20000
+        },
+        "tokens_complete": true,
+        "estimated_cost_usd": 1.1425,
+        "cost_status": "estimated"
+      }
+    }
+  ],
+  "next_cursor": "31"
+}
+```
+
+The example abridges the run to some of its fields; `runs` serves the full run shape of [`GET /api/v1/runs`](#get-apiv1runs-run-history), and `groups` is `[]` when no issue has a matching run.
+
+**Group fields:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `issue_id` | string | The tracker's issue ID. |
+| `issue_identifier` | string | The issue identifier of the issue's newest run. |
+| `display_identifier` | string or absent | The qualified form of the identifier, omitted when empty. |
+| `issue_title`, `issue_url` | string or absent | The title and link of the issue's newest run. Omitted when empty. Masked: a value registered as a secret after the run is replaced by the mask marker too. |
+| `status` | string | What [`GET /api/v1/{identifier}`](#get-apiv1identifier--per-issue-detail) serves for the issue at the same instant. While a live entry of the state holds the issue, its status, such as `running` or `retrying`. Otherwise `history`. |
+| `status_text`, `status_text_full` | string | The status sentence pair. While a live entry holds the issue, the entry's pair. Otherwise the pair worded from the issue's outcome and its newest run's hop decision. |
+| `issue_outcome` | object or `null` | How the issue's latest work ended, in the shape of the `issue_outcome` run field, or `null` when Sortie observed no ending. |
+| `runs` | array | The issue's newest matching runs, at most 5, newest first, none newer than the group's newest matching run. |
+| `next_cursor` | string or `null` | Non-`null` exactly when the issue has an older matching run. It continues on `GET /api/v1/runs` with `issue_id` set to the group's `issue_id` and the request's `rule`, `status`, and `stage`. |
+| `totals` | object | The `totals` of the per-issue response, over every run of the issue whatever the filters select. |
+
+Sortie reads the state before run history, as the per-issue route does, so a run that ends between the two reads appears in both and never in neither.
+
+**Errors:**
+
+| Condition | Status | `error.code` |
+| --------- | ------ | ------------ |
+| An unknown parameter, a parameter given more than once, a `limit` that is not an integer from 1 to 50, or a `cursor` that is not an integer of 1 or more | 400 | `invalid_parameter`; the message names the parameter and the rule, for example `parameter "limit" must be an integer from 1 to 50`. Nothing is read. |
+| Run history or the outcomes of the served issues cannot be read, or the server has none | 503 | `history_unavailable` |
+| The runtime snapshot cannot be read | 503 | `snapshot_unavailable` |
+| A method other than `GET` | 405 | `method_not_allowed` |
+
+A client that disconnects gets no response, and the reads stop.
+
+The route reads through the connection the orchestrator uses. One statement selects the page's groups and stops once it holds them, and Sortie reads each served issue's runs, newest run, and totals only after that statement closes, through an index on the issue ID. An `issue` key resolves through the indexes on the identifier and on the display identifier. A filter that matches few runs on a long history reads down to the start of run history, so a narrow filter takes longer than a page of recent issues.
+
 #### `GET /api/v1/stats`: run statistics
 
 Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
@@ -3349,7 +3461,8 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000},
       "cost_usd": 17.87,
       "cost_per_succeeded_run_usd": 5.96,
-      "tokens_unmeasured_runs": 0
+      "tokens_unmeasured_runs": 0,
+      "cost_unpriced_runs": 0
     }
   ],
   "by_adapter": [],
@@ -3369,6 +3482,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "cost_usd": 17.87,
       "cost_per_succeeded_run_usd": 8.94,
       "tokens_unmeasured_runs": 0,
+      "cost_unpriced_runs": 0,
       "issue": "MT-649",
       "stages": ["implement", "review"],
       "last_hop": "advanced"
@@ -3386,7 +3500,8 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
       "cost_usd": 12.25,
       "cost_per_succeeded_run_usd": 6.13,
-      "tokens_unmeasured_runs": 1
+      "tokens_unmeasured_runs": 1,
+      "cost_unpriced_runs": 1
     }
   ],
   "by_origin": [
@@ -3401,7 +3516,8 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
       "cost_usd": 12.25,
       "cost_per_succeeded_run_usd": 6.13,
-      "tokens_unmeasured_runs": 1
+      "tokens_unmeasured_runs": 1,
+      "cost_unpriced_runs": 1
     }
   ],
   "self_review": {
@@ -3474,6 +3590,7 @@ The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `
 | `tokens`                     | object or `null` | As in `summary`, over the group's runs. |
 | `cost_usd`, `cost_per_succeeded_run_usd` | number or `null` | As in `summary`, over the group's runs. |
 | `tokens_unmeasured_runs`     | integer          | The group's runs that reported no usage. |
+| `cost_unpriced_runs`         | integer          | The group's runs that `cost_usd` leaves out for want of a rate, counted as in `summary`. `0` on the `base` tier and while `token_rates` is not configured. |
 
 **`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
 
@@ -3859,7 +3976,7 @@ token_rates:
     cache_read_per_mtok: 0.25
 ```
 
-When `token_rates` is configured, the dashboard labels every cost an estimate and estimates the cost of today's runs, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, and the `sortie stats` subcommand and `GET /api/v1/stats` price the runs they aggregate from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
+When `token_rates` is configured, the dashboard labels every cost an estimate, estimates the cost of today's runs, and shows an estimate on each run, each issue, and each breakdown of its History and Analytics screens, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, including each issue of run history by issue, and the `sortie stats` subcommand and `GET /api/v1/stats` price the runs they aggregate from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
 
 Every figure Sortie prices is a fresh-input token, a cache-read token, a cache-write token, or an output token, priced once each at its own rate. An unset `cache_read_per_mtok` or `cache_write_per_mtok` prices that class at `input_per_mtok`, so a configuration that sets neither keeps pricing every input token, cached or not, at the input rate. `claude-code`, `copilot-cli`, and `opencode` report a cache-write count; an operator of one of those kinds sets `cache_write_per_mtok` to that provider's cache-write rate to price it separately.
 
