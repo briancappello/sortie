@@ -1,6 +1,7 @@
 import { fmtDue, fmtDuration, parseInstant } from "@/lib/format";
 
 import type {
+  ActiveIssueResponse,
   AttentionItemResponse,
   BudgetExhaustedResponse,
   ConfigResponse,
@@ -35,7 +36,7 @@ export const PHASES: readonly Phase[] = [
   "needs_attention",
 ];
 
-/** One issue in Active, merged from the state's row lists. */
+/** One issue in Active, built from a served `active` entry. */
 export interface ActiveRow {
   issueId: string;
   identifier: string;
@@ -50,15 +51,7 @@ export interface ActiveRow {
   agentKind: string | null;
   rule: string | null;
   timeBase: string | null;
-  dispatchedAt: string | null;
   acknowledgedAt: string | null;
-}
-
-/** The position an order memory holds for a row. */
-export interface OrderKey {
-  dispatchedAt: number | null;
-  identifier: string;
-  issueId: string;
 }
 
 /** One entry of the Rule menu; `group` is the first rule of the chain a header or member belongs to. */
@@ -83,36 +76,10 @@ interface RuleSource {
   rule_name?: string;
 }
 
-const KINDS: readonly RowKind[] = [
-  "running",
-  "retrying",
-  "budget_exhausted",
-  "parked",
-  "pending_reactions",
-  "between_stages",
-];
-
 const DEFAULT_RULE = "default";
 
 function isNamedRule(name: string | undefined): name is string {
   return name !== undefined && name !== "" && name !== DEFAULT_RULE;
-}
-
-function entriesOf(state: StateResponse, kind: RowKind): Deciding[] {
-  switch (kind) {
-    case "running":
-      return (state.running ?? []).map((entry) => ({ kind, entry }));
-    case "retrying":
-      return (state.retrying ?? []).map((entry) => ({ kind, entry }));
-    case "budget_exhausted":
-      return (state.budget_exhausted ?? []).map((entry) => ({ kind, entry }));
-    case "parked":
-      return (state.parked ?? []).map((entry) => ({ kind, entry }));
-    case "pending_reactions":
-      return (state.pending_reactions ?? []).map((entry) => ({ kind, entry }));
-    case "between_stages":
-      return (state.between_stages ?? []).map((entry) => ({ kind, entry }));
-  }
 }
 
 /** Gives the phase of a row; a reaction row is needs-attention only once it escalated. */
@@ -192,19 +159,59 @@ function timeBaseOf(deciding: Deciding): string | null {
   }
 }
 
-function decidingFor(candidates: Deciding[]): Deciding {
-  const first = candidates[0];
-  if (first.kind !== "pending_reactions") {
-    return first;
+function isRowKind(value: string): value is RowKind {
+  switch (value) {
+    case "running":
+    case "retrying":
+    case "budget_exhausted":
+    case "parked":
+    case "pending_reactions":
+    case "between_stages":
+      return true;
+    default:
+      return false;
   }
-  return (
-    candidates.find((c) => c.kind === "pending_reactions" && c.entry.escalated_at !== null) ?? first
-  );
 }
 
-function toRow(deciding: Deciding, state: StateResponse): ActiveRow {
-  const { entry, kind } = deciding;
-  const escalatedAt = deciding.kind === "pending_reactions" ? deciding.entry.escalated_at : null;
+function namedRow(
+  state: StateResponse,
+  kind: RowKind,
+  entry: ActiveIssueResponse,
+): Deciding | undefined {
+  const isIssue = (row: { issue_id: string }) => row.issue_id === entry.issue_id;
+  switch (kind) {
+    case "running": {
+      const named = (state.running ?? []).find(isIssue);
+      return named === undefined ? undefined : { kind, entry: named };
+    }
+    case "retrying": {
+      const named = (state.retrying ?? []).find(isIssue);
+      return named === undefined ? undefined : { kind, entry: named };
+    }
+    case "budget_exhausted": {
+      const named = (state.budget_exhausted ?? []).find(isIssue);
+      return named === undefined ? undefined : { kind, entry: named };
+    }
+    case "parked": {
+      const named = (state.parked ?? []).find(isIssue);
+      return named === undefined ? undefined : { kind, entry: named };
+    }
+    case "pending_reactions": {
+      const named = (state.pending_reactions ?? []).find(
+        (row) => isIssue(row) && row.kind === entry.reaction_kind,
+      );
+      return named === undefined ? undefined : { kind, entry: named };
+    }
+    case "between_stages": {
+      const named = (state.between_stages ?? []).find(isIssue);
+      return named === undefined ? undefined : { kind, entry: named };
+    }
+  }
+}
+
+function toRow(entry: ActiveIssueResponse, kind: RowKind, state: StateResponse): ActiveRow {
+  const named = namedRow(state, kind, entry);
+  const escalatedAt = named?.kind === "pending_reactions" ? named.entry.escalated_at : null;
   const { mark, acknowledgedAt } = rowMark(kind, entry.issue_id, state.attention ?? []);
   return {
     issueId: entry.issue_id,
@@ -219,23 +226,16 @@ function toRow(deciding: Deciding, state: StateResponse): ActiveRow {
     route: routeText(entry, state.config),
     agentKind: entry.agent_kind || null,
     rule: ruleOf(entry),
-    timeBase: timeBaseOf(deciding),
-    dispatchedAt: entry.dispatched_at,
+    timeBase: named === undefined ? null : timeBaseOf(named),
     acknowledgedAt,
   };
 }
 
-/** Merges the state's row lists into one row per issue; the earliest list decides which entry speaks for it. */
-export function mergeRows(state: StateResponse): ActiveRow[] {
-  const candidates = new Map<string, Deciding[]>();
-  for (const kind of KINDS) {
-    for (const deciding of entriesOf(state, kind)) {
-      const list = candidates.get(deciding.entry.issue_id) ?? [];
-      list.push(deciding);
-      candidates.set(deciding.entry.issue_id, list);
-    }
-  }
-  return [...candidates.values()].map((list) => toRow(decidingFor(list), state));
+/** Builds the Active rows from the served `active` entries, in the served order. */
+export function activeRows(state: StateResponse): ActiveRow[] {
+  return (state.active ?? []).flatMap((entry) =>
+    isRowKind(entry.status) ? [toRow(entry, entry.status, state)] : [],
+  );
 }
 
 /** Words the time cell of a row on the server clock. */
@@ -245,52 +245,6 @@ export function timeCell(row: ActiveRow, now: number): string {
     return "unknown";
   }
   return row.kind === "retrying" ? fmtDue((base - now) / 1000) : fmtDuration((now - base) / 1000);
-}
-
-function compareKeys(a: OrderKey, b: OrderKey): number {
-  if (a.dispatchedAt !== b.dispatchedAt) {
-    if (a.dispatchedAt === null) {
-      return -1;
-    }
-    if (b.dispatchedAt === null) {
-      return 1;
-    }
-    return a.dispatchedAt - b.dispatchedAt;
-  }
-  if (a.identifier !== b.identifier) {
-    return a.identifier < b.identifier ? -1 : 1;
-  }
-  if (a.issueId !== b.issueId) {
-    return a.issueId < b.issueId ? -1 : 1;
-  }
-  return 0;
-}
-
-/**
- * Orders rows by the key remembered when each first appeared, so a row never
- * moves while it stays active. It writes to `memory`; call it on live data
- * only, never on a held snapshot.
- */
-export function orderRows(memory: Map<string, OrderKey>, rows: ActiveRow[]): ActiveRow[] {
-  const present = new Set(rows.map((row) => row.issueId));
-  for (const issueId of memory.keys()) {
-    if (!present.has(issueId)) {
-      memory.delete(issueId);
-    }
-  }
-  const keyed = rows.map((row) => {
-    let key = memory.get(row.issueId);
-    if (key === undefined) {
-      key = {
-        dispatchedAt: parseInstant(row.dispatchedAt),
-        identifier: row.identifier,
-        issueId: row.issueId,
-      };
-      memory.set(row.issueId, key);
-    }
-    return { row, key };
-  });
-  return keyed.sort((a, b) => compareKeys(a.key, b.key)).map(({ row }) => row);
 }
 
 function countRows(rows: readonly ActiveRow[], matches: (rule: string | null) => boolean): number {

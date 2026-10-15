@@ -26,6 +26,7 @@ type stateResponse struct {
 	Parked                 []parkedEntryResponse            `json:"parked"`
 	PendingReactions       []pendingReactionResponse        `json:"pending_reactions"`
 	BetweenStages          []stageHopResponse               `json:"between_stages"`
+	Active                 []activeIssueResponse            `json:"active"`
 	Attention              []attentionItemResponse          `json:"attention"`
 	AgentTotals            orchestrator.SnapshotAgentTotals `json:"agent_totals"`
 	RateLimits             map[string]any                   `json:"rate_limits"`
@@ -958,6 +959,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRa
 		AgentTotals:      snap.AgentTotals,
 		RateLimits:       rateLimits,
 	}
+	resp.Active = activeIssuesOf(resp, snap.ActiveOrder)
 
 	if len(tokenRates) > 0 {
 		total, anySet, unpriced := activeCostTotal(snap.Running, tokenRates)
@@ -1496,21 +1498,29 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 		}
 	}
 
-	if runEntry == nil && retryEntry == nil && budgetEntry == nil && parkedEntry == nil && len(pendingRows) == 0 && hopEntry == nil {
+	pending := toPendingReactionResponses(pendingRows, words)
+	rows := issueRows{
+		running: runEntry,
+		retry:   retryEntry,
+		budget:  budgetEntry,
+		parked:  parkedEntry,
+		pending: pending,
+		between: hopEntry,
+	}
+	if rows.status() == "" {
 		return nil
 	}
 
 	situation.PendingReactions = pendingRows
-	pending := toPendingReactionResponses(pendingRows, words)
 
 	var status string
 	var statusText, statusTextFull string
 	var entryIdentifier, entryIssueID string
 	var issue issueResponse
 
-	switch {
-	case runEntry != nil:
-		status = "running"
+	switch rows.status() {
+	case statusRunning:
+		status = statusRunning
 		statusText, statusTextFull = runEntry.StatusText, runEntry.StatusTextFull
 		entryIdentifier, entryIssueID = runEntry.IssueIdentifier, runEntry.IssueID
 		issue = issueResponse{
@@ -1520,8 +1530,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 			Labels:    runEntry.IssueLabels,
 			State:     runEntry.State,
 		}
-	case retryEntry != nil:
-		status = "retrying"
+	case statusRetrying:
+		status = statusRetrying
 		statusText, statusTextFull = retryEntry.StatusText, retryEntry.StatusTextFull
 		entryIdentifier, entryIssueID = retryEntry.IssueIdentifier, retryEntry.IssueID
 		issue = issueResponse{
@@ -1531,8 +1541,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 			Labels:    retryEntry.IssueLabels,
 			State:     retryEntry.State,
 		}
-	case budgetEntry != nil:
-		status = "budget_exhausted"
+	case statusBudgetExhausted:
+		status = statusBudgetExhausted
 		statusText, statusTextFull = budgetEntry.StatusText, budgetEntry.StatusTextFull
 		entryIdentifier, entryIssueID = budgetEntry.IssueIdentifier, budgetEntry.IssueID
 		issue = issueResponse{
@@ -1542,8 +1552,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 			Labels:    budgetEntry.IssueLabels,
 			State:     budgetEntry.State,
 		}
-	case parkedEntry != nil:
-		status = "parked"
+	case statusParked:
+		status = statusParked
 		statusText, statusTextFull = parkedEntry.StatusText, parkedEntry.StatusTextFull
 		entryIdentifier, entryIssueID = parkedEntry.IssueIdentifier, parkedEntry.IssueID
 		issue = issueResponse{
@@ -1553,8 +1563,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 			Labels:    parkedEntry.IssueLabels,
 			State:     parkedEntry.ParkedState,
 		}
-	case len(pendingRows) > 0:
-		status = "pending_reactions"
+	case statusPendingReactions:
+		status = statusPendingReactions
 		deciding := decidingPendingReaction(pending)
 		statusText, statusTextFull = deciding.StatusText, deciding.StatusTextFull
 		entryIdentifier, entryIssueID = pendingRows[0].Identifier, pendingRows[0].IssueID
@@ -1565,8 +1575,8 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 			Labels:    pendingRows[0].IssueLabels,
 			State:     pendingRows[0].State,
 		}
-	case hopEntry != nil:
-		status = "between_stages"
+	case statusBetweenStages:
+		status = statusBetweenStages
 		statusText, statusTextFull = hopEntry.StatusText, hopEntry.StatusTextFull
 		entryIdentifier, entryIssueID = hopEntry.IssueIdentifier, hopEntry.IssueID
 		issue = issueResponse{

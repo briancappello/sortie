@@ -43,6 +43,77 @@
       ],
       "type": "object"
     },
+    "ActiveIssueResponse": {
+      "properties": {
+        "agent_kind": {
+          "type": "string"
+        },
+        "configured_model": {
+          "type": "string"
+        },
+        "dispatched_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_identifier": {
+          "type": "string"
+        },
+        "issue_id": {
+          "type": "string"
+        },
+        "issue_identifier": {
+          "type": "string"
+        },
+        "issue_title": {
+          "type": "string"
+        },
+        "issue_url": {
+          "type": "string"
+        },
+        "reaction_kind": {
+          "type": "string"
+        },
+        "rule_name": {
+          "type": "string"
+        },
+        "stage_position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StagePositionResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "status_text": {
+          "type": "string"
+        },
+        "status_text_full": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id",
+        "issue_identifier",
+        "status",
+        "stage_position",
+        "dispatched_at",
+        "status_text",
+        "status_text_full"
+      ],
+      "type": "object"
+    },
     "AttemptsInfo": {
       "properties": {
         "current_retry_attempt": {
@@ -3416,6 +3487,19 @@
     },
     "StateResponse": {
       "properties": {
+        "active": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ActiveIssueResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "active_estimated_cost_usd": {
           "type": "number"
         },
@@ -3566,6 +3650,7 @@
         "parked",
         "pending_reactions",
         "between_stages",
+        "active",
         "attention",
         "agent_totals",
         "rate_limits"

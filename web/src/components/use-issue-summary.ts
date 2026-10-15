@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 
 import { useEndedQuery, useStateQuery } from "@/api/queries";
-import { mergeRows } from "@/lib/active-rows";
+import { activeRows } from "@/lib/active-rows";
 import { buildEnded } from "@/lib/ended";
 import { now, localMidnight } from "@/lib/server-clock";
 import { attentionKey, endedKey, markRead } from "@/lib/unread";
@@ -20,7 +20,7 @@ export function useIssueSummary(identifier: string): IssueDetailRow | undefined 
     if (state === undefined) {
       return undefined;
     }
-    const row = mergeRows(state).find((candidate) => candidate.identifier === identifier);
+    const row = activeRows(state).find((candidate) => candidate.identifier === identifier);
     if (row !== undefined) {
       return row;
     }

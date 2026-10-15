@@ -14,7 +14,7 @@ import type { ActiveRow as ActiveRowModel } from "@/lib/active-rows";
 
 /** Props of {@link ActiveList}. */
 export interface ActiveListProps {
-  /** Every merged row in dispatch order, before any filter. */
+  /** The served `active` rows in served order, before any filter. */
   rows: readonly ActiveRowModel[];
   /** The rows the `phase` and `rule` search parameters leave. */
   visibleRows: readonly ActiveRowModel[];

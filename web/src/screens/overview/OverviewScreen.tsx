@@ -7,7 +7,7 @@ import { useEndedQuery, useFirstRunQuery, useStateQuery, useTallyQuery } from "@
 import { useHold, useLive, useNow } from "@/app/live";
 import { useShortcuts } from "@/app/keys";
 import { usePeek } from "@/components/use-peek";
-import { filterRows, mergeRows, orderRows } from "@/lib/active-rows";
+import { activeRows, filterRows } from "@/lib/active-rows";
 import { condition } from "@/lib/condition";
 import { buildEnded } from "@/lib/ended";
 import { localMidnight } from "@/lib/server-clock";
@@ -25,7 +25,7 @@ import { useAttentionActions } from "./use-attention-actions";
 
 import type { AttentionItemResponse, Report, RunsResponse, StateResponse } from "@/api/types.gen";
 import type { Binding } from "@/app/keys";
-import type { ActiveRow, OrderKey } from "@/lib/active-rows";
+import type { ActiveRow } from "@/lib/active-rows";
 import type { EndedEmpty } from "./EndedToday";
 
 /** One item the keyboard selection can rest on. */
@@ -82,11 +82,10 @@ function OverviewBody({ state }: OverviewBodyProps) {
   const tally = useTallyQuery(midnight);
   const isFirstRun = useFirstRunQuery();
   const isFetching = useIsFetching() > 0;
-  const [orderMemory] = useState(() => new Map<string, OrderKey>());
   const [selection, setSelection] = useState({ key: null as string | null, index: 0 });
   const [showSelection, setShowSelection] = useState(false);
 
-  const rows = useMemo(() => orderRows(orderMemory, mergeRows(state)), [orderMemory, state]);
+  const rows = useMemo(() => activeRows(state), [state]);
   const isHeld = peekIdentifier !== null;
   const view = useHold<OverviewView>(
     {

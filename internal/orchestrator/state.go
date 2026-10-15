@@ -1291,6 +1291,10 @@ type State struct {
 	// table. Only the event loop may mutate this map.
 	StageHops map[string]*StageHopEntry
 
+	// ActiveOrder maps the ID of each issue the row lists hold to the time it
+	// is ordered by. Runtime-only; written only on the event-loop goroutine.
+	ActiveOrder map[string]time.Time
+
 	// AgentTotals holds aggregate token counts and cumulative runtime
 	// seconds across all ended sessions. Active-session elapsed time is
 	// computed at snapshot time.
@@ -1415,6 +1419,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		Parked:                    make(map[string]*ParkedEntry),
 		AttentionAcknowledgements: make(map[string]time.Time),
 		StageHops:                 make(map[string]*StageHopEntry),
+		ActiveOrder:               make(map[string]time.Time),
 		AgentTotals:               totals,
 		ReactionAttempts:          make(map[string]int),
 		ReactionHandedOffComments: make(map[string]map[string]struct{}),
@@ -1724,6 +1729,10 @@ type RuntimeSnapshotResult struct {
 	// BetweenStages is never nil.
 	BetweenStages []SnapshotStageHop `json:"between_stages"`
 
+	// ActiveOrder maps every issue ID the row lists hold to its order time.
+	// It shares nothing with State.
+	ActiveOrder map[string]time.Time `json:"-"`
+
 	// MaxTokens and MaxSessions are the token ceiling and session budget in
 	// force at capture; 0 means no limit.
 	MaxTokens   int `json:"max_tokens"`
@@ -2027,6 +2036,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 
 	snap.PendingReactions = snapshotPendingReactions(state)
 	snap.BetweenStages = snapshotBetweenStages(state)
+	snap.ActiveOrder = activeOrderOf(state)
 
 	if state.AgentRateLimits != nil {
 		snap.RateLimits = maps.Clone(state.AgentRateLimits.Data)
@@ -2120,13 +2130,7 @@ func watchBasis(entry *PendingReaction) time.Time {
 func snapshotBetweenStages(state *State) []SnapshotStageHop {
 	rows := make([]SnapshotStageHop, 0, len(state.StageHops))
 	for id, hop := range state.StageHops {
-		if hop.RunDispatched {
-			continue
-		}
-		if _, running := state.Running[id]; running {
-			continue
-		}
-		if _, retrying := state.RetryAttempts[id]; retrying {
+		if !listedBetweenStages(state, id, hop) {
 			continue
 		}
 		identity := maskedIdentity(hop.IssueIdentity)
@@ -2156,6 +2160,20 @@ func snapshotBetweenStages(state *State) []SnapshotStageHop {
 		return cmp.Or(cmp.Compare(a.Identifier, b.Identifier), cmp.Compare(a.IssueID, b.IssueID))
 	})
 	return rows
+}
+
+// listedBetweenStages reports whether hop puts the issue in the between-stages
+// list: no dispatched run has followed it, and the issue is neither running
+// nor queued for a retry.
+func listedBetweenStages(state *State, issueID string, hop *StageHopEntry) bool {
+	if hop.RunDispatched {
+		return false
+	}
+	if _, running := state.Running[issueID]; running {
+		return false
+	}
+	_, retrying := state.RetryAttempts[issueID]
+	return !retrying
 }
 
 // snapshotContinuation returns the view of target, or nil for the zero value.
