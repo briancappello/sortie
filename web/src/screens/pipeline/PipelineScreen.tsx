@@ -370,7 +370,7 @@ function PipelineBody({ state }: PipelineBodyProps) {
                 "No issue is active."
               ) : (
                 <>
-                  No active issue matches these filters.
+                  No issue matches these filters.
                   <Button onClick={handleShowAll}>Show all</Button>
                 </>
               )}
