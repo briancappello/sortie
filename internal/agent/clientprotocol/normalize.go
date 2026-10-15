@@ -11,9 +11,8 @@ import (
 )
 
 // reasoningBlockMessage and planUpdateMessage are the compile-time
-// constant messages the normalization table assigns to a thought chunk,
-// a plan update, and a message chunk carrying no text; none of them
-// carries agent-produced text.
+// constant messages the normalization table assigns to a thought chunk
+// and a plan update; neither carries agent-produced text.
 const (
 	reasoningBlockMessage = "reasoning block"
 
@@ -32,8 +31,11 @@ const messageTruncateLimit = 500
 // normalizedUpdate is what applySessionUpdate returns for one recognized
 // session/update variant: the event to publish, if any.
 type normalizedUpdate struct {
-	event    domain.AgentEvent
-	hasEvent bool
+	event        domain.AgentEvent
+	hasEvent     bool
+	messageChunk bool
+	messageID    *messageId
+	messageText  string
 }
 
 // applySessionUpdate normalizes one decoded session/update variant,
@@ -48,17 +50,21 @@ func applySessionUpdate(tracker *agentcore.ToolTracker, ev sessionUpdateEvent) n
 		text := chunkText(ev.chunk)
 		if text == "" {
 			return normalizedUpdate{
-				event:    domain.AgentEvent{Type: domain.EventMalformed, Timestamp: now, Message: nonTextChunkMessage},
-				hasEvent: true,
+				event:        domain.AgentEvent{Type: domain.EventMalformed, Timestamp: now, Message: nonTextChunkMessage},
+				hasEvent:     true,
+				messageChunk: true,
+				messageID:    ev.chunk.MessageID,
 			}
 		}
 		return normalizedUpdate{
 			event: domain.AgentEvent{
 				Type:      domain.EventNotification,
 				Timestamp: now,
-				Message:   redact.Truncate(text, messageTruncateLimit),
 			},
-			hasEvent: true,
+			hasEvent:     true,
+			messageChunk: true,
+			messageID:    ev.chunk.MessageID,
+			messageText:  text,
 		}
 
 	case updateAgentThoughtChunk:
