@@ -478,6 +478,7 @@ export interface RunResponse {
   reaction_config_key: string | null;
   session_id: string | null;
   ssh_host: string | null;
+  stage_chain: string[] | null;
   issue_outcome: IssueOutcomeResponse | null;
 }
 

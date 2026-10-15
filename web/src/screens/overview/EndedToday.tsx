@@ -3,8 +3,9 @@ import { StatusMark } from "@/components/StatusMark";
 import { cn } from "@/lib/cn";
 import { fmtClock } from "@/lib/format";
 import { outcomeMark } from "@/lib/run-status";
+import { rowStyles, secondLineColor } from "@/lib/rows";
 
-import { endedNavKey, rowStyles, secondLineColor } from "./rows";
+import { endedNavKey } from "./rows";
 
 import type { EndedIssue } from "@/lib/ended";
 

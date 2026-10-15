@@ -5,8 +5,7 @@ import { Button, buttonStyles } from "@/components/ui/button";
 import { linkActionOf } from "@/components/use-attention-actions";
 import { cn } from "@/lib/cn";
 import { fmtAgo } from "@/lib/format";
-
-import { rowStyles, secondLineColor } from "./rows";
+import { rowStyles, secondLineColor } from "@/lib/rows";
 
 import type { MouseEvent } from "react";
 

@@ -207,6 +207,10 @@ func (s *Server) buildIssueGroup(ctx context.Context, key IssueGroupKey, q Issue
 		return issueGroupResponse{}, false, err
 	}
 
+	var chains [][]string
+	if words.Shape != nil {
+		chains = words.Shape.Dispatch.Chains
+	}
 	outcome, hasOutcome := outcomes[key.IssueID]
 	group := issueGroupResponse{
 		IssueID:           key.IssueID,
@@ -214,7 +218,7 @@ func (s *Server) buildIssueGroup(ctx context.Context, key IssueGroupKey, q Issue
 		DisplayIdentifier: newest.DisplayID,
 		IssueTitle:        redact.Mask(newest.IssueTitle),
 		IssueURL:          redact.Mask(newest.IssueURL),
-		Runs:              toRunResponses(page, s.tokenRates),
+		Runs:              toRunResponses(page, s.tokenRates, chains),
 		NextCursor:        runsNext,
 		Totals:            historyTotalsOf(totals, s.tokenRates),
 	}

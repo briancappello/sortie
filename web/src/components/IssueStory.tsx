@@ -16,6 +16,7 @@ import {
 } from "@/lib/figures";
 import { fmtClock, fmtDuration, parseInstant, plural, pluralVerb } from "@/lib/format";
 import { agentLabel, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
+import { numberedRunsOf } from "@/lib/run-number";
 import { runStatus } from "@/lib/run-status";
 
 import type { ReactNode } from "react";
@@ -33,7 +34,9 @@ const PULL_REQUEST_KEY = "pull_request";
 
 const SEP = " · ";
 
-type StoryRun = { kind: "run"; run: RunResponse } | { kind: "live"; running: RunningEntryResponse };
+type StoryRun =
+  | { kind: "run"; run: RunResponse; number: number }
+  | { kind: "live"; running: RunningEntryResponse };
 
 interface Chapter {
   id: string;
@@ -70,28 +73,6 @@ export function storyRunsOf(
     (a, b) =>
       (parseInstant(a.started_at) ?? 0) - (parseInstant(b.started_at) ?? 0) || a.run_id - b.run_id,
   );
-}
-
-/**
- * Picks the newest finished run of a stage that was not started by a pull
- * request reaction, from runs in any order.
- */
-export function lastStageRunOf(
-  runs: readonly RunResponse[],
-  current: string,
-): RunResponse | undefined {
-  return runs
-    .filter((run) => run.rule_name === current && !run.reaction_kind)
-    .reduce<RunResponse | undefined>(
-      (newest, run) =>
-        newest === undefined ||
-        (parseInstant(run.started_at) ?? 0) > (parseInstant(newest.started_at) ?? 0) ||
-        ((parseInstant(run.started_at) ?? 0) === (parseInstant(newest.started_at) ?? 0) &&
-          run.run_id > newest.run_id)
-          ? run
-          : newest,
-      undefined,
-    );
 }
 
 function chapterKeyOf(item: StoryRun): string {
@@ -161,7 +142,10 @@ function chapterHeadOf(
     return { title: "Work", sub: agent };
   }
   const rule = `Rule ${ruleLabel(chapter.key)}`;
-  return { title: "Work", sub: agent === undefined ? rule : `${rule}${SEP}${agent}` };
+  return {
+    title: "Work",
+    sub: agent === undefined ? rule : `${rule}${SEP}${agent}`,
+  };
 }
 
 function endWordOf(last: StoryRun): string {
@@ -216,7 +200,6 @@ interface RunCardProps {
 function RunCard({ item, now, hasEstimates }: RunCardProps) {
   const isLive = item.kind === "live";
   const status = isLive ? { word: "Running", mark: "running" as Mark } : runStatus(item.run.status);
-  const attempt = isLive ? undefined : item.run.attempt;
   const origin = originOf(item);
   const started = parseInstant(startOf(item));
   const end = endOf(item);
@@ -232,7 +215,7 @@ function RunCard({ item, now, hasEstimates }: RunCardProps) {
     <div className="flex flex-col gap-xxs rounded-xl border border-line bg-canvas px-md py-sm">
       <div className="flex flex-wrap items-baseline gap-x-sm gap-y-xxs">
         <strong className="text-body-md font-bold text-ink">
-          {attempt === undefined ? "Live run" : `Run ${attempt}`}
+          {item.kind === "live" ? "Live run" : `Run ${item.number}`}
         </strong>
         {status.mark === null ? (
           <span className="text-body-sm text-ink-body">{lowerFirst(status.word)}</span>
@@ -475,7 +458,9 @@ export function IssueStory({ detail, position, progress, needsAttention }: Issue
   const { history, running } = detail;
   const runs = storyRunsOf(history?.runs ?? [], older.data?.pages ?? []);
   const items: StoryRun[] = [
-    ...runs.map((run): StoryRun => ({ kind: "run", run })),
+    ...numberedRunsOf(runs, history?.totals.run_count ?? runs.length).map(
+      ({ run, number }): StoryRun => ({ kind: "run", run, number }),
+    ),
     ...(running === null ? [] : [{ kind: "live", running } satisfies StoryRun]),
   ];
   const isExhausted = wanted > 0 && older.data !== undefined && !hasNextPage;

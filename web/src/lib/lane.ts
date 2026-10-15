@@ -1,6 +1,6 @@
 import { rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
-import { fmtStamp } from "@/lib/format";
-import { reactionLabel } from "@/lib/labels";
+import { fmtStamp, parseInstant } from "@/lib/format";
+import { reactionLabel, reactionShortLabel } from "@/lib/labels";
 import { outcomeMark, runStatus } from "@/lib/run-status";
 
 import type { Deciding } from "@/lib/active-rows";
@@ -24,6 +24,8 @@ export interface Station {
   key: string;
   kind: StationKind;
   label: string;
+  /** The form a header too narrow for the label uses; absent when the label is already short. */
+  short?: string;
 }
 
 const AGENT_KEY = "agent";
@@ -54,12 +56,28 @@ export function stationsOf(config: ConfigResponse): Station[] {
   }
   const reactions = REACTION_ORDER.filter((key) => config.reactions[key] !== undefined);
   for (const key of reactions) {
-    stations.push({ key, kind: "reaction", label: reactionLabel(key) });
+    const short = reactionShortLabel(key);
+    stations.push({
+      key,
+      kind: "reaction",
+      label: reactionLabel(key),
+      ...(short === undefined ? {} : { short }),
+    });
   }
   if (reactions.length > 0) {
-    stations.push({ key: "end", kind: "end", label: "Merged" });
+    stations.push({ key: "end", kind: "end", label: endLabelOf(config) });
   }
   return stations;
+}
+
+// Sortie records a terminal ending without a merge when an issue closes under an open pull
+// request, so a terminal state's name is true of the end station only when every merge Sortie
+// records moves the issue into it, which `merge_completion` does and `auto_merge` alone does not.
+function endLabelOf(config: ConfigResponse): string {
+  const terminal = config.tracker.terminal_states ?? [];
+  const isEveryMergeTerminal =
+    config.reactions.auto_merge === undefined || config.reactions.merge_completion !== undefined;
+  return terminal.length === 1 && isEveryMergeTerminal ? (terminal[0] ?? "End") : "End";
 }
 
 function pendingEntryOf(
@@ -116,10 +134,13 @@ export interface StandingInput {
   now: number;
 }
 
+/** What a lane draws at the station it stands on: a status mark, or the ring of an issue that ended today. */
+export type LaneMarker = Mark | "ended";
+
 /** Where an issue stands: a station key, its mark, and the time shown beside it. */
 export interface Standing {
   station: string;
-  mark: Mark | null;
+  mark: LaneMarker | null;
   time: string | null;
 }
 
@@ -192,7 +213,7 @@ export type StationState = "passed" | "current" | "ahead" | "waiting" | "escalat
 /** A {@link Station} with its state, and the mark and time of the issue standing on it. */
 export interface LaneStation extends Station {
   state: StationState;
-  mark: Mark | null;
+  mark: LaneMarker | null;
   time: string | null;
 }
 
@@ -203,11 +224,11 @@ function stateOf(
   pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
 ): StationState {
   if (station.kind === "reaction") {
-    const row = pending.find((r) => r.config_key === station.key);
-    if (row === undefined) {
+    const rows = pending.filter((r) => r.config_key === station.key);
+    if (rows.length === 0) {
       return "idle";
     }
-    return row.escalated_at === null ? "waiting" : "escalated";
+    return rows.some((r) => r.escalated_at !== null) ? "escalated" : "waiting";
   }
   if (current < 0) {
     return "idle";
@@ -229,8 +250,18 @@ export function laneOf(
   const current = standing === null ? -1 : stations.findIndex((s) => s.key === standing.station);
   return stations.map((station, index) =>
     standing !== null && index === current
-      ? { ...station, state: "current", mark: standing.mark, time: standing.time }
-      : { ...station, state: stateOf(station, index, current, pending), mark: null, time: null },
+      ? {
+          ...station,
+          state: "current",
+          mark: standing.mark,
+          time: standing.time,
+        }
+      : {
+          ...station,
+          state: stateOf(station, index, current, pending),
+          mark: null,
+          time: null,
+        },
   );
 }
 
@@ -255,6 +286,19 @@ function chainSourceOf(
 }
 
 /**
+ * Reads a place in a stage chain from a chain source. It returns `null` when
+ * there is no source, no chain, or the current stage is not on the chain.
+ */
+export function positionFrom(
+  source: { chain: readonly string[] | null; current: string } | null,
+): StagePosition | null {
+  if (source === null || source.chain === null || !source.chain.includes(source.current)) {
+    return null;
+  }
+  return { chain: source.chain, current: source.current };
+}
+
+/**
  * Reads the issue's place in its stage chain: from the deciding row while one
  * exists, from `history.last_stage` for a finished issue. It returns `null`
  * when the issue has no chain or its current stage is not on it.
@@ -263,11 +307,41 @@ export function positionOf(
   detail: IssueDetailResponse,
   deciding: Deciding | null,
 ): StagePosition | null {
-  const source = chainSourceOf(detail, deciding);
-  if (source === null || source.chain === null || !source.chain.includes(source.current)) {
-    return null;
-  }
-  return { chain: source.chain, current: source.current };
+  return positionFrom(chainSourceOf(detail, deciding));
+}
+
+/**
+ * Picks the newest finished run of a stage that was not started by a pull
+ * request reaction, from runs in any order.
+ */
+export function lastStageRunOf(
+  runs: readonly RunResponse[],
+  current: string,
+): RunResponse | undefined {
+  return runs
+    .filter((run) => run.rule_name === current && !run.reaction_kind)
+    .reduce<RunResponse | undefined>(
+      (newest, run) =>
+        newest === undefined ||
+        (parseInstant(run.started_at) ?? 0) > (parseInstant(newest.started_at) ?? 0) ||
+        ((parseInstant(run.started_at) ?? 0) === (parseInstant(newest.started_at) ?? 0) &&
+          run.run_id > newest.run_id)
+          ? run
+          : newest,
+      undefined,
+    );
+}
+
+/**
+ * Reads a finished issue's place in the chain its last stage run stood on,
+ * from one issue's runs served newest first. It returns `null` when the issue
+ * has no stage run, or that run's chain is absent or does not hold its rule.
+ */
+export function lastStagePositionOf(runs: readonly RunResponse[]): StagePosition | null {
+  const run = runs.find((candidate) => !candidate.reaction_kind && candidate.rule_name);
+  return run === undefined
+    ? null
+    : positionFrom({ chain: run.stage_chain, current: run.rule_name ?? "" });
 }
 
 /** What the stage summary and the meter single out. */
@@ -290,7 +364,11 @@ function hopNotMade(run: RunResponse | undefined): StageFocus | null {
   if (run === undefined || (run.stage_result !== "failed" && run.stage_result !== "ceiling")) {
     return null;
   }
-  return { kind: "hop_not_made", target: run.stage_target ?? "", result: run.stage_result };
+  return {
+    kind: "hop_not_made",
+    target: run.stage_target ?? "",
+    result: run.stage_result,
+  };
 }
 
 /**

@@ -6,7 +6,7 @@ import { keyTip } from "@/app/key-tips";
 import { useNow } from "@/app/live";
 import { ExternalLinkIcon } from "@/components/icons";
 import { IssueMargin, NextOutcomes } from "@/components/IssueMargin";
-import { IssueStory, lastStageRunOf, storyRunsOf } from "@/components/IssueStory";
+import { IssueStory, storyRunsOf } from "@/components/IssueStory";
 import { Lane } from "@/components/Lane";
 import { ServedText } from "@/components/ServedText";
 import { StateBadge } from "@/components/StateBadge";
@@ -22,12 +22,14 @@ import { agentLabel, modelLabel, ruleLabel } from "@/lib/labels";
 import {
   decidingOf,
   laneOf,
+  lastStageRunOf,
   positionOf,
   stageProgressOf,
   standingOf,
   stationsOf,
 } from "@/lib/lane";
 import { safeHttpUrl } from "@/lib/links";
+import { numberedRunsOf } from "@/lib/run-number";
 import { runStatus } from "@/lib/run-status";
 
 import type { ReactNode } from "react";
@@ -286,9 +288,10 @@ interface PeekRunsProps {
 }
 
 function PeekRuns({ detail, now }: PeekRunsProps) {
-  const runs = storyRunsOf(detail.history?.runs ?? [], []);
-  const shown = runs.slice(-PEEK_RUNS);
-  const earlier = (detail.history?.totals.run_count ?? runs.length) - shown.length;
+  const served = detail.history?.runs ?? [];
+  const total = detail.history?.totals.run_count ?? served.length;
+  const shown = numberedRunsOf(served, total).slice(-PEEK_RUNS);
+  const earlier = total - shown.length;
   const node = "relative z-(--z-raised) mt-xs ml-xxs size-[9px] rounded-full border-[1.5px]";
   return (
     <ul className="relative before:absolute before:top-xs before:bottom-xs before:left-[60px] before:w-px before:bg-line">
@@ -299,7 +302,7 @@ function PeekRuns({ detail, now }: PeekRunsProps) {
           <span className="text-ink-muted">{plural(earlier, "earlier run", "earlier runs")}</span>
         </li>
       ) : undefined}
-      {shown.map((run) => (
+      {shown.map(({ run, number }) => (
         <li
           key={run.run_id}
           className="grid grid-cols-[48px_20px_minmax(0,1fr)] gap-x-sm py-xs text-body-md"
@@ -309,7 +312,7 @@ function PeekRuns({ detail, now }: PeekRunsProps) {
           </span>
           <span aria-hidden="true" className={cn(node, "border-ink-body bg-ink-body")} />
           <span className="text-ink-body">
-            {`Run ${run.attempt}${run.rule_name ? `${SEP}${ruleLabel(run.rule_name)}` : ""}${SEP}${runStatus(run.status).word.toLowerCase()} at ${fmtClock(run.completed_at)}`}
+            {`Run ${number}${run.rule_name ? `${SEP}${ruleLabel(run.rule_name)}` : ""}${SEP}${runStatus(run.status).word.toLowerCase()} at ${fmtClock(run.completed_at)}`}
             {run.stage_result ? (
               <span className="block text-body-sm text-ink-muted">
                 stage result: {run.stage_result}
@@ -404,7 +407,7 @@ export function IssueDetail({ identifier, row, peek = false }: IssueDetailProps)
                   position={view.position}
                   progress={view.progress}
                   live={view.isLive}
-                  compact
+                  variant="peek"
                 />
               </div>
             )}

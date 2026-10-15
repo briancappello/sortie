@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router";
 
+import { ActiveHead } from "@/components/ActiveHead";
 import { PhaseFilter } from "@/components/PhaseFilter";
 import { RuleFilter } from "@/components/RuleFilter";
 import { Button } from "@/components/ui/button";
@@ -56,12 +57,7 @@ export function ActiveList({
 
   return (
     <section className="flex flex-col gap-sm">
-      <div className="flex flex-wrap items-baseline gap-x-sm">
-        <h2 className="font-heading text-h7 font-semibold text-ink">Active</h2>
-        <span className="text-body-md text-ink-muted">
-          {plural(rows.length, "issue", "issues")} · dispatch order
-        </span>
-      </div>
+      <ActiveHead view="list" meta={`${plural(rows.length, "issue", "issues")}, dispatch order`} />
       <div className="flex flex-wrap items-center justify-between gap-xs empty:hidden">
         <PhaseFilter rows={ruleRows} />
         <RuleFilter config={config} rows={rows} />
