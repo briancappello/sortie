@@ -273,6 +273,15 @@ export function LoaderCircleIcon(props: IconProps) {
   );
 }
 
+/** Draws the Lucide `minus` glyph. */
+export function MinusIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12h14" />
+    </Svg>
+  );
+}
+
 /** Draws the Lucide `monitor` glyph. */
 export function MonitorIcon(props: IconProps) {
   return (

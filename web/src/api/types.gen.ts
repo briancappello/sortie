@@ -28,6 +28,7 @@ export interface ActiveIssueResponse {
   dispatched_at: string | null;
   status_text: string;
   status_text_full: string;
+  pr_loop: Record<string, PrLoopStationResponse> | null;
 }
 
 export interface AgentEventFrame {
@@ -268,6 +269,7 @@ export interface IssueDetailResponse {
   last_error: string | null;
   tracked: Record<string, unknown> | null;
   history: IssueHistoryResponse | null;
+  pr_loop: Record<string, PrLoopStationResponse> | null;
   status_text: string;
   status_text_full: string;
   next_outcomes: NextOutcomeResponse[] | null;
@@ -398,6 +400,11 @@ export interface PollHealthResponse {
   outcome?: string;
   next_poll_at: string | null;
   summary_text: string;
+}
+
+export interface PrLoopStationResponse {
+  result: string;
+  continuations: number;
 }
 
 export interface PullRequestResponse {
@@ -564,6 +571,7 @@ export interface RunResponse {
   dispatch_id: string | null;
   stage_chain: string[] | null;
   issue_outcome: IssueOutcomeResponse | null;
+  pr_loop: Record<string, PrLoopStationResponse> | null;
 }
 
 export interface RunningEntryResponse {

@@ -111,7 +111,7 @@ function activeLanes(state: StateResponse, stations: readonly Station[], now: nu
       stallTextFull: row.stallTextFull,
       marker: standing.mark ?? row.mark,
       acknowledgedAt: row.acknowledgedAt,
-      stations: laneOf(stations, standing, pending),
+      stations: laneOf(stations, standing, pending, entry.pr_loop),
       station: standing.station,
       position,
       progress:
@@ -172,7 +172,7 @@ function endedLanes(
       stallTextFull: null,
       marker: "ended",
       acknowledgedAt: null,
-      stations: laneOf(stations, { ...standing, mark: "ended" }, []),
+      stations: laneOf(stations, { ...standing, mark: "ended" }, [], issue.prLoop),
       station: standing.station,
       position,
       progress:
