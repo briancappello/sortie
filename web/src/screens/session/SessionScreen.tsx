@@ -6,6 +6,7 @@ import { useHold, useLive, useNow } from "@/app/live";
 import { useRunEvents } from "@/app/run-events";
 import { TriangleAlertIcon } from "@/components/icons";
 import { Panel } from "@/components/Panel";
+import { ServedText } from "@/components/ServedText";
 import { StallNotice } from "@/components/StallNotice";
 import { useSessionRun } from "@/components/use-session-run";
 import { routeText } from "@/lib/active-rows";
@@ -21,16 +22,53 @@ import { timelineOf, turnBarsOf } from "./timeline";
 import { TokensChart, TokensLegend } from "./TokensChart";
 
 import type { ConfigResponse } from "@/api/types.gen";
-import type { RunLog } from "@/stream/core";
+import type { RunItem, RunLog } from "@/stream/core";
 import type { ResolvedSession } from "./SessionPanels";
+
+const SAYING_EVENTS: ReadonlySet<string> = new Set([
+  "notification",
+  "other_message",
+  "turn_completed",
+  "turn_failed",
+  "turn_cancelled",
+  "turn_ended_with_error",
+  "turn_input_required",
+]);
+
+/** The newest message an event of the run carries, which often says why the agent stopped. */
+function lastMessageOf(items: readonly RunItem[]): string | null {
+  for (const item of [...items].reverse()) {
+    if (
+      item.kind === "event" &&
+      SAYING_EVENTS.has(item.event.event) &&
+      item.event.message.trim() !== ""
+    ) {
+      return item.event.message;
+    }
+  }
+  return null;
+}
 
 interface EndNoticeProps {
   status: string;
   error: string;
+  lastMessage: string | null;
+}
+
+function LastMessage({ message }: { message: string | null }) {
+  if (message === null) {
+    return undefined;
+  }
+  return (
+    <span className="mt-xs block text-ink-body">
+      <span className="text-ink-muted">Last message from the agent: </span>
+      <ServedText text={message} />
+    </span>
+  );
 }
 
 /** Renders why a finished session ended under the page head, alarmed only when the run failed. */
-function EndNotice({ status, error }: EndNoticeProps) {
+function EndNotice({ status, error, lastMessage }: EndNoticeProps) {
   const { word, mark } = runStatus(status);
   if (mark === "failed") {
     return (
@@ -42,6 +80,7 @@ function EndNotice({ status, error }: EndNoticeProps) {
         <p className="min-w-0 wrap-anywhere">
           <strong className="font-bold text-error">{word}</strong>
           {` ${error}`}
+          <LastMessage message={lastMessage} />
         </p>
       </div>
     );
@@ -50,6 +89,7 @@ function EndNotice({ status, error }: EndNoticeProps) {
     <p className="mb-lg rounded-xl border border-solid border-line-strong bg-surface px-md py-sm text-body-md text-ink-body wrap-anywhere">
       <strong className="font-bold text-ink">{word}</strong>
       {` ${error}`}
+      <LastMessage message={lastMessage} />
     </p>
   );
 }
@@ -155,7 +195,11 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
         <StallNotice text={stallOff} isStalled={false} />
       ) : undefined}
       {session.kind === "finished" && session.run.error ? (
-        <EndNotice status={session.run.status} error={session.run.error} />
+        <EndNotice
+          status={session.run.status}
+          error={session.run.error}
+          lastMessage={lastMessageOf(held.items)}
+        />
       ) : undefined}
       <div className="flex flex-col gap-xl xl:grid xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start xl:gap-xxxl">
         <div className="flex min-w-0 flex-col gap-xl">

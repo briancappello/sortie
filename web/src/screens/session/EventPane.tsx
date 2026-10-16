@@ -211,6 +211,11 @@ function TurnLine({ line, isFresh }: TurnLineProps) {
           seconds={seconds}
           className={isFailed ? "text-body-sm text-ink-muted" : undefined}
         />
+        {isNumbered && event.message.trim() !== "" ? (
+          <span className="basis-full text-body-md text-ink">
+            <ServedText text={event.message} />
+          </span>
+        ) : undefined}
       </div>
     </Row>
   );
