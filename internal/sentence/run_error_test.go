@@ -31,6 +31,11 @@ func TestRunError(t *testing.T) {
 			want:   "The agent finished without changing anything, so Sortie did not hand the issue off.",
 		},
 		{
+			name:   "multiline detail",
+			stored: "agent turn 2: agent: port_exit: exit status 1\npanic: boom",
+			want:   "The agent process ended unexpectedly: exit status 1\npanic: boom.",
+		},
+		{
 			name:   "cancelled turn chain",
 			stored: "agent turn 1: agent: turn_cancelled: turn cancelled: context canceled",
 			want:   "Sortie stopped the session before the agent finished turn 1.",

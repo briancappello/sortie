@@ -16,10 +16,10 @@ const (
 )
 
 var (
-	agentTurnEnded = regexp.MustCompile(`^agent turn (\d+) ended: (.*)$`)
-	agentTurn      = regexp.MustCompile(`^agent turn (\d+): (.*)$`)
-	agentKindChain = regexp.MustCompile(`^agent: ([a-z_]+): (.*)$`)
-	turnStage      = regexp.MustCompile(`^(prompt render|issue state refresh) \(turn (\d+)\): (.*)$`)
+	agentTurnEnded = regexp.MustCompile(`(?s)^agent turn (\d+) ended: (.*)$`)
+	agentTurn      = regexp.MustCompile(`(?s)^agent turn (\d+): (.*)$`)
+	agentKindChain = regexp.MustCompile(`(?s)^agent: ([a-z_]+): (.*)$`)
+	turnStage      = regexp.MustCompile(`(?s)^(prompt render|issue state refresh) \(turn (\d+)\): (.*)$`)
 )
 
 // agentErrorKinds are the adapter error kinds that have a run-error sentence.
