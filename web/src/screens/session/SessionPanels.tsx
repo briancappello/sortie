@@ -2,7 +2,7 @@ import { Pair, Pairs, Panel } from "@/components/Panel";
 import { costText, NOT_MEASURED } from "@/lib/figures";
 import { fmtCount, fmtDuration } from "@/lib/format";
 
-import type { ConfigResponse } from "@/api/types.gen";
+import type { ConfigResponse, TokenInfo } from "@/api/types.gen";
 import type { SessionRun } from "@/components/use-session-run";
 import type { ReactNode } from "react";
 
@@ -13,8 +13,8 @@ function figureText(n: number | null): string {
   return n === null ? NOT_MEASURED : fmtCount(n);
 }
 
-function totalOf(session: ResolvedSession): ReactNode {
-  const { total_tokens: total } = (session.kind === "live" ? session.running : session.run).tokens;
+function tokensOf(session: ResolvedSession): ReactNode {
+  const total = (session.kind === "live" ? session.running : session.run).uncached_tokens;
   if (total === null) {
     return NOT_MEASURED;
   }
@@ -32,6 +32,15 @@ function totalOf(session: ResolvedSession): ReactNode {
   );
 }
 
+/** Input arrives cache-inclusive, so the fresh input leaves out both cache counters. */
+function freshInputOf(tokens: TokenInfo): number | null {
+  const { input_tokens: input, cache_read_tokens: read, cache_write_tokens: write } = tokens;
+  if (input === null || read === null || write === null) {
+    return null;
+  }
+  return Math.max(0, input - read - write);
+}
+
 /** Props of {@link UsagePanel}. */
 export interface UsagePanelProps {
   session: ResolvedSession;
@@ -47,14 +56,14 @@ export function UsagePanel({ session }: UsagePanelProps) {
       <Pairs>
         {source.tokens_measured ? (
           <>
-            <Pair label="Input">{figureText(tokens.input_tokens)}</Pair>
+            <Pair label="Input">{figureText(freshInputOf(tokens))}</Pair>
             <Pair label="Output">{figureText(tokens.output_tokens)}</Pair>
             <Pair label="Cache read">{figureText(tokens.cache_read_tokens)}</Pair>
             <Pair label="Cache write">{figureText(tokens.cache_write_tokens)}</Pair>
-            <Pair label="Total">{totalOf(session)}</Pair>
+            <Pair label="Tokens">{tokensOf(session)}</Pair>
           </>
         ) : (
-          <Pair label="Total">{NOT_MEASURED}</Pair>
+          <Pair label="Tokens">{NOT_MEASURED}</Pair>
         )}
         <Pair label="Est. cost">{costText(source.cost_status, source.estimated_cost_usd)}</Pair>
       </Pairs>

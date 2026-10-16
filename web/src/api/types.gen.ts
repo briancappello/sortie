@@ -236,6 +236,7 @@ export interface HistoryTotalsResponse {
   run_count: number;
   unmeasured_runs: number;
   tokens: TokenInfo;
+  uncached_tokens: number | null;
   tokens_complete: boolean;
   estimated_cost_usd: number | null;
   cost_status: string;
@@ -543,6 +544,7 @@ export interface RunResponse {
   dispatched_at: string | null;
   turns_completed: number;
   tokens: TokenInfo;
+  uncached_tokens: number | null;
   tokens_measured: boolean;
   unaccounted_turns: number;
   estimated_cost_usd: number | null;
@@ -585,6 +587,7 @@ export interface RunningEntryResponse {
   workspace_path: string;
   ssh_host?: string;
   tokens: TokenInfo;
+  uncached_tokens: number | null;
   model_name?: string;
   rule_name?: string;
   stage_lineage: StageLineageResponse | null;
@@ -613,6 +616,7 @@ export interface RunningEntryResponse {
   unmeasured_sessions: number | null;
   used_tokens: number | null;
   used_tokens_complete: boolean;
+  issue_uncached_tokens: number | null;
   budget_tokens: number | null;
   estimated_cost_usd: number | null;
   cost_status: string;
@@ -919,6 +923,7 @@ export interface Tokens {
   total: number;
   cache_read: number;
   cache_write: number;
+  uncached: number;
 }
 
 export interface VerdictCount {

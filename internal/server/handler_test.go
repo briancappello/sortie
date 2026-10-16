@@ -1774,11 +1774,11 @@ func TestToServedRunningEntry(t *testing.T) {
 	}
 	unknownSpend := func(completed any) map[string]any {
 		return map[string]any{
-			"issue_tokens_completed": completed, "used_tokens": nil, "used_tokens_complete": false,
+			"issue_tokens_completed": completed, "used_tokens": nil, "issue_uncached_tokens": nil, "used_tokens_complete": false,
 			"cost_status": "unmeasured", "estimated_cost_usd": nil, "issue_cost_status": "unmeasured", "issue_estimated_cost_usd": nil,
 		}
 	}
-	partialWorked := map[string]any{"used_tokens": 485000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.837}
+	partialWorked := map[string]any{"used_tokens": 485000, "issue_uncached_tokens": 145000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.837}
 
 	tests := []struct {
 		name                   string
@@ -1791,7 +1791,7 @@ func TestToServedRunningEntry(t *testing.T) {
 			name: "worked example", maxTokens: 1_000_000, maxSessions: 5,
 			want: map[string]any{
 				"used_sessions": 3, "budget_sessions": 5, "issue_tokens_completed": 420000, "unmeasured_sessions": 0,
-				"used_tokens": 485000, "used_tokens_complete": true, "budget_tokens": 1_000_000,
+				"used_tokens": 485000, "issue_uncached_tokens": 145000, "used_tokens_complete": true, "budget_tokens": 1_000_000,
 				"estimated_cost_usd": 0.147, "cost_status": "estimated", "issue_estimated_cost_usd": 0.837, "issue_cost_status": "estimated",
 			},
 		},

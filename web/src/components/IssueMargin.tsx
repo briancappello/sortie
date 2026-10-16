@@ -422,7 +422,7 @@ function BudgetPanel({ detail, config, chained }: BudgetPanelProps) {
         ) : (
           <BudgetMeter name="Sessions" line={sessions} format={fmtCount} />
         )}
-        <BudgetMeter name="Tokens" line={tokens} format={fmtTokens} />
+        <BudgetMeter name="Tokens and cache reads" line={tokens} format={fmtTokens} />
         {note === undefined ? undefined : <p className="text-body-sm text-ink-muted">{note}</p>}
       </div>
       {cost === null ? undefined : (

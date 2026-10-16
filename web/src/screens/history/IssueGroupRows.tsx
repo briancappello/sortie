@@ -17,8 +17,10 @@ import { cn } from "@/lib/cn";
 import {
   NOT_MEASURED,
   UNPRICED,
+  runCacheReadsText,
   runCostText,
   runTokensText,
+  totalsCacheReadsText,
   totalsCostText,
   totalsTokensText,
 } from "@/lib/figures";
@@ -60,7 +62,7 @@ export function HistoryTableHead({ config }: HistoryTableHeadProps) {
       <TableHead>Agent</TableHead>
       <TableHead>Duration</TableHead>
       <TableHead>Turns</TableHead>
-      <TableHead>Tokens</TableHead>
+      <TableHead title="Cache reads not included">Tokens</TableHead>
       {hasCost ? <TableHead>Est. cost</TableHead> : undefined}
       <TableHead>Finished</TableHead>
     </TableHeader>
@@ -105,6 +107,10 @@ function hopText(run: RunResponse): string | undefined {
 
 function tokensPart(text: string): string {
   return text === NOT_MEASURED ? "tokens not measured" : `${text} tokens`;
+}
+
+function cacheReadsTitle(text: string | null): string | undefined {
+  return text === null ? undefined : `${text} cache reads`;
 }
 
 function costPart(text: string): string {
@@ -163,7 +169,7 @@ function RunRow({ run, columns }: RunRowProps) {
       </TableCell>
       <TableCell>{fmtDuration(runSeconds(run))}</TableCell>
       <TableCell>{fmtCount(run.turns_completed)}</TableCell>
-      <TableCell>{runTokensText(run)}</TableCell>
+      <TableCell title={cacheReadsTitle(runCacheReadsText(run))}>{runTokensText(run)}</TableCell>
       {columns.hasCost ? <TableCell>{runCostText(run)}</TableCell> : undefined}
       <TableCell>{fmtStamp(run.completed_at)}</TableCell>
     </TableRow>
@@ -195,12 +201,14 @@ export function IssueGroupRows({ group, filter, config }: IssueGroupRowsProps) {
   const title = group.issue_title || key;
   const mark = groupMark(group);
   const ending = group.status === "history" ? group.issue_outcome : null;
+  const cacheReads = totalsCacheReadsText(group.totals);
   const secondLine = (
     [
       ["key", group.issue_title ? key : undefined],
       ["status", group.status_text],
       ["runs", plural(group.totals.run_count, "run", "runs")],
       ["tokens", tokensPart(totalsTokensText(group.totals))],
+      ["cache-reads", cacheReads === null ? undefined : `${cacheReads} cache reads`],
       ["cost", columns.hasCost ? costPart(totalsCostText(group.totals)) : undefined],
     ] as const
   ).filter(([, part]) => part !== undefined);

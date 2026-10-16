@@ -234,7 +234,7 @@ interface PeekFactsProps {
 
 function PeekFacts({ detail, state, position }: PeekFactsProps) {
   const config = state?.config;
-  const { sessions, tokens, cost } = budgetOf(detail, config);
+  const { sessions, uncachedTokens, cost } = budgetOf(detail, config);
   const { running } = detail;
   const pullRequest = pullRequestOf(detail);
   const agent = agentText(detail);
@@ -264,7 +264,7 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
       ? String(sessions.used ?? 0)
       : `${sessions.used ?? 0} of ${sessions.limit}`,
   ]);
-  if (tokens.used === null) {
+  if (uncachedTokens === null) {
     facts.push([
       "Tokens",
       <span key="tokens" className="text-ink-muted italic">
@@ -274,10 +274,10 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
   } else if (cost !== null) {
     facts.push([
       "Spent",
-      `${costText(cost.status, cost.usd)} estimated, ${fmtTokens(tokens.used)} tokens`,
+      `${costText(cost.status, cost.usd)} estimated, ${fmtTokens(uncachedTokens)} tokens`,
     ]);
   } else {
-    facts.push(["Tokens", fmtTokens(tokens.used)]);
+    facts.push(["Tokens", fmtTokens(uncachedTokens)]);
   }
   if (pullRequest !== undefined) {
     facts.push([

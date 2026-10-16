@@ -1,4 +1,5 @@
 import {
+  statsCacheReadsText,
   statsCostText,
   statsShortfall,
   statsTokensShortfall,
@@ -78,6 +79,14 @@ export function SummaryTiles({ report, config }: SummaryTilesProps) {
       value={statsTokensText(summary, tier)}
       detail={statsTokensShortfall(summary) ?? (tier === "full" ? "every run measured" : null)}
     />,
+  );
+  const cacheReads = statsCacheReadsText(summary, tier);
+  tiles.push(
+    cacheReads === null ? (
+      <div key="cache-reads" />
+    ) : (
+      <Tile key="cache-reads" label="Cache reads" value={cacheReads} />
+    ),
   );
   if (config?.token_rates != null) {
     tiles.push(

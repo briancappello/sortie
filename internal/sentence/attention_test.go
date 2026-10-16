@@ -310,12 +310,12 @@ func TestAttentionTexts(t *testing.T) {
 			r.UnmeasuredSessions, r.StoppedInFlight = new(1), new(1)
 		}), nil, texts{
 			"Token budget reached",
-			"The issue has used at least 2.02M tokens of its budget of 2M, and the budget stopped 1 session mid-run.",
+			"The issue has used at least 2.02M tokens and cache reads of its budget of 2M, and the budget stopped 1 session mid-run.",
 			"Clears on the next poll tick after `agent.max_tokens` is raised above what the issue has used or is removed, or after the issue leaves the active tracker states.",
 		}},
 		{"token hold with a complete spend and no stopped session", budgetInput(func(r *orchestrator.SnapshotBudgetEntry) {
 			r.Reason, r.UsedTokens, r.BudgetTokens = "token_budget", new(int64(2_020_000)), 2_000_000
-		}), nil, texts{why: "The issue has used 2.02M tokens of its budget of 2M."}},
+		}), nil, texts{why: "The issue has used 2.02M tokens and cache reads of its budget of 2M."}},
 		{"session hold", budgetInput(nil), nil, texts{
 			"Session budget reached",
 			"The issue has used 3 sessions of its budget of 3.",

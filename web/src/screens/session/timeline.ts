@@ -1,6 +1,6 @@
 import { parseInstant } from "@/lib/format";
 
-import type { RunEventResponse, RunningEntryResponse } from "@/api/types.gen";
+import type { RunEventResponse, RunningEntryResponse, TokenInfo } from "@/api/types.gen";
 import type { RunItem } from "@/stream/core";
 
 /** One line of the event pane. */
@@ -23,7 +23,7 @@ export type TimelineLine =
 /** The lines of a run's events and the figures the next turn builds on. */
 export interface Timeline {
   lines: TimelineLine[];
-  /** The run total as of the last turn end with nothing missing after it. */
+  /** The run's uncached tokens as of the last turn end with nothing missing after it. */
   baseline: number | null;
   /** The number the next turn takes, `null` when not known. */
   nextTurn: number | null;
@@ -45,6 +45,14 @@ const TURN_END: ReadonlySet<string> = new Set([
   "turn_ended_with_error",
   "turn_input_required",
 ]);
+
+/** Events carry no served uncached figure, so it is the total less the cache reads. */
+function uncachedOf(usage: TokenInfo | null): number | null {
+  if (usage === null || usage.total_tokens === null || usage.cache_read_tokens === null) {
+    return null;
+  }
+  return Math.max(0, usage.total_tokens - usage.cache_read_tokens);
+}
 
 /**
  * Arranges retained events into lines: consecutive tool results fold into one,
@@ -94,10 +102,10 @@ export function timelineOf(items: readonly RunItem[]): Timeline {
       lines.push({ kind: "event", key, event });
     } else if (TURN_END.has(event.event)) {
       const usage = event.usage ?? null;
-      const total = usage?.total_tokens ?? null;
-      const difference = total !== null && baseline !== null ? total - baseline : null;
+      const figure = uncachedOf(usage);
+      const difference = figure !== null && baseline !== null ? figure - baseline : null;
       const tokens = difference !== null && difference >= 0 ? difference : null;
-      baseline = usage === null ? 0 : total;
+      baseline = usage === null ? 0 : figure;
 
       const at = parseInstant(event.at);
       const seconds = since !== null && at !== null ? (at - since) / 1000 : null;
@@ -132,17 +140,17 @@ export function turnBarsOf(timeline: Timeline, running: RunningEntryResponse | n
     }
   }
 
-  const total = running?.tokens.total_tokens ?? null;
+  const figure = running?.uncached_tokens ?? null;
   const isMeasuring =
     running !== null &&
     running.tokens_measured &&
     !running.tokens_pending &&
     running.usage_arrival === "incremental";
-  if (isMeasuring && total !== null && timeline.baseline !== null && total > timeline.baseline) {
+  if (isMeasuring && figure !== null && timeline.baseline !== null && figure > timeline.baseline) {
     bars.push({
       turn: timeline.nextTurn,
       at: null,
-      tokens: total - timeline.baseline,
+      tokens: figure - timeline.baseline,
       seconds: null,
       inProgress: true,
     });

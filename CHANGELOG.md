@@ -123,6 +123,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A running agent's latest message, in the JSON API and on the dashboard, no longer shows an agent protocol marker such as `system/task_progress`, `rate_limit_event`, `assistant message`, `reasoning block`, or `[tool: Bash]`. It keeps the last thing the agent actually said, and the issue's agent events leave those markers out too.
 
+- The dashboard no longer counts tokens read from the prompt cache as tokens, which made an agent that resends its conversation every turn look many times busier than it was. Analytics and History show cache reads on their own, and the JSON API and `sortie stats --format json` add the token count without them. The token budget, `agent.max_tokens`, still counts cache reads, and the budget meter and the messages that compare an issue with it now name them. ([#1361](https://github.com/sortie-ai/sortie/issues/1361))
+
 ### Migrations
 
 - Add `issue_title` and `issue_url` to `run_history` and `retry_entries`, and `display_identifier` to `retry_entries`. A retry or run recorded before the upgrade reads back with no title or link; a queued retry gets one from the first tracker poll or when it next fires. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))

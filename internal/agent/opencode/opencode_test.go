@@ -1042,7 +1042,11 @@ cat '`+runPath+`'`)
 		if !result2.UsageMeasured {
 			t.Error("turn 2 (cancelled after a measured turn): UsageMeasured = false, want true")
 		}
-		<-errCh
+		runErr := <-errCh
+		var agentErr *domain.AgentError
+		if !errors.As(runErr, &agentErr) || agentErr.Kind != domain.ErrTurnCancelled {
+			t.Errorf("turn 2: RunTurn() error = %v, want AgentError{Kind: %q}", runErr, domain.ErrTurnCancelled)
+		}
 	case <-outerCtx.Done():
 		t.Fatal("RunTurn (turn 2) did not return after context cancel")
 	}
