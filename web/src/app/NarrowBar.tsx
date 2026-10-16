@@ -9,8 +9,9 @@ import { condition } from "@/lib/condition";
 import { pluralVerb } from "@/lib/format";
 
 import type { StateResponse } from "@/api/types.gen";
+import type { ReactNode } from "react";
 
-function statusLabel(state: StateResponse): string {
+function statusLabel(state: StateResponse): ReactNode {
   const { subject, verb } = pluralVerb(
     state.counts.attention,
     ["item", "items"],
@@ -19,7 +20,13 @@ function statusLabel(state: StateResponse): string {
   const needs = `${subject} ${verb} attention`;
   switch (condition(state)) {
     case "degraded":
-      return state.counts.attention > 0 ? `Degraded · ${needs}` : "Degraded";
+      return state.counts.attention > 0 ? (
+        <span className="flex flex-wrap gap-x-xs">
+          <span>Degraded</span> <span>{needs}</span>
+        </span>
+      ) : (
+        "Degraded"
+      );
     case "needs":
       return needs;
     case "clear":

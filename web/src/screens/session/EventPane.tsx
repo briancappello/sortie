@@ -237,7 +237,7 @@ function toolDurationOf(calls: readonly RunEventResponse[]): string | undefined 
     return undefined;
   }
   const seconds = measured.reduce((sum, call) => sum + (call.duration_ms ?? 0), 0) / 1000;
-  return `${measured.length < calls.length ? "at least " : ""}${fmtDuration(seconds)}`;
+  return fmtDuration(seconds);
 }
 
 interface ToolsLineProps {

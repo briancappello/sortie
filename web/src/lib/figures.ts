@@ -20,17 +20,13 @@ export const UNPRICED = "unpriced";
 const NOT_RECORDED = "not recorded";
 const BASE_TIER = "base";
 
-function atLeast(text: string): string {
-  return `at least ${text}`;
-}
-
 /** Words an estimated cost by its served status; a status the client does not know reads "unknown". */
 export function costText(status: string, usd: number | null): string {
   switch (status) {
     case "estimated":
       return usd === null ? "unknown" : fmtMoney(usd);
     case "partial":
-      return usd === null ? "unknown" : atLeast(fmtMoney(usd));
+      return usd === null ? "unknown" : fmtMoney(usd);
     case "unpriced":
       return UNPRICED;
     case "unmeasured":
@@ -45,17 +41,16 @@ export function runTokensText(run: RunResponse): string {
   if (!run.tokens_measured || run.uncached_tokens === null) {
     return NOT_MEASURED;
   }
-  const figure = fmtTokens(run.uncached_tokens);
-  return run.unaccounted_turns > 0 ? atLeast(figure) : figure;
+  return fmtTokens(run.uncached_tokens);
 }
 
-/** Words the token figure of the session in flight; a count still arriving reads "at least". */
+/** Words the token figure of the session in flight. */
 export function runningTokensText(running: RunningEntryResponse): string {
   const figure = running.uncached_tokens;
   if (!running.tokens_measured || figure === null) {
     return NOT_MEASURED;
   }
-  return running.tokens_pending ? atLeast(fmtTokens(figure)) : fmtTokens(figure);
+  return fmtTokens(figure);
 }
 
 /** Words the estimated cost of one run. */
@@ -68,8 +63,7 @@ export function totalsTokensText(totals: HistoryTotalsResponse): string {
   if (totals.uncached_tokens === null) {
     return NOT_MEASURED;
   }
-  const figure = fmtTokens(totals.uncached_tokens);
-  return totals.tokens_complete ? figure : atLeast(figure);
+  return fmtTokens(totals.uncached_tokens);
 }
 
 /** Words the estimated cost over every run of an issue. */
@@ -85,39 +79,25 @@ export function statsTokensText(f: StatsFigures, tier: string): string {
   if (f.tokens === null) {
     return f.tokens_unmeasured_runs > 0 ? NOT_MEASURED : NOT_RECORDED;
   }
-  const figure = fmtTokens(f.tokens.uncached);
-  return f.tokens_unmeasured_runs > 0 ? atLeast(figure) : figure;
+  return fmtTokens(f.tokens.uncached);
 }
 
-function cacheReadsText(
-  cacheReads: number | null,
-  tokensFigure: number | null,
-  isLowerBound: boolean,
-): string | null {
+function cacheReadsText(cacheReads: number | null, tokensFigure: number | null): string | null {
   // A zero also means an agent that reports no cache data, and a zero is a claim.
   if (tokensFigure === null || cacheReads === null || cacheReads === 0) {
     return null;
   }
-  const figure = fmtTokens(cacheReads);
-  return isLowerBound ? atLeast(figure) : figure;
+  return fmtTokens(cacheReads);
 }
 
 /** Words the cache reads of one run, or `null` while there is nothing to state. */
 export function runCacheReadsText(run: RunResponse): string | null {
-  return cacheReadsText(
-    run.tokens.cache_read_tokens,
-    run.uncached_tokens,
-    run.unaccounted_turns > 0,
-  );
+  return cacheReadsText(run.tokens.cache_read_tokens, run.uncached_tokens);
 }
 
 /** Words the cache reads over every run of an issue, or `null` while there is nothing to state. */
 export function totalsCacheReadsText(totals: HistoryTotalsResponse): string | null {
-  return cacheReadsText(
-    totals.tokens.cache_read_tokens,
-    totals.uncached_tokens,
-    !totals.tokens_complete,
-  );
+  return cacheReadsText(totals.tokens.cache_read_tokens, totals.uncached_tokens);
 }
 
 /** Words the cache reads of a report group or summary, or `null` while there is nothing to state. */
@@ -125,18 +105,16 @@ export function statsCacheReadsText(f: StatsFigures, tier: string): string | nul
   if (tier === BASE_TIER || f.tokens === null) {
     return null;
   }
-  return cacheReadsText(f.tokens.cache_read, f.tokens.uncached, f.tokens_unmeasured_runs > 0);
+  return cacheReadsText(f.tokens.cache_read, f.tokens.uncached);
 }
 
-/** Words the estimated cost of a report group or summary; a cost with runs left out reads "at least". */
+/** Words the estimated cost of a report group or summary. */
 export function statsCostText(f: StatsFigures, tier: string): string {
   if (tier === BASE_TIER) {
     return NOT_RECORDED;
   }
-  const hasShortfall = f.cost_unpriced_runs > 0 || f.tokens_unmeasured_runs > 0;
   if (f.cost_usd !== null) {
-    const cost = fmtMoney(f.cost_usd);
-    return hasShortfall ? atLeast(cost) : cost;
+    return fmtMoney(f.cost_usd);
   }
   if (f.cost_unpriced_runs > 0) {
     return UNPRICED;
