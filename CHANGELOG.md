@@ -69,6 +69,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The dashboard has a session view for every agent run, opened from a run on the issue page, from a button on the issue page and the peek, with `O` there and on the selected issue in Overview and Pipeline, and from the command palette. It shows the issue, stage, agent and model, SSH host, status, turns, elapsed time, tokens, and estimated cost, then the events Sortie kept for the run and each new event as it arrives, with consecutive tool calls folded into one line that keeps a failed call in view, each turn's token usage on its line, and tokens per turn as a chart, or a note that the agent reports none. It follows the newest event while you stay at the bottom and offers a jump back after you scroll up. A running session that has sent no event for half of `agent.stall_timeout_ms` is marked on its Active row, its Pipeline lane, its issue page, and its session view, which also says when Sortie stops it as stalled, or that it will not when stall detection is off. ([#1309](https://github.com/sortie-ai/sortie/issues/1309))
 
+- The Pipeline and the issue page now show, at each pull request reaction, what happened in the issue's current pass and after the issue ends: where Sortie acted and how many fixes or runs it scheduled, where it escalated, where it had nothing to act on, and where it has no record. A legend names each reading, the CI station is now named CI fix, and the JSON API reports the same as `pr_loop` on the active issues of `/api/v1/state`, on `/api/v1/{identifier}`, and on the runs of `/api/v1/runs`. ([#1375](https://github.com/sortie-ai/sortie/issues/1375))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -152,6 +154,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `dispatch_id` to `run_history` and the `run_events` and `run_events_total` tables, which hold each finished run's agent events and their stored size. A run recorded before the upgrade has no dispatch ID and no retained events. ([#1307](https://github.com/sortie-ai/sortie/issues/1307))
 
 - Add `agent_blocked` to `run_history`, marking each run whose agent stopped to wait for a person, and the `live_passes` table, which lets `sortie stats` count the passes running or held by a budget right now. A run recorded before the upgrade is never marked, so the stage funnels count such an earlier pass as handed off on a chain's last stage and as stopped by an operator on any other stage. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
+
+- Add the `reaction_activity` table, which records what each pull request reaction did in each pass of an issue. A pass that began before the upgrade shows no record at its reactions. ([#1375](https://github.com/sortie-ai/sortie/issues/1375))
 
 ## [1.27.0] - 2026-10-11
 
