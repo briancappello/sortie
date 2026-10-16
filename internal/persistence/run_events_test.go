@@ -59,6 +59,9 @@ func storedEventRuns(t *testing.T, s *Store) []string {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate stored event runs: %v", err)
+	}
 	return ids
 }
 
