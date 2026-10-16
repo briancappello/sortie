@@ -13,8 +13,14 @@ import type { Duration, Group } from "@/api/types.gen";
 import type { ReactNode } from "react";
 
 const PAGE_ROWS = 20;
-const CELL = "px-md py-sm whitespace-nowrap tabular-nums";
-const HEAD = "px-md py-sm text-left text-label-caps font-medium whitespace-nowrap text-ink-muted";
+const HEAD_BASE = "px-md py-sm text-label-caps font-medium whitespace-nowrap text-ink-muted";
+
+/** Class names of a body cell, shared with the other tables of the screen so they keep one style. */
+export const CELL = "px-md py-sm whitespace-nowrap tabular-nums";
+/** Class names of a left-aligned header cell. */
+export const HEAD = `${HEAD_BASE} text-left`;
+/** Class names of a right-aligned header cell. */
+export const HEAD_RIGHT = `${HEAD_BASE} text-right`;
 
 function durationText(duration: Duration): string {
   if (duration.samples === 0) {

@@ -173,6 +173,37 @@ export interface ErrorResponse {
   error: ErrorDetail;
 }
 
+export interface Funnel {
+  stages: FunnelStage[] | null;
+}
+
+export interface FunnelArrivals {
+  hop: number;
+  match: number;
+  label: number;
+}
+
+export interface FunnelOutcomes {
+  advanced: number;
+  handed_off: number;
+  ceiling: number;
+  hop_failed: number;
+  no_hop: number;
+  in_stage: number;
+}
+
+export interface FunnelStage {
+  rule: string;
+  entry: boolean;
+  last: boolean;
+  runs: number;
+  entered: number;
+  arrivals: FunnelArrivals;
+  outcomes: FunnelOutcomes;
+  no_hop_reasons: NoHopReason[] | null;
+  median_seconds: number | null;
+}
+
 export interface Group {
   name: string;
   runs: number;
@@ -298,6 +329,11 @@ export interface NextOutcomeResponse {
   text: string;
 }
 
+export interface NoHopReason {
+  reason: string;
+  passes: number;
+}
+
 export interface ParkedEntryResponse {
   issue_id: string;
   issue_identifier: string;
@@ -414,6 +450,7 @@ export interface Report {
   by_template: Group[] | null;
   by_model: Group[] | null;
   by_chain: ChainGroup[] | null;
+  chain_funnels: Funnel[] | null;
   by_trigger: Group[] | null;
   by_origin: Group[] | null;
   self_review: SelfReview | null;
