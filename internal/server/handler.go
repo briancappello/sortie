@@ -446,6 +446,12 @@ type issueDetailResponse struct {
 	Tracked          map[string]any            `json:"tracked"`
 	History          *issueHistoryResponse     `json:"history"`
 
+	// PRLoop is what each configured pull request reaction recorded in the
+	// pass that decides a live issue's status, or in the newest run's pass
+	// of an issue that only run history knows; null without run history or a
+	// workflow shape.
+	PRLoop map[string]prLoopStationResponse `json:"pr_loop"`
+
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
 
@@ -1146,6 +1152,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if health != nil {
 		resp.Health = toStateHealthResponse(*health, words)
 	}
+	s.attachActivePRLoops(r, &resp, snap, words.Shape)
 	writeJSON(w, s.logger, http.StatusOK, resp)
 
 	s.logger.Debug("request served",
@@ -1246,6 +1253,10 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 	if len(page) == 0 {
 		if detail != nil {
 			detail.situation.Spend = &sentence.Spend{}
+			if err := s.attachIssuePRLoop(ctx, detail, snap, words.Shape, nil); err != nil {
+				s.historyReadFailed(w, r, err)
+				return nil, false
+			}
 		}
 		return detail, true
 	}
@@ -1275,6 +1286,10 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 	attachIssueOutcomes(detail.History.Runs, outcomes)
 	if hasOutcome {
 		detail.History.IssueOutcome = toIssueOutcomeResponse(outcome, newest.Identifier, newest.DisplayID)
+	}
+	if err := s.attachIssuePRLoop(ctx, detail, snap, words.Shape, &newest); err != nil {
+		s.historyReadFailed(w, r, err)
+		return nil, false
 	}
 	return detail, true
 }

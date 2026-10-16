@@ -1516,6 +1516,7 @@ type SnapshotStageHop struct {
 	TargetLabel  string    `json:"target_label"`
 	HoppedAt     time.Time `json:"hopped_at"`
 	DispatchedAt time.Time `json:"dispatched_at"`
+	ChainID      string    `json:"-"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
 	StagePosition   *SnapshotStagePosition `json:"stage_position"`
@@ -1635,6 +1636,7 @@ type SnapshotParkedEntry struct {
 	Label        string    `json:"label"`
 	LabelApplied bool      `json:"label_applied"`
 	ParkedAt     time.Time `json:"parked_at"`
+	ChainID      string    `json:"-"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
 	StagePosition   *SnapshotStagePosition `json:"stage_position"`
@@ -1692,6 +1694,7 @@ type SnapshotPendingReaction struct {
 	PullRequest  SnapshotPullRequest `json:"pull_request"`
 	CreatedAt    time.Time           `json:"created_at"`
 	DispatchedAt time.Time           `json:"dispatched_at"`
+	ChainID      string              `json:"-"`
 	NextPollAt   time.Time           `json:"next_poll_at"`
 	Wait         string              `json:"wait,omitempty"`
 	UsedAttempts *int                `json:"used_attempts"`
@@ -2079,6 +2082,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			Label:        entry.Label,
 			LabelApplied: entry.LabelApplied,
 			ParkedAt:     entry.ParkedAt,
+			ChainID:      entry.StageLineage.ChainID,
 
 			RuleName:        entry.RuleName,
 			StagePosition:   stagePosition(state, id, entry.RuleName, entry.StageLineage.PreviousRule),
@@ -2130,6 +2134,7 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 			},
 			CreatedAt:    entry.CreatedAt,
 			DispatchedAt: entry.StageLineage.DispatchedAt,
+			ChainID:      entry.StageLineage.ChainID,
 			NextPollAt:   cmp.Or(entry.PendingRetryAt, entry.CreatedAt),
 			Wait:         entry.Wait,
 			LastCheck:    snapshotReactionCheck(entry.LastCheck),
@@ -2206,6 +2211,7 @@ func snapshotBetweenStages(state *State) []SnapshotStageHop {
 			TargetLabel:  hop.TargetLabel,
 			HoppedAt:     hop.HoppedAt,
 			DispatchedAt: hop.DispatchedAt,
+			ChainID:      hop.ChainID,
 
 			RuleName:        hop.TargetRule,
 			StagePosition:   stagePosition(state, id, hop.TargetRule, hop.SourceRule),

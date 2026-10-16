@@ -179,6 +179,34 @@ Primary key: `(issue_id, kind)`. Every kind that escalates writes its row when a
 
 A row with a non-NULL `escalated_at` is a standing escalation, and the startup restore turns it back into a pending entry. The pull request columns let the restore build the entry without the workspace; it reads the issue's newest successful run for the rest and ends a row whose kind is not configured or whose issue has no such run. The time is stored at nanosecond precision so the identifier and start time of the attention item built from the escalation survive a restart. The table starts empty on upgrade, so an escalation standing at the upgrade's restart is not restored, and the next escalation of its kind records one.
 
+**`reaction_activity`**: what each pull request reaction did in each pass of an issue
+
+| Column        | Type                       | Notes                                                                                                             |
+| ------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `id`          | INTEGER PRIMARY KEY AUTOINCREMENT | Row identifier                                                                                             |
+| `issue_id`    | TEXT NOT NULL              | Tracker-internal issue ID                                                                                         |
+| `chain_id`    | TEXT NOT NULL              | The stage chain identifier of the pass, as `run_history.chain_id` holds it                                        |
+| `kind`        | TEXT NOT NULL              | Reaction kind: `ci`, `review`, `bot-review`, `merge`, `merge-conflict`, `label-review`, `label-fix`, or `merge-completion` |
+| `activity`    | TEXT NOT NULL              | `watch`, `continuation`, `action`, or `escalation`                                                                |
+| `recorded_at` | TEXT NOT NULL              | RFC 3339 with nanoseconds, in UTC; the time of the iteration that acted                                           |
+
+An index on (`issue_id`, `chain_id`) serves the read of a pass. A unique partial index on (`issue_id`, `chain_id`, `kind`) where `activity` is `watch` keeps one `watch` row per issue, pass, and kind, so a write of a second one is ignored; every other activity appends a row.
+
+The table is an append-only record. Nothing updates, deletes, or prunes a row, as nothing prunes `run_history`, and the release of an issue leaves its rows. A pass adds one `watch` row for each kind its pull request seeds and one row for each act. The table starts empty on upgrade and no backfill fills it.
+
+The orchestrator writes it on its event loop, in the iteration that acts, and a failed write does not stop the act (Section 13.1). Each activity has its writer:
+
+| `activity` | Written when |
+| --- | --- |
+| `watch` | A worker exit seeds a pending entry of the kind; the row belongs to the pass of the exiting run |
+| `continuation` | A reconcile pass schedules a run of the kind, a CI fix, a review or bot review fix, a merge conflict fix, or a label command run; the row belongs to the pass of the entry that scheduled it. A retry of a failed reaction run records nothing |
+| `action` | A reaction first applies a triage verdict, once; Sortie makes a merge call for `merge`; Sortie makes a tracker transition for `merge-completion`, whatever the forge or the tracker answers |
+| `escalation` | An escalation begins on an entry that has none standing, a latched subject included; an escalation that stands records nothing more |
+
+Startup recovery and the escalation restore record nothing, so a kind first watched after a restart has no `watch` row until it acts.
+
+The run-history reader behind `pr_loop` (Section 13.7.2) reads the rows of the passes a request serves and sums them per kind. It takes the `applied_at` that `schema_migrations` holds for the migration that creates this table as the start of the recorded passes: a pass dispatched before it, a pass without a chain identifier, and a pass without a dispatch time read as unrecorded whatever rows exist. The reader reads `applied_at` before it opens its row query, because the store has one connection.
+
 **`reaction_handoffs`**: review comments each issue's runs were given
 
 | Column       | Type | Notes                                                                |
@@ -324,5 +352,5 @@ Every write of `run_events` updates `bytes` in its own transaction, so the figur
 ### 19.3 Migration Strategy
 
 - Migrations are numbered sequentially and applied in order at startup.
-- Applied migrations are tracked in a `schema_migrations` table.
+- Applied migrations are tracked in a `schema_migrations` table. The `applied_at` of the migration that creates `reaction_activity` marks the start of the passes whose reaction activity is recorded (Section 19.2).
 - Migrations are additive (new columns/tables) where possible; destructive migrations require explicit versioning.

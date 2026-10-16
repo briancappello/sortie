@@ -27,6 +27,7 @@ import (
 )
 
 type mockExitStore struct {
+	reactionActivityLog
 	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords
@@ -4813,6 +4814,7 @@ func TestHandleWorkerExit_HandoffReview_DoesNotOverwriteExistingPendingReaction(
 	tracker := &mockTrackerAdapter{}
 	state := exitStateWithIssue(t, "HO-DUP1", "In Progress")
 
+	state.Running["HO-DUP1"].StageLineage = StageLineage{ChainID: "chain-dup", DispatchedAt: baseTime}
 	existingEntry := &PendingReaction{
 		IssueID:   "HO-DUP1",
 		Kind:      ReactionKindReview,
@@ -4832,6 +4834,7 @@ func TestHandleWorkerExit_HandoffReview_DoesNotOverwriteExistingPendingReaction(
 	params.HandoffState = "In Review"
 	params.ActiveStates = []string{"In Progress"}
 	params.SCMAdapter = &scmAdapterStubExit{}
+	params.ReviewReactionConfigured = true
 
 	HandleWorkerExit(state, WorkerResult{
 		IssueID:       "HO-DUP1",
@@ -4851,6 +4854,9 @@ func TestHandleWorkerExit_HandoffReview_DoesNotOverwriteExistingPendingReaction(
 	}
 	if reviewData.PRNumber != 99 {
 		t.Errorf("ReviewReactionData.PRNumber = %d, want 99 (seeded value)", reviewData.PRNumber)
+	}
+	if watches := store.activities(persistence.ReactionActivityWatch); len(watches) != 0 {
+		t.Errorf("RecordReactionActivity watch records = %+v, want none for an entry the exit did not create", watches)
 	}
 }
 
@@ -6422,6 +6428,7 @@ func TestHandleWorkerExit_CIProvider_PopulatesPendingReaction(t *testing.T) {
 	store := &mockExitStore{}
 	state := exitState(t, "CI-ISS-1", nil)
 	state.Running["CI-ISS-1"].RuleSettingsApplied = true
+	state.Running["CI-ISS-1"].StageLineage = StageLineage{ChainID: "chain-ci-1", DispatchedAt: baseTime}
 	params := defaultExitParams(t, store)
 	params.CIProvider = &ciProviderStubExit{}
 	params.SCMAdapter = &scmAdapterStubExit{}
@@ -6464,6 +6471,10 @@ func TestHandleWorkerExit_CIProvider_PopulatesPendingReaction(t *testing.T) {
 	}
 	if _, ok := state.PendingReactions[ReactionKey("CI-ISS-1", ReactionKindReview)]; ok {
 		t.Error("PendingReactions[CI-ISS-1:review] present, want absent without the review reaction configured")
+	}
+	watches := store.activities(persistence.ReactionActivityWatch)
+	if len(watches) != 1 || watches[0].IssueID != "CI-ISS-1" || watches[0].ChainID != "chain-ci-1" || watches[0].Kind != ReactionKindCI {
+		t.Errorf("RecordReactionActivity watch records = %+v, want one for CI-ISS-1 kind %q chain %q", watches, ReactionKindCI, "chain-ci-1")
 	}
 }
 
@@ -10373,7 +10384,7 @@ func TestHandleWorkerExit_StageHopOnlyForSuccessfulRun(t *testing.T) {
 			want := SnapshotStageHop{
 				IssueID: hopExitIssueID, Identifier: "HOP-1-ident", DisplayID: "acme/web#1", IssueTitle: "Add search", IssueURL: "https://example.test/acme/web/issues/1",
 				IssueLabels: []string{"feature", hopExitTargetLabel}, State: "In Progress", RuleName: "implement",
-				SourceRule: "specify", TargetRule: "implement", TargetLabel: hopExitTargetLabel, HoppedAt: between[0].HoppedAt, DispatchedAt: hopExitPassAt,
+				SourceRule: "specify", TargetRule: "implement", TargetLabel: hopExitTargetLabel, HoppedAt: between[0].HoppedAt, DispatchedAt: hopExitPassAt, ChainID: hopExitChain,
 			}
 			if !reflect.DeepEqual(between[0], want) || between[0].HoppedAt.IsZero() {
 				t.Errorf("BetweenStages[0] = %+v, want %+v with a hop time", between[0], want)

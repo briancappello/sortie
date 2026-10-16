@@ -84,6 +84,7 @@ type OrchestratorStore interface {
 	GetReactionEscalation(ctx context.Context, issueID, kind string) (persistence.ReactionEscalation, bool, error)
 	SaveReactionEscalation(ctx context.Context, rec persistence.ReactionEscalation) error
 	EndReactionEscalation(ctx context.Context, issueID, kind string) error
+	RecordReactionActivity(ctx context.Context, records []persistence.ReactionActivity) error
 	DeleteReactionEscalations(ctx context.Context, issueID string) error
 	SaveAttentionAcknowledgement(ctx context.Context, ack persistence.AttentionAcknowledgement) error
 	DeleteAttentionAcknowledgements(ctx context.Context, itemIDs []string) error

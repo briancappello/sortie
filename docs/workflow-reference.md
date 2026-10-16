@@ -2270,7 +2270,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:20:00Z",
       "status_text": "Held: session budget reached",
-      "status_text_full": "Held at the session budget of 3. Sessions used: 3."
+      "status_text_full": "Held at the session budget of 3. Sessions used: 3.",
+      "pr_loop": {"ci_failure": {"result": "unrecorded", "continuations": 0}, "review_comments": {"result": "unrecorded", "continuations": 0}, "bot_review": {"result": "unrecorded", "continuations": 0}, "auto_merge": {"result": "unrecorded", "continuations": 0}}
     },
     {
       "issue_id": "jkl012",
@@ -2284,7 +2285,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:40:12Z",
       "status_text": "Parked: the agent needs a person",
-      "status_text_full": "Parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
+      "status_text_full": "Parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`.",
+      "pr_loop": {"ci_failure": {"result": "unrecorded", "continuations": 0}, "review_comments": {"result": "unrecorded", "continuations": 0}, "bot_review": {"result": "unrecorded", "continuations": 0}, "auto_merge": {"result": "unrecorded", "continuations": 0}}
     },
     {
       "issue_id": "def456",
@@ -2303,7 +2305,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:41:05Z",
       "status_text": "Retry 3 in 30s: no agent slot was free",
-      "status_text_full": "The retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
+      "status_text_full": "The retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s.",
+      "pr_loop": {"ci_failure": {"result": "acted", "continuations": 1}, "review_comments": {"result": "quiet", "continuations": 0}, "bot_review": {"result": "quiet", "continuations": 0}, "auto_merge": {"result": "quiet", "continuations": 0}}
     },
     {
       "issue_id": "pqr678",
@@ -2322,7 +2325,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:47:30Z",
       "status_text": "Between stages: specify to implement",
-      "status_text_full": "Moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
+      "status_text_full": "Moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue.",
+      "pr_loop": {"ci_failure": {"result": "unrecorded", "continuations": 0}, "review_comments": {"result": "unrecorded", "continuations": 0}, "bot_review": {"result": "unrecorded", "continuations": 0}, "auto_merge": {"result": "unrecorded", "continuations": 0}}
     },
     {
       "issue_id": "mno345",
@@ -2337,7 +2341,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "reaction_kind": "ci",
       "dispatched_at": "2026-02-24T19:52:10Z",
       "status_text": "CI escalated on #931",
-      "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
+      "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2.",
+      "pr_loop": {"ci_failure": {"result": "escalated", "continuations": 2}, "review_comments": {"result": "quiet", "continuations": 0}, "bot_review": {"result": "quiet", "continuations": 0}, "auto_merge": {"result": "quiet", "continuations": 0}}
     },
     {
       "issue_id": "abc123",
@@ -2356,7 +2361,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:58:40Z",
       "status_text": "Fixing CI on #927, fix 1 of 2",
-      "status_text_full": "Fixing CI on PR #927, fix 1 of 2."
+      "status_text_full": "Fixing CI on PR #927, fix 1 of 2.",
+      "pr_loop": {"ci_failure": {"result": "acted", "continuations": 1}, "review_comments": {"result": "quiet", "continuations": 0}, "bot_review": {"result": "quiet", "continuations": 0}, "auto_merge": {"result": "quiet", "continuations": 0}}
     }
   ],
   "attention": [
@@ -2762,10 +2768,26 @@ The deciding row of an entry is the issue's row in the list that `status` names.
 | `dispatched_at`      | string or `null` | When Sortie dispatched the first run of the pass the deciding row belongs to, in UTC. Always present, and `null` when the deciding row serves `null`. |
 | `reaction_kind`      | string or absent | The `kind` of the deciding row. On every entry whose `status` is `pending_reactions`, and omitted on every other entry. |
 | `status_text`, `status_text_full` | string | The deciding row's status sentence pair, equal to the pair `GET /api/v1/{identifier}` serves for the issue at its top level. Always present. |
+| `pr_loop`            | object or `null` | What each configured pull request reaction recorded in the pass of the deciding row, as the `pr_loop` description after this table gives. Always present, and `null` when the read of reaction activity failed. |
 
 Only `pending_reactions` holds more than one row for an issue, so a client finds the deciding row by `issue_id` in the list that `status` names, and in `pending_reactions` by `issue_id` and by `kind` equal to `reaction_kind`. The `reactions` key a kind is configured under follows from the kind, so the entry serves none, and a running or retrying entry carries no reaction key because its row already serves the continuation's pair.
 
 The entries are in the order Sortie keeps for the issues: the place of each issue, then `issue_identifier`, then `issue_id`, each in byte order. An issue's place is the earliest `dispatched_at` its rows carried when it joined the row lists, and an issue none of whose rows is dated is placed before every dated issue. The place holds through a move from one list to another, through a new pass begun while the issue is listed (a park released and dispatched on one poll tick, a budget hold cleared by a raised ceiling, an issue a person returns to an active state while a reaction waits), and when a `dispatched_at` turns from `null` into a time. An issue that no list held and that returns takes a new place. Sortie keeps the places in memory and serves none, so a client that filters the list keeps the served order, and after a restart each issue takes its place from its restored rows.
+
+**Pull request reaction history (`pr_loop`):**
+
+`pr_loop` says what each configured pull request reaction recorded in one pass of an issue, so a client draws a reaction that is no longer pending, or never was. It is on each entry of `active`, on `GET /api/v1/{identifier}`, and on each run of `GET /api/v1/runs`. A pass is the runs that share a `chain_id`. On an `active` entry it is the pass of the deciding row. On the per-issue response it is the pass of the row that decides `status` for a live issue and the pass of the newest run for a `history` issue. On a run of `GET /api/v1/runs` it is the pass the run's own `chain_id` and `dispatched_at` name.
+
+The value is an object with one member for each key of `config.reactions`, named as in `WORKFLOW.md`, and `{}` when `config.reactions` is empty. The `label_commands` member covers the review and fix label commands together. Each member holds two keys.
+
+| Field           | Type    | Description |
+| --------------- | ------- | ----------- |
+| `result`        | string  | `escalated` when the reaction began an escalation in the pass, one that has since ended included. Otherwise `acted` when Sortie applied a triage verdict, merged the pull request, moved the issue after the merge, or scheduled a run for the reaction in the pass. Otherwise `quiet` when Sortie watched the pull request for the reaction and had nothing to act on. Otherwise `unrecorded`. |
+| `continuations` | integer | The runs scheduled for the reaction in the pass, `0` when none. It counts runs scheduled, the quantity the pull request panel calls the fixes used, so a run that a budget hold kept from starting still counts. |
+
+`unrecorded` means Sortie has no record, which differs from `quiet`, where Sortie watched and found nothing to act on. Every member of a pass that began before Sortie recorded reaction activity reads `unrecorded`, and so does the member of a reaction Sortie began watching after a restart until that reaction acts. A pass without a `chain_id` or a `dispatched_at` reads `unrecorded` throughout.
+
+`pr_loop` is `null` when the server holds no run history or no workflow shape. The runs in the groups of `GET /api/v1/runs/issues` and in `history.runs` serve `null` always. When the read of reaction activity fails, `GET /api/v1/state` answers `200` with a `null` `pr_loop` on every entry, and `GET /api/v1/{identifier}` and `GET /api/v1/runs` answer `503` with `history_unavailable`.
 
 **Attention (`attention`):**
 
@@ -3066,6 +3088,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
   "parked": null,
   "pending_reactions": [],
   "between_stages": null,
+  "pr_loop": {"ci_failure": {"result": "acted", "continuations": 1}, "review_comments": {"result": "quiet", "continuations": 0}, "bot_review": {"result": "quiet", "continuations": 0}, "auto_merge": {"result": "quiet", "continuations": 0}},
   "history": {
     "runs": [
       {
@@ -3104,6 +3127,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
         "session_id": "thread-1-turn-1",
         "ssh_host": "",
         "stage_chain": ["specify", "implement"],
+        "pr_loop": null,
         "issue_outcome": null
       }
     ],
@@ -3181,6 +3205,8 @@ The `running` object uses the same per-session field schema as `GET /api/v1/stat
 
 `status_text` and `status_text_full` at the top level are the status sentence pair of the row that decides `status`. For `pending_reactions` they are the pair of the first served row whose `escalated_at` is non-null, and of the first served row when none is. For `history` they word how the issue ended from its outcome and the newest run's hop decision, so a handoff that followed a stage hop that was not made names the stage it did not reach, and an issue with no outcome says that Sortie recorded no ending. The pair is present on every `200` response.
 
+`pr_loop` is present on every `200` response and describes the pass of the row that decides `status` for a live issue, and the pass of the newest run for a `history` issue, in the shape described with the `active` entries. It is `null` when the server holds no run history or no workflow shape.
+
 `issue` is present on every `200` response, built from the entry that decides `status`. Its members take the names of the prompt template's `issue` variable, and each is omitted when that entry holds none, so the object is `{}` when it holds none of them. All are masked like the running row's `issue_title`. `labels` is `[]` when the entry holds labels and the issue carries none.
 
 | `status`                                         | `issue` members |
@@ -3228,7 +3254,7 @@ For a work session of `MT-654` on the `specify` stage, whose rule names `impleme
 
 A request by an identifier that no live entry holds is answered through run history. When the newest run recorded under it belongs to an issue that is live under a newer identifier (a tracker move keeps the issue ID), the response is that issue's live detail with `issue_identifier` set to the identifier the issue carries now. The `history` of a response always covers the issue by its ID, so runs recorded under an older identifier stay on its page.
 
-A read of run history that fails, the read of the issue's outcome included, answers `503` with `history_unavailable`, for a live and for a non-live identifier, rather than `history` `null` or `404`.
+A read of run history that fails, the read of the issue's outcome and of reaction activity included, answers `503` with `history_unavailable`, for a live and for a non-live identifier, rather than `history` `null` or `404`.
 
 #### `GET /api/v1/runs`: run history
 
@@ -3304,6 +3330,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
       "ssh_host": "",
       "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
       "stage_chain": ["specify", "implement", "review"],
+      "pr_loop": {"ci_failure": {"result": "acted", "continuations": 1}, "review_comments": {"result": "quiet", "continuations": 0}, "bot_review": {"result": "quiet", "continuations": 0}, "auto_merge": {"result": "quiet", "continuations": 0}},
       "issue_outcome": {
         "kind": "merged",
         "observed_at": "2026-02-24T21:02:10Z",
@@ -3360,6 +3387,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `dispatch_id`            | string or `null`   | The dispatch ID of the run, the key of its agent events on [`GET /api/v1/runs/{dispatch_id}/events`](#get-apiv1runsdispatch_idevents-run-events). `""` on the recorded CI result, which no dispatch produced, and `null` for a run recorded before the dispatch ID existed. A run with either has no retained events. |
 | `stage_chain`            | array of strings or `null` | The stage chain the run's rule stands on, as the rule names of the chain in `next` order. It is the chain `stage_position.chain` serves for the run's `rule_name` and `stage_previous`, and it follows the configuration in effect, so a reload that edits the chains changes it for runs recorded before the reload. Always present. `null` when the run has no `rule_name`, when its rule is on no chain, and when the server holds no workflow shape. Not masked. On the per-issue response, `history.last_stage.chain` equals the `stage_chain` of the deciding run. |
 | `issue_outcome`          | object or `null`   | How the issue's latest work ended, as Sortie observed it, or `null` when Sortie observed no ending since it last picked the issue up, or when the issue ended before outcomes were recorded. Always present. It belongs to the issue, so every run of one issue carries the same object, and it is served as recorded whatever the issue's live state. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is when Sortie made or observed the ending, in UTC. `state` is present for `handed_off` and `terminal`: the state the handoff wrote, or the terminal state Sortie read. `merge_path` and `pull_request` are present for `merged`: `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key that observed the merge, and `pull_request` holds `number` and `repository`. `state` and `repository` are masked like `issue_title`. `status_text` and `status_text_full` are always present: the sentence of how the issue ended, worded from the outcome alone, so a stage hop that was not made appears only in the top-level pair of a `history` response. |
+| `pr_loop`                | object or `null`   | What each configured pull request reaction recorded in the run's own pass, in the shape described with the `active` entries. Always present, `null` when the server holds no workflow shape, and `null` on every run in the groups of `GET /api/v1/runs/issues` and in `history.runs`. |
 
 The recorded CI result of a failing check is a run with `status` `ci_failed`, no agent kind, and `""` in each origin key and in `dispatch_id`, because it records a verdict and nothing started it.
 
@@ -3368,7 +3396,7 @@ The recorded CI result of a failing check is a run with `status` `ci_failed`, no
 | Condition | Status | `error.code` |
 | --------- | ------ | ------------ |
 | An unknown parameter, a parameter given more than once, a malformed or out-of-range value, `since` not before `until`, or `ended_since` not before `ended_until` | 400 | `invalid_parameter`; the message names the parameter and the rule, for example `parameter "limit" must be an integer from 1 to 200`. No run is read. |
-| Run history or the outcomes of the served issues cannot be read, or the server has none | 503 | `history_unavailable` |
+| Run history, the outcomes of the served issues, or their reaction activity cannot be read, or the server has none | 503 | `history_unavailable` |
 | A method other than `GET` | 405 | `method_not_allowed` |
 
 A request whose filters match fewer runs than the page holds reads run history down to its start, and a read waits for the database connection the orchestrator uses, so a narrow filter on a long history takes longer than a page of recent runs.
@@ -3428,7 +3456,8 @@ A group is one issue with at least one run that matches `rule`, `status`, and `s
           "turns_completed": 9,
           "tokens_measured": true,
           "estimated_cost_usd": 0.1923,
-          "cost_status": "estimated"
+          "cost_status": "estimated",
+          "pr_loop": null
         }
       ],
       "next_cursor": "37",

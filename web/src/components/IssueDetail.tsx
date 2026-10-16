@@ -98,7 +98,7 @@ function viewOf(
     lane:
       stations === undefined
         ? undefined
-        : laneOf(stations, standing, detail.pending_reactions ?? []),
+        : laneOf(stations, standing, detail.pending_reactions ?? [], detail.pr_loop),
     position,
     progress:
       position === null

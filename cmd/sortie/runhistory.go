@@ -113,6 +113,32 @@ func (r runHistoryReader) IssueOutcomes(ctx context.Context, issueIDs []string) 
 	return out, nil
 }
 
+// PassActivities returns what the reactions recorded in each listed pass.
+func (r runHistoryReader) PassActivities(ctx context.Context, passes []server.PassRef) (map[server.PassKey]server.PassActivity, error) {
+	refs := make([]persistence.PassRef, len(passes))
+	for i, p := range passes {
+		refs[i] = persistence.PassRef{IssueID: p.IssueID, ChainID: p.ChainID, DispatchedAt: p.DispatchedAt}
+	}
+	stored, err := r.store.PassActivities(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[server.PassKey]server.PassActivity, len(stored))
+	for key, activity := range stored {
+		kinds := make(map[string]server.KindActivity, len(activity.Kinds))
+		for kind, k := range activity.Kinds {
+			kinds[kind] = server.KindActivity{
+				Watched:       k.Watched,
+				Continuations: k.Continuations,
+				Acted:         k.Acted,
+				Escalated:     k.Escalated,
+			}
+		}
+		out[server.PassKey{IssueID: key.IssueID, ChainID: key.ChainID}] = server.PassActivity{Recorded: activity.Recorded, Kinds: kinds}
+	}
+	return out, nil
+}
+
 func runHistoryEntry(r persistence.RunHistory) server.RunHistoryEntry {
 	return server.RunHistoryEntry{
 		Identifier:       r.Identifier,

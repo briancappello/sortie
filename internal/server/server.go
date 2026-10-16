@@ -201,6 +201,35 @@ type IssueOutcome struct {
 	PRRepository string
 }
 
+// PassRef names one pass of one issue and when its first run was dispatched.
+type PassRef struct {
+	IssueID      string
+	ChainID      string
+	DispatchedAt time.Time // zero for an undated pass
+}
+
+// PassKey keys a pass in a PassActivities result.
+type PassKey struct {
+	IssueID string
+	ChainID string
+}
+
+// KindActivity sums what one reaction kind recorded in one pass.
+type KindActivity struct {
+	Watched       bool
+	Continuations int
+	Acted         bool // an action row exists
+	Escalated     bool
+}
+
+// PassActivity is what the reactions recorded in one pass. Recorded is false
+// for a pass without a chain identifier or a dispatch time, or dispatched
+// before reaction activity was first recorded; Kinds is then empty.
+type PassActivity struct {
+	Recorded bool
+	Kinds    map[string]KindActivity // keyed by reaction kind
+}
+
 // IssueRunTotals is one issue's spend over all of its runs.
 type IssueRunTotals struct {
 	// Usage counts runs and prices spend per agent kind.
@@ -220,6 +249,10 @@ type RunHistoryReader interface {
 	// IssueOutcomes returns the outcome of each listed issue that has one,
 	// keyed by issue ID.
 	IssueOutcomes(ctx context.Context, issueIDs []string) (map[string]IssueOutcome, error)
+	// PassActivities returns what the reactions recorded in each listed
+	// pass, keyed by issue and chain. A listed pass without records maps to
+	// a PassActivity with no Kinds.
+	PassActivities(ctx context.Context, passes []PassRef) (map[PassKey]PassActivity, error)
 	// RunEvents returns one run's stored events ascending by seq: all when
 	// newest is 0, else the newest up to newest. It returns an empty non-nil
 	// slice when the run has none, and an error for a row that does not

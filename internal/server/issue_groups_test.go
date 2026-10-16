@@ -45,6 +45,10 @@ func (h groupsHistory) RunEvents(context.Context, string, int) ([]orchestrator.R
 	return nil, nil
 }
 
+func (h groupsHistory) PassActivities(context.Context, []PassRef) (map[PassKey]PassActivity, error) {
+	return nil, nil
+}
+
 func (h groupsHistory) IssueOutcomes(context.Context, []string) (map[string]IssueOutcome, error) {
 	return h.outcomes, nil
 }

@@ -5,7 +5,7 @@ import { useEndedQuery, useStateQuery } from "@/api/queries";
 import { useHold, useNow } from "@/app/live";
 import { useShortcuts } from "@/app/keys";
 import { ActiveHead } from "@/components/ActiveHead";
-import { XIcon } from "@/components/icons";
+import { CheckIcon, MinusIcon, XIcon } from "@/components/icons";
 import { PhaseFilter } from "@/components/PhaseFilter";
 import { RuleFilter } from "@/components/RuleFilter";
 import { StatusMark } from "@/components/StatusMark";
@@ -125,15 +125,23 @@ function Legend({ hasReactions, hasChains }: LegendProps) {
             a reaction waiting
           </span>
           <span className="inline-flex items-center gap-xs">
+            <XIcon aria-hidden="true" className="size-3 text-ink-body" />
+            an escalated reaction
+          </span>
+          <span className="inline-flex items-center gap-xs">
+            <CheckIcon aria-hidden="true" className="size-3 text-ink-body" />
+            Sortie acted
+          </span>
+          <span className="inline-flex items-center gap-xs">
+            <MinusIcon aria-hidden="true" className="size-3 text-ink-muted" />
+            nothing to act on
+          </span>
+          <span className="inline-flex items-center gap-xs">
             <i
               aria-hidden="true"
               className={cn(swatch, "border-[1.5px] border-track-todo bg-canvas")}
             />
-            nothing waiting
-          </span>
-          <span className="inline-flex items-center gap-xs">
-            <XIcon aria-hidden="true" className="size-3 text-ink-body" />
-            an escalated reaction
+            no record
           </span>
         </>
       ) : undefined}

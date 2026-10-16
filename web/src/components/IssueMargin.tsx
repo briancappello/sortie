@@ -204,8 +204,8 @@ function watchState(
   }
   switch (row.kind) {
     case "ci":
-      if (check?.status === "failing") return { word: "failed", mark: "failed" };
-      if (check?.status === "passing") return { word: "passed", mark: "succeeded" };
+      if (check?.status === "failing") return { word: "checks failing", mark: "failed" };
+      if (check?.status === "passing") return { word: "checks passing", mark: "succeeded" };
       break;
     case "review":
     case "bot-review":
@@ -230,6 +230,8 @@ interface ReactionLineProps {
 function ReactionLine({ row, detail, state }: ReactionLineProps) {
   const actions = useIssueActions();
   const label = reactionLabel(row.config_key);
+  // The check reads the CI signal, not the fix Sortie makes, so the CI station's new name does not apply here.
+  const checked = row.config_key === "ci_failure" ? "CI" : label;
   const tries = triesText(row);
   const watch =
     row.escalated_at === null
@@ -257,7 +259,7 @@ function ReactionLine({ row, detail, state }: ReactionLineProps) {
       <div className="col-span-2 pl-[calc(var(--size-icon)+var(--spacing-xs))]">
         <EffectButton
           label="Check now"
-          effect={`Checks ${label} now instead of at ${fmtClock(row.next_poll_at)}`}
+          effect={`Checks ${checked} now instead of at ${fmtClock(row.next_poll_at)}`}
           isDisabled={actions.isChecking(detail.issue_identifier, row.kind)}
           onActivate={() => actions.checkNow(detail.issue_identifier, row.kind)}
         />
