@@ -98,6 +98,7 @@ type observerFunc func()
 func (f observerFunc) OnStateChange() { f() }
 
 type stubStore struct {
+	reactionActivityLog
 	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords

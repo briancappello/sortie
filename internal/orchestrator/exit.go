@@ -52,6 +52,7 @@ type WorkerExitStore interface {
 	DeleteStageHop(ctx context.Context, issueID string) error
 	RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error
 	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
+	RecordReactionActivity(ctx context.Context, records []persistence.ReactionActivity) error
 }
 
 // HandleWorkerExitParams holds the dependencies for [HandleWorkerExit] that
@@ -1043,6 +1044,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// watches keyed on that head must start over.
 		fixExit := claimedAtExit && dispatchPostureForReactionKind(entry.ReactionKind) == PostureFix && !blockedSoftStop && !terminalSuppressed
 		headWatchesAllowed := reactionEnqueueAllowed || fixExit
+		var seededKinds []string
 
 		// Seed a pending CI check when CI provider and SCM adapter are both
 		// configured and the workspace carries PR identity: the reaction
@@ -1057,6 +1059,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 						nowCI = params.NowFunc().UTC()
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindCI)
+					seededKinds = append(seededKinds, ReactionKindCI)
 					replaced := state.PendingReactions[rkey]
 					state.PendingReactions[rkey] = &PendingReaction{
 						IssueID:     workerResult.IssueID,
@@ -1109,6 +1112,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindReview)
 					// Skip if already present to preserve in-progress debounce.
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindReview)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1151,6 +1155,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindBotReview)
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindBotReview)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1192,6 +1197,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindAutoMerge)
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindAutoMerge)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1234,6 +1240,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindMergeConflict)
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindMergeConflict)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1279,6 +1286,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindLabelReview)
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindLabelReview)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1321,6 +1329,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindLabelFix)
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindLabelFix)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1362,6 +1371,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					}
 					rkey := ReactionKey(workerResult.IssueID, ReactionKindMergeCompletion)
 					if _, exists := state.PendingReactions[rkey]; !exists {
+						seededKinds = append(seededKinds, ReactionKindMergeCompletion)
 						state.PendingReactions[rkey] = &PendingReaction{
 							IssueID:     workerResult.IssueID,
 							Identifier:  workerResult.Identifier,
@@ -1388,6 +1398,9 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 				}
 			}
 		}
+
+		recordReactionActivity(ctx, params.Store, workerResult.IssueID, entry.StageLineage,
+			persistence.ReactionActivityWatch, seededKinds, now, log)
 
 	case WorkerExitCancelled:
 		// Release the claim only if reconciliation stall detection has not

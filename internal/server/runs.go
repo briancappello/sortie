@@ -87,6 +87,11 @@ type runResponse struct {
 
 	// IssueOutcome is the issue's, the same on every run of the issue.
 	IssueOutcome *issueOutcomeResponse `json:"issue_outcome"`
+
+	// PRLoop is what each configured pull request reaction recorded in the
+	// run's pass; null on the runs the per-issue history and the issue
+	// groups serve, and when the server holds no workflow shape.
+	PRLoop map[string]prLoopStationResponse `json:"pr_loop"`
 }
 
 // issueOutcomeResponse is how an issue's latest work ended. State is present
@@ -499,12 +504,24 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		s.historyReadFailed(w, r, err)
 		return
 	}
+	var shape *orchestrator.WorkflowShape
 	var chains [][]string
 	if s.workflowShapeFn != nil {
-		chains = s.workflowShapeFn().Dispatch.Chains
+		shape = new(s.workflowShapeFn())
+		chains = shape.Dispatch.Chains
+	}
+	passes := make([]PassRef, len(rows))
+	for i, row := range rows {
+		passes[i] = passOfRun(row)
+	}
+	loops, err := s.readPRLoops(r.Context(), shape, passes)
+	if err != nil {
+		s.historyReadFailed(w, r, err)
+		return
 	}
 	runs := toRunResponses(rows, s.tokenRates, chains)
 	attachIssueOutcomes(runs, outcomes)
+	attachRunPRLoops(runs, rows, loops)
 	writeJSON(w, s.logger, http.StatusOK, runsResponse{Runs: runs, NextCursor: next})
 
 	s.logger.Debug("request served",

@@ -77,6 +77,19 @@
         "issue_url": {
           "type": "string"
         },
+        "pr_loop": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/PrLoopStationResponse"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reaction_kind": {
           "type": "string"
         },
@@ -110,7 +123,8 @@
         "stage_position",
         "dispatched_at",
         "status_text",
-        "status_text_full"
+        "status_text_full",
+        "pr_loop"
       ],
       "type": "object"
     },
@@ -1194,6 +1208,19 @@
             }
           ]
         },
+        "pr_loop": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/PrLoopStationResponse"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "recent_events": {
           "anyOf": [
             {
@@ -1275,6 +1302,7 @@
         "last_error",
         "tracked",
         "history",
+        "pr_loop",
         "status_text",
         "status_text_full",
         "next_outcomes"
@@ -1899,6 +1927,21 @@
         "failing_since",
         "next_poll_at",
         "summary_text"
+      ],
+      "type": "object"
+    },
+    "PrLoopStationResponse": {
+      "properties": {
+        "continuations": {
+          "type": "integer"
+        },
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "result",
+        "continuations"
       ],
       "type": "object"
     },
@@ -2604,6 +2647,19 @@
         "origin_recorded": {
           "type": "boolean"
         },
+        "pr_loop": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/PrLoopStationResponse"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reaction_config_key": {
           "anyOf": [
             {
@@ -2753,7 +2809,8 @@
         "ssh_host",
         "dispatch_id",
         "stage_chain",
-        "issue_outcome"
+        "issue_outcome",
+        "pr_loop"
       ],
       "type": "object"
     },

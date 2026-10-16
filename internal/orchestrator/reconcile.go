@@ -40,6 +40,7 @@ type ReconcileStore interface {
 	SaveReactionEscalation(ctx context.Context, rec persistence.ReactionEscalation) error
 	EndReactionEscalation(ctx context.Context, issueID, kind string) error
 	DeleteReactionEscalations(ctx context.Context, issueID string) error
+	RecordReactionActivity(ctx context.Context, records []persistence.ReactionActivity) error
 }
 
 var _ ReconcileStore = (*persistence.Store)(nil)

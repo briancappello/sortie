@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +62,30 @@ func (noEscalationRecords) EndReactionEscalation(context.Context, string, string
 
 func (noEscalationRecords) DeleteReactionEscalations(context.Context, string) error { return nil }
 
+type reactionActivityLog struct {
+	mu       sync.Mutex
+	recorded []persistence.ReactionActivity
+}
+
+func (l *reactionActivityLog) RecordReactionActivity(_ context.Context, records []persistence.ReactionActivity) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.recorded = append(l.recorded, records...)
+	return nil
+}
+
+func (l *reactionActivityLog) activities(activity string) []persistence.ReactionActivity {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []persistence.ReactionActivity
+	for _, r := range l.recorded {
+		if r.Activity == activity {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 type livePassLog struct {
 	upserted []persistence.LivePass
 	deleted  []persistence.LivePass
@@ -86,6 +111,7 @@ func requireLivePasses(t *testing.T, op string, got, want []persistence.LivePass
 // mockReconcileStore records calls to ReconcileStore methods and returns
 // configurable errors.
 type mockReconcileStore struct {
+	reactionActivityLog
 	noopOutcomeRecorder
 	noEscalationRecords
 	unsupportedReactionObservationStore

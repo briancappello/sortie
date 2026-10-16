@@ -506,7 +506,7 @@ func handleCIFailure(
 
 	nextAttempt := pending.Attempt
 
-	ScheduleRetry(state, ScheduleRetryParams{
+	scheduleReactionContinuation(ctx, state, params.Store, ScheduleRetryParams{
 		IssueID:     pending.IssueID,
 		Identifier:  pending.Identifier,
 		DisplayID:   pending.DisplayID,
@@ -529,7 +529,7 @@ func handleCIFailure(
 
 		IssueIdentity: pending.IssueIdentity,
 		Trigger:       triggerCIFix,
-	}, params.OnRetryFire)
+	}, params.OnRetryFire, now)
 	metrics.IncRetries(triggerCIFix)
 
 	log.Info("CI failure detected, scheduling CI fix dispatch",

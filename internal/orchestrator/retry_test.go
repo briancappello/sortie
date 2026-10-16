@@ -20,6 +20,7 @@ import (
 )
 
 type mockRetryStore struct {
+	reactionActivityLog
 	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords

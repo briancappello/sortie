@@ -2310,6 +2310,43 @@ func TestHandleState(t *testing.T) {
 			t.Error("rate_limits = null in JSON, want {}")
 		}
 	})
+
+	t.Run("failed reaction activity read serves null pr_loop", func(t *testing.T) {
+		t.Parallel()
+
+		snap := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: fixedTime,
+			Running: []orchestrator.SnapshotRunningEntry{
+				{IssueID: "id-1", Identifier: "MT-1", StageLineage: orchestrator.StageLineage{ChainID: "chain-1", DispatchedAt: fixedTime}},
+				{IssueID: "id-2", Identifier: "MT-2", StageLineage: orchestrator.StageLineage{ChainID: "chain-2", DispatchedAt: fixedTime}},
+			},
+		}
+		srv := New(Params{
+			SnapshotFn: fixedSnapshot(snap),
+			RefreshFn:  acceptingRefresh(),
+			Logger:     slog.New(slog.DiscardHandler),
+			RunHistory: &fakeRunHistory{passesErr: errors.New("database is locked")},
+			WorkflowShapeFn: func() orchestrator.WorkflowShape {
+				return orchestrator.WorkflowShape{Reactions: orchestrator.ShapeReactions{CIFailure: &orchestrator.ShapeCIFailure{}}}
+			},
+		})
+		ts := httptest.NewServer(srv.Mux())
+		t.Cleanup(ts.Close)
+
+		status, body := getJSON[stateResponse](t, ts, "/api/v1/state")
+
+		if status != http.StatusOK {
+			t.Fatalf("GET /api/v1/state status = %d, want %d", status, http.StatusOK)
+		}
+		if len(body.Active) != 2 {
+			t.Fatalf("GET /api/v1/state active = %d entries, want 2", len(body.Active))
+		}
+		for _, entry := range body.Active {
+			if entry.PRLoop != nil {
+				t.Errorf("GET /api/v1/state active %s pr_loop = %v, want null", entry.IssueID, entry.PRLoop)
+			}
+		}
+	})
 }
 
 func TestHandleState_EveryRowCarriesBothForms(t *testing.T) {
@@ -3787,6 +3824,8 @@ type fakeRunHistory struct {
 	totalsErr   error
 	outcomes    map[string]IssueOutcome
 	outcomesErr error
+	passes      map[PassKey]PassActivity
+	passesErr   error
 	onQuery     func(RunHistoryQuery)
 	groups      []IssueGroupKey
 	onGroups    func(IssueGroupQuery)
@@ -3813,6 +3852,10 @@ func (f *fakeRunHistory) IssueTotals(context.Context, string) (IssueRunTotals, e
 
 func (f *fakeRunHistory) IssueOutcomes(context.Context, []string) (map[string]IssueOutcome, error) {
 	return f.outcomes, f.outcomesErr
+}
+
+func (f *fakeRunHistory) PassActivities(context.Context, []PassRef) (map[PassKey]PassActivity, error) {
+	return f.passes, f.passesErr
 }
 
 func (f *fakeRunHistory) RunEvents(_ context.Context, dispatchID string, newest int) ([]orchestrator.RunEvent, error) {
