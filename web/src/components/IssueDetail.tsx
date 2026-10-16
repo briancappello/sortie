@@ -9,6 +9,7 @@ import { IssueMargin, NextOutcomes } from "@/components/IssueMargin";
 import { IssueStory, storyRunsOf } from "@/components/IssueStory";
 import { Lane } from "@/components/Lane";
 import { ServedText } from "@/components/ServedText";
+import { StallNotice } from "@/components/StallNotice";
 import { StateBadge } from "@/components/StateBadge";
 import { Button, buttonStyles } from "@/components/ui/button";
 import { DrawerClose, DrawerTitle } from "@/components/ui/drawer";
@@ -17,7 +18,7 @@ import { budgetOf } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import { costText, NOT_MEASURED, runningTokensText } from "@/lib/figures";
 import { fmtClock, fmtTokens, plural } from "@/lib/format";
-import { issueLinkOf } from "@/lib/issue-link";
+import { issueLinkOf, latestSessionOf, sessionLinkOf } from "@/lib/issue-link";
 import { agentLabel, modelLabel, ruleLabel } from "@/lib/labels";
 import {
   decidingOf,
@@ -145,12 +146,23 @@ interface ActionsProps {
 
 function Actions({ detail, attention = [] }: ActionsProps) {
   const actions = useAttentionActions();
+  const location = useLocation();
   const trackerUrl = safeHttpUrl(detail.issue.url);
   const pullRequest = pullRequestOf(detail);
   const pullRequestUrl = safeHttpUrl(pullRequest?.url);
-  if (trackerUrl === null && pullRequestUrl === null && attention.length === 0) {
+  const session = latestSessionOf(detail);
+  if (
+    trackerUrl === null &&
+    pullRequestUrl === null &&
+    attention.length === 0 &&
+    session === null
+  ) {
     return undefined;
   }
+  const sessionLink =
+    session === null
+      ? undefined
+      : sessionLinkOf(detail.issue_identifier, session.dispatchId, location);
   return (
     <div className="flex flex-wrap gap-xs">
       {attention.map((item) => (
@@ -164,6 +176,16 @@ function Actions({ detail, attention = [] }: ActionsProps) {
           {actions.pending.has(item.id) ? "Acknowledging" : "Acknowledge"}
         </Button>
       ))}
+      {session === null || sessionLink === undefined ? undefined : (
+        <Link
+          to={sessionLink.to}
+          state={sessionLink.state}
+          className={buttonStyles("secondary")}
+          title={keyTip("Open session", "O")}
+        >
+          {session.isLive ? "Open live session" : "Last session"}
+        </Link>
+      )}
       {trackerUrl === null ? undefined : (
         <ExternalButton href={trackerUrl}>Open issue</ExternalButton>
       )}
@@ -293,9 +315,9 @@ function PeekRuns({ detail, now }: PeekRunsProps) {
   const total = detail.history?.totals.run_count ?? served.length;
   const shown = numberedRunsOf(served, total).slice(-PEEK_RUNS);
   const earlier = total - shown.length;
-  const node = "relative z-(--z-raised) mt-xs ml-xxs size-[9px] rounded-full border-[1.5px]";
+  const node = "relative z-(--z-raised) mt-xs ml-xxs size-2.25 rounded-full border-[1.5px]";
   return (
-    <ul className="relative before:absolute before:top-xs before:bottom-xs before:left-[60px] before:w-px before:bg-line">
+    <ul className="relative before:absolute before:top-xs before:bottom-xs before:left-15 before:w-px before:bg-line">
       {earlier > 0 ? (
         <li className="grid grid-cols-[48px_20px_minmax(0,1fr)] gap-x-sm py-xs text-body-md">
           <span />
@@ -369,6 +391,7 @@ export function IssueDetail({ identifier, row, peek = false }: IssueDetailProps)
     (item) => item.issue_id === data?.issue_id && item.acknowledged_at === null,
   );
   const link = issueLinkOf(identifier, location);
+  const stallText = data?.running?.stall_text_full ?? null;
 
   if (peek) {
     return (
@@ -454,6 +477,7 @@ export function IssueDetail({ identifier, row, peek = false }: IssueDetailProps)
               <ServedText text={sentence} />
             </p>
           ) : undefined}
+          {stallText === null ? undefined : <StallNotice text={stallText} isStalled />}
           {isHistoryDown ? (
             <p className="mb-lg text-body-md text-ink-body">Run history could not be read.</p>
           ) : undefined}

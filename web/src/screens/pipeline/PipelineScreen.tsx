@@ -11,6 +11,7 @@ import { RuleFilter } from "@/components/RuleFilter";
 import { StatusMark } from "@/components/StatusMark";
 import { Button } from "@/components/ui/button";
 import { useAttentionActions } from "@/components/use-attention-actions";
+import { useOpenLatestSession } from "@/components/use-open-session";
 import { usePeek } from "@/components/use-peek";
 import { filterRows, isPhase } from "@/lib/active-rows";
 import { cn } from "@/lib/cn";
@@ -178,6 +179,7 @@ function PipelineBody({ state }: PipelineBodyProps) {
   const [params, setParams] = useSearchParams();
   const { identifier: peekIdentifier, open, follow, close } = usePeek();
   const actions = useAttentionActions();
+  const openLatestSession = useOpenLatestSession();
   const now = useNow();
   const ended = useEndedQuery(localMidnight(now).toISOString());
   const [selection, setSelection] = useState({ key: null as string | null, index: 0 });
@@ -289,6 +291,13 @@ function PipelineBody({ state }: PipelineBodyProps) {
     }
   }
 
+  function handleOpenSession() {
+    const identifier = peekIdentifier ?? selected?.identifier;
+    if (identifier) {
+      openLatestSession(identifier);
+    }
+  }
+
   function peekedItem(): AttentionItemResponse | undefined {
     return isHeld
       ? (view.state.attention ?? []).find(
@@ -302,6 +311,7 @@ function PipelineBody({ state }: PipelineBodyProps) {
     { keys: ["k", "ArrowUp"], run: () => handleMove(-1) },
     { keys: [" "], run: handleTogglePeek },
     { keys: ["Enter"], run: handleOpenPage },
+    { keys: ["o"], run: handleOpenSession },
     {
       keys: ["a"],
       run: () => {

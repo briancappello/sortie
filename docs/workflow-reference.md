@@ -1897,7 +1897,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | Method | Path                     | Description                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------ |
 | GET    | `/`                      | Redirects to `/ui/` with `302 Found`. |
-| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change: run-history reads (History, an issue page's older runs, and the issue lookup of the command palette) at most once per 5 seconds and Analytics at most once per 30 seconds. |
+| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change: run-history reads (History, the older runs of an issue page or a session view, and the issue lookup of the command palette) at most once per 5 seconds and Analytics at most once per 30 seconds. |
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, one entry per active issue in a stable order, the list of what needs a person, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
@@ -2598,7 +2598,7 @@ Each row of `retrying`, and the `retry` object of the per-issue response, carrie
 | `stage_position`      | object or `null`  | Always present. Where the retry's rule stands on its stage chain, under the rules of a running row's `stage_position`. |
 | `paused`              | boolean           | Always present. `true` when the retry was last put back because its issue's state does not permit dispatching it, which is when `error` is `reaction retry paused by an open blocking issue` or `reaction retry paused by issue state`. |
 
-When a retry comes due and cannot start, Sortie puts it back with the trigger `timer` and sets `error` to the reason. The error of the run before it stays in the logs and in that run's run history, and the per-issue `last_error` carries the reason too.
+When a retry comes due and cannot start, Sortie puts it back with the trigger `timer` and sets `error` to the reason. The error of the run before it stays in the logs and in that run's run history, and the per-issue `last_error` carries the reason too. A retry serves `error`, and `last_error`, as the same plain sentence a run row's `error` carries for a withheld handoff or an agent error, not the stored text.
 
 | `error` after a reschedule                        | Meaning |
 | ------------------------------------------------- | ------- |
@@ -3323,7 +3323,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `issue_url`              | string or absent   | The tracker's web link as read then. Omitted when empty. Masked like `issue_title`. |
 | `attempt`                | integer            | The attempt number at the time of the run. |
 | `status`                 | string             | The run's disposition. |
-| `error`                  | string or `null`   | The run's error message, `null` when it recorded none. Masked like `issue_title`. |
+| `error`                  | string or `null`   | The run's error message, `null` when it recorded none. A run whose handoff Sortie withheld because the agent changed nothing, or because Sortie could not tell, reads as a plain sentence saying so, such as `The agent finished without changing anything, so Sortie did not hand the issue off.`; so does a run that ended on an agent error, such as `Sortie stopped the session before the agent finished turn 1.` for a cancelled turn, which keeps any message the agent supplied and never shows Go error-chain prefixes or `context canceled`. The stored text is not served for either. Masked like `issue_title`. |
 | `rule_name`              | string or absent   | The dispatch rule that routed the run, `default` for `dispatch.default`, omitted when the workflow-wide fallback routed it. |
 | `agent_kind`             | string or absent   | The agent kind the run used. Omitted when empty. |
 | `configured_model`, `configured_effort` | string or absent | The `model` and `effort` the run's resolved settings block carried. Omitted when unset. |
@@ -4260,7 +4260,7 @@ Every figure Sortie prices is a fresh-input token, a cache-read token, a cache-w
 
 One rate set prices every model of a kind alike: two models of one kind run under different dispatch rules are priced at the same rates, so the savings from routing show in token counts before they show in money.
 
-When `token_rates` is absent or empty, the dashboard shows no cost, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
+When `token_rates` is absent or empty, the dashboard shows no cost, its session view states a session's cost as unpriced, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
 
 The `config.token_rates` member of `GET /api/v1/state` serves the rates the process started with: an entry per agent kind keyed as written, each rate `null` when not set, and `complete`, `true` exactly when both `input_per_mtok` and `output_per_mtok` are set. It is `null` when `token_rates` is absent or empty.
 

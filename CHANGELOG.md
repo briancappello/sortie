@@ -67,6 +67,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `sortie stats`, `/api/v1/stats`, and the dashboard's Analytics screen now show a funnel for each stage chain: one row per stage with how many passes reached it, how many advanced, stopped and why, or are still in the stage, and how long a pass spent there. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
 
+- The dashboard has a session view for every agent run, opened from a run on the issue page, from a button on the issue page and the peek, with `O` there and on the selected issue in Overview and Pipeline, and from the command palette. It shows the issue, stage, agent and model, SSH host, status, turns, elapsed time, tokens, and estimated cost, then the events Sortie kept for the run and each new event as it arrives, with consecutive tool calls folded into one line that keeps a failed call in view, each turn's token usage on its line, and tokens per turn as a chart, or a note that the agent reports none. It follows the newest event while you stay at the bottom and offers a jump back after you scroll up. A running session that has sent no event for half of `agent.stall_timeout_ms` is marked on its Active row, its Pipeline lane, its issue page, and its session view, which also says when Sortie stops it as stalled, or that it will not when stall detection is off. ([#1309](https://github.com/sortie-ai/sortie/issues/1309))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -78,6 +80,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `sortie stats` and the dashboard's Analytics screen now break runs down by the model the agent reported running, falling back to the configured model only when the agent reported none, so runs left to the agent's default model are counted under that model's name instead of one shared "no model" row.
 
 - `sortie stats` now stops with the diagnostics `sortie validate` prints when the workflow's dispatch rules do not load, for example when a rule's prompt template file is missing. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
+
+- A run that Sortie withheld a handoff from, was cancelled, or ended on an agent error, and the retry that follows it, now read in the dashboard and the JSON API as a plain sentence, for example "The agent finished without changing anything, so Sortie did not hand the issue off." or "Sortie stopped the session before the agent finished turn 1.", instead of `handoff withheld: absence of work observed under observed policy` or `agent turn 1: agent: turn_cancelled: turn cancelled: context canceled`.
+
+- Sortie now logs each agent tool call at debug level instead of info, and a failed call's record keeps only the first line of its error, so an info log no longer fills with the output of the commands an agent runs.
 
 ### Fixed
 
@@ -114,6 +120,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - After a fix command session pushes to a pull request, Sortie again watches that pull request's CI and bot reviews. A CI failure or a new bot review on the pushed commit used to go unnoticed. ([#1368](https://github.com/sortie-ai/sortie/issues/1368))
 
 - A Claude Code run that ends on a message Claude Code writes itself, such as an API error notice, now keeps the model that did the work as its reported model. It used to be recorded as `<synthetic>`, so `sortie stats` and the Analytics screen counted that run under `<synthetic>` instead of its model. Runs recorded before the fix keep `<synthetic>`.
+
+- A running agent's latest message, in the JSON API and on the dashboard, no longer shows an agent protocol marker such as `system/task_progress`, `rate_limit_event`, `assistant message`, `reasoning block`, or `[tool: Bash]`. It keeps the last thing the agent actually said, and the issue's agent events leave those markers out too.
 
 ### Migrations
 
