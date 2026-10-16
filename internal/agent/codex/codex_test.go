@@ -1074,12 +1074,11 @@ func waitChOpen(state *sessionState) bool {
 	}
 }
 
-// countOtherMessages reports how many events events carries whose
-// Type is domain.EventOtherMessage and whose Message names method.
-func countOtherMessages(events []domain.AgentEvent, method string) int {
+// countBlankPings reports how many events carry an empty notification.
+func countBlankPings(events []domain.AgentEvent) int {
 	var n int
 	for _, e := range events {
-		if e.Type == domain.EventOtherMessage && e.Message == method {
+		if e.Type == domain.EventNotification && e.Message == "" {
 			n++
 		}
 	}
@@ -1137,7 +1136,7 @@ func TestRunTurn_BurstDuringTurnOpeningNoLongerHangs(t *testing.T) {
 	if !waitChOpen(state) {
 		t.Error("state.waitCh is closed, want the runtime still alive and unreaped")
 	}
-	if n := countOtherMessages(events, "filler/notification"); n != burstCount {
+	if n := countBlankPings(events); n != burstCount {
 		t.Errorf("filler notification events = %d, want %d", n, burstCount)
 	}
 }
@@ -1217,7 +1216,7 @@ func TestRunTurn_BurstBetweenTurnsNoLongerHangs(t *testing.T) {
 	if !waitChOpen(state) {
 		t.Error("state.waitCh is closed, want the runtime still alive and unreaped")
 	}
-	if n := countOtherMessages(events, "filler/notification"); n != burstCount {
+	if n := countBlankPings(events); n != burstCount {
 		t.Errorf("filler notification events = %d, want %d", n, burstCount)
 	}
 }
