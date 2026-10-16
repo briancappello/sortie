@@ -83,8 +83,7 @@ function ServerClock() {
   const now = useNow();
   return (
     <span className="flex items-center gap-xs">
-      <span>{fmtDate(now)}</span>
-      <span>{fmtClock(now)}</span>
+      <span>{fmtDate(now)}</span> <span>{fmtClock(now)}</span>
     </span>
   );
 }

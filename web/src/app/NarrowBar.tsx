@@ -22,8 +22,7 @@ function statusLabel(state: StateResponse): ReactNode {
     case "degraded":
       return state.counts.attention > 0 ? (
         <span className="flex flex-wrap gap-x-xs">
-          <span>Degraded</span>
-          <span>{needs}</span>
+          <span>Degraded</span> <span>{needs}</span>
         </span>
       ) : (
         "Degraded"

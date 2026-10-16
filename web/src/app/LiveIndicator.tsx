@@ -92,7 +92,12 @@ export function LiveIndicator({ isHolding, onTogglePause }: LiveIndicatorProps) 
     >
       <span aria-hidden="true" className={cn("size-xs shrink-0 rounded-full", TONE_DOT[tone])} />
       <span>{text}</span>
-      {detail === undefined ? undefined : <span>{detail}</span>}
+      {detail === undefined ? undefined : (
+        <>
+          {" "}
+          <span>{detail}</span>
+        </>
+      )}
     </button>
   );
 }
