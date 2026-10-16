@@ -525,6 +525,13 @@ func (o *Orchestrator) RunEvents(dispatchID string) ([]RunEvent, bool) {
 	return o.state.RetainedEvents.Events(dispatchID)
 }
 
+// RunEventsAfter returns the events of a running run that follow cursor, and
+// false when no running run carries dispatchID. It is safe to call from any
+// goroutine.
+func (o *Orchestrator) RunEventsAfter(dispatchID string, cursor int64) (RunEventPage, bool) {
+	return o.state.RetainedEvents.After(dispatchID, cursor)
+}
+
 // applyQueued calls apply for each message ch holds, in order, without
 // blocking, stopping at an empty receive or after cap(ch) messages.
 func applyQueued[T any](ch <-chan T, apply func(T)) {

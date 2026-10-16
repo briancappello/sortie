@@ -45,6 +45,10 @@ type CheckNowFunc func(ctx context.Context, identifier, kind string) orchestrato
 // first, and false when no running run carries dispatchID.
 type RunEventsFunc func(dispatchID string) ([]orchestrator.RunEvent, bool)
 
+// RunEventsAfterFunc returns the events of a running run after cursor, and
+// false when no running run carries dispatchID.
+type RunEventsAfterFunc func(dispatchID string, cursor int64) (orchestrator.RunEventPage, bool)
+
 // RunHistoryEntry is a server-layer view of a completed run attempt.
 // Decoupled from persistence types to avoid leaking internal packages.
 type RunHistoryEntry struct {
@@ -303,6 +307,10 @@ type Params struct {
 	// only, which holds none.
 	RunEventsFn RunEventsFunc
 
+	// RunEventsAfterFn reads running runs for the change stream. When nil,
+	// the stream reads every run from the store only.
+	RunEventsAfterFn RunEventsAfterFunc
+
 	// TokenRates maps agent adapter kind strings to per-token USD
 	// rates for cost estimation in the JSON API. When nil or empty,
 	// the API reports raw token counts without cost estimates.
@@ -336,6 +344,7 @@ type Server struct {
 	workflowLoadedFn func() bool
 	runHistory       RunHistoryReader
 	runEventsFn      RunEventsFunc
+	runEventsAfterFn RunEventsAfterFunc
 	tokenRates       TokenRates
 	stats            StatsFunc
 
@@ -381,6 +390,7 @@ func New(params Params) *Server {
 		workflowLoadedFn: params.WorkflowLoadedFn,
 		runHistory:       params.RunHistory,
 		runEventsFn:      params.RunEventsFn,
+		runEventsAfterFn: params.RunEventsAfterFn,
 		tokenRates:       params.TokenRates,
 		stats:            params.Stats,
 		changes:          newChangeFeed(),

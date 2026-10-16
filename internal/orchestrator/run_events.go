@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,35 @@ type RunEvent struct {
 	Usage *domain.TokenUsage
 
 	size int64
+}
+
+// RunEventPage is the part of one run's retained events that follows a cursor.
+type RunEventPage struct {
+	// Events ascend by seq: those above the cursor, or every retained event
+	// when Expired.
+	Events []RunEvent
+	// Expired reports that events between the cursor and FirstSeq were evicted.
+	Expired bool
+	// FirstSeq and LastSeq are the seq of the oldest and the newest retained
+	// event; both are 0 when the run retained none.
+	FirstSeq, LastSeq int64
+}
+
+// PageAfter returns the page of events, which ascend by seq, that follows
+// cursor. A cursor above the newest seq reads as the newest seq.
+func PageAfter(events []RunEvent, cursor int64) RunEventPage {
+	if len(events) == 0 {
+		return RunEventPage{}
+	}
+	page := RunEventPage{FirstSeq: events[0].Seq, LastSeq: events[len(events)-1].Seq}
+	cursor = min(cursor, page.LastSeq)
+	if cursor < page.FirstSeq-1 {
+		page.Events = events
+		page.Expired = true
+		return page
+	}
+	page.Events = events[sort.Search(len(events), func(i int) bool { return events[i].Seq > cursor }):]
+	return page
 }
 
 // runEventPayload is the stored and served form of the members of a
@@ -204,6 +234,22 @@ func (l *RunEventLog) Events(dispatchID string) ([]RunEvent, bool) {
 	return buffer.snapshot(), true
 }
 
+// After returns [PageAfter] of the running run that carries dispatchID, with
+// Events copied so that no later append or eviction changes them, and false
+// when no running run carries it.
+func (l *RunEventLog) After(dispatchID string, cursor int64) (RunEventPage, bool) {
+	if l == nil {
+		return RunEventPage{}, false
+	}
+	l.mu.Lock()
+	buffer, ok := l.buffers[dispatchID]
+	l.mu.Unlock()
+	if !ok {
+		return RunEventPage{}, false
+	}
+	return buffer.pageAfter(cursor), true
+}
+
 // register creates the buffer of a run that has just started. It returns nil
 // on a nil log, which retains nothing.
 func (l *RunEventLog) register(dispatchID string) *runEventBuffer {
@@ -246,6 +292,14 @@ func (b *runEventBuffer) snapshot() []RunEvent {
 	events := make([]RunEvent, len(live))
 	copy(events, live)
 	return events
+}
+
+func (b *runEventBuffer) pageAfter(cursor int64) RunEventPage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	page := PageAfter(b.events[b.head:], cursor)
+	page.Events = slices.Clone(page.Events)
+	return page
 }
 
 func (b *runEventBuffer) hasStartupFailed() bool {
