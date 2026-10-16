@@ -8,7 +8,8 @@
 // poll check, and [RefreshOutcome], [RetryNowOutcome], [CheckNowOutcome], and
 // [AcknowledgeOutcome] for a refresh, a retry-now, a check-now, and an
 // acknowledge request. [Event] words one retained agent event, and [Stall]
-// and [StallOff] word a running row's quiet marker and its absence. All are
+// and [StallOff] word a running row's quiet marker and its absence, and
+// [RunError] words a finished run's stored error. All are
 // safe for concurrent use and never fail: a template that cannot render
 // yields a fixed fallback text, or leaves out the one next outcome it
 // belongs to, and logs one record.
@@ -349,7 +350,7 @@ func selectRetry(e *orchestrator.SnapshotRetryEntry, c Context) (string, map[str
 	data := map[string]any{
 		"Attempt": e.Attempt,
 		"Due":     float64(e.DueAtMS-c.Now.UnixMilli()) / 1000,
-		"Error":   strings.TrimSpace(e.Error),
+		"Error":   strings.TrimSuffix(RunError(strings.TrimSpace(e.Error)), "."),
 		"Reason":  "",
 		"Run":     "",
 	}

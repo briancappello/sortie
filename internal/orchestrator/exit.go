@@ -769,7 +769,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					DisplayID:           entry.Issue.DisplayID,
 					Attempt:             nextAttempt,
 					DelayMS:             delayMS,
-					Error:               "worker exited: " + evidenceErr.Error(),
+					Error:               WorkerExitedErrorPrefix + evidenceErr.Error(),
 					LastSSHHost:         workerResult.SSHHost,
 					ContinuationContext: entry.ContinuationContext,
 					ReactionKind:        entry.ReactionKind,
@@ -1416,7 +1416,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 				var errMsg string
 				if workerResult.Error != nil {
-					errMsg = redact.Mask("worker exited: " + workerResult.Error.Error())
+					errMsg = redact.Mask(WorkerExitedErrorPrefix + workerResult.Error.Error())
 				}
 
 				ScheduleRetry(state, ScheduleRetryParams{

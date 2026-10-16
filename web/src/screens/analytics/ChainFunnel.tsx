@@ -8,6 +8,8 @@ import {
 } from "@/components/ui/table";
 import { fmtCount, fmtDuration } from "@/lib/format";
 
+import { COLUMN_WIDTH } from "./GroupTable";
+
 import type { ConfigResponse, Funnel, FunnelStage } from "@/api/types.gen";
 import type { ReactNode } from "react";
 
@@ -63,7 +65,12 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
     <TableRow>
       <TableCell look="number-muted">{index + 1}</TableCell>
       <TableCell>
-        <span className={MONO}>{stage.rule}</span>
+        <span
+          title={stage.rule}
+          className={`inline-block truncate align-bottom ${MONO} ${stage.entry ? COLUMN_WIDTH.entryStageText : COLUMN_WIDTH.stageText}`}
+        >
+          {stage.rule}
+        </span>
         {stage.entry ? (
           <>
             {" "}
@@ -144,12 +151,13 @@ export function ChainFunnel({ funnel, config }: ChainFunnelProps) {
   return (
     <Table title={headingOf(stages)}>
       <TableHeader>
-        <TableHead align="right" className="w-[36px]">
+        <TableHead align="right" className={COLUMN_WIDTH.stageNumber}>
           #
         </TableHead>
-        <TableHead>Stage</TableHead>
+        <TableHead className={COLUMN_WIDTH.stage}>Stage</TableHead>
         <TableHead
           align="right"
+          className={COLUMN_WIDTH.runs}
           title="Finished runs of the rule, retries and pull request fixes included"
         >
           Runs

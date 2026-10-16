@@ -1,4 +1,4 @@
-import { rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
+import { routeText, rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
 import { fmtStamp, parseInstant } from "@/lib/format";
 import { reactionLabel, reactionShortLabel } from "@/lib/labels";
 import { outcomeMark, runStatus } from "@/lib/run-status";
@@ -14,7 +14,7 @@ import type {
   RunResponse,
   ShapeReactions,
 } from "@/api/types.gen";
-import type { Mark } from "@/lib/run-status";
+import type { Mark, StateMark } from "@/lib/run-status";
 
 /** What a station stands for on the way from the tracker to the end of a pull request. */
 export type StationKind = "tracker" | "agent" | "handoff" | "reaction" | "end";
@@ -135,7 +135,7 @@ export interface StandingInput {
 }
 
 /** What a lane draws at the station it stands on: a status mark, or the ring of an issue that ended today. */
-export type LaneMarker = Mark | "ended";
+export type LaneMarker = StateMark | "ended";
 
 /** Where an issue stands: a station key, its mark, and the time shown beside it. */
 export interface Standing {
@@ -342,6 +342,12 @@ export function lastStagePositionOf(runs: readonly RunResponse[]): StagePosition
   return run === undefined
     ? null
     : positionFrom({ chain: run.stage_chain, current: run.rule_name ?? "" });
+}
+
+/** Words a finished run's place in its chain, or its rule, as an Active row words a running one. */
+export function runRouteText(run: RunResponse, config: ConfigResponse | undefined): string | null {
+  const position = lastStagePositionOf([run]);
+  return routeText({ stage_position: position, rule_name: run.rule_name }, config);
 }
 
 /** What the stage summary and the meter single out. */

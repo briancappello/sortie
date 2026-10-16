@@ -16,6 +16,14 @@ const reactionRecoveryMaxCandidates = 200
 // verdict column.
 const HandoffAbsenceErrorPrefix = "handoff withheld: "
 
+// The verdicts that follow [HandoffAbsenceErrorPrefix] in a run_history error.
+// Whoever words the stored error for a person matches on them, so they are
+// shared rather than repeated.
+const (
+	HandoffVerdictAbsence      = "absence of work observed"
+	HandoffVerdictUndetermined = "evidence not determinable"
+)
+
 // RunHistory is a single completed run attempt in the run_history table.
 // ID is assigned by the database on insert; leave it zero when calling
 // [Store.AppendRunHistory].

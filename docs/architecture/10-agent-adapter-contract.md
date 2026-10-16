@@ -110,6 +110,7 @@ A kind declaring `turn_end` reports each figure a turn settles as exactly one `t
 - `tool_result`: a tool call completed. Optional fields: `tool_name` (string), `duration_ms` (int64), `tool_error` (bool, true when the call returned an error).
 - `notification`: informational message from the agent
 - `other_message`: unclassified message
+- A frame that carries no text for a person, such as a protocol event type, a JSON-RPC method name, a lifecycle marker, a tool-call tag, or a fixed placeholder, MUST be reported as a `notification` or `other_message` with an empty message, never with the frame's type name or a placeholder. The orchestrator treats an empty one as a liveness signal for stall detection and does not retain it. Agent text, retry and human-request notices, and any message Sortie words itself keep their text. Tool calls are reported by their `tool_result` events.
 - `malformed`: unparseable or unrecognized message
 
 Each event should include:

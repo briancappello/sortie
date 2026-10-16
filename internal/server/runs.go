@@ -268,7 +268,7 @@ func toRunResponse(e RunHistoryEntry, rates TokenRates, chains [][]string) runRe
 		DispatchID:           copyText(e.DispatchID),
 	}
 	if e.Error != nil {
-		resp.Error = new(redact.Mask(*e.Error))
+		resp.Error = new(redact.Mask(sentence.RunError(*e.Error)))
 	}
 	if e.DispatchedAt != "" {
 		resp.DispatchedAt = new(e.DispatchedAt)

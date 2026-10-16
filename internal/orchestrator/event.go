@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"log/slog"
 	"maps"
+	"strings"
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
@@ -111,19 +112,22 @@ func HandleAgentEvent(state *State, issueID string, event domain.AgentEvent, log
 		}
 		metrics.IncToolCalls(event.ToolName, outcome)
 
+		// Agents call tools constantly and a failed call is routine, so these
+		// records stay at Debug; the error keeps only its first line because
+		// a tool's output can run to thousands of lines of workspace content.
 		if event.ToolError {
-			errMsg := event.Message
-			if errMsg == "" {
+			errMsg, _, _ := strings.Cut(event.Message, "\n")
+			if strings.TrimSpace(errMsg) == "" {
 				errMsg = "tool returned error"
 			}
-			log.Info("tool call completed",
+			log.Debug("tool call completed",
 				slog.String("tool", event.ToolName),
 				slog.Int64("duration_ms", event.ToolDurationMS),
 				slog.String("outcome", outcome),
-				slog.String("tool_error", errMsg),
+				slog.String("tool_error", redact.Truncate(errMsg, 200)),
 			)
 		} else {
-			log.Info("tool call completed",
+			log.Debug("tool call completed",
 				slog.String("tool", event.ToolName),
 				slog.Int64("duration_ms", event.ToolDurationMS),
 				slog.String("outcome", outcome),

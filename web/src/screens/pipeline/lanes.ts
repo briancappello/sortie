@@ -30,6 +30,8 @@ export interface PipelineLane extends Filterable {
   agentKind: string | null;
   statusText: string;
   statusTextFull: string;
+  stallText: string | null;
+  stallTextFull: string | null;
   marker: LaneMarker;
   acknowledgedAt: string | null;
   stations: LaneStation[];
@@ -105,6 +107,8 @@ function activeLanes(state: StateResponse, stations: readonly Station[], now: nu
       agentKind: row.agentKind,
       statusText: row.statusText,
       statusTextFull: row.statusTextFull,
+      stallText: row.stallText,
+      stallTextFull: row.stallTextFull,
       marker: standing.mark ?? row.mark,
       acknowledgedAt: row.acknowledgedAt,
       stations: laneOf(stations, standing, pending),
@@ -164,6 +168,8 @@ function endedLanes(
       agentKind: issue.agentKind,
       statusText: issue.outcome.status_text,
       statusTextFull: issue.outcome.status_text_full,
+      stallText: null,
+      stallTextFull: null,
       marker: "ended",
       acknowledgedAt: null,
       stations: laneOf(stations, { ...standing, mark: "ended" }, []),

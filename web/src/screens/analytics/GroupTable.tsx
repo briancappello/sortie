@@ -24,6 +24,24 @@ import type { ReactNode } from "react";
 
 const PAGE_ROWS = 20;
 
+/**
+ * Column widths every Analytics table shares, so the columns line up from table
+ * to table; Duration takes the rest. A chain table splits the name width into
+ * its stage number and stage name, so its Runs column lines up too.
+ */
+export const COLUMN_WIDTH = {
+  name: "w-[240px]",
+  nameText: "max-w-[208px]",
+  stageNumber: "w-[48px]",
+  stage: "w-[192px]",
+  stageText: "max-w-[160px]",
+  entryStageText: "max-w-[96px]",
+  runs: "w-[112px]",
+  measure: "w-[112px]",
+  turns: "w-[144px]",
+  figure: "w-[176px]",
+} as const;
+
 function durationText(duration: Duration): string {
   if (duration.samples === 0) {
     return "unknown";
@@ -123,30 +141,35 @@ export function GroupTable<Row extends Group>({
 
   return (
     <section className="flex flex-col gap-sm">
-      <Table title={title}>
+      <Table title={title} className="table-fixed">
         <TableHeader>
           {nameColumns.map((column, index) => (
-            <SortableHead key={column.header} columnId={`name${index}`} sort={sort}>
+            <SortableHead
+              key={column.header}
+              columnId={`name${index}`}
+              sort={sort}
+              className={COLUMN_WIDTH.name}
+            >
               {column.header}
             </SortableHead>
           ))}
-          <SortableHead columnId="runs" sort={sort}>
+          <SortableHead columnId="runs" sort={sort} align="right" className={COLUMN_WIDTH.runs}>
             Runs
           </SortableHead>
-          <SortableHead columnId={measure} sort={sort}>
+          <SortableHead columnId={measure} sort={sort} className={COLUMN_WIDTH.measure}>
             {measure === "share" ? "Share" : "Success"}
           </SortableHead>
           <SortableHead columnId="duration" sort={sort} title="p50 to p95">
             Duration
           </SortableHead>
-          <SortableHead columnId="turns" sort={sort} align="right">
+          <SortableHead columnId="turns" sort={sort} align="right" className={COLUMN_WIDTH.turns}>
             Mean turns
           </SortableHead>
-          <SortableHead columnId="tokens" sort={sort} align="right">
+          <SortableHead columnId="tokens" sort={sort} align="right" className={COLUMN_WIDTH.figure}>
             Tokens
           </SortableHead>
           {hasRates ? (
-            <SortableHead columnId="cost" sort={sort} align="right">
+            <SortableHead columnId="cost" sort={sort} align="right" className={COLUMN_WIDTH.figure}>
               Est. cost
             </SortableHead>
           ) : undefined}
@@ -155,9 +178,16 @@ export function GroupTable<Row extends Group>({
           {ordered.slice(0, shown).map((row, index) => (
             <TableRow key={index} tabIndex={-1}>
               {nameColumns.map((column) => (
-                <TableCell key={column.header}>{column.cell(row)}</TableCell>
+                <TableCell key={column.header}>
+                  <span
+                    title={column.sortText(row)}
+                    className={`block truncate ${COLUMN_WIDTH.nameText}`}
+                  >
+                    {column.cell(row)}
+                  </span>
+                </TableCell>
               ))}
-              <TableCell>{fmtCount(row.runs)}</TableCell>
+              <TableCell look="number">{fmtCount(row.runs)}</TableCell>
               <TableCell>
                 {fmtPercent(measure === "share" ? row.share : row.success_rate)}
               </TableCell>
