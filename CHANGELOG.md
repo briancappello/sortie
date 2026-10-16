@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-10-11
+
 ### Added
 
 - The JSON API (`/api/v1/state` and `/api/v1/{identifier}`) now describes every active issue in full: its title and tracker link, type, labels, and state, its dispatch rule, stage, agent, and model, its spend against its budgets, why it waits, the pull request reactions it waits on and what each did, when its agent last sent an event, a plain English sentence on what it is doing, and what Sortie will do next. `/api/v1/state` also lists every active issue once in the order Sortie picked it up, and `/api/v1/{identifier}` now answers for parked, waiting, and finished issues. ([#1286](https://github.com/sortie-ai/sortie/issues/1286), [#1071](https://github.com/sortie-ai/sortie/issues/1071), [#1287](https://github.com/sortie-ai/sortie/issues/1287), [#1288](https://github.com/sortie-ai/sortie/issues/1288), [#1311](https://github.com/sortie-ai/sortie/issues/1311), [#1310](https://github.com/sortie-ai/sortie/issues/1310), [#1321](https://github.com/sortie-ai/sortie/issues/1321), [#1312](https://github.com/sortie-ai/sortie/issues/1312), [#1348](https://github.com/sortie-ai/sortie/issues/1348), [#1375](https://github.com/sortie-ai/sortie/issues/1375))
@@ -1282,7 +1284,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CI pipeline with `golangci-lint`, `gofmt` enforcement, and test execution via GitHub Actions.
 - Architecture Decision Records (ADR-0001 through ADR-0005).
 
-[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.27.0...HEAD
+[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.28.0...HEAD
+[1.28.0]: https://github.com/sortie-ai/sortie/compare/v1.27.0...v1.28.0
 [1.27.0]: https://github.com/sortie-ai/sortie/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/sortie-ai/sortie/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/sortie-ai/sortie/compare/v1.24.1...v1.25.0
