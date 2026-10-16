@@ -240,7 +240,7 @@ export function IssueGroupRows({ group, filter, config }: IssueGroupRowsProps) {
               {mark === null ? undefined : <StatusMark mark={mark} />}
             </span>
             <div className="min-w-0 flex-1">
-              <p className="text-body-md font-medium text-ink [overflow-wrap:anywhere]">
+              <p className="text-body-md font-medium text-ink wrap-anywhere">
                 <Link
                   to={link.to}
                   state={link.state}
@@ -250,7 +250,7 @@ export function IssueGroupRows({ group, filter, config }: IssueGroupRowsProps) {
                   <ServedText text={title} />
                 </Link>
               </p>
-              <p className="flex flex-wrap gap-x-md text-body-sm text-ink-muted [overflow-wrap:anywhere]">
+              <p className="flex flex-wrap gap-x-md text-body-sm text-ink-muted wrap-anywhere">
                 {secondLine.map(([id, part]) => (
                   <span key={id}>{id === "status" ? <ServedText text={part} /> : part}</span>
                 ))}

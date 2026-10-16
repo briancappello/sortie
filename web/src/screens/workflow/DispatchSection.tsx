@@ -61,7 +61,7 @@ function Step({ marker, hasNext, title, aside, detail }: StepProps) {
             <span className="text-body-sm text-ink-muted">{aside}</span>
           )}
         </span>
-        <span className="text-body-sm text-ink-muted [overflow-wrap:anywhere]">{detail}</span>
+        <span className="text-body-sm text-ink-muted wrap-anywhere">{detail}</span>
       </div>
     </li>
   );

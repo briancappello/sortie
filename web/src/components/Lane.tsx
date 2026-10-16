@@ -227,7 +227,7 @@ export function Lane({
         }}
       />
       <div
-        className="absolute top-[calc(50%-1px)] h-[3px] rounded-full bg-track-done"
+        className="absolute top-[calc(50%-1px)] h-0.75 rounded-full bg-track-done"
         style={{ left: `${stationX(0, count)}%`, width: `${reached}%` }}
       />
       {stations.map((station, index) => {
@@ -402,7 +402,7 @@ function StationDot({ station, left, countLine }: StationDotProps) {
   return (
     <span
       className={cn(
-        "absolute top-1/2 size-[11px] -translate-1/2 rounded-full border-[1.5px]",
+        "absolute top-1/2 size-2.75 -translate-1/2 rounded-full border-[1.5px]",
         DOT[station.state],
       )}
       style={{ left }}

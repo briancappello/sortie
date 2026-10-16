@@ -48,7 +48,7 @@ export function NarrowBar({ onOpenPalette }: NarrowBarProps) {
       <BrandMark />
       <span className="font-heading font-semibold">Sortie</span>
       {data === undefined ? undefined : (
-        <span className="min-w-0 text-body-sm [overflow-wrap:anywhere]">
+        <span className="min-w-0 text-body-sm wrap-anywhere">
           <StatusMark mark={condition(data)} label={statusLabel(data)} />
         </span>
       )}

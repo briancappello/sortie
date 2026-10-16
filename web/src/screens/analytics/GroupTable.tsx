@@ -235,7 +235,7 @@ export function GroupTable<Row extends Group>({
     <section className="flex flex-col gap-sm">
       <Table
         title={title}
-        className={hasRates ? "table-fixed min-w-[1148px]" : "table-fixed min-w-[992px]"}
+        className={hasRates ? "table-fixed min-w-287" : "table-fixed min-w-248"}
       >
         <TableHeader>
           {nameColumns.map((column, index) => (

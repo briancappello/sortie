@@ -48,7 +48,7 @@ export function EndedToday({
       <div className="flex flex-wrap items-baseline gap-x-sm">
         <h2 className="font-heading text-h7 font-semibold text-ink">Ended today</h2>
         {tally === undefined ? undefined : (
-          <span className="text-body-md text-ink-muted [overflow-wrap:anywhere]">{tally}</span>
+          <span className="text-body-md text-ink-muted wrap-anywhere">{tally}</span>
         )}
         <Link to="/history" className={cn("ml-auto text-body-md", LINK)}>
           History
@@ -99,7 +99,7 @@ function EndedRow({ issue, isUnread, isSelected, showSelection, onOpen }: EndedR
       data-nav-key={endedNavKey(issue.issueId)}
       onClick={() => onOpen(issue)}
       className={cn(
-        "grid grid-cols-[auto_auto_minmax(0,1fr)] gap-x-sm gap-y-xxs px-md py-sm md:grid-cols-[auto_auto_minmax(0,1fr)_minmax(0,1fr)_auto] md:gap-x-md [overflow-wrap:anywhere]",
+        "grid grid-cols-[auto_auto_minmax(0,1fr)] gap-x-sm gap-y-xxs px-md py-sm md:grid-cols-[auto_auto_minmax(0,1fr)_minmax(0,1fr)_auto] md:gap-x-md wrap-anywhere",
         rowStyles(isLook, true),
       )}
     >
