@@ -17,6 +17,7 @@ function start_service():
   run_schema_migrations()
 
   persisted_retries = sqlite.load_retry_entries()
+  sqlite.delete_all_live_passes()                        // a failure is logged; startup continues
 
   state = {
     poll_interval_ms: get_config_poll_interval_ms(),
@@ -420,6 +421,7 @@ function dispatch_issue(issue, state, attempt):
   if entry.stage_lineage.dispatched_at is zero:
     entry.stage_lineage.dispatched_at = entry.started_at   // the first run of a pass dates the pass
   mark_stage_hop_dispatched(state, issue.id)
+  record_running_pass(issue.id, entry)                   // only with a rule, a chain, and no reaction kind; a failure is logged
 
   state.claimed.add(issue.id)
   state.retry_attempts.remove(issue.id)
@@ -866,6 +868,7 @@ on_worker_exit(issue_id, reason, worker_result, state):
       else:
         cancel_retry(state, issue_id)
         state.claimed.remove(issue_id)
+      delete_live_pass(issue_id, "running")           // a failure is logged
       notify_observers()
       return state
 
@@ -879,6 +882,7 @@ on_worker_exit(issue_id, reason, worker_result, state):
       state.claimed.remove(issue_id)
       reset_stage_hop(state, issue_id, "terminal")
       log_info("handoff suppressed for terminal issue", observation)
+      delete_live_pass(issue_id, "running")           // a failure is logged
       notify_observers()
       return state
 
@@ -1043,6 +1047,9 @@ on_worker_exit(issue_id, reason, worker_result, state):
     # else: the retry slot (Section 7.5) is occupied, so this exit defers
     # to the incumbent instead of scheduling a backoff retry.
 
+  // After the run's row, its hop result, and any retry row the exit saved,
+  // on every exit kind, so a finished pass never reads as still in its stage.
+  delete_live_pass(issue_id, "running")                 // a failure is logged
   notify_observers()
   return state
 ```

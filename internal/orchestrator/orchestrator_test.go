@@ -98,6 +98,7 @@ type observerFunc func()
 func (f observerFunc) OnStateChange() { f() }
 
 type stubStore struct {
+	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords
 	unsupportedReactionObservationStore
@@ -5669,6 +5670,7 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 		if _, ok := state.BudgetExhausted[issue.ID]; ok {
 			t.Errorf("BudgetExhausted[%s] remains with MaxSessions=0, want cleared", issue.ID)
 		}
+		requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: issue.ID, Kind: persistence.LivePassBudget}})
 	})
 
 	t.Run("empty candidate list with budget enabled clears stale set", func(t *testing.T) {
@@ -5693,6 +5695,7 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 		if _, ok := state.BudgetExhausted[issue.ID]; ok {
 			t.Errorf("BudgetExhausted[%s] retained on empty candidate list, want cleared", issue.ID)
 		}
+		requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: issue.ID, Kind: persistence.LivePassBudget}})
 	})
 
 	t.Run("dispatch context of a hold", func(t *testing.T) {
@@ -5737,10 +5740,11 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 			ticks     int
 			want      holdContext
 			wantReads int
+			wantRow   bool
 		}{
-			{name: "no prior record reads the latest agent run", ticks: 1, want: fromRun, wantReads: 1},
-			{name: "a waiting hop describes its target with no run history read", hop: &waiting, ticks: 1, want: fromHop},
-			{name: "a hop already followed by a run reads the latest agent run", hop: &dispatched, ticks: 1, want: fromRun, wantReads: 1},
+			{name: "no prior record reads the latest agent run", ticks: 1, want: fromRun, wantReads: 1, wantRow: true},
+			{name: "a waiting hop describes its target with no run history read", hop: &waiting, ticks: 1, want: fromHop, wantRow: true},
+			{name: "a hop already followed by a run reads the latest agent run", hop: &dispatched, ticks: 1, want: fromRun, wantReads: 1, wantRow: true},
 			{
 				name:  "a record the retry lane described keeps its context with no read",
 				prior: &BudgetExhaustedEntry{RuleName: held.rule, AgentKind: held.kind, ConfiguredModel: held.model, StageLineage: held.lineage},
@@ -5782,6 +5786,11 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 				if reads := len(store.latestRunsCalls); reads != tt.wantReads {
 					t.Errorf("LatestAgentRuns calls = %d over %d ticks, want %d", reads, tt.ticks, tt.wantReads)
 				}
+				wantPasses := []persistence.LivePass{{IssueID: issue.ID, Kind: persistence.LivePassBudget, ChainID: tt.want.lineage.ChainID, RuleName: tt.want.rule, StagePrevious: tt.want.lineage.PreviousRule}}
+				if !tt.wantRow {
+					wantPasses = nil
+				}
+				requireLivePasses(t, "UpsertLivePass", store.upserted, wantPasses)
 			})
 		}
 	})
@@ -9118,6 +9127,13 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 				if wantFirst := id == tt.wantFirst; entry.FirstAfterHop != wantFirst {
 					t.Errorf("Running[%q].FirstAfterHop = %t, want %t", id, entry.FirstAfterHop, wantFirst)
 				}
+				wantPass := persistence.LivePass{IssueID: id, Kind: persistence.LivePassRunning, ChainID: entry.StageLineage.ChainID, RuleName: "plan", StagePrevious: want.PreviousRule}
+				if !slices.Contains(h.store.upserted, wantPass) {
+					t.Errorf("UpsertLivePass calls = %+v, want one for %+v", h.store.upserted, wantPass)
+				}
+			}
+			if len(h.store.upserted) != len(tt.want) {
+				t.Errorf("UpsertLivePass calls = %+v, want one per dispatch (%d)", h.store.upserted, len(tt.want))
 			}
 			if after := RuntimeSnapshot(h.state, time.Now()).BetweenStages; len(after) != 0 {
 				t.Errorf("BetweenStages after the dispatch = %+v, want none", after)

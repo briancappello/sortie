@@ -40,6 +40,7 @@ type WorkerExitStore interface {
 	UpsertSessionMetadata(ctx context.Context, meta persistence.SessionMetadata) error
 	SaveRetryEntry(ctx context.Context, entry persistence.RetryEntry) error
 	DeleteRetryEntry(ctx context.Context, issueID string) error
+	DeleteLivePass(ctx context.Context, issueID, kind string) error
 	DeleteReactionEscalations(ctx context.Context, issueID string) error
 	QueryConsecutiveHandoffAbsenceCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
 	ResetHandoffAbsenceSequence(ctx context.Context, issueID string) error
@@ -472,6 +473,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		SSHHost:      entry.SSHHost,
 
 		FirstAfterHop: entry.FirstAfterHop,
+		AgentBlocked:  blockedSoftStop,
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
@@ -1462,6 +1464,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 			}
 		}
 	}
+
+	deleteLivePass(ctx, params.Store, workerResult.IssueID, persistence.LivePassRunning, log)
 
 	runDuration := max(now.Sub(entry.StartedAt), 0)
 

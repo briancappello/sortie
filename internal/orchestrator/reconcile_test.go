@@ -61,6 +61,28 @@ func (noEscalationRecords) EndReactionEscalation(context.Context, string, string
 
 func (noEscalationRecords) DeleteReactionEscalations(context.Context, string) error { return nil }
 
+type livePassLog struct {
+	upserted []persistence.LivePass
+	deleted  []persistence.LivePass
+}
+
+func (l *livePassLog) UpsertLivePass(_ context.Context, pass persistence.LivePass) error {
+	l.upserted = append(l.upserted, pass)
+	return nil
+}
+
+func (l *livePassLog) DeleteLivePass(_ context.Context, issueID, kind string) error {
+	l.deleted = append(l.deleted, persistence.LivePass{IssueID: issueID, Kind: kind})
+	return nil
+}
+
+func requireLivePasses(t *testing.T, op string, got, want []persistence.LivePass) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("%s live passes = %+v, want %+v", op, got, want)
+	}
+}
+
 // mockReconcileStore records calls to ReconcileStore methods and returns
 // configurable errors.
 type mockReconcileStore struct {

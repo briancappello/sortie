@@ -739,6 +739,137 @@
       ],
       "type": "object"
     },
+    "Funnel": {
+      "properties": {
+        "stages": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/FunnelStage"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "stages"
+      ],
+      "type": "object"
+    },
+    "FunnelArrivals": {
+      "properties": {
+        "hop": {
+          "type": "integer"
+        },
+        "label": {
+          "type": "integer"
+        },
+        "match": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hop",
+        "match",
+        "label"
+      ],
+      "type": "object"
+    },
+    "FunnelOutcomes": {
+      "properties": {
+        "advanced": {
+          "type": "integer"
+        },
+        "ceiling": {
+          "type": "integer"
+        },
+        "handed_off": {
+          "type": "integer"
+        },
+        "hop_failed": {
+          "type": "integer"
+        },
+        "in_stage": {
+          "type": "integer"
+        },
+        "no_hop": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "advanced",
+        "handed_off",
+        "ceiling",
+        "hop_failed",
+        "no_hop",
+        "in_stage"
+      ],
+      "type": "object"
+    },
+    "FunnelStage": {
+      "properties": {
+        "arrivals": {
+          "$ref": "#/$defs/FunnelArrivals"
+        },
+        "entered": {
+          "type": "integer"
+        },
+        "entry": {
+          "type": "boolean"
+        },
+        "last": {
+          "type": "boolean"
+        },
+        "median_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "no_hop_reasons": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NoHopReason"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcomes": {
+          "$ref": "#/$defs/FunnelOutcomes"
+        },
+        "rule": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rule",
+        "entry",
+        "last",
+        "runs",
+        "entered",
+        "arrivals",
+        "outcomes",
+        "no_hop_reasons",
+        "median_seconds"
+      ],
+      "type": "object"
+    },
     "Group": {
       "properties": {
         "cost_per_succeeded_run_usd": {
@@ -1415,6 +1546,21 @@
       ],
       "type": "object"
     },
+    "NoHopReason": {
+      "properties": {
+        "passes": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "passes"
+      ],
+      "type": "object"
+    },
     "ParkedEntryResponse": {
       "properties": {
         "agent_kind": {
@@ -1995,6 +2141,19 @@
             }
           ]
         },
+        "chain_funnels": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Funnel"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "db_path": {
           "type": "string"
         },
@@ -2069,6 +2228,7 @@
         "by_template",
         "by_model",
         "by_chain",
+        "chain_funnels",
         "by_trigger",
         "by_origin",
         "self_review"

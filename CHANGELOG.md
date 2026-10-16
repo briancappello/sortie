@@ -65,6 +65,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `/api/v1/events` now streams an agent's events as it works: a client names the runs it shows by the `dispatch_id` the JSON API reports and receives the events it has not seen, then each new one, then a notice when the run ends, and after a dropped connection it picks up where it stopped. When older events are no longer kept, the stream says so instead of leaving a silent gap, and a slow connection keeps its stream while a client that stops reading is dropped without holding Sortie up. Sortie's HTTP server has no authentication, so a deployment that others can reach must sit behind a reverse proxy with authentication or a VPN. ([#1308](https://github.com/sortie-ai/sortie/issues/1308))
 
+- `sortie stats`, `/api/v1/stats`, and the dashboard's Analytics screen now show a funnel for each stage chain: one row per stage with how many passes reached it, how many advanced, stopped and why, or are still in the stage, and how long a pass spent there. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -74,6 +76,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The `tick completed` poll summary now logs at INFO level only on the first poll after startup and when it differs from the previous poll's, so an idle Sortie no longer repeats the same line every poll interval; `--log-level debug` still shows it on every poll. ([#1350](https://github.com/sortie-ai/sortie/issues/1350))
 
 - `sortie stats` and the dashboard's Analytics screen now break runs down by the model the agent reported running, falling back to the configured model only when the agent reported none, so runs left to the agent's default model are counted under that model's name instead of one shared "no model" row.
+
+- `sortie stats` now stops with the diagnostics `sortie validate` prints when the workflow's dispatch rules do not load, for example when a rule's prompt template file is missing. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
 
 ### Fixed
 
@@ -136,6 +140,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add an index on `run_history` by the qualified issue key (`owner/repo#9`), so filtering run history by that key does not scan every run. Sortie builds it on the first start after the upgrade, which takes longer on a long history. ([#1299](https://github.com/sortie-ai/sortie/issues/1299))
 
 - Add `dispatch_id` to `run_history` and the `run_events` and `run_events_total` tables, which hold each finished run's agent events and their stored size. A run recorded before the upgrade has no dispatch ID and no retained events. ([#1307](https://github.com/sortie-ai/sortie/issues/1307))
+
+- Add `agent_blocked` to `run_history`, marking each run whose agent stopped to wait for a person, and the `live_passes` table, which lets `sortie stats` count the passes running or held by a budget right now. A run recorded before the upgrade is never marked, so the stage funnels count such an earlier pass as handed off on a chain's last stage and as stopped by an operator on any other stage. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
 
 ## [1.27.0] - 2026-10-11
 
