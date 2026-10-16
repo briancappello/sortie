@@ -195,13 +195,15 @@ export function IssueGroupRows({ group, filter, config }: IssueGroupRowsProps) {
   const title = group.issue_title || key;
   const mark = groupMark(group);
   const ending = group.status === "history" ? group.issue_outcome : null;
-  const secondLine = [
-    group.issue_title ? key : undefined,
-    <ServedText key="status" text={group.status_text} />,
-    plural(group.totals.run_count, "run", "runs"),
-    tokensPart(totalsTokensText(group.totals)),
-    columns.hasCost ? costPart(totalsCostText(group.totals)) : undefined,
-  ].filter((part) => part !== undefined);
+  const secondLine = (
+    [
+      ["key", group.issue_title ? key : undefined],
+      ["status", group.status_text],
+      ["runs", plural(group.totals.run_count, "run", "runs")],
+      ["tokens", tokensPart(totalsTokensText(group.totals))],
+      ["cost", columns.hasCost ? costPart(totalsCostText(group.totals)) : undefined],
+    ] as const
+  ).filter(([, part]) => part !== undefined);
 
   const expandedRuns = expansion.data?.pages.flatMap((page) => page.runs ?? []);
   const runs = expandedRuns ?? group.runs ?? [];
@@ -241,8 +243,8 @@ export function IssueGroupRows({ group, filter, config }: IssueGroupRowsProps) {
                 </Link>
               </p>
               <p className="flex flex-wrap gap-x-md text-body-sm text-ink-muted [overflow-wrap:anywhere]">
-                {secondLine.map((part, index) => (
-                  <span key={index}>{part}</span>
+                {secondLine.map(([id, part]) => (
+                  <span key={id}>{id === "status" ? <ServedText text={part} /> : part}</span>
                 ))}
               </p>
             </div>
