@@ -119,5 +119,5 @@ export function statsShortfall(f: StatsFigures): string | null {
     statsTokensShortfall(f),
     f.cost_unpriced_runs > 0 ? plural(f.cost_unpriced_runs, "run unpriced", "runs unpriced") : null,
   ].filter((part) => part !== null);
-  return parts.length === 0 ? null : parts.join(" · ");
+  return parts.length === 0 ? null : parts.join(", ");
 }

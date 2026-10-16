@@ -79,6 +79,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `sortie stats` now stops with the diagnostics `sortie validate` prints when the workflow's dispatch rules do not load, for example when a rule's prompt template file is missing. ([#1360](https://github.com/sortie-ai/sortie/issues/1360))
 
+- Every table in the dashboard now shares one look, and the tables on the Analytics screen sort by any column when you click its heading.
+
 ### Fixed
 
 - Jira issue links no longer include a user name and password written into `tracker.endpoint`, so the link opens and an agent prompt that shows it no longer exposes them. ([#1286](https://github.com/sortie-ai/sortie/issues/1286))

@@ -2,6 +2,15 @@ import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
+  SortableHead,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { useTableSort } from "@/components/use-table-sort";
+import {
   statsCostText,
   statsShortfall,
   statsTokensShortfall,
@@ -10,17 +19,10 @@ import {
 import { fmtCount, fmtDuration, fmtMean, fmtPercent } from "@/lib/format";
 
 import type { Duration, Group } from "@/api/types.gen";
+import type { SortColumn } from "@/components/use-table-sort";
 import type { ReactNode } from "react";
 
 const PAGE_ROWS = 20;
-const HEAD_BASE = "px-md py-sm text-label-caps font-medium whitespace-nowrap text-ink-muted";
-
-/** Class names of a body cell, shared with the other tables of the screen so they keep one style. */
-export const CELL = "px-md py-sm whitespace-nowrap tabular-nums";
-/** Class names of a left-aligned header cell. */
-export const HEAD = `${HEAD_BASE} text-left`;
-/** Class names of a right-aligned header cell. */
-export const HEAD_RIGHT = `${HEAD_BASE} text-right`;
 
 function durationText(duration: Duration): string {
   if (duration.samples === 0) {
@@ -35,11 +37,15 @@ function durationText(duration: Duration): string {
 export interface NameColumn<Row> {
   header: string;
   cell: (row: Row) => ReactNode;
+  /** The words the cell shows, which the column sorts by. */
+  sortText: (row: Row) => string;
 }
 
 /** Props of {@link GroupTable}. */
 export interface GroupTableProps<Row extends Group> {
   title: string;
+  /** The address param that keeps this table's sort. */
+  sortParam: string;
   nameColumns: readonly NameColumn<Row>[];
   rows: readonly Row[];
   /** The report's `schema_tier`. */
@@ -50,13 +56,40 @@ export interface GroupTableProps<Row extends Group> {
   measure?: "success" | "share";
 }
 
+function sortColumns<Row extends Group>(
+  nameColumns: readonly NameColumn<Row>[],
+  tier: string,
+  measure: "success" | "share",
+): SortColumn<Row>[] {
+  const isRecorded = tier !== "base";
+  return [
+    ...nameColumns.map((column, index) => ({ id: `name${index}`, value: column.sortText })),
+    { id: "runs", value: (row: Row) => row.runs },
+    {
+      id: measure,
+      value: (row: Row) => (measure === "share" ? row.share : row.success_rate),
+    },
+    {
+      id: "duration",
+      value: (row: Row) => (row.duration_seconds.samples === 0 ? null : row.duration_seconds.p50),
+    },
+    { id: "turns", value: (row: Row) => row.mean_turns },
+    {
+      id: "tokens",
+      value: (row: Row) => (isRecorded && row.tokens !== null ? row.tokens.total : null),
+    },
+    { id: "cost", value: (row: Row) => (isRecorded ? row.cost_usd : null) },
+  ];
+}
+
 /**
  * Renders one breakdown of a report: name columns, then the figure columns,
- * 20 rows at a time. The shown count lives in state, so mount the table with a
- * key that changes with the range.
+ * 20 rows at a time, sortable by any column. The shown count lives in state, so
+ * mount the table with a key that changes with the range.
  */
 export function GroupTable<Row extends Group>({
   title,
+  sortParam,
   nameColumns,
   rows,
   tier,
@@ -66,6 +99,11 @@ export function GroupTable<Row extends Group>({
   const [shown, setShown] = useState(PAGE_ROWS);
   const body = useRef<HTMLTableSectionElement>(null);
   const focusRow = useRef<number | null>(null);
+  const { rows: ordered, sort } = useTableSort(
+    rows,
+    sortColumns(nameColumns, tier, measure),
+    sortParam,
+  );
 
   useEffect(() => {
     if (focusRow.current !== null) {
@@ -85,71 +123,60 @@ export function GroupTable<Row extends Group>({
 
   return (
     <section className="flex flex-col gap-sm">
-      <h2 className="font-heading text-h7 font-semibold text-ink">{title}</h2>
-      <div className="max-w-full overflow-x-auto rounded-lg border border-line bg-canvas">
-        <table className="w-full border-collapse text-body-md text-ink-body">
-          <thead className="border-b border-line">
-            <tr>
+      <Table title={title}>
+        <TableHeader>
+          {nameColumns.map((column, index) => (
+            <SortableHead key={column.header} columnId={`name${index}`} sort={sort}>
+              {column.header}
+            </SortableHead>
+          ))}
+          <SortableHead columnId="runs" sort={sort}>
+            Runs
+          </SortableHead>
+          <SortableHead columnId={measure} sort={sort}>
+            {measure === "share" ? "Share" : "Success"}
+          </SortableHead>
+          <SortableHead columnId="duration" sort={sort} title="p50 to p95">
+            Duration
+          </SortableHead>
+          <SortableHead columnId="turns" sort={sort} align="right">
+            Mean turns
+          </SortableHead>
+          <SortableHead columnId="tokens" sort={sort} align="right">
+            Tokens
+          </SortableHead>
+          {hasRates ? (
+            <SortableHead columnId="cost" sort={sort} align="right">
+              Est. cost
+            </SortableHead>
+          ) : undefined}
+        </TableHeader>
+        <TableBody ref={body}>
+          {ordered.slice(0, shown).map((row, index) => (
+            <TableRow key={index} tabIndex={-1}>
               {nameColumns.map((column) => (
-                <th key={column.header} scope="col" className={HEAD}>
-                  {column.header}
-                </th>
+                <TableCell key={column.header}>{column.cell(row)}</TableCell>
               ))}
-              <th scope="col" className={HEAD}>
-                Runs
-              </th>
-              <th scope="col" className={HEAD}>
-                {measure === "share" ? "Share" : "Success"}
-              </th>
-              <th scope="col" className={HEAD} title="p50 to p95">
-                Duration
-              </th>
-              <th scope="col" className={HEAD}>
-                Mean turns
-              </th>
-              <th scope="col" className={HEAD}>
-                Tokens
-              </th>
+              <TableCell>{fmtCount(row.runs)}</TableCell>
+              <TableCell>
+                {fmtPercent(measure === "share" ? row.share : row.success_rate)}
+              </TableCell>
+              <TableCell>{durationText(row.duration_seconds)}</TableCell>
+              <TableCell look="number">
+                {row.mean_turns === null ? "not recorded" : fmtMean(row.mean_turns)}
+              </TableCell>
+              <TableCell look="number" title={statsTokensShortfall(row) ?? undefined}>
+                {statsTokensText(row, tier)}
+              </TableCell>
               {hasRates ? (
-                <th scope="col" className={HEAD}>
-                  Est. cost
-                </th>
+                <TableCell look="number" title={statsShortfall(row) ?? undefined}>
+                  {statsCostText(row, tier)}
+                </TableCell>
               ) : undefined}
-            </tr>
-          </thead>
-          <tbody ref={body}>
-            {rows.slice(0, shown).map((row, index) => (
-              <tr
-                key={index}
-                tabIndex={-1}
-                className="border-t border-line outline-focus-ring first:border-t-0 focus-visible:outline-2 focus-visible:-outline-offset-2"
-              >
-                {nameColumns.map((column) => (
-                  <td key={column.header} className={CELL}>
-                    {column.cell(row)}
-                  </td>
-                ))}
-                <td className={CELL}>{fmtCount(row.runs)}</td>
-                <td className={CELL}>
-                  {fmtPercent(measure === "share" ? row.share : row.success_rate)}
-                </td>
-                <td className={CELL}>{durationText(row.duration_seconds)}</td>
-                <td className={CELL}>
-                  {row.mean_turns === null ? "not recorded" : fmtMean(row.mean_turns)}
-                </td>
-                <td className={CELL} title={statsTokensShortfall(row) ?? undefined}>
-                  {statsTokensText(row, tier)}
-                </td>
-                {hasRates ? (
-                  <td className={CELL} title={statsShortfall(row) ?? undefined}>
-                    {statsCostText(row, tier)}
-                  </td>
-                ) : undefined}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
       {shown < rows.length ? (
         <div>
           <Button onClick={handleShowMore}>Show more</Button>
