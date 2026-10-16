@@ -49,6 +49,11 @@ export function ruleLabel(name: string | undefined): string {
   return name === "default" ? "dispatch.default" : name;
 }
 
+/** Reports whether a rule breakdown group names a configured rule, as opposed to the dispatch default or runs that recorded no rule. */
+export function isNamedRuleGroup(name: string): boolean {
+  return name !== NONE && name !== "default";
+}
+
 /** Words a model name; a run that neither configured nor reported one reads "Not reported". */
 export function modelLabel(name: string): string {
   return name === NONE ? "Not reported" : name;

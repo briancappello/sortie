@@ -7,11 +7,12 @@ import { StatusMark } from "@/components/StatusMark";
 import { Segmented } from "@/components/ui/segmented";
 import { cn } from "@/lib/cn";
 import { fmtClock, fmtDate } from "@/lib/format";
-import { agentLabel, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
+import { agentLabel, isNamedRuleGroup, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
 import { runStatus } from "@/lib/run-status";
 
 import { ChainFunnel } from "./ChainFunnel";
 import { GroupTable } from "./GroupTable";
+import { OutcomeBar } from "./OutcomeBar";
 import { SummaryTiles } from "./SummaryTiles";
 
 import type { AnalyticsRange } from "@/api/queries";
@@ -102,10 +103,12 @@ function Breakdowns({ report, hasRules, hasRates }: BreakdownsProps) {
   const byStatus = report.by_status ?? [];
   const byTrigger = report.by_trigger ?? [];
   const byOrigin = report.by_origin ?? [];
+  const showByRule =
+    hasRules && byRule.some((group) => byRule.length > 1 || isNamedRuleGroup(group.name));
 
   return (
     <>
-      {hasRules && byRule.length > 0 ? (
+      {showByRule ? (
         <GroupTable
           title="By rule"
           sortParam="by-rule"
@@ -164,7 +167,7 @@ function Breakdowns({ report, hasRules, hasRates }: BreakdownsProps) {
   );
 }
 
-/** Renders Analytics: the run statistics report of a range with its summary and breakdowns, every figure as the report serves it. */
+/** Renders Analytics: the run statistics report of a range with its summary and breakdowns. */
 export function AnalyticsScreen() {
   const { data: state } = useStateQuery();
   const config = state?.config;
@@ -227,6 +230,7 @@ export function AnalyticsScreen() {
           ) : (
             <div key={range} className="flex flex-col gap-xl">
               <SummaryTiles report={report} config={config} />
+              <OutcomeBar summary={report.summary} />
               {(report.chain_funnels ?? []).map((funnel) => (
                 <ChainFunnel key={funnel.stages?.[0]?.rule} funnel={funnel} config={config} />
               ))}

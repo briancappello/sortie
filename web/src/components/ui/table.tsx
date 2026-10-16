@@ -1,4 +1,5 @@
 import { ArrowDownIcon, ArrowUpIcon, ChevronsUpDownIcon } from "@/components/icons";
+import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/cn";
 
 import type { TableSort } from "@/components/use-table-sort";
@@ -19,12 +20,7 @@ export interface TableProps extends Omit<ComponentProps<"table">, "title"> {
  */
 export function Table({ title, isWide = false, className, ...props }: TableProps) {
   return (
-    <div className="max-w-full overflow-hidden rounded-xl border border-line bg-canvas">
-      {title === undefined ? undefined : (
-        <h2 className="border-b border-line px-md py-sm text-body-md font-medium text-ink">
-          {title}
-        </h2>
-      )}
+    <Card title={title}>
       <div className="overflow-x-auto">
         <table
           className={cn(
@@ -35,7 +31,7 @@ export function Table({ title, isWide = false, className, ...props }: TableProps
           {...props}
         />
       </div>
-    </div>
+    </Card>
   );
 }
 

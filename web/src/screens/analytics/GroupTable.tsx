@@ -37,10 +37,10 @@ export const COLUMN_WIDTH = {
   stage: "w-[192px]",
   stageText: "max-w-[160px]",
   entryStageText: "max-w-[96px]",
-  runs: "w-[112px]",
-  measure: "w-[112px]",
-  turns: "w-[144px]",
-  figure: "w-[176px]",
+  runs: "w-[140px]",
+  measure: "w-[124px]",
+  turns: "w-[120px]",
+  figure: "w-[156px]",
 } as const;
 
 function durationText(duration: Duration): string {
@@ -50,6 +50,83 @@ function durationText(duration: Duration): string {
   const low = fmtDuration(duration.p50);
   const high = fmtDuration(duration.p95);
   return low === high ? low : `${low} to ${high}`;
+}
+
+/** Props of {@link CountBar}. */
+export interface CountBarProps {
+  value: number;
+  /** The largest value of the table. */
+  max: number;
+}
+
+/** Renders a count after a bar as wide as its share of the table's largest count. */
+export function CountBar({ value, max }: CountBarProps) {
+  return (
+    <span className="inline-grid grid-cols-[48px_auto] items-center gap-xs">
+      <span aria-hidden="true" className="block h-2 bg-transparent">
+        <span
+          className="block h-full rounded-r bg-viz-1"
+          style={{ width: `${(value / Math.max(max, 1)) * 100}%` }}
+        />
+      </span>
+      {fmtCount(value)}
+    </span>
+  );
+}
+
+interface RateBarProps {
+  ratio: number;
+}
+
+function RateBar({ ratio }: RateBarProps) {
+  return (
+    <span className="inline-grid grid-cols-[40px_auto] items-center gap-xs">
+      <span aria-hidden="true" className="block h-1 overflow-hidden rounded-full bg-viz-1-track">
+        <span
+          className="block h-full rounded-full bg-viz-1"
+          style={{ width: `${Math.min(1, Math.max(0, ratio)) * 100}%` }}
+        />
+      </span>
+      {fmtPercent(ratio)}
+    </span>
+  );
+}
+
+const RANGE_WIDTH = 64;
+const RANGE_INSET = 2;
+
+interface DurationRangeProps {
+  duration: Duration;
+  /** The largest p95 of the table. */
+  maxP95: number;
+}
+
+function DurationRange({ duration, maxP95 }: DurationRangeProps) {
+  const { p50, p95, samples } = duration;
+  const x = (seconds: number) =>
+    RANGE_INSET + (maxP95 > 0 ? seconds / maxP95 : 0) * (RANGE_WIDTH - 2 * RANGE_INSET);
+
+  return (
+    <span className="inline-grid grid-cols-[64px_auto] items-center gap-xs">
+      <span aria-hidden="true" className="block h-3">
+        {samples > 0 && p50 !== null && p95 !== null ? (
+          <svg width={RANGE_WIDTH} height={12} className="block overflow-visible">
+            <line
+              x1={x(p50)}
+              x2={x(p95)}
+              y1={6}
+              y2={6}
+              strokeWidth={2}
+              strokeLinecap="round"
+              className="stroke-ink-muted"
+            />
+            <circle cx={x(p50)} cy={6} r={4} strokeWidth={2} className="fill-ink stroke-canvas" />
+          </svg>
+        ) : undefined}
+      </span>
+      <span className="text-body-sm text-ink-muted">{durationText(duration)}</span>
+    </span>
+  );
 }
 
 function tokensTitle(row: Group, tier: string): string | undefined {
@@ -125,6 +202,11 @@ export function GroupTable<Row extends Group>({
   measure = "success",
 }: GroupTableProps<Row>) {
   const [shown, setShown] = useState(PAGE_ROWS);
+  const maxRuns = Math.max(1, ...rows.map((row) => row.runs));
+  const maxP95 = Math.max(
+    0,
+    ...rows.map((row) => (row.duration_seconds.samples > 0 ? (row.duration_seconds.p95 ?? 0) : 0)),
+  );
   const body = useRef<HTMLTableSectionElement>(null);
   const focusRow = useRef<number | null>(null);
   const { rows: ordered, sort } = useTableSort(
@@ -151,7 +233,10 @@ export function GroupTable<Row extends Group>({
 
   return (
     <section className="flex flex-col gap-sm">
-      <Table title={title} className="table-fixed">
+      <Table
+        title={title}
+        className={hasRates ? "table-fixed min-w-[1148px]" : "table-fixed min-w-[992px]"}
+      >
         <TableHeader>
           {nameColumns.map((column, index) => (
             <SortableHead
@@ -163,7 +248,7 @@ export function GroupTable<Row extends Group>({
               {column.header}
             </SortableHead>
           ))}
-          <SortableHead columnId="runs" sort={sort} align="right" className={COLUMN_WIDTH.runs}>
+          <SortableHead columnId="runs" sort={sort} className={COLUMN_WIDTH.runs}>
             Runs
           </SortableHead>
           <SortableHead columnId={measure} sort={sort} className={COLUMN_WIDTH.measure}>
@@ -203,11 +288,15 @@ export function GroupTable<Row extends Group>({
                   </span>
                 </TableCell>
               ))}
-              <TableCell look="number">{fmtCount(row.runs)}</TableCell>
               <TableCell>
-                {fmtPercent(measure === "share" ? row.share : row.success_rate)}
+                <CountBar value={row.runs} max={maxRuns} />
               </TableCell>
-              <TableCell>{durationText(row.duration_seconds)}</TableCell>
+              <TableCell>
+                <RateBar ratio={measure === "share" ? row.share : row.success_rate} />
+              </TableCell>
+              <TableCell>
+                <DurationRange duration={row.duration_seconds} maxP95={maxP95} />
+              </TableCell>
               <TableCell look="number">
                 {row.mean_turns === null ? "not recorded" : fmtMean(row.mean_turns)}
               </TableCell>

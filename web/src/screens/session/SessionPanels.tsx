@@ -18,11 +18,6 @@ function tokensOf(session: ResolvedSession): ReactNode {
   if (total === null) {
     return NOT_MEASURED;
   }
-  const isIncomplete =
-    session.kind === "live" ? session.running.tokens_pending : session.run.unaccounted_turns > 0;
-  if (isIncomplete) {
-    return <strong className="font-bold">{`at least ${fmtCount(total)}`}</strong>;
-  }
   return session.kind === "live" ? (
     <>
       <strong className="font-bold">{fmtCount(total)}</strong> so far

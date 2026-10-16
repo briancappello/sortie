@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/table";
 import { fmtCount, fmtDuration } from "@/lib/format";
 
-import { COLUMN_WIDTH } from "./GroupTable";
+import { COLUMN_WIDTH, CountBar } from "./GroupTable";
 
 import type { ConfigResponse, Funnel, FunnelStage } from "@/api/types.gen";
 import type { ReactNode } from "react";
@@ -57,7 +57,7 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
   const { arrivals, outcomes } = stage;
   const reasons = stage.no_hop_reasons ?? [];
   const reasonsTitle =
-    reasons.length > 1
+    reasons.length > 0
       ? reasons.map((entry) => `${fmtCount(entry.passes)} ${reasonWord(entry.reason)}`).join(", ")
       : undefined;
 
@@ -80,25 +80,13 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
       </TableCell>
       <CountCell value={stage.runs} />
       <TableCell>
-        <span className="inline-grid grid-cols-[48px_auto] items-center gap-xs">
-          <span aria-hidden="true" className="block h-2 bg-transparent">
-            <span
-              className="block h-full rounded-r bg-viz-1"
-              style={{ width: `${(stage.entered / widest) * 100}%` }}
-            />
-          </span>
-          {fmtCount(stage.entered)}
-        </span>
+        <CountBar value={stage.entered} max={widest} />
       </TableCell>
       <TableCell look="number">
         {arrivals.label === 0 ? undefined : fmtCount(arrivals.label)}
       </TableCell>
       {stage.last ? (
-        <TableCell
-          look="number"
-          title={targets === undefined ? undefined : `moved to ${targets}`}
-          aside="handed off"
-        >
+        <TableCell look="number" title={targets === undefined ? undefined : `moved to ${targets}`}>
           {fmtCount(outcomes.handed_off)}
         </TableCell>
       ) : (
@@ -106,11 +94,7 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
       )}
       <CountCell value={outcomes.ceiling} />
       <CountCell value={outcomes.hop_failed} />
-      <TableCell
-        look={outcomes.no_hop === 0 ? "muted" : "text"}
-        title={reasonsTitle}
-        aside={reasons[0] === undefined ? undefined : reasonWord(reasons[0].reason)}
-      >
+      <TableCell look={outcomes.no_hop === 0 ? "number-muted" : "number"} title={reasonsTitle}>
         {fmtCount(outcomes.no_hop)}
       </TableCell>
       <CountCell value={outcomes.in_stage} />
@@ -179,7 +163,10 @@ export function ChainFunnel({ funnel, config }: ChainFunnelProps) {
           Ceiling
         </TableHead>
         <TableHead align="right">Hop failed</TableHead>
-        <TableHead title="The run failed, stopped for a person or at a budget, was stopped by an operator, or had its handoff withheld, so no hop was due">
+        <TableHead
+          align="right"
+          title="The run failed, stopped for a person or at a budget, was stopped by an operator, or had its handoff withheld, so no hop was due"
+        >
           No hop
         </TableHead>
         <TableHead align="right" title="Passes whose run is going or retrying now">

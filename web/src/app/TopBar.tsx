@@ -82,8 +82,9 @@ function SessionBreadcrumb({ identifier, dispatchId, screens }: SessionBreadcrum
 function ServerClock() {
   const now = useNow();
   return (
-    <span>
-      {fmtDate(now)} · {fmtClock(now)}
+    <span className="flex items-center gap-xs">
+      <span>{fmtDate(now)}</span>
+      <span>{fmtClock(now)}</span>
     </span>
   );
 }
