@@ -242,6 +242,17 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"ssh_host", "TEXT", false, 0},
 				{"first_after_hop", "INTEGER", true, 0},
 				{"dispatch_id", "TEXT", false, 0},
+				{"agent_blocked", "INTEGER", true, 0},
+			},
+		},
+		{
+			table: "live_passes",
+			cols: []colSpec{
+				{"issue_id", "TEXT", true, 1},
+				{"kind", "TEXT", true, 2},
+				{"chain_id", "TEXT", true, 0},
+				{"rule_name", "TEXT", true, 0},
+				{"stage_previous", "TEXT", true, 0},
 			},
 		},
 		{

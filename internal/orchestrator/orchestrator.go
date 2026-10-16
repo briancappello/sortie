@@ -76,6 +76,8 @@ type OrchestratorStore interface {
 	MarkStageHopDispatched(ctx context.Context, issueID string) error
 	DeleteStageHop(ctx context.Context, issueID string) error
 	ListStageHops(ctx context.Context) ([]persistence.StageHop, error)
+	UpsertLivePass(ctx context.Context, pass persistence.LivePass) error
+	DeleteLivePass(ctx context.Context, issueID, kind string) error
 	RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error
 	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
 	DeleteIssueOutcome(ctx context.Context, issueID string) error
@@ -1174,6 +1176,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			entry.TemplateID = resolution.TemplateID
 			entry.UsageArrival, entry.UsageAttribution = attemptSettings.UsageArrival, attemptSettings.UsageAttribution
 			freezeIssueTokenBaseline(ctx, o.state, issue.ID, o.store, o.logger)
+			recordRunningPass(ctx, o.store, issue.ID, entry, issueLog)
 		}
 		logging.WithIssue(o.logger, issue.ID, issue.Identifier).Info("issue dispatched",
 			slog.String("agent_kind", resolution.AgentKind),
@@ -1760,7 +1763,9 @@ var ceilingSettingByBudgetReason = map[string]string{
 // run on the event loop.
 func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.ServiceConfig, sorted []domain.Issue) {
 	if cfg.Agent.MaxSessions == 0 && cfg.Agent.MaxTokens == 0 {
+		prior := o.state.BudgetExhausted
 		o.state.BudgetExhausted = make(map[string]*BudgetExhaustedEntry)
+		syncBudgetPasses(ctx, o.store, prior, o.state.BudgetExhausted, o.logger)
 		o.state.TokenBudgetIncomplete = make(map[string]struct{})
 		releaseAllBudgetHoldNotices(ctx, o.state, o.store, o.logger)
 		return
@@ -1873,6 +1878,7 @@ func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.Se
 	o.state.TokenBudgetIncomplete = freshIncomplete
 
 	o.describeBudgetHolds(ctx, cfg, prior, fresh)
+	syncBudgetPasses(ctx, o.store, prior, fresh, o.logger)
 
 	for id, entry := range fresh {
 		told, wasTold := o.state.BudgetAnnounced[id]

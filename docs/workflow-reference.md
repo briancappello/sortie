@@ -1234,7 +1234,7 @@ The count is kept per issue in the database and resets when:
 
 Each reset logs `stage hop count reset` with the `trigger`. Moving a stage label while the issue stays active does not reset the count, and neither does a failed handoff write, a withheld verdict, a reload, or reaching the ceiling. Reconciliation reads every issue that holds a hop record on each tick, whether or not it is running.
 
-**Recording.** Every run carries a chain identifier, a random value that ties together the runs of one pass through a chain. A run that no hop led to starts a new chain. The run a hop leads to continues the chain of the run that made the hop, and a retry or a restart keeps the chain of the run it continues. The run that reaches a hop decision also records the rule the hop targeted and the result: `advanced`, `partial` (the label was added but an old stage label was not removed), `failed` (the label add failed), or `ceiling`. A run recorded before the upgrade has no chain and no result. Sortie sends `stage.advanced` when a hop is made, `advanced` or `partial`, and `stage.not_advanced` when a due hop is not made, with the reason; both reach only the notification entries that list them ([Event catalog](#event-catalog)). `sortie stats` groups the runs by stage chain, listing only the chains in which a hop was due or made, and a run in an issue's detail in the dashboard shows its rule and, when its exit reached a hop decision, the target rule and the result.
+**Recording.** Every run carries a chain identifier, a random value that ties together the runs of one pass through a chain. A run that no hop led to starts a new chain. The run a hop leads to continues the chain of the run that made the hop, and a retry or a restart keeps the chain of the run it continues. The run that reaches a hop decision also records the rule the hop targeted and the result: `advanced`, `partial` (the label was added but an old stage label was not removed), `failed` (the label add failed), or `ceiling`. A run recorded before the upgrade has no chain and no result. Sortie sends `stage.advanced` when a hop is made, `advanced` or `partial`, and `stage.not_advanced` when a due hop is not made, with the reason; both reach only the notification entries that list them ([Event catalog](#event-catalog)). `sortie stats` groups the runs by stage chain, listing only the chains in which a hop was due or made, and draws a funnel for each stage chain: for every stage, the passes that reached it and how each one left it. A run in an issue's detail in the dashboard shows its rule and, when its exit reached a hop decision, the target rule and the result.
 
 **The `stage` object.** Every prompt render carries `stage` with `stage.current`, `stage.previous`, and `stage.previous_outcome`, so a template can tell what the earlier stage was and read what it left in the workspace. See [Section 5.2](#52-template-input-variables).
 
@@ -1366,7 +1366,7 @@ dispatch:
         effort: max           # model inherited from the top-level block
 ```
 
-Issues with neither label run on the top-level block. `sortie stats` groups the runs by rule, by model, by stage chain, by retry trigger, and by what started each run.
+Issues with neither label run on the top-level block. `sortie stats` groups the runs by rule, by model, by stage chain, by retry trigger, and by what started each run, and draws a funnel for each stage chain.
 
 Two work profiles on two kinds fit in one workflow. A rule that introduces a kind other than `agent.kind` and carries that kind's block needs no top-level block for it:
 
@@ -1904,7 +1904,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
-| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger and by what started them, priced at the `token_rates` the process started with. |
+| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, priced at the `token_rates` the process started with. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, lists what Sortie does next for it as condition and sentence pairs, and lists the latest 50 agent events of its running or latest run as `recent_events`. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
@@ -3540,7 +3540,7 @@ A running run keeps its newest 1,000 retained events, within 256 KiB, in memory,
 
 #### `GET /api/v1/stats`: run statistics
 
-Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
 
 **Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
 
@@ -3617,6 +3617,26 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "last_hop": "advanced"
     }
   ],
+  "chain_funnels": [
+    {
+      "stages": [
+        {
+          "rule": "implement", "entry": true, "last": false, "runs": 3, "entered": 3,
+          "arrivals": {"hop": 0, "match": 3, "label": 0},
+          "outcomes": {"advanced": 2, "handed_off": 0, "ceiling": 0, "hop_failed": 0, "no_hop": 1, "in_stage": 0},
+          "no_hop_reasons": [{"reason": "run_failed", "passes": 1}],
+          "median_seconds": 900
+        },
+        {
+          "rule": "review", "entry": false, "last": true, "runs": 3, "entered": 2,
+          "arrivals": {"hop": 2, "match": 0, "label": 0},
+          "outcomes": {"advanced": 0, "handed_off": 1, "ceiling": 0, "hop_failed": 0, "no_hop": 0, "in_stage": 1},
+          "no_hop_reasons": [],
+          "median_seconds": 600
+        }
+      ]
+    }
+  ],
   "by_trigger": [
     {
       "name": "<unknown>",
@@ -3659,7 +3679,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
 }
 ```
 
-The example omits the members of the breakdowns other than `by_status`, `by_chain`, `by_trigger`, and `by_origin`; every breakdown is a list of groups of the same shape.
+The example omits the members of the breakdowns other than `by_status`, `by_chain`, `by_trigger`, and `by_origin`; every breakdown is a list of groups of the same shape. It shows one funnel of two stages.
 
 **Envelope fields:**
 
@@ -3668,7 +3688,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `generated_at`   | string            | The instant of the request, as an RFC 3339 timestamp in UTC. Relative bounds count back from it. |
 | `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
 | `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
-| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `by_trigger`, and `by_origin` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
+| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
 | `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. The warnings of the `token_rates` the process started with follow. |
 | `summary`        | object            | The report-wide figures, below. |
 | `by_status`      | array of groups   | One group per run status. |
@@ -3677,6 +3697,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `by_template`    | array of groups   | One group per prompt template the rule selected, named as the run recorded it, which can be a host path. `<none>` names the runs that recorded none. |
 | `by_model`       | array of groups   | One group per configured model, `<none>` for the runs that configured none. |
 | `by_chain`       | array of chain groups | One entry per stage chain in which a hop was due or made. It is a listing, not a partition: runs outside a chain, and chains without a hop, are absent. |
+| `chain_funnels`  | array of funnels  | One funnel per stage chain definition, below. It is not a breakdown: its entries are stages, not groups of runs. |
 | `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
 | `by_origin`      | array of groups   | One group per run origin, below. |
 | `self_review`    | object or `null`  | The self-review results, below. `null` on the `base` tier. |
@@ -3723,6 +3744,35 @@ The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `
 
 **`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
 
+**`chain_funnels` fields.** A funnel is one stage chain definition: the chains of your workflow that share a stage count as one, so a stage reached by two chains has one row. Funnels follow the order of the chains in the workflow. A funnel is `{"stages": [...]}`, with one entry per stage in chain order, the stages of a chain that joins another before the stage where it joins. A funnel never grows with the number of passes. A pass is the runs that share a chain identifier, as [Stage chains](#stage-chains) describes; it counts once on a stage, however many runs it makes there.
+
+| Field            | Type            | Description |
+| ---------------- | --------------- | ----------- |
+| `rule`           | string          | The dispatch rule of the stage. |
+| `entry`          | boolean         | `true` when a chain starts at the stage. |
+| `last`           | boolean         | `true` on the final stage of the funnel, the stage whose finished pass is handed off. |
+| `runs`           | integer         | The finished runs of the rule in the range, retries and pull request fixes included. It equals the `runs` of the `by_rule` group of the rule. |
+| `entered`        | integer         | The passes through the stage in the range, plus the passes held there now. |
+| `arrivals`       | object          | `entered` split by how the pass reached the stage: `hop`, from the previous stage; `label`, a stage label that a person put on the issue; `match`, the rule matched the issue. |
+| `outcomes`       | object          | `entered` split by how the pass left the stage, below. |
+| `no_hop_reasons` | array           | The passes counted in `outcomes.no_hop`, as `{"reason", "passes"}` pairs, largest first. A reason without passes is absent. |
+| `median_seconds` | number or `null` | The median, over the passes, of the seconds the pass spent on the stage, summing its finished runs there. `null` when no pass has a finished run with a readable duration there. |
+
+The latest finished run of a pass on the stage decides its outcome. `outcomes` holds these members, and each pass counts in exactly one of them:
+
+| Member       | The pass |
+| ------------ | -------- |
+| `in_stage`   | Has a session running or a retry queued now. |
+| `advanced`   | Hopped to the next stage, with the hop result `advanced` or `partial`. Always `0` on the last stage. |
+| `handed_off` | Was handed off: its run succeeded on the last stage and the issue moved on. Always `0` on any other stage. |
+| `ceiling`    | Reached the hop ceiling, `dispatch.max_consecutive_hops`, so the hop was refused. |
+| `hop_failed` | Failed to hop, with the hop result `failed`. |
+| `no_hop`     | Made no hop, for the reason `no_hop_reasons` names. |
+
+The reasons of `no_hop`, in the order they break a tie: `run_failed`, the run failed; `needs_person`, the agent stopped to wait for a person, or the run ended `needs_person`; `budget_held`, a budget stopped the pass or holds it now; `operator_stopped`, the run was cancelled, or it succeeded on a stage that is not the last without hopping, as when the issue moved to a terminal state; `verdict_withheld`, the run failed because the evidence verdict withheld its handoff. A pass that a budget holds counts as `budget_held` unless its latest run made a hop decision or was handed off.
+
+A pass that is running, queued for a retry, or held by a budget now is counted from the database, and only when the range is open at its end or ends after `generated_at`; for an earlier end, each pass is decided by its runs in the range. A funnel lists every stage with zero counts when no pass reached it, a range without runs included. `chain_funnels` is `[]` when the workflow has no stage chains and on a database written before Sortie recorded which runs stopped to wait for a person, whatever its `schema_tier`; `warnings` says so in the second case while chains exist, and running Sortie once with the workflow adds what is missing. A run recorded before the upgrade is never marked as stopped to wait for a person, so its pass counts as handed off on the last stage and as stopped by an operator on any other stage.
+
 **`by_trigger` names.** A group is named by the trigger value the runs stored: `error`, `continuation`, `stall`, or `ci_fix`, as in the `trigger` of a run row. `<none>` names the runs whose trigger is the empty string: runs dispatched from the poll tick, runs a reaction other than the CI fix started, and recorded CI results. `<unknown>` names the runs whose row records no trigger: runs recorded before Sortie kept the trigger, and runs dispatched by a retry that never stored what started it. The groups partition the counted runs, so their `runs` sum to `summary.runs`. `by_trigger` carries no other names, and is `[]` on a database that lacks the trigger column, which the first `warnings` entry then states.
 
 **`by_origin` names.** A group is named by what started its runs, and the first rule that matches decides a run's group.
@@ -3743,6 +3793,8 @@ The groups partition the counted runs, so their `runs` sum to `summary.runs`. A 
 **`null` versus `0`.** A count is `0` when nothing matches. A figure that needs a measurement is `null` when no run supplies one: a run that reported no usage adds nothing to `tokens`, `cost_usd`, or their per-run figures, and a run that no `token_rates` entry prices adds nothing to `cost_usd`. Neither is reported as a zero.
 
 Pricing uses the `token_rates` the process started with, the same rates `config.token_rates` of `GET /api/v1/state` serves. `sortie stats` reads the workflow file each time it runs, so after an edit of `token_rates` the command and the route price differently until the process restarts.
+
+`sortie stats` loads the dispatch rules of the workflow to build the funnels, so it stops with the diagnostics `sortie validate` prints, and exits `1`, when they do not load, for example when a rule's prompt template file is missing. The route reads the dispatch rules in force on each request, so it follows a reload of the workflow.
 
 The report holds no issue titles, error text, or agent output, so the route masks nothing in it. Its strings are names and identifiers, including the rule, template, and model names your workflow defines. The host paths in `workflow_path` and `db_path`, and any in the `by_template` names, are served as the command prints them.
 

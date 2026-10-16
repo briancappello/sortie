@@ -27,6 +27,7 @@ import (
 )
 
 type mockExitStore struct {
+	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords
 	runHistories    []persistence.RunHistory
@@ -57,6 +58,7 @@ type mockExitStore struct {
 	deleteRetryEntryErr       error
 	absenceCountErr           error
 	absenceResetErr           error
+	writesAtPassDelete        int
 }
 
 type recordedStageResult struct {
@@ -84,6 +86,11 @@ func (m *mockExitStore) UpsertAggregateMetrics(_ context.Context, metrics persis
 func (m *mockExitStore) SaveRetryEntry(_ context.Context, entry persistence.RetryEntry) error {
 	m.retryEntries = append(m.retryEntries, entry)
 	return m.saveRetryEntryErr
+}
+
+func (m *mockExitStore) DeleteLivePass(ctx context.Context, issueID, kind string) error {
+	m.writesAtPassDelete = len(m.runHistories) + len(m.retryEntries)
+	return m.livePassLog.DeleteLivePass(ctx, issueID, kind)
 }
 
 func (m *mockExitStore) DeleteRetryEntry(_ context.Context, issueID string) error {
@@ -1037,6 +1044,9 @@ func TestHandleWorkerExit_RetryableError(t *testing.T) {
 	if len(store.retryEntries) != 1 {
 		t.Fatalf("SaveRetryEntry called %d times, want 1", len(store.retryEntries))
 	}
+	if store.writesAtPassDelete != 2 {
+		t.Errorf("run history and retry rows written before DeleteLivePass = %d, want 2", store.writesAtPassDelete)
+	}
 }
 
 func TestHandleWorkerExit_RetryableReactionErrorPreservesContext(t *testing.T) {
@@ -1324,6 +1334,7 @@ func TestHandleWorkerExit_CancelledExit(t *testing.T) {
 	if len(store.retryEntries) != 0 {
 		t.Errorf("SaveRetryEntry called %d times, want 0", len(store.retryEntries))
 	}
+	requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: "ISSUE-4", Kind: persistence.LivePassRunning}})
 }
 
 func TestHandleWorkerExit_TokenCeilingStoppedRecordsBudgetStoppedStatus(t *testing.T) {
@@ -3938,6 +3949,9 @@ func TestHandleWorkerExit_HandoffTransitionSucceeds(t *testing.T) {
 	if len(store.retryEntries) != 0 {
 		t.Errorf("SaveRetryEntry called %d times, want 0", len(store.retryEntries))
 	}
+	if len(store.runHistories) != 1 || store.runHistories[0].AgentBlocked {
+		t.Errorf("appended run history = %+v, want one row with AgentBlocked false", store.runHistories)
+	}
 }
 
 func TestHandleWorkerExit_HandoffTransitionFails(t *testing.T) {
@@ -6112,6 +6126,10 @@ func TestHandleWorkerExitBlockedDrivingDispatchParksIssue(t *testing.T) {
 	if len(calls) != 1 || calls[0].issueID != "BLK-1" || calls[0].label != "needs-human" {
 		t.Errorf("AddLabel calls = %+v, want one needs-human call for BLK-1", calls)
 	}
+	if len(store.runHistories) != 1 || !store.runHistories[0].AgentBlocked {
+		t.Errorf("appended run history = %+v, want one row with AgentBlocked true", store.runHistories)
+	}
+	requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: "BLK-1", Kind: persistence.LivePassRunning}})
 }
 
 func TestHandleWorkerExitBlockedWithReviewMetadataTakesBlockedDisposition(t *testing.T) {
@@ -8703,10 +8721,6 @@ func TestHandleWorkerExit_RetryableErrorDeferral(t *testing.T) {
 	}
 }
 
-// TestHandleWorkerExit_StopSignalDispositionsDestroyForeignIncumbent pins
-// the six stop-signal dispositions that cancel a foreign incumbent
-// regardless: blocked soft stop, terminal observation, other soft stop,
-// and the three handoff soft-stop variants.
 func TestHandleWorkerExit_StopSignalDispositionsDestroyForeignIncumbent(t *testing.T) {
 	t.Parallel()
 
@@ -8868,6 +8882,7 @@ func TestHandleWorkerExit_StopSignalDispositionsDestroyForeignIncumbent(t *testi
 			if _, ok := state.Claimed[tc.issueID]; ok {
 				t.Error("Claimed entry survived a stop-signal disposition, want released even against a foreign incumbent")
 			}
+			requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: tc.issueID, Kind: persistence.LivePassRunning}})
 		})
 	}
 

@@ -10,6 +10,7 @@ import { fmtClock, fmtDate } from "@/lib/format";
 import { agentLabel, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
 import { runStatus } from "@/lib/run-status";
 
+import { ChainFunnel } from "./ChainFunnel";
 import { GroupTable } from "./GroupTable";
 import { SummaryTiles } from "./SummaryTiles";
 
@@ -199,6 +200,9 @@ export function AnalyticsScreen() {
           ) : (
             <div key={range} className="flex flex-col gap-xl">
               <SummaryTiles report={report} config={config} />
+              {(report.chain_funnels ?? []).map((funnel) => (
+                <ChainFunnel key={funnel.stages?.[0]?.rule} funnel={funnel} config={config} />
+              ))}
               <Breakdowns
                 report={report}
                 hasRules={(config?.dispatch.rules ?? []).length > 0}
