@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/table";
 import { useTableSort } from "@/components/use-table-sort";
 import {
+  statsCacheReadsText,
   statsCostText,
   statsShortfall,
   statsTokensShortfall,
@@ -49,6 +50,15 @@ function durationText(duration: Duration): string {
   const low = fmtDuration(duration.p50);
   const high = fmtDuration(duration.p95);
   return low === high ? low : `${low} to ${high}`;
+}
+
+function tokensTitle(row: Group, tier: string): string | undefined {
+  const cacheReads = statsCacheReadsText(row, tier);
+  const parts = [
+    cacheReads === null ? null : `${cacheReads} cache reads`,
+    statsTokensShortfall(row),
+  ].filter((part) => part !== null);
+  return parts.length === 0 ? undefined : parts.join(", ");
 }
 
 /** One name column of a {@link GroupTable}. */
@@ -94,7 +104,7 @@ function sortColumns<Row extends Group>(
     { id: "turns", value: (row: Row) => row.mean_turns },
     {
       id: "tokens",
-      value: (row: Row) => (isRecorded && row.tokens !== null ? row.tokens.total : null),
+      value: (row: Row) => (isRecorded && row.tokens !== null ? row.tokens.uncached : null),
     },
     { id: "cost", value: (row: Row) => (isRecorded ? row.cost_usd : null) },
   ];
@@ -165,7 +175,13 @@ export function GroupTable<Row extends Group>({
           <SortableHead columnId="turns" sort={sort} align="right" className={COLUMN_WIDTH.turns}>
             Mean turns
           </SortableHead>
-          <SortableHead columnId="tokens" sort={sort} align="right" className={COLUMN_WIDTH.figure}>
+          <SortableHead
+            columnId="tokens"
+            sort={sort}
+            align="right"
+            title="Cache reads not included"
+            className={COLUMN_WIDTH.figure}
+          >
             Tokens
           </SortableHead>
           {hasRates ? (
@@ -195,7 +211,7 @@ export function GroupTable<Row extends Group>({
               <TableCell look="number">
                 {row.mean_turns === null ? "not recorded" : fmtMean(row.mean_turns)}
               </TableCell>
-              <TableCell look="number" title={statsTokensShortfall(row) ?? undefined}>
+              <TableCell look="number" title={tokensTitle(row, tier)}>
                 {statsTokensText(row, tier)}
               </TableCell>
               {hasRates ? (

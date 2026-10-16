@@ -119,7 +119,7 @@ func TestFor(t *testing.T) {
 			name:  "token budget with no measured usage",
 			entry: held(orchestrator.SnapshotBudgetEntry{Reason: "token_budget"}),
 			short: "Held: token budget reached",
-			long:  "Held at the token budget. Tokens used: not measured.",
+			long:  "Held at the token budget. Tokens and cache reads used: not measured.",
 		},
 		{
 			name: "token budget with an unmeasured session",
@@ -127,7 +127,7 @@ func TestFor(t *testing.T) {
 				Reason: "token_budget", UsedTokens: new(int64(704000)), UnmeasuredSessions: new(1),
 			}),
 			short: "Held: token budget reached",
-			long:  "Held at the token budget. Tokens used: at least 704K.",
+			long:  "Held at the token budget. Tokens and cache reads used: at least 704K.",
 		},
 		{
 			name: "token budget fully measured",
@@ -135,7 +135,7 @@ func TestFor(t *testing.T) {
 				Reason: "token_budget", UsedTokens: new(int64(704000)), UnmeasuredSessions: new(0),
 			}),
 			short: "Held: token budget reached",
-			long:  "Held at the token budget. Tokens used: 704K.",
+			long:  "Held at the token budget. Tokens and cache reads used: 704K.",
 		},
 		{"session budget", held(orchestrator.SnapshotBudgetEntry{Reason: "session_budget"}), "Held: session budget reached", ""},
 

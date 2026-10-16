@@ -75,13 +75,16 @@ type Duration struct {
 	Samples int      `json:"samples"`
 }
 
-// Tokens reports the five token sums as stored, never recomputed.
+// Tokens reports the stored token sums, never recomputed, and Uncached,
+// which the report derives from Total and CacheRead so that Uncached plus
+// CacheRead equals Total.
 type Tokens struct {
 	Input      int64 `json:"input"`
 	Output     int64 `json:"output"`
 	Total      int64 `json:"total"`
 	CacheRead  int64 `json:"cache_read"`
 	CacheWrite int64 `json:"cache_write"`
+	Uncached   int64 `json:"uncached"`
 }
 
 // Group is one row of a by_status, by_adapter, by_rule, by_template,

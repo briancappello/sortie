@@ -42,20 +42,20 @@ export function costText(status: string, usd: number | null): string {
 
 /** Words the token figure of one run. */
 export function runTokensText(run: RunResponse): string {
-  if (!run.tokens_measured) {
+  if (!run.tokens_measured || run.uncached_tokens === null) {
     return NOT_MEASURED;
   }
-  const total = fmtTokens(run.tokens.total_tokens);
-  return run.unaccounted_turns > 0 ? atLeast(total) : total;
+  const figure = fmtTokens(run.uncached_tokens);
+  return run.unaccounted_turns > 0 ? atLeast(figure) : figure;
 }
 
 /** Words the token figure of the session in flight; a count still arriving reads "at least". */
 export function runningTokensText(running: RunningEntryResponse): string {
-  const total = running.tokens.total_tokens;
-  if (!running.tokens_measured || total === null) {
+  const figure = running.uncached_tokens;
+  if (!running.tokens_measured || figure === null) {
     return NOT_MEASURED;
   }
-  return running.tokens_pending ? atLeast(fmtTokens(total)) : fmtTokens(total);
+  return running.tokens_pending ? atLeast(fmtTokens(figure)) : fmtTokens(figure);
 }
 
 /** Words the estimated cost of one run. */
@@ -65,11 +65,11 @@ export function runCostText(run: RunResponse): string {
 
 /** Words the token figure over every run of an issue. */
 export function totalsTokensText(totals: HistoryTotalsResponse): string {
-  if (totals.tokens.total_tokens === null) {
+  if (totals.uncached_tokens === null) {
     return NOT_MEASURED;
   }
-  const total = fmtTokens(totals.tokens.total_tokens);
-  return totals.tokens_complete ? total : atLeast(total);
+  const figure = fmtTokens(totals.uncached_tokens);
+  return totals.tokens_complete ? figure : atLeast(figure);
 }
 
 /** Words the estimated cost over every run of an issue. */
@@ -85,8 +85,47 @@ export function statsTokensText(f: StatsFigures, tier: string): string {
   if (f.tokens === null) {
     return f.tokens_unmeasured_runs > 0 ? NOT_MEASURED : NOT_RECORDED;
   }
-  const total = fmtTokens(f.tokens.total);
-  return f.tokens_unmeasured_runs > 0 ? atLeast(total) : total;
+  const figure = fmtTokens(f.tokens.uncached);
+  return f.tokens_unmeasured_runs > 0 ? atLeast(figure) : figure;
+}
+
+function cacheReadsText(
+  cacheReads: number | null,
+  tokensFigure: number | null,
+  isLowerBound: boolean,
+): string | null {
+  // A zero also means an agent that reports no cache data, and a zero is a claim.
+  if (tokensFigure === null || cacheReads === null || cacheReads === 0) {
+    return null;
+  }
+  const figure = fmtTokens(cacheReads);
+  return isLowerBound ? atLeast(figure) : figure;
+}
+
+/** Words the cache reads of one run, or `null` while there is nothing to state. */
+export function runCacheReadsText(run: RunResponse): string | null {
+  return cacheReadsText(
+    run.tokens.cache_read_tokens,
+    run.uncached_tokens,
+    run.unaccounted_turns > 0,
+  );
+}
+
+/** Words the cache reads over every run of an issue, or `null` while there is nothing to state. */
+export function totalsCacheReadsText(totals: HistoryTotalsResponse): string | null {
+  return cacheReadsText(
+    totals.tokens.cache_read_tokens,
+    totals.uncached_tokens,
+    !totals.tokens_complete,
+  );
+}
+
+/** Words the cache reads of a report group or summary, or `null` while there is nothing to state. */
+export function statsCacheReadsText(f: StatsFigures, tier: string): string | null {
+  if (tier === BASE_TIER || f.tokens === null) {
+    return null;
+  }
+  return cacheReadsText(f.tokens.cache_read, f.tokens.uncached, f.tokens_unmeasured_runs > 0);
 }
 
 /** Words the estimated cost of a report group or summary; a cost with runs left out reads "at least". */

@@ -2015,6 +2015,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
         "cache_read_tokens": 400,
         "cache_write_tokens": 100
       },
+      "uncached_tokens": 1600,
       "model_name": "claude-sonnet-4-20250514",
       "rule_name": "implement",
       "stage_lineage": {
@@ -2055,6 +2056,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "unmeasured_sessions": 0,
       "used_tokens": 107000,
       "used_tokens_complete": true,
+      "issue_uncached_tokens": 55000,
       "budget_tokens": 500000,
       "estimated_cost_usd": 0.014595,
       "cost_status": "estimated",
@@ -2530,9 +2532,10 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `pull_request`            | object or absent  | The pull request the continuation works on. Present exactly when `reaction_kind` is. Holds `number` and `repository` (`owner/repo`, masked), named as in a pending reaction row's `pull_request`. |
 | `self_review_active`      | boolean           | True while the session is in its self-review phase. |
 | `self_review_iteration`   | integer           | The self-review iterations completed in the current phase: `0` while the first runs and whenever `self_review_active` is `false`. |
-| `tokens`                  | object            | Token counts for this session. Each of the five members, `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, and `cache_write_tokens`, is an integer or `null`. The five are `null` together, exactly when `tokens_measured` is `false`, and each carries its figure otherwise. |
+| `tokens`                  | object            | Token counts for this session. Its members `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, and `cache_write_tokens` are each an integer or `null`. They are `null` together, exactly when `tokens_measured` is `false`, and each carries its figure otherwise. |
 | `tokens.cache_read_tokens` | integer or `null` | Cumulative cache-read token count. Reflects tokens served from the LLM provider's prompt cache rather than reprocessed. `null` when `tokens_measured` is `false`; `0` when the session is measured and the agent adapter reports no cache data. |
 | `tokens.cache_write_tokens` | integer or `null` | Cumulative cache-write token count. Reflects input tokens written to the LLM provider's prompt cache. `null` when `tokens_measured` is `false`; `0` when the session is measured and the agent adapter reports no cache-write count. |
+| `uncached_tokens` | integer or `null` | The session's tokens without cache reads: `tokens.total_tokens` less `tokens.cache_read_tokens`, floored at zero, so `uncached_tokens` plus `tokens.cache_read_tokens` equals `tokens.total_tokens` and cache writes stay in it. A sibling of `tokens`, not a member of it. `null` exactly when `tokens_measured` is `false`. |
 | `model_name`              | string or absent  | LLM model identifier the agent reported running (e.g. `"claude-sonnet-4-20250514"`). Omitted when the adapter does not report a model, and when `usage_arrival` is `none`. It can differ from `configured_model` under routing aliases and runtime fallbacks. |
 | `rule_name`               | string or absent  | The dispatch rule the session runs under. Omitted when the workflow-wide fallback routed the issue. |
 | `stage_lineage`           | object or `null`  | Always present. `null` unless a stage hop reached the session, otherwise the object a retry row's `stage_lineage` describes. |
@@ -2543,7 +2546,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `requests_by_model` | object or absent  | Map of model name to request count (e.g. `{"claude-sonnet-4-20250514": 3}`). Omitted when `api_requests_measured` is `false`, and when `usage_attribution` does not name a model. Enables tracking model usage when the agent switches models mid-session. |
 | `tool_time_percent` | number or `null`  | Cumulative tool call execution time as a percentage of session wall-clock time. Computed at response time. `null` when no tool timing data has been received. |
 | `api_time_percent`  | number or `null`  | Cumulative LLM API response wait time as a percentage of session wall-clock time. Computed at response time. `null` when no API timing data has been received. |
-| `tokens_measured`    | boolean           | True once at least one usage measurement has been reported in this session. The five members of `tokens` are `null` when it is `false`. False for a session whose `usage_arrival` is `none`, whatever its runtime reports.   |
+| `tokens_measured`    | boolean           | True once at least one usage measurement has been reported in this session. The members of `tokens` and `uncached_tokens` are `null` when it is `false`. False for a session whose `usage_arrival` is `none`, whatever its runtime reports.   |
 | `usage_arrival`      | string            | The session's kind's declared usage-reporting arrival, frozen at dispatch: `incremental`, `turn_end`, `none`, or `""` when undeclared.    |
 | `usage_attribution`  | string            | The session's kind's declared usage-reporting attribution, frozen at dispatch: `per_model`, `session_total`, `none`, or `""` when undeclared. |
 | `tokens_pending`     | boolean           | True only when `usage_arrival` is `turn_end`, the session is measured, and the turn that figure would settle for is still in flight.      |
@@ -2555,13 +2558,14 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `unmeasured_sessions`     | integer or `null` | Completed sessions whose token usage was never recorded, which `issue_tokens_completed` and `used_tokens` leave out. `null` exactly when `used_sessions` is. |
 | `used_tokens`             | integer or `null` | `issue_tokens_completed` plus `tokens.total_tokens`, each counted as `0` when `null`: the figure the token ceiling compares with `agent.max_tokens`, advancing with each usage figure of the session. `null` when that sum is `0` and `used_tokens_complete` is `false`, so unknown spend never reads as zero. |
 | `used_tokens_complete`    | boolean           | True exactly when `used_tokens` is the issue's whole spend: the completed sessions were read, none is unmeasured, none recorded an unaccounted turn, this session is measured, and it has recorded no unaccounted turn. When `false`, `used_tokens` is a lower bound. It ignores `tokens_pending`, which keeps telling a consumer that the figure excludes a turn in flight. |
+| `issue_uncached_tokens`   | integer or `null` | `used_tokens` less the cache reads of the sessions it counts, those of the issue's completed sessions and this session's own when it is measured, floored at zero: the issue's spend without cache reads, where `used_tokens` keeps them. `null` exactly when `used_tokens` is. |
 | `budget_tokens`           | integer or `null` | `agent.max_tokens` as of the latest poll tick. `null` means no token ceiling (`agent.max_tokens` is `0`), never `0`. The token headroom is `budget_tokens` minus `used_tokens`; there is no value when either is `null`, and it turns negative when a run overshoots, because the ceiling stops a run at the first usage figure at or past it. |
 | `estimated_cost_usd`      | number or `null` | The estimated USD cost of this session, from `tokens` and the `token_rates` entry of `agent_kind`. Unrounded. Non-`null` exactly when `cost_status` is `estimated`. |
 | `cost_status`             | string            | `estimated`, which a zero rate also gives; `unpriced` when the session is measured and `token_rates` holds no entry with both `input_per_mtok` and `output_per_mtok` for `agent_kind`, an absent `token_rates` included; `unmeasured` when `tokens_measured` is `false`. |
 | `issue_estimated_cost_usd` | number or `null` | The estimated USD cost of the whole issue: the sum of the estimates of its priced parts, completed sessions and this session alike, at the rates the process started with. Non-`null` exactly when `issue_cost_status` is `estimated` or `partial`. |
 | `issue_cost_status`       | string            | `estimated` when the estimate covers the issue's whole spend; `partial` when it is a lower bound, because a part that spent tokens is left out; `unpriced` when no priced part spent tokens and a part that did has no rate; `unmeasured` when `used_tokens` is `null`, and when no part is priced or unpriced. A session measured at zero tokens leaves nothing out, so a missing rate for its kind does not make a complete, otherwise priced issue `partial`. |
 
-A limit key (`budget_tokens`, `budget_sessions`) is always present: `null` means no limit is configured. A usage key (`used_tokens`, `issue_tokens_completed`, `used_sessions`, `unmeasured_sessions`) set to `null` means unknown. `used_tokens` is `null` only when `issue_cost_status` is `unmeasured`, and `issue_cost_status` is `estimated` only when `used_tokens_complete` is `true`. While `token_rates` holds an entry for any agent kind, the top-level `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated`, and `cost_unpriced_running` counts the rows whose `cost_status` is `unpriced`.
+A limit key (`budget_tokens`, `budget_sessions`) is always present: `null` means no limit is configured. A usage key (`used_tokens`, `issue_uncached_tokens`, `issue_tokens_completed`, `used_sessions`, `unmeasured_sessions`) set to `null` means unknown. `used_tokens` is `null` only when `issue_cost_status` is `unmeasured`, and `issue_cost_status` is `estimated` only when `used_tokens_complete` is `true`. While `token_rates` holds an entry for any agent kind, the top-level `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated`, and `cost_unpriced_running` counts the rows whose `cost_status` is `unpriced`.
 
 **Retry and budget-exhausted identity fields:**
 
@@ -3010,6 +3014,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
       "cache_read_tokens": 400,
       "cache_write_tokens": 100
     },
+    "uncached_tokens": 1600,
     "model_name": "claude-sonnet-4-20250514",
     "rule_name": "implement",
     "stage_lineage": {
@@ -3047,6 +3052,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     "unmeasured_sessions": 0,
     "used_tokens": 107000,
     "used_tokens_complete": true,
+    "issue_uncached_tokens": 55000,
     "budget_tokens": 500000,
     "estimated_cost_usd": 0.014595,
     "cost_status": "estimated",
@@ -3082,6 +3088,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
           "cache_read_tokens": null,
           "cache_write_tokens": null
         },
+        "uncached_tokens": null,
         "tokens_measured": false,
         "unaccounted_turns": 0,
         "estimated_cost_usd": null,
@@ -3111,6 +3118,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
         "cache_read_tokens": null,
         "cache_write_tokens": null
       },
+      "uncached_tokens": null,
       "tokens_complete": false,
       "estimated_cost_usd": null,
       "cost_status": "unmeasured"
@@ -3216,7 +3224,7 @@ For a work session of `MT-654` on the `specify` stage, whose rule names `impleme
 }
 ```
 
-`history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs, so a running issue with earlier runs serves its live detail and its history together. `runs` holds the newest page of the issue's runs, newest first, each in the run shape of [`GET /api/v1/runs`](#get-apiv1runs-run-history). `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the runs the page was cut from. `totals` covers all of the issue's runs: `run_count` counts every run, a recorded CI result included, and `unmeasured_runs` counts the runs that never reported usage. Each member of `totals.tokens` is the sum over the measured runs, except `total_tokens`, which sums every run, and is `null` when its sum is `0` and `tokens_complete` is `false`. `tokens_complete` is `true` exactly when no run is unmeasured and none recorded an unaccounted turn, and when it is `false` the sums are lower bounds. `totals.estimated_cost_usd` and `totals.cost_status` follow the rule of `issue_estimated_cost_usd` and `issue_cost_status` over the issue's runs alone. `hops` holds the stage hop decisions of the runs in `runs`, newest first: `source_rule` is the rule of the deciding run, `target_rule` the rule its exit reached, and `result` is `advanced` or `partial` when the hop was made and `failed` or `ceiling` when it was not. A hop decision older than the page arrives with its run on the pages `next_cursor` continues. `last_stage` is the stage chain the issue's last stage run stood on, or `null`, so a client places a finished issue on its chain, which no live row serves for it. It is always present and holds `chain`, the rule names of the chain in `next` order, and `rule`, the rule of the deciding run. The deciding run is the newest run in `runs` that no pull request reaction started and whose `rule_name` is set, so a reaction run and the recorded CI result, which carries no `rule_name`, never decide. `chain` is the chain `stage_position.chain` serves for that rule and the run's `stage_previous`, so it equals the deciding run's `stage_chain`, and it follows the configuration in effect, so a reload that edits the chains changes it for runs recorded before the reload. `last_stage` is `null` when no run in `runs` decides, when the deciding rule is on no chain, and when the server holds no workflow shape. `issue_outcome` is how the issue's latest work ended, or `null` when Sortie observed no ending since it last picked the issue up. It is the object every run in `runs` carries, as the `issue_outcome` row of the run fields describes.
+`history` is present on every `200` response: `null` when the issue has no run, and otherwise the issue's newest runs, so a running issue with earlier runs serves its live detail and its history together. `runs` holds the newest page of the issue's runs, newest first, each in the run shape of [`GET /api/v1/runs`](#get-apiv1runs-run-history). `next_cursor` is `null` on the last page and otherwise continues on `GET /api/v1/runs?issue_id=<issue_id>`, which selects exactly the runs the page was cut from. `totals` covers all of the issue's runs: `run_count` counts every run, a recorded CI result included, and `unmeasured_runs` counts the runs that never reported usage. Each member of `totals.tokens` is the sum over the measured runs, except `total_tokens`, which sums every run, and is `null` when its sum is `0` and `tokens_complete` is `false`. `totals.uncached_tokens` is that `total_tokens` less the sum of `cache_read_tokens`, floored at zero, and is `null` under the same rule. `tokens_complete` is `true` exactly when no run is unmeasured and none recorded an unaccounted turn, and when it is `false` the sums are lower bounds. `totals.estimated_cost_usd` and `totals.cost_status` follow the rule of `issue_estimated_cost_usd` and `issue_cost_status` over the issue's runs alone. `hops` holds the stage hop decisions of the runs in `runs`, newest first: `source_rule` is the rule of the deciding run, `target_rule` the rule its exit reached, and `result` is `advanced` or `partial` when the hop was made and `failed` or `ceiling` when it was not. A hop decision older than the page arrives with its run on the pages `next_cursor` continues. `last_stage` is the stage chain the issue's last stage run stood on, or `null`, so a client places a finished issue on its chain, which no live row serves for it. It is always present and holds `chain`, the rule names of the chain in `next` order, and `rule`, the rule of the deciding run. The deciding run is the newest run in `runs` that no pull request reaction started and whose `rule_name` is set, so a reaction run and the recorded CI result, which carries no `rule_name`, never decide. `chain` is the chain `stage_position.chain` serves for that rule and the run's `stage_previous`, so it equals the deciding run's `stage_chain`, and it follows the configuration in effect, so a reload that edits the chains changes it for runs recorded before the reload. `last_stage` is `null` when no run in `runs` decides, when the deciding rule is on no chain, and when the server holds no workflow shape. `issue_outcome` is how the issue's latest work ended, or `null` when Sortie observed no ending since it last picked the issue up. It is the object every run in `runs` carries, as the `issue_outcome` row of the run fields describes.
 
 A request by an identifier that no live entry holds is answered through run history. When the newest run recorded under it belongs to an issue that is live under a newer identifier (a tracker move keeps the issue ID), the response is that issue's live detail with `issue_identifier` set to the identifier the issue carries now. The `history` of a response always covers the issue by its ID, so runs recorded under an older identifier stay on its page.
 
@@ -3273,6 +3281,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
         "cache_read_tokens": 30000,
         "cache_write_tokens": 4000
       },
+      "uncached_tokens": 31100,
       "tokens_measured": true,
       "unaccounted_turns": 0,
       "estimated_cost_usd": 0.1923,
@@ -3333,6 +3342,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `dispatched_at`          | string or `null`   | When Sortie dispatched the first run of the pass the run belongs to, as on a running row. `null` when the run could not be dated. |
 | `turns_completed`        | integer            | The agent turns the run completed. |
 | `tokens`                 | object             | The token members of a running row's `tokens`. Each member is `null` exactly when `tokens_measured` is `false`; a measured zero is `0`. |
+| `uncached_tokens`        | integer or `null`  | `tokens.total_tokens` less `tokens.cache_read_tokens`, floored at zero, so `uncached_tokens` plus `tokens.cache_read_tokens` equals `tokens.total_tokens`. A sibling of `tokens`. `null` exactly when `tokens_measured` is `false`. |
 | `tokens_measured`        | boolean            | True when the runtime reported a usage figure for the run, or the run never entered an agent turn. |
 | `unaccounted_turns`      | integer            | The turns that issued a model request no token figure accounted for. When it is non-zero, the token figures are lower bounds. |
 | `estimated_cost_usd`     | number or `null`   | The estimated USD cost of the run from `tokens` and the `token_rates` entry of `agent_kind`. Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
@@ -3432,6 +3442,7 @@ A group is one issue with at least one run that matches `rule`, `status`, and `s
           "cache_read_tokens": 150000,
           "cache_write_tokens": 20000
         },
+        "uncached_tokens": 212000,
         "tokens_complete": true,
         "estimated_cost_usd": 1.1425,
         "cost_status": "estimated"
@@ -3570,7 +3581,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
     "success_rate": 0.5,
     "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
     "mean_turns_succeeded": 4,
-    "tokens": {"input": 3900000, "output": 760000, "total": 4660000, "cache_read": 50000, "cache_write": 10000},
+    "tokens": {"input": 3900000, "output": 760000, "total": 4660000, "cache_read": 50000, "cache_write": 10000, "uncached": 4610000},
     "cost_usd": 19.52,
     "cost_per_succeeded_run_usd": 6.51,
     "zero_duration_runs": 1,
@@ -3587,7 +3598,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "share": 0.5,
       "duration_seconds": {"p50": 1200, "p95": 1800, "mean": 1200, "samples": 3},
       "mean_turns": 4,
-      "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000},
+      "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000, "uncached": 4150000},
       "cost_usd": 17.87,
       "cost_per_succeeded_run_usd": 5.96,
       "tokens_unmeasured_runs": 0,
@@ -3607,7 +3618,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "share": 0.3333,
       "duration_seconds": {"p50": 600, "p95": 1800, "mean": 1200, "samples": 2},
       "mean_turns": 4,
-      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 50000, "cache_write": 10000},
+      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 50000, "cache_write": 10000, "uncached": 3550000},
       "cost_usd": 17.87,
       "cost_per_succeeded_run_usd": 8.94,
       "tokens_unmeasured_runs": 0,
@@ -3646,7 +3657,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "share": 0.6667,
       "duration_seconds": {"p50": 600, "p95": 1800, "mean": 900, "samples": 4},
       "mean_turns": 3,
-      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
+      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0, "uncached": 3600000},
       "cost_usd": 12.25,
       "cost_per_succeeded_run_usd": 6.13,
       "tokens_unmeasured_runs": 1,
@@ -3662,7 +3673,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "share": 0.6667,
       "duration_seconds": {"p50": 600, "p95": 1800, "mean": 900, "samples": 4},
       "mean_turns": 3,
-      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0},
+      "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 0, "cache_write": 0, "uncached": 3600000},
       "cost_usd": 12.25,
       "cost_per_succeeded_run_usd": 6.13,
       "tokens_unmeasured_runs": 1,
@@ -3717,7 +3728,7 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `success_rate`               | number           | `succeeded` divided by `runs`, from `0` to `1`, `0` when no run is in range. |
 | `duration_seconds`           | object           | `p50`, `p95`, `mean`, and `samples` over the succeeded runs. Each of them is `null` when `samples` is `0`. |
 | `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
-| `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage. `null` on the `base` tier and when no run reported usage. |
+| `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage, and `uncached`, which is `total` less `cache_read`, floored at zero, so `uncached` plus `cache_read` equals `total` and cache writes stay in it. `null` on the `base` tier and when no run reported usage. |
 | `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier and when no run is priced, which includes a workflow without `token_rates`. |
 | `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage. `null` when `cost_usd` is, and when no succeeded run reported usage. |
 | `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |

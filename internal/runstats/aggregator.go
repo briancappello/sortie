@@ -208,6 +208,13 @@ type totalAccum struct {
 	succeededSamples     []float64
 }
 
+// withUncached returns t with Uncached derived from its Total and
+// CacheRead sums.
+func withUncached(t Tokens) Tokens {
+	t.Uncached = domain.TokenUsage{TotalTokens: t.Total, CacheReadTokens: t.CacheRead}.Uncached()
+	return t
+}
+
 // bumpGroup returns groups' entry for name, creating it on first
 // use, and increments its run count and, when isSucceeded, its
 // succeeded count.
@@ -665,7 +672,7 @@ func (a *Aggregator) summary(full bool) Summary {
 		s.TokensUnmeasuredRuns = a.total.unmeasuredRuns
 	}
 	if full && a.total.measuredRuns > 0 {
-		s.Tokens = new(a.total.tokens)
+		s.Tokens = new(withUncached(a.total.tokens))
 	}
 	if full && a.total.pricedRuns > 0 {
 		cost := round2(a.total.costUSD)
@@ -709,7 +716,7 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 		stat.TokensUnmeasuredRuns = g.unmeasuredRuns
 		stat.CostUnpricedRuns = g.costUnpricedRuns
 		if g.measuredRuns > 0 {
-			stat.Tokens = new(g.tokens)
+			stat.Tokens = new(withUncached(g.tokens))
 		}
 		if g.pricedRuns > 0 {
 			cost := round2(g.costUSD)

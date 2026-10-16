@@ -1042,6 +1042,16 @@
         "tokens_complete": {
           "type": "boolean"
         },
+        "uncached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "unmeasured_runs": {
           "type": "integer"
         }
@@ -1050,6 +1060,7 @@
         "run_count",
         "unmeasured_runs",
         "tokens",
+        "uncached_tokens",
         "tokens_complete",
         "estimated_cost_usd",
         "cost_status"
@@ -2702,6 +2713,16 @@
         "unaccounted_turns": {
           "type": "integer"
         },
+        "uncached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "workflow_file": {
           "type": "string"
         }
@@ -2718,6 +2739,7 @@
         "dispatched_at",
         "turns_completed",
         "tokens",
+        "uncached_tokens",
         "tokens_measured",
         "unaccounted_turns",
         "estimated_cost_usd",
@@ -2866,6 +2888,16 @@
         },
         "issue_type": {
           "type": "string"
+        },
+        "issue_uncached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "issue_url": {
           "type": "string"
@@ -3033,6 +3065,16 @@
         "turn_count": {
           "type": "integer"
         },
+        "uncached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "unmeasured_sessions": {
           "anyOf": [
             {
@@ -3095,6 +3137,7 @@
         "last_event_at",
         "workspace_path",
         "tokens",
+        "uncached_tokens",
         "stage_lineage",
         "stage_position",
         "api_request_count",
@@ -3112,6 +3155,7 @@
         "unmeasured_sessions",
         "used_tokens",
         "used_tokens_complete",
+        "issue_uncached_tokens",
         "budget_tokens",
         "estimated_cost_usd",
         "cost_status",
@@ -4508,6 +4552,9 @@
         },
         "total": {
           "type": "integer"
+        },
+        "uncached": {
+          "type": "integer"
         }
       },
       "required": [
@@ -4515,7 +4562,8 @@
         "output",
         "total",
         "cache_read",
-        "cache_write"
+        "cache_write",
+        "uncached"
       ],
       "type": "object"
     },

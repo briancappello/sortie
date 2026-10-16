@@ -59,6 +59,7 @@ type runResponse struct {
 	DispatchedAt         *string             `json:"dispatched_at"`
 	TurnsCompleted       int                 `json:"turns_completed"`
 	Tokens               tokenInfo           `json:"tokens"`
+	UncachedTokens       *int64              `json:"uncached_tokens"`
 	TokensMeasured       bool                `json:"tokens_measured"`
 	UnaccountedTurns     int                 `json:"unaccounted_turns"`
 	EstimatedCostUSD     *float64            `json:"estimated_cost_usd"`
@@ -133,6 +134,7 @@ type historyTotalsResponse struct {
 	RunCount         int       `json:"run_count"`
 	UnmeasuredRuns   int       `json:"unmeasured_runs"`
 	Tokens           tokenInfo `json:"tokens"`
+	UncachedTokens   *int64    `json:"uncached_tokens"`
 	TokensComplete   bool      `json:"tokens_complete"`
 	EstimatedCostUSD *float64  `json:"estimated_cost_usd"`
 	CostStatus       string    `json:"cost_status"`
@@ -281,6 +283,7 @@ func toRunResponse(e RunHistoryEntry, rates TokenRates, chains [][]string) runRe
 			CacheReadTokens:  new(e.Tokens.CacheReadTokens),
 			CacheWriteTokens: new(e.Tokens.CacheWriteTokens),
 		}
+		resp.UncachedTokens = new(domain.TokenUsage{TotalTokens: e.Tokens.TotalTokens, CacheReadTokens: e.Tokens.CacheReadTokens}.Uncached())
 	}
 	resp.EstimatedCostUSD, resp.CostStatus = runCostOf(e, rates)
 
@@ -420,6 +423,7 @@ func historyTotalsOf(t IssueRunTotals, rates TokenRates) historyTotalsResponse {
 		RunCount:         t.Usage.Sessions,
 		UnmeasuredRuns:   t.Usage.UnmeasuredSessions,
 		Tokens:           tokens,
+		UncachedTokens:   known(domain.TokenUsage{TotalTokens: t.Usage.TotalTokens, CacheReadTokens: t.Tokens.CacheReadTokens}.Uncached()),
 		TokensComplete:   complete,
 		EstimatedCostUSD: cost,
 		CostStatus:       status,
