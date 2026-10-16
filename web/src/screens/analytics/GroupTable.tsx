@@ -233,10 +233,7 @@ export function GroupTable<Row extends Group>({
 
   return (
     <section className="flex flex-col gap-sm">
-      <Table
-        title={title}
-        className={hasRates ? "table-fixed min-w-287" : "table-fixed min-w-248"}
-      >
+      <Table title={title} className={hasRates ? "table-fixed min-w-287" : "table-fixed min-w-248"}>
         <TableHeader>
           {nameColumns.map((column, index) => (
             <SortableHead
