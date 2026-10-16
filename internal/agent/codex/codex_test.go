@@ -666,9 +666,10 @@ func TestStopSession_ReturnsWhileWriteParked(t *testing.T) {
 	}
 	state.conn = jsonrpc.NewConn(sig, strings.NewReader(""), jsonrpc.Deliver(state.inbox, identity))
 
-	writeErr := make(chan error, 1)
+	written := make(chan struct{})
 	go func() {
-		writeErr <- state.conn.Notify("parked/notify", nil)
+		_ = state.conn.Notify("parked/notify", nil)
+		close(written)
 	}()
 
 	// Registered before the assertions below, so a t.Fatal on the
@@ -677,7 +678,7 @@ func TestStopSession_ReturnsWhileWriteParked(t *testing.T) {
 		_ = pr.Close()
 		_ = pw.Close()
 		select {
-		case <-writeErr:
+		case <-written:
 		case <-time.After(2 * time.Second):
 		}
 	})

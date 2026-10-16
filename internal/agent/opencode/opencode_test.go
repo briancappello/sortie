@@ -1012,9 +1012,8 @@ cat '`+runPath+`'`)
 	turnCtx, turnCancel := context.WithCancel(outerCtx)
 	gotEvent := make(chan struct{}, 1)
 	resultCh := make(chan domain.TurnResult, 1)
-	errCh := make(chan error, 1)
 	go func() {
-		result, runErr := a.RunTurn(turnCtx, session, domain.RunTurnParams{
+		result, _ := a.RunTurn(turnCtx, session, domain.RunTurnParams{
 			Prompt: "second prompt",
 			OnEvent: func(domain.AgentEvent) {
 				select {
@@ -1024,7 +1023,6 @@ cat '`+runPath+`'`)
 			},
 		})
 		resultCh <- result
-		errCh <- runErr
 	}()
 
 	select {
@@ -1042,7 +1040,6 @@ cat '`+runPath+`'`)
 		if !result2.UsageMeasured {
 			t.Error("turn 2 (cancelled after a measured turn): UsageMeasured = false, want true")
 		}
-		<-errCh
 	case <-outerCtx.Done():
 		t.Fatal("RunTurn (turn 2) did not return after context cancel")
 	}
