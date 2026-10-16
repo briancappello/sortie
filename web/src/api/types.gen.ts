@@ -30,6 +30,20 @@ export interface ActiveIssueResponse {
   status_text_full: string;
 }
 
+export interface AgentEventFrame {
+  dispatch_id: string;
+  seq: number;
+  at: string;
+  event: string;
+  message: string;
+  text: string;
+  session_id?: string;
+  tool_name?: string;
+  duration_ms?: number;
+  tool_error?: boolean;
+  usage?: TokenInfo | null;
+}
+
 export interface AttemptsInfo {
   restart_count: number;
   current_retry_attempt: number;
@@ -441,6 +455,11 @@ export interface RetryNowResponse {
   outcome_text: string;
 }
 
+export interface RunEndedFrame {
+  dispatch_id: string;
+  last_seq: number;
+}
+
 export interface RunEventResponse {
   seq: number;
   at: string;
@@ -458,6 +477,12 @@ export interface RunEventsResponse {
   dispatch_id: string;
   first_seq: number | null;
   events: RunEventResponse[] | null;
+}
+
+export interface RunResetFrame {
+  dispatch_id: string;
+  reason: string;
+  first_seq?: number;
 }
 
 export interface RunResponse {

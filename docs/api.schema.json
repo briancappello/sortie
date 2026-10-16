@@ -114,6 +114,60 @@
       ],
       "type": "object"
     },
+    "AgentEventFrame": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "dispatch_id": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "event": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "tool_error": {
+          "type": "boolean"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "dispatch_id",
+        "seq",
+        "at",
+        "event",
+        "message",
+        "text"
+      ],
+      "type": "object"
+    },
     "AttemptsInfo": {
       "properties": {
         "current_retry_attempt": {
@@ -2166,6 +2220,21 @@
       ],
       "type": "object"
     },
+    "RunEndedFrame": {
+      "properties": {
+        "dispatch_id": {
+          "type": "string"
+        },
+        "last_seq": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dispatch_id",
+        "last_seq"
+      ],
+      "type": "object"
+    },
     "RunEventResponse": {
       "properties": {
         "at": {
@@ -2249,6 +2318,24 @@
         "dispatch_id",
         "first_seq",
         "events"
+      ],
+      "type": "object"
+    },
+    "RunResetFrame": {
+      "properties": {
+        "dispatch_id": {
+          "type": "string"
+        },
+        "first_seq": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dispatch_id",
+        "reason"
       ],
       "type": "object"
     },

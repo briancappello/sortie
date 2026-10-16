@@ -1910,7 +1910,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
 | POST   | `/api/v1/attention/{id}/acknowledge` | Record that a person has seen an item that needs a person: it leaves the attention count and stays listed with the time it was acknowledged until its cause clears, and a new cause shows as a new item. Changes nothing in the tracker or the pull request. Returns 200 OK, 404 when no current item has the ID, and 409 Conflict during graceful shutdown. Every 200 and 409 response says in one sentence what it did. |
 | POST   | `/api/v1/reactions/{identifier}/{kind}/check` | Make a pending pull request reaction check its pull request on the next poll tick instead of at its scheduled time. The check follows every rule of the reaction, and the request itself starts no agent and changes nothing in the tracker or the pull request. A reaction still waiting after that check keeps the time its next check was due before, so asking early never makes it wait longer. Returns 202 Accepted, 404 when the issue has no pending reaction of that kind, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
-| GET    | `/api/v1/events`         | Server-sent event stream of change signals: one `change` event each time anything the JSON API serves changes, at most one a second, and a `heartbeat` event every 15 seconds. Carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals](#get-apiv1events-change-signals). |
+| GET    | `/api/v1/events`         | Server-sent event stream: one `change` event each time anything the JSON API serves changes, at most one a second, a `heartbeat` event every 15 seconds, and, for each run named with `run`, the run's agent events. A change signal carries no data; a client refetches what it shows. See [`GET /api/v1/events`: change signals and agent events](#get-apiv1events-change-signals-and-agent-events). |
 | GET    | `/metrics`               | Prometheus exposition-format scrape endpoint. Present only when `github.com/prometheus/client_golang` metrics are enabled (always co-located with the HTTP server). |
 
 All responses use `Content-Type: application/json; charset=utf-8` (JSON endpoints), except `GET /api/v1/events`, which uses `text/event-stream`. Error responses use a standard envelope: `{"error": {"code": "...", "message": "..."}}`. API endpoints (`/api/v1/*`) return 405 with the JSON error envelope. Health probes (`/livez`, `/readyz`) return the standard HTTP 405 plain-text response. The `/metrics` endpoint returns `text/plain` in Prometheus exposition format. The `/ui/` dashboard returns `text/html` for its document and the content type of each file for its assets.
@@ -3937,13 +3937,30 @@ A `202` also carries `display_identifier` when the issue has one. `issue_id`, `i
 
 > **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can make a pull request reaction check early. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
 
-#### `GET /api/v1/events`: change signals
+#### `GET /api/v1/events`: change signals and agent events
 
-Streams a signal each time anything the JSON API serves changes, so a client refetches what it shows instead of polling. The response is a server-sent event stream (`text/event-stream`) that stays open until the client leaves or Sortie shuts down. A signal carries no data of its own: it names no issue and no agent message, and the stream shows nothing that `GET /api/v1/state` does not. The route takes no parameters and ignores the query string. A method other than `GET` answers `405`.
+Streams a signal each time anything the JSON API serves changes, so a client refetches what it shows instead of polling, and streams the agent events of the runs the client names with `run`. The response is a server-sent event stream (`text/event-stream`) that stays open until the client leaves or Sortie shuts down. A change signal carries no data of its own: it names no issue and no agent message, and the stream shows nothing the JSON API does not. A method other than `GET` answers `405`.
+
+> **Important:** Sortie's HTTP server has no authentication, so anyone who can reach it can read the agent events of every retained run. A deployment that others can reach must sit behind a reverse proxy with authentication or a VPN.
+
+**The `run` parameter.** Repeat `run=<dispatch_id>` or `run=<dispatch_id>:<seq>` once for each run the client shows, up to 16 per connection. The `dispatch_id` is the one the JSON API reports for a running row or a run. Without a `seq` the stream starts with every retained event of the run; with one, it starts after that `seq`. A `seq` above the run's newest `seq` reads as that `seq`. Every other query parameter is ignored. The cursor is a query parameter because `EventSource` cannot set a header on its first connection.
+
+A dispatch ID has 1 to 64 characters, each from `A` to `Z` or `2` to `7`. A `seq` has 1 to 19 digits and fits a signed 64-bit integer. An empty value is invalid.
 
 ```bash
-curl -N http://127.0.0.1:7678/api/v1/events
+curl -N 'http://127.0.0.1:7678/api/v1/events?run=RLQFSIOFERWGDW2HZY45W55VXK:42'
 ```
+
+**Errors:**
+
+| Condition | Status | `error.code` |
+| --------- | ------ | ------------ |
+| A `run` value that is not a dispatch ID optionally followed by `:` and a `seq`, a dispatch ID given twice, or more than 16 `run` values | 400 | `invalid_parameter`; the message names the broken rule and echoes no input |
+| A method other than `GET` | 405 | `method_not_allowed`, with `Allow: GET` |
+
+A `400` opens no stream. A malformed `Last-Event-ID` never causes one.
+
+A change signal is one frame:
 
 ```
 id: 1792000000000000000
@@ -3952,11 +3969,46 @@ data: {}
 
 ```
 
-The `id` is a counter that rises with every change. A client keeps the last one it saw for the reconnect rule below.
+The revision part of the `id` is a counter that rises with every change. A client keeps the last `id` it saw for the reconnect rule below.
+
+**The `id` of a frame.** Every frame, a change signal, a heartbeat, and each run frame, carries one `id`: the revision, followed by `;<dispatch_id>:<seq>` for each subscribed run in the order of the `run` parameters. The `seq` is the run's cursor as the stream holds it: the `seq` of the last event of the run the stream wrote, or the cursor the subscription started from. A run frame never advances the revision, so the revision part is that of the last change signal on the stream, or the one the stream opened with when it has sent none. A stream with no `run` carries the revision alone.
+
+```
+id: 1792000000000000000;RLQFSIOFERWGDW2HZY45W55VXK:43
+event: agent_event
+data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","seq":43,"at":"2026-02-24T20:14:59Z","event":"notification","message":"Working on tests","text":"Working on tests"}
+
+```
+
+**Agent events.** A subscribed run gets these frames beside the change signals:
+
+| Event | Data | When |
+| ----- | ---- | ---- |
+| `agent_event` | `dispatch_id` and the members of the [event shape](#get-apiv1runsdispatch_idevents-run-events) | One for each retained event after the cursor, then one for each new event as Sortie applies it, in `seq` order |
+| `run_ended` | `dispatch_id` and `last_seq`, the `seq` of the run's newest retained event | After the run's last event, once the run has ended |
+| `reset` | `dispatch_id` and `reason` `cursor_expired`, with `first_seq` | The cursor is behind retention: the events between the cursor and `first_seq` were evicted. Every retained event of the run follows in the same stream, and the `id` of the reset carries `first_seq` minus one as the run's cursor |
+| `reset` | `dispatch_id` and `reason` `not_retained` | The run's events are not retained, by the rule of the run events route's `404`. The run leaves the `id` and no other frame of it follows |
+
+```
+id: 1792000000000000000;RLQFSIOFERWGDW2HZY45W55VXK:43
+event: run_ended
+data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","last_seq":43}
+
+id: 1792000000000000000;RLQFSIOFERWGDW2HZY45W55VXK:11
+event: reset
+data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","reason":"cursor_expired","first_seq":12}
+
+id: 1792000000000000000
+event: reset
+data: {"dispatch_id":"RLQFSIOFERWGDW2HZY45W55VXK","reason":"not_retained"}
+
+```
+
+A client keeps the events it holds after a `cursor_expired` reset and marks the gap; it fetches nothing. A subscription without a cursor to a run whose oldest retained `seq` is above 1 starts with that reset. After `run_ended` the run keeps its cursor in the `id`, so a reconnect with it gets `run_ended` again and no event twice; after `not_retained` a reconnect gets `not_retained` again. Run frames are never coalesced and are not bound by the one signal a second: they go out as soon as the event is applied, in `seq` order within a run. When Sortie cannot read the stored events of a finished run, it writes nothing for that run, reads them again at the next heartbeat, and keeps the other runs and the change signals going; the run events route answers that run `503`.
 
 **When a signal arrives.** A signal follows every tick, refresh, worker exit, and retry, every retry made due on request, every reaction check made due on request, every acknowledgement recorded on request, every message from a running agent session (so a session's token counts and latest message reach a client within a second), the start of shutdown, and every load of WORKFLOW.md, whether the load succeeds or fails. A stream carries at most one change signal per second. The first change after a quiet second arrives at once; changes made during a second arrive together as one signal when it ends. Values that move with the clock alone change without a signal: `agent_totals.seconds_running`, elapsed times computed from `started_at`, and the window of a relative `since` on `GET /api/v1/stats`.
 
-**Reconnect.** A client reconnecting sends the `id` of its last signal in the `Last-Event-ID` header; a browser's `EventSource` does this on its own. When that value equals the current counter exactly, Sortie sends nothing until the next change. Any other value, an absent header, or a value from before a restart gets one change signal at once, so the client refetches.
+**Reconnect.** A client reconnecting sends the `id` of its last frame in the `Last-Event-ID` header; a browser's `EventSource` does this on its own. When the text before the first `;` equals the current counter exactly, Sortie sends no change signal until the next change. Any other value, an absent header, or a value from before a restart gets one change signal at once, so the client refetches. For each run the `run` parameters name, a cursor in the header replaces the cursor of the query, so the stream resumes after the last event the client received. The query alone decides which runs are subscribed. A header part that is not `<dispatch_id>:<seq>` is ignored, and the first part for a run counts.
 
 **Heartbeat.** Every 15 seconds Sortie writes a heartbeat frame so that a proxy does not close an idle stream:
 
@@ -3967,15 +4019,15 @@ data: {}
 
 ```
 
-The heartbeat carries the `id` of the last change signal on the stream, or the `Last-Event-ID` the stream opened with when it has sent none. A browser delivers it only to `heartbeat` listeners, not to `message` or `change` listeners.
+The heartbeat carries the revision part of the last change signal on the stream, or of the `Last-Event-ID` the stream opened with when it has sent none, followed by the cursor of every subscribed run. A browser delivers it only to `heartbeat` listeners, not to `message` or `change` listeners.
 
-**Reconnecting.** When a stream closes for good (`EventSource.readyState` is `CLOSED` after an `error` event, as a non-`200` answer or a wrong `Content-Type` leaves it), open a new one after a delay that doubles from 1 second up to 30 seconds while new streams keep failing, and go back to 1 second once one opens. A new stream carries no `Last-Event-ID`, so its opening change signal makes the client refetch.
+**Reconnecting.** When a stream closes for good (`EventSource.readyState` is `CLOSED` after an `error` event, as a non-`200` answer or a wrong `Content-Type` leaves it), open a new one after a delay that doubles from 1 second up to 30 seconds while new streams keep failing, and go back to 1 second once one opens. A new stream carries no `Last-Event-ID`, so its opening change signal makes the client refetch, and the client writes the last `seq` it holds of each run into that run's `run` parameter, so no event is replayed twice or missed.
 
 **Idle timeout.** When an open stream delivers no event, change signal or heartbeat, for 45 seconds, close it and open a new one the same way. This recovers a stream that died without the browser being told, for example after a laptop wakes holding a connection Sortie dropped while it slept.
 
-**Shutdown.** When shutdown begins, Sortie ends every open stream, so a connected client does not delay it. A stream opened during shutdown answers `200` and ends at once. The route never answers `503`, because a browser does not reconnect after a non-`200` answer. Behind a reverse proxy, a client reconnecting while Sortie restarts gets the proxy's `502`, which closes its stream; the client's reconnect with backoff reopens it.
+**Shutdown.** When shutdown begins, Sortie ends every open stream, also one in the middle of writing agent events, before its next frame, so a connected client does not delay it. A stream opened during shutdown answers `200` and ends at once. The route never answers `503`, because a browser does not reconnect after a non-`200` answer. Behind a reverse proxy, a client reconnecting while Sortie restarts gets the proxy's `502`, which closes its stream; the client's reconnect with backoff reopens it.
 
-**Slow clients.** The 10 second write timeout of the HTTP server does not end a stream. A client that stops reading is dropped once Sortie cannot write a frame to it within 2 seconds, and it delays no other client.
+**Slow clients.** The 10 second write timeout of the HTTP server does not end a stream. Each frame has its own write deadline of 2 seconds. A client that stops reading is dropped once Sortie cannot write to it within 2 seconds, and it delays no other client and not the agent. A connection that keeps reading is never dropped for the length of a catch-up, however long the retained events take to send. A dropped client reconnects with the `id` of its last frame.
 
 **Browser connection limit.** Over plain HTTP a browser allows six connections per origin across all its tabs, and every open stream holds one. Open one stream per browser and share it across tabs instead of one stream per tab.
 

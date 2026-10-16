@@ -24,6 +24,7 @@ var (
 	timeType          = reflect.TypeFor[time.Time]()
 	reactionCheckType = reflect.TypeFor[reactionCheckResponse]()
 	runEventType      = reflect.TypeFor[runEventResponse]()
+	agentEventType    = reflect.TypeFor[agentEventFrame]()
 	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
 	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
 )
@@ -78,7 +79,7 @@ func (c *contract) convert(t reflect.Type) (contractNode, error) {
 	if t == timeType {
 		return dateTime, nil
 	}
-	if t != reactionCheckType && t != runEventType && (reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
+	if t != reactionCheckType && t != runEventType && t != agentEventType && (reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
 		return contractNode{}, fmt.Errorf("%v implements a marshaler interface", t)
 	}
 
@@ -125,9 +126,13 @@ func (c *contract) addStruct(t reflect.Type) (string, error) {
 		c.members[name] = reactionCheckMembers()
 		return name, nil
 	}
-	if t == runEventType {
+	if t == runEventType || t == agentEventType {
 		usage, err := c.convert(reflect.TypeFor[tokenInfo]())
-		c.members[name] = runEventMembers(usage)
+		members := runEventMembers(usage)
+		if t == agentEventType {
+			members = slices.Insert(members, 0, contractMember{"dispatch_id", primitive("string", "string"), false})
+		}
+		c.members[name] = members
 		return name, err
 	}
 
@@ -278,6 +283,7 @@ func TestAPIContract(t *testing.T) {
 		reflect.TypeFor[runstats.Report](), reflect.TypeFor[refreshResponse](), reflect.TypeFor[retryNowResponse](), reflect.TypeFor[checkNowResponse](),
 		reflect.TypeFor[acknowledgeResponse](), reflect.TypeFor[errorResponse](),
 		reflect.TypeFor[healthResponse](), reflect.TypeFor[readyResponse](), reflect.TypeFor[runEventsResponse](),
+		agentEventType, reflect.TypeFor[runEndedFrame](), reflect.TypeFor[runResetFrame](),
 	)
 	if err != nil {
 		t.Fatalf("newContract: %v", err)

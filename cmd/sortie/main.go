@@ -912,6 +912,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			TokenRates:       tokenRates,
 			RunHistory:       runHistoryReader{store: store},
 			RunEventsFn:      o.RunEvents,
+			RunEventsAfterFn: o.RunEventsAfter,
 			Stats:            statsSource{dbPath: dbPath, workflowPath: br.path, rates: tokenRates, rateWarnings: rateWarnings}.report,
 		})
 		o.AddObserver(srv)
