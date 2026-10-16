@@ -51,6 +51,10 @@ const (
 		"{{else if eq .Ahead \"run\"}} after the current run ends{{end}}"
 )
 
+// errorDetail ends a run-error sentence with the text the stored error
+// carried, when it carried any.
+const errorDetail = "{{if .Detail}}: {{.Detail}}{{end}}."
+
 // eventMessage appends an event's message to its sentence when it has one.
 const eventMessage = "{{if .Message}}: {{.Message}}{{end}}"
 
@@ -407,6 +411,34 @@ var table = map[string]parts{
 	"event_notification":  {text: "{{.Raw}}"},
 	"event_other_message": {text: "{{.Raw}}"},
 	"event_malformed":     {text: "Sortie could not read a message from the agent" + eventMessage + "."},
+
+	"run_error_absence":      {text: "The agent finished without changing anything, so Sortie did not hand the issue off."},
+	"run_error_undetermined": {text: "Sortie could not tell whether the agent changed anything, so it did not hand the issue off."},
+	"run_error_withheld":     {text: "Sortie did not hand the issue off" + errorDetail},
+
+	"run_error_agent_not_found":       {text: "Sortie could not find the agent command" + errorDetail},
+	"run_error_invalid_workspace_cwd": {text: "The agent could not use the workspace directory" + errorDetail},
+	"run_error_response_timeout":      {text: "The agent did not respond in time" + errorDetail},
+	"run_error_turn_timeout":          {text: "The agent did not finish {{.Turn}} within the turn time limit, so Sortie stopped it."},
+	"run_error_port_exit":             {text: "The agent process ended unexpectedly" + errorDetail},
+	"run_error_response_error":        {text: "The agent returned an error" + errorDetail},
+	"run_error_turn_failed":           {text: "The agent reported that {{.Turn}} failed" + errorDetail},
+	"run_error_turn_cancelled":        {text: "Sortie stopped the session before the agent finished {{if .Start}}starting{{else}}{{.Turn}}{{end}}."},
+	"run_error_turn_input_required":   {text: "The agent stopped {{.Turn}} and asked for input" + errorDetail},
+	"run_error_turn_incomplete":       {text: "The agent ended {{.Turn}} without finishing the task" + errorDetail},
+	"run_error_turn_refused":          {text: "The agent declined to continue {{.Turn}}" + errorDetail},
+	"run_error_turn_outcome_unknown":  {text: "The agent ended {{.Turn}} with an outcome Sortie could not read" + errorDetail},
+	"run_error_turn_token_limit":      {text: "The agent ended {{.Turn}} because a token limit was reached" + errorDetail},
+	"run_error_turn_request_limit":    {text: "The agent ended {{.Turn}} because it used up its request limit" + errorDetail},
+	"run_error_credential_unverified": {text: "The agent could not confirm its credential before the first turn" + errorDetail},
+	"run_error_agent_other":           {text: "The agent reported an error" + errorDetail},
+	"run_error_turn_ended":            {text: "The agent ended {{.Turn}} early{{if .Detail}} ({{.Detail}}){{end}}."},
+	"run_error_stage_stopped":         {text: "Sortie stopped the run while {{.Doing}}."},
+	"run_error_stage_timeout":         {text: "Sortie gave up on {{.Doing}} because it took too long."},
+	"run_error_stage":                 {text: "Sortie hit an error while {{.Doing}}" + errorDetail},
+	"run_error_panic":                 {text: "Sortie hit an internal error while running the agent" + errorDetail},
+	"run_error_stopped":               {text: "Sortie stopped the run before it finished."},
+	"run_error_out_of_time":           {text: "The run ran out of time."},
 
 	"stall_marker": {
 		short: "No events for {{elapsed .Silence}}; Sortie stops it after {{duration .Timeout}}",

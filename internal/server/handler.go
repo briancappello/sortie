@@ -711,7 +711,7 @@ func toRetryEntryResponse(e orchestrator.SnapshotRetryEntry) retryEntryResponse 
 		DispatchedAt:      utcOrNil(e.StageLineage.DispatchedAt),
 		Attempt:           e.Attempt,
 		DueAt:             time.UnixMilli(e.DueAtMS).UTC(),
-		Error:             e.Error,
+		Error:             sentence.RunError(e.Error),
 
 		Trigger:           e.Trigger,
 		ReactionKind:      e.ReactionKind,
