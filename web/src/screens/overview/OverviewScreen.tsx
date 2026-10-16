@@ -53,7 +53,7 @@ function isHistoryUnavailable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 503 && error.code === "history_unavailable";
 }
 
-function endedEmpty(view: OverviewView, endedCount: number): EndedEmpty {
+function endedEmpty(view: OverviewView): EndedEmpty {
   if (view.isHistoryUnavailable) {
     return "unavailable";
   }
@@ -63,7 +63,7 @@ function endedEmpty(view: OverviewView, endedCount: number): EndedEmpty {
   if (view.pages === undefined) {
     return "loading";
   }
-  return endedCount === 0 ? "none" : "all-read";
+  return "none";
 }
 
 interface OverviewBodyProps {
@@ -118,10 +118,12 @@ function OverviewBody({ state }: OverviewBodyProps) {
     () => (view.pages === undefined ? [] : buildEnded(view.pages, view.state)),
     [view.pages, view.state],
   );
-  const endedUnread = useMemo(
+  const endedUnreadIds = useMemo(
     () =>
-      endedAll.filter(
-        (issue) => !view.readSet.has(endedKey(issue.issueId, issue.outcome.observed_at)),
+      new Set(
+        endedAll
+          .filter((issue) => !view.readSet.has(endedKey(issue.issueId, issue.outcome.observed_at)))
+          .map((issue) => issue.issueId),
       ),
     [endedAll, view.readSet],
   );
@@ -138,13 +140,13 @@ function OverviewBody({ state }: OverviewBodyProps) {
         identifier: row.identifier,
         attention: null,
       })),
-      ...endedUnread.map((issue) => ({
+      ...endedAll.map((issue) => ({
         key: endedNavKey(issue.issueId),
         identifier: issue.identifier,
         attention: null,
       })),
     ],
-    [unacknowledged, visibleRows, endedUnread],
+    [unacknowledged, visibleRows, endedAll],
   );
 
   const foundIndex =
@@ -312,8 +314,9 @@ function OverviewBody({ state }: OverviewBodyProps) {
         onOpen={(row) => selectAndOpen(activeNavKey(row.issueId), row.identifier)}
       />
       <EndedToday
-        rows={endedUnread}
-        empty={endedEmpty(view, endedAll.length)}
+        rows={endedAll}
+        unreadIds={endedUnreadIds}
+        empty={endedEmpty(view)}
         tally={tallyText}
         selectedKey={selectedKey}
         showSelection={showSelection}

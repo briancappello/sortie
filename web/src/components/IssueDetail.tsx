@@ -175,16 +175,17 @@ function Actions({ detail, attention = [] }: ActionsProps) {
 }
 
 interface KickerProps {
-  issueKey: string;
   detail: IssueDetailResponse | undefined;
 }
 
-function Kicker({ issueKey, detail }: KickerProps) {
+function Kicker({ detail }: KickerProps) {
   const state = detail?.issue.state;
   const type = detail?.issue.issue_type;
+  if (!state && !type) {
+    return undefined;
+  }
   return (
     <p className="flex flex-wrap items-center gap-x-sm gap-y-xxs text-body-sm text-ink-muted">
-      <span className="text-ink-body tabular-nums">{issueKey}</span>
       {state ? <StateBadge state={state} /> : undefined}
       {type ? <span>{type}</span> : undefined}
     </p>
@@ -345,7 +346,7 @@ function SubHeading({ children }: { children: ReactNode }) {
 }
 
 /**
- * Renders one issue. The page shows the key, state and type over the title,
+ * Renders one issue. The page shows the state and type over the title,
  * the served sentence, the external links, the lane, then the story beside a
  * margin from 1280 px. The peek shows the same head over the facts, what
  * happens next, and the last runs.
@@ -440,7 +441,7 @@ export function IssueDetail({ identifier, row, peek = false }: IssueDetailProps)
 
   return (
     <div className="flex flex-col">
-      <Kicker issueKey={key} detail={data} />
+      <Kicker detail={data} />
       {isGone ? (
         <p className="mt-xs text-body-md text-ink-body">Sortie no longer knows {key}.</p>
       ) : (

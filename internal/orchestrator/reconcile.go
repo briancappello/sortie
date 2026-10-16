@@ -384,12 +384,7 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 	for issueID, entry := range state.Running {
 		entryLog := logging.WithIssue(log, issueID, entry.Identifier)
 
-		refTime := entry.StartedAt
-		if !entry.LastAgentTimestamp.IsZero() {
-			refTime = entry.LastAgentTimestamp
-		}
-
-		elapsedMS := now.Sub(refTime).Milliseconds()
+		elapsedMS := now.Sub(stallReference(entry)).Milliseconds()
 		if elapsedMS <= stallThreshold {
 			continue
 		}

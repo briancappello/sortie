@@ -393,6 +393,8 @@ function dispatch_issue(issue, state, attempt):
     monitor_handle,
     identifier: issue.identifier,
     issue,
+    dispatch_id,                                         // minted per dispatch, never reused
+    events: register_event_buffer(state, dispatch_id),   // bounded buffer of the run's retained agent events (Section 13.9)
     agent_kind,
     template_id,
     rule_name,
@@ -804,7 +806,21 @@ on_worker_exit(issue_id, reason, worker_result, state):
       elif evidence.verdict == "work observed":
         evidence_work_observed = true
 
-  sqlite.persist_run_attempt(running_entry, status, run_error)
+  # A session that failed to start, without a startup_failed event from its
+  # adapter, gets one from Sortie whose message is the start error. A start
+  # that ended in cancellation gets none.
+  if worker_result.startup_error is not null and reason == error
+      and not running_entry.events.has_startup_failed:
+    retain_event(running_entry, startup_failed(worker_result.startup_error))
+
+  # The retained events are stored with the run's row in one transaction.
+  # When only the events fail to store, the row stays and the events are held
+  # in memory for a bounded retry off the event loop (Section 13.9).
+  events_result = sqlite.persist_run_attempt_with_events(running_entry, status, run_error, running_entry.events)
+  if events_result is events_failed:
+    log_warn("failed to persist run events")
+    hold_events_for_retry(running_entry.dispatch_id, running_entry.events)
+  release_event_buffer(state, running_entry.dispatch_id)   // after the write, whatever it returned
 
   # The absence sequence is reconstructed from run_history rather than
   # from a verdict column (Section 19.2), so both steps below follow the

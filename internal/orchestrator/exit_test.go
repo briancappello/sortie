@@ -67,7 +67,7 @@ type recordedStageResult struct {
 
 var _ WorkerExitStore = (*mockExitStore)(nil)
 
-func (m *mockExitStore) AppendRunHistory(_ context.Context, run persistence.RunHistory) (persistence.RunHistory, error) {
+func (m *mockExitStore) AppendRunHistoryWithEvents(_ context.Context, run persistence.RunHistory, _ []persistence.RunEvent, _ persistence.RunEventLimits) (persistence.RunHistory, error) {
 	m.runHistories = append(m.runHistories, run)
 	if m.appendRunHistoryErr != nil {
 		return persistence.RunHistory{}, m.appendRunHistoryErr
@@ -2161,9 +2161,9 @@ func (s *orderRecordingExitStore) UpsertSessionMetadata(ctx context.Context, met
 	return s.mockExitStore.UpsertSessionMetadata(ctx, meta)
 }
 
-func (s *orderRecordingExitStore) AppendRunHistory(ctx context.Context, run persistence.RunHistory) (persistence.RunHistory, error) {
+func (s *orderRecordingExitStore) AppendRunHistoryWithEvents(ctx context.Context, run persistence.RunHistory, events []persistence.RunEvent, limits persistence.RunEventLimits) (persistence.RunHistory, error) {
 	s.callOrder = append(s.callOrder, "AppendRunHistory")
-	return s.mockExitStore.AppendRunHistory(ctx, run)
+	return s.mockExitStore.AppendRunHistoryWithEvents(ctx, run, events, limits)
 }
 
 func TestHandleWorkerExit_SessionExitWriteOrder(t *testing.T) {

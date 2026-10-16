@@ -61,6 +61,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The dashboard has a Pipeline screen that draws every active issue, and every issue that ended today, as a lane across the same stations, from the tracker through the agent and the handoff state to each pull request reaction and the end: how many issues stand at each station, how long each has stood at its own, which reactions wait or escalated, and how far a chained issue has come through its stages. Issues that need a person stand out, a busy day folds the lanes into one line per station, `L` switches between Overview and Pipeline, and each run on `/api/v1/runs` now names the stage chain its rule stands on. ([#1298](https://github.com/sortie-ai/sortie/issues/1298))
 
+- The JSON API now keeps what each agent run did: `/api/v1/{identifier}` lists the latest 50 agent events of the issue's running or latest run, each with a plain English sentence, including why a session failed to start, and the new `/api/v1/runs/{dispatch_id}/events` lists every event Sortie kept for a run, for at least 365 days after it ends and within 2 GiB across all runs. Each running issue also shows when its agent last sent an event and when Sortie stops it as stalled under `agent.stall_timeout_ms`, or that it will not when stall detection is off. ([#1307](https://github.com/sortie-ai/sortie/issues/1307))
+
 ### Changed
 
 - The JSON API now reports a budget-held issue's unset token and session limits as `null` instead of `0`, and its token count as `null` when its sessions reported no token usage, as it does for running issues; the budget-hold comment and its Slack and webhook messages show that count as "not measured" instead of `0`, and put "at least" before a count that leaves out unreported spend. ([#1315](https://github.com/sortie-ai/sortie/issues/1315))
@@ -130,6 +132,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add the `attention_acknowledgements` table, which keeps each acknowledged item's acknowledgement for as long as its cause lasts. ([#1303](https://github.com/sortie-ai/sortie/issues/1303))
 
 - Add an index on `run_history` by the qualified issue key (`owner/repo#9`), so filtering run history by that key does not scan every run. Sortie builds it on the first start after the upgrade, which takes longer on a long history. ([#1299](https://github.com/sortie-ai/sortie/issues/1299))
+
+- Add `dispatch_id` to `run_history` and the `run_events` and `run_events_total` tables, which hold each finished run's agent events and their stored size. A run recorded before the upgrade has no dispatch ID and no retained events. ([#1307](https://github.com/sortie-ai/sortie/issues/1307))
 
 ## [1.27.0] - 2026-10-11
 

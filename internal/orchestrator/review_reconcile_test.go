@@ -368,6 +368,10 @@ func (s *fingerprintModelStore) storedIDs(issueID, kind string) []string {
 	return slices.Sorted(maps.Keys(s.rows[ReactionKey(issueID, kind)]))
 }
 
+func (s *fingerprintModelStore) AppendRunHistoryWithEvents(_ context.Context, run persistence.RunHistory, _ []persistence.RunEvent, _ persistence.RunEventLimits) (persistence.RunHistory, error) {
+	return run, nil
+}
+
 func (s *fingerprintModelStore) CountRunHistoryByIssue(context.Context, string) (int, error) {
 	return 0, nil
 }

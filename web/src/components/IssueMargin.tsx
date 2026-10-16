@@ -39,6 +39,7 @@ import type {
 } from "@/api/types.gen";
 import type { BudgetLine } from "@/lib/budget";
 import type { StagePosition } from "@/lib/lane";
+import type { Mark } from "@/lib/run-status";
 
 const HEAD_LENGTH = 7;
 
@@ -192,6 +193,34 @@ function triesText(row: PendingReactionResponse): string | undefined {
     : `${row.used_attempts} of ${row.max_attempts} fixes used`;
 }
 
+/** Words where a watch stands, from its last check, and the mark that word carries. */
+function watchState(
+  row: PendingReactionResponse,
+  detail: IssueDetailResponse,
+): { word: string; mark: Mark } {
+  const check = row.last_check;
+  if (detail.running?.reaction_kind === row.kind) {
+    return { word: "fixing", mark: "running" };
+  }
+  switch (row.kind) {
+    case "ci":
+      if (check?.status === "failing") return { word: "failed", mark: "failed" };
+      if (check?.status === "passing") return { word: "passed", mark: "succeeded" };
+      break;
+    case "review":
+    case "bot-review":
+      if (row.wait === "debounce") return { word: "comments arriving", mark: "waiting" };
+      if ((check?.actionable_comments ?? 0) > 0) {
+        return { word: "comments to answer", mark: "waiting" };
+      }
+      break;
+    case "merge-conflict":
+      if (check?.mergeable === false) return { word: "conflict", mark: "failed" };
+      break;
+  }
+  return { word: "waiting", mark: "waiting" };
+}
+
 interface ReactionLineProps {
   row: PendingReactionResponse;
   detail: IssueDetailResponse;
@@ -202,16 +231,19 @@ function ReactionLine({ row, detail, state }: ReactionLineProps) {
   const actions = useIssueActions();
   const label = reactionLabel(row.config_key);
   const tries = triesText(row);
-  const mark =
+  const watch =
     row.escalated_at === null
-      ? "waiting"
-      : rowMark("pending_reactions", detail.issue_id, state?.attention ?? []).mark;
+      ? watchState(row, detail)
+      : {
+          word: "escalated",
+          mark: rowMark("pending_reactions", detail.issue_id, state?.attention ?? []).mark,
+        };
 
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm gap-y-xxs border-t border-line py-xs first:border-t-0">
       <StatusMark
-        mark={mark}
-        label={<ServedText text={row.status_text} />}
+        mark={watch.mark}
+        label={`${label}: ${watch.word}`}
         className="items-start text-body-md font-medium text-ink"
       />
       <span className="text-body-sm whitespace-nowrap text-ink-muted tabular-nums">
@@ -225,7 +257,7 @@ function ReactionLine({ row, detail, state }: ReactionLineProps) {
       <div className="col-span-2 pl-[calc(var(--size-icon)+var(--spacing-xs))]">
         <EffectButton
           label="Check now"
-          effect={`Checks ${label} on #${row.pull_request.number} now instead of at ${fmtClock(row.next_poll_at)}`}
+          effect={`Checks ${label} now instead of at ${fmtClock(row.next_poll_at)}`}
           isDisabled={actions.isChecking(detail.issue_identifier, row.kind)}
           onActivate={() => actions.checkNow(detail.issue_identifier, row.kind)}
         />

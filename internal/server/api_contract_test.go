@@ -23,6 +23,7 @@ var updateContract = flag.Bool("update", false, "rewrite the generated API contr
 var (
 	timeType          = reflect.TypeFor[time.Time]()
 	reactionCheckType = reflect.TypeFor[reactionCheckResponse]()
+	runEventType      = reflect.TypeFor[runEventResponse]()
 	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
 	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
 )
@@ -77,7 +78,7 @@ func (c *contract) convert(t reflect.Type) (contractNode, error) {
 	if t == timeType {
 		return dateTime, nil
 	}
-	if t != reactionCheckType && (reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
+	if t != reactionCheckType && t != runEventType && (reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)) {
 		return contractNode{}, fmt.Errorf("%v implements a marshaler interface", t)
 	}
 
@@ -124,6 +125,11 @@ func (c *contract) addStruct(t reflect.Type) (string, error) {
 		c.members[name] = reactionCheckMembers()
 		return name, nil
 	}
+	if t == runEventType {
+		usage, err := c.convert(reflect.TypeFor[tokenInfo]())
+		c.members[name] = runEventMembers(usage)
+		return name, err
+	}
 
 	fields, err := jsonFields(t)
 	if err != nil {
@@ -157,6 +163,22 @@ func reactionCheckMembers() []contractMember {
 		{"actionable_comments", num, true},
 		{"new_comments", num, true},
 		{"mergeable", nullable(primitive("boolean", "boolean")), true},
+	}
+}
+
+func runEventMembers(usage contractNode) []contractMember {
+	str, num := primitive("string", "string"), primitive("number", "integer")
+	return []contractMember{
+		{"seq", num, false},
+		{"at", dateTime, false},
+		{"event", str, false},
+		{"message", str, false},
+		{"text", str, false},
+		{"session_id", str, true},
+		{"tool_name", str, true},
+		{"duration_ms", num, true},
+		{"tool_error", primitive("boolean", "boolean"), true},
+		{"usage", nullable(usage), true},
 	}
 }
 
@@ -255,7 +277,7 @@ func TestAPIContract(t *testing.T) {
 		reflect.TypeFor[stateResponse](), reflect.TypeFor[issueDetailResponse](), reflect.TypeFor[runsResponse](), reflect.TypeFor[issueGroupsResponse](),
 		reflect.TypeFor[runstats.Report](), reflect.TypeFor[refreshResponse](), reflect.TypeFor[retryNowResponse](), reflect.TypeFor[checkNowResponse](),
 		reflect.TypeFor[acknowledgeResponse](), reflect.TypeFor[errorResponse](),
-		reflect.TypeFor[healthResponse](), reflect.TypeFor[readyResponse](),
+		reflect.TypeFor[healthResponse](), reflect.TypeFor[readyResponse](), reflect.TypeFor[runEventsResponse](),
 	)
 	if err != nil {
 		t.Fatalf("newContract: %v", err)

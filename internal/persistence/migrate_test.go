@@ -241,6 +241,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"session_id", "TEXT", false, 0},
 				{"ssh_host", "TEXT", false, 0},
 				{"first_after_hop", "INTEGER", true, 0},
+				{"dispatch_id", "TEXT", false, 0},
 			},
 		},
 		{

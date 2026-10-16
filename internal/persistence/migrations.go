@@ -116,6 +116,9 @@ var migration034SQL string
 //go:embed sql/035_run_history_display_identifier_index.sql
 var migration035SQL string
 
+//go:embed sql/036_run_events.sql
+var migration036SQL string
+
 var migrations = []Migration{
 	{Version: 1, Description: "core persistence tables", SQL: migration001SQL},
 	{Version: 2, Description: "extended token metrics", SQL: migration002SQL},
@@ -152,4 +155,5 @@ var migrations = []Migration{
 	{Version: 33, Description: "reaction escalation records", SQL: migration033SQL},
 	{Version: 34, Description: "attention acknowledgements", SQL: migration034SQL},
 	{Version: 35, Description: "display_identifier index on run_history", SQL: migration035SQL},
+	{Version: 36, Description: "dispatch ID on run history and retained run events", SQL: migration036SQL},
 }

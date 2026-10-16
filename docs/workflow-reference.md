@@ -525,7 +525,7 @@ agent:
 | `command`                        | string (argument vector) or list of strings | Only when the default kind has no default command | Adapter-defined | Future dispatches                          | Command to launch the agent, for the default kind: `dispatch.default.agent` when set, otherwise `agent.kind`. It applies to adapters that run as a local subprocess (`claude-code`, `copilot-cli`, `codex`, `opencode`, and `agent-client-protocol`). Every one of them except `agent-client-protocol` has a default command of its own, so you can leave `command` out for it; `agent-client-protocol` has none, so it needs `command`. A kind other than the default kind always launches its own default command and never reads this field. Written as a string, the value is split on whitespace into an argument vector when the agent runs locally and run without a shell, so shell syntax is not interpreted and `~` and `$VAR` are not expanded; when `worker.ssh_hosts` sends the agent to a remote host, the string is passed to the remote shell unsplit. Written as a list, element zero is the program and each later element is one argument, passed exactly as written: nothing splits, expands, or quotes it locally, and over SSH each element reaches the remote shell as one word. Use the list form when the program path or an argument contains a space. The list must not be empty, and every element must be a non-empty string. Sortie waits for the agent it starts and talks to it, so a string value ending in `&` detaches the agent and the session cannot work. Adapters that do not start a local process ignore this field. |
 | `turn_timeout_ms`                | integer                           | No                                  | `3600000` (1h)  | Future worker attempts                     | Wall-clock bound on a single agent turn, enforced by the orchestrator. Must be positive.                                                                                         |
 | `read_timeout_ms`                | integer                           | No                                  | `5000` (5s)     | Future worker attempts                     | Request/response timeout during startup and synchronous operations. A wait that ends only once the model starts answering is the larger of this value and 60 seconds: the Agent Client Protocol adapter's `initialize` wait, since a runtime may establish its credential with its backend before answering, and the `opencode` wait for a turn's first output, since OpenCode prints nothing until the model answers. Neither fails a healthy run at a short configured value.                                                                                                              |
-| `stall_timeout_ms`               | integer                           | No                                  | `300000` (5m)   | **Immediate**, in-flight sessions included | Inactivity timeout: each poll tick stops a session that has emitted no agent event for longer than this, measured from its last event or, before the first, from its start. Set to `0` or negative to **disable** stall detection. |
+| `stall_timeout_ms`               | integer                           | No                                  | `300000` (5m)   | **Immediate**, in-flight sessions included | Inactivity timeout: each poll tick stops a session that has emitted no agent event for longer than this, measured from its last event or, before the first, from its start. Set to `0` or negative to **disable** stall detection. While it is on, running rows of the JSON API serve `quiet_at` and `stall_at` from it. |
 | `stop_grace_ms`                  | integer                           | No                                  | `5000` (5s)     | Future worker attempts                     | The period an adapter waits, after sending a catchable termination signal, for the agent to exit on its own before it force-terminates the process group. Must be positive; overridable through `SORTIE_AGENT_STOP_GRACE_MS`. In `claude-code`, `copilot-cli`, and `opencode`, the same value also bounds a cancelled turn's escalation to a force kill; `mock` launches no process, so it has no such period. The per-session stop deadline derives from this field alone, no longer from `agent.read_timeout_ms`, which shortens that deadline for a deployment that had set `read_timeout_ms` above `20000`. Raising this field also lengthens graceful shutdown by the same amount: a session still stopping when Sortie is asked to shut down is waited for rather than abandoned, and at the default the worker drain alone is 50s. A second Ctrl-C during shutdown ends every remaining shutdown wait at once, so a raised grace never strands the operator without an escape. |
 | `max_concurrent_agents`          | integer or string integer         | No                                  | `10`            | **Yes** — affects subsequent dispatch      | Global concurrency limit across all issues.                                                                                                                                      |
 | `max_turns`                      | integer                           | No                                  | `20`            | Future dispatches                          | Maximum coding-agent turns per worker session. The worker re-checks tracker state after each turn and starts another turn if the issue is still active, up to this limit.        |
@@ -1903,8 +1903,9 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, one entry per active issue in a stable order, the list of what needs a person, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
+| GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
 | GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count and the runs grouped by retry trigger and by what started them, priced at the `token_rates` the process started with. |
-| GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, and lists what Sortie does next for it as condition and sentence pairs. Returns 404 only when neither the current state nor run history knows the identifier. |
+| GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, lists what Sortie does next for it as condition and sentence pairs, and lists the latest 50 agent events of its running or latest run as `recent_events`. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
 | POST   | `/api/v1/attention/{id}/acknowledge` | Record that a person has seen an item that needs a person: it leaves the attention count and stays listed with the time it was acknowledged until its cause clears, and a new cause shows as a new item. Changes nothing in the tracker or the pull request. Returns 200 OK, 404 when no current item has the ID, and 409 Conflict during graceful shutdown. Every 200 and 409 response says in one sentence what it did. |
@@ -1999,7 +2000,13 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "last_message": "",
       "started_at": "2026-02-24T20:10:12Z",
       "dispatched_at": "2026-02-24T19:58:40Z",
+      "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
       "last_event_at": "2026-02-24T20:14:59Z",
+      "quiet_at": "2026-02-24T20:17:29Z",
+      "stall_at": "2026-02-24T20:19:59Z",
+      "stall_text": null,
+      "stall_text_full": null,
+      "stall_off_text": null,
       "workspace_path": "/tmp/sortie_workspaces/MT-649",
       "tokens": {
         "input_tokens": 1200,
@@ -2054,7 +2061,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "issue_estimated_cost_usd": 0.235095,
       "issue_cost_status": "estimated",
       "status_text": "Fixing CI on #927, fix 1 of 2",
-      "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2."
+      "status_text_full": "Fixing CI on PR #927, fix 1 of 2."
     }
   ],
   "retrying": [
@@ -2087,7 +2094,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       },
       "paused": false,
       "status_text": "Retry 3 in 30s: no agent slot was free",
-      "status_text_full": "MT-650's retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
+      "status_text_full": "The retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
     }
   ],
   "budget_exhausted": [
@@ -2114,7 +2121,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "agent_kind": "claude-code",
       "configured_model": "claude-sonnet-4-20250514",
       "status_text": "Held: session budget reached",
-      "status_text_full": "MT-651 is held at its session budget of 3. Sessions used: 3."
+      "status_text_full": "Held at the session budget of 3. Sessions used: 3."
     }
   ],
   "parked": [
@@ -2137,7 +2144,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "agent_kind": "claude-code",
       "configured_model": "claude-sonnet-4-20250514",
       "status_text": "Parked: the agent needs a person",
-      "status_text_full": "MT-652 is parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
+      "status_text_full": "Parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
     }
   ],
   "pending_reactions": [
@@ -2181,7 +2188,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "agent_kind": "claude-code",
       "configured_model": "claude-sonnet-4-20250514",
       "status_text": "CI escalated on #931",
-      "status_text_full": "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
+      "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
     },
     {
       "issue_id": "mno345",
@@ -2218,7 +2225,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "agent_kind": "claude-code",
       "configured_model": "claude-sonnet-4-20250514",
       "status_text": "1 new review comment on #931; next check in 35s",
-      "status_text_full": "MT-653 has 1 new review comment on PR #931 (3 actionable) and waits for the comments to settle; next check in 35s. Review fix runs used: 1 of 3."
+      "status_text_full": "Waiting for 1 new review comment on PR #931 (3 actionable) to settle; next check in 35s. Review fix runs used: 1 of 3."
     }
   ],
   "between_stages": [
@@ -2245,7 +2252,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "agent_kind": "claude-code",
       "configured_model": "claude-sonnet-4-20250514",
       "status_text": "Between stages: specify to implement",
-      "status_text_full": "MT-654 moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
+      "status_text_full": "Moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
     }
   ],
   "active": [
@@ -2261,7 +2268,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:20:00Z",
       "status_text": "Held: session budget reached",
-      "status_text_full": "MT-651 is held at its session budget of 3. Sessions used: 3."
+      "status_text_full": "Held at the session budget of 3. Sessions used: 3."
     },
     {
       "issue_id": "jkl012",
@@ -2275,7 +2282,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:40:12Z",
       "status_text": "Parked: the agent needs a person",
-      "status_text_full": "MT-652 is parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
+      "status_text_full": "Parked: the agent stopped because it cannot go on without a person. Parking label: `needs-human`."
     },
     {
       "issue_id": "def456",
@@ -2294,7 +2301,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:41:05Z",
       "status_text": "Retry 3 in 30s: no agent slot was free",
-      "status_text_full": "MT-650's retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
+      "status_text_full": "The retry came due and was not dispatched: no agent slot was free. Retry 3 in 30s."
     },
     {
       "issue_id": "pqr678",
@@ -2313,7 +2320,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:47:30Z",
       "status_text": "Between stages: specify to implement",
-      "status_text_full": "MT-654 moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
+      "status_text_full": "Moved from stage specify to stage implement, and Sortie added `stage-implement`; implement starts when a poll tick reads that label on the issue."
     },
     {
       "issue_id": "mno345",
@@ -2328,7 +2335,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "reaction_kind": "ci",
       "dispatched_at": "2026-02-24T19:52:10Z",
       "status_text": "CI escalated on #931",
-      "status_text_full": "MT-653: Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
+      "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."
     },
     {
       "issue_id": "abc123",
@@ -2347,7 +2354,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "configured_model": "claude-sonnet-4-20250514",
       "dispatched_at": "2026-02-24T19:58:40Z",
       "status_text": "Fixing CI on #927, fix 1 of 2",
-      "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2."
+      "status_text_full": "Fixing CI on PR #927, fix 1 of 2."
     }
   ],
   "attention": [
@@ -2377,8 +2384,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "issue_title": "Rotate the signing keys",
       "issue_url": "https://tracker.example.com/browse/MT-652",
       "reason_text": "Parked: the agent needs a person",
-      "why_text": "The agent stopped because it cannot go on without a person, so Sortie parked MT-652 under the label `needs-human`.",
-      "clears_text": "Clears when a poll tick finds `needs-human` removed from MT-652, or MT-652 moved out of In Progress.",
+      "why_text": "The agent stopped because it cannot go on without a person, so Sortie parked the issue under the label `needs-human`.",
+      "clears_text": "Clears when a poll tick finds `needs-human` removed from the issue, or the issue moved out of In Progress.",
       "action": {"kind": "open_issue", "url": "https://tracker.example.com/browse/MT-652"},
       "evidence": {
         "reason": "agent_blocked",
@@ -2396,8 +2403,8 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "issue_title": "Migrate the billing tables",
       "issue_url": "https://tracker.example.com/browse/MT-651",
       "reason_text": "Session budget reached",
-      "why_text": "MT-651 has used 3 sessions of its budget of 3.",
-      "clears_text": "Clears on the next poll tick after `agent.max_sessions` is raised above 3 or is removed, or after MT-651 leaves the active tracker states.",
+      "why_text": "The issue has used 3 sessions of its budget of 3.",
+      "clears_text": "Clears on the next poll tick after `agent.max_sessions` is raised above 3 or is removed, or after the issue leaves the active tracker states.",
       "action": {"kind": "acknowledge"},
       "evidence": {
         "reason": "session_budget",
@@ -2417,7 +2424,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "issue_url": "https://tracker.example.com/browse/MT-653",
       "reason_text": "CI escalated on #931",
       "why_text": "Sortie escalated failing CI on PR #931 after 2 of 2 CI fixes; the latest check found Test failing.",
-      "clears_text": "Clears when a check of PR #931 passes, a new commit lands on it, it merges or closes, `reactions.ci_failure.max_retries` rises above 2, or MT-653 reaches a terminal tracker state or leaves In Review.",
+      "clears_text": "Clears when a check of PR #931 passes, a new commit lands on it, it merges or closes, `reactions.ci_failure.max_retries` rises above 2, or the issue reaches a terminal tracker state or leaves In Review.",
       "action": {"kind": "open_pull_request", "url": "https://github.com/acme/web/pull/931"},
       "evidence": {
         "reaction_kind": "ci",
@@ -2508,6 +2515,12 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `issue_type`              | string or absent  | The tracker's issue type, as read at dispatch. Omitted when the tracker returned none. Masked like `issue_title`. |
 | `state`                   | string            | The tracker state of the issue as Sortie last read it for the session. Masked like `issue_title`. |
 | `dispatched_at`           | string            | When Sortie dispatched the first run of the issue's current pass, as an RFC 3339 timestamp in UTC. A pass is the runs that share a stage chain identifier: a dispatch that no stage hop reached starts one, and the next stage after a hop, a retry, a reaction continuation, and a restart continue it. So the first run of a pass reads the same as its `started_at`, and every later run reads an earlier time. Always present, never `null`. `active` serves the issues in a stable order, so a client that shows one line per issue keeps that order. A client that orders the rows of one list by `dispatched_at` places a `null` before every timestamp and breaks ties, which rows dispatched in one poll tick can share, by `issue_identifier`, then `issue_id`. |
+| `dispatch_id`             | string            | The dispatch ID Sortie minted for the run, never reused, across restarts included. It keys the run's agent events: [`GET /api/v1/runs/{dispatch_id}/events`](#get-apiv1runsdispatch_idevents-run-events) serves them. Always present, never empty. |
+| `last_event_at`           | string or `null`  | When the session's latest agent event arrived, in UTC. Liveness pings and events that are not retained count. `null` before the first event. |
+| `quiet_at`                | string or `null`  | Half of `agent.stall_timeout_ms` after `last_event_at`, else after `started_at`, in UTC. `null` when stall detection is off. |
+| `stall_at`                | string or `null`  | All of `agent.stall_timeout_ms` after `last_event_at`, else after `started_at`, in UTC: the instant after which the next poll tick stops the session as stalled. `null` when stall detection is off. |
+| `stall_text`, `stall_text_full` | string or `null` | The short and long sentence that states the silence and the timeout, such as `No events for 2m; Sortie stops it after 5m`. The silence is rounded down, so the sentence is true when served and stays true until the next event. `null` until `generated_at` reaches `quiet_at`, and while stall detection is off. A client refetches at `quiet_at` to get it. |
+| `stall_off_text`          | string or `null`  | The sentence that says stall detection is off and Sortie will not stop the session as stalled. `null` while stall detection is on, so it is non-`null` exactly when `quiet_at` is `null`. |
 | `ssh_host`                | string or absent  | The SSH host the session runs on. Omitted for a local session. |
 | `workflow_file`           | string or absent  | Base filename of the `WORKFLOW.md` in force at dispatch. Omitted when unset. |
 | `agent_kind`              | string or absent  | The agent kind the session runs, from the configuration in force at dispatch. Omitted when unset. |
@@ -2841,6 +2854,7 @@ A sentence says in plain English what the issue is doing, what it waits on, or h
 - Sentences are English. Sortie renders them on each request from the snapshot, the `config` the response serves, and run history, and stores none. A relative time such as "in 40s" is measured from `generated_at`.
 - A sentence states only a fact Sortie records for the row, in `config`, or in run history. A figure Sortie does not have reads as not measured, never as zero, and a figure that is only a lower bound reads as at least.
 - A sentence states no cost and no clock time or date, and uses stage wording only when the workflow has stage chains.
+- A sentence does not repeat what the response carrying it already shows: `status_text_full` never names the issue key. Neither do a next outcome or an attention item's `why_text` and `clears_text`; only an operator action's `outcome_text` names the issue.
 - A sentence is masked like `issue_title`, so a value registered as a secret after it was stored is masked too.
 - A sentence that fails to render is served as `Status not available`, and Sortie logs the failure.
 - Every structured field a sentence is built from stays served. A client that needs data reads the fields and does not parse the text.
@@ -2953,7 +2967,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
   "issue_id": "abc123",
   "status": "running",
   "status_text": "Fixing CI on #927, fix 1 of 2",
-  "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2.",
+  "status_text_full": "Fixing CI on PR #927, fix 1 of 2.",
   "next_outcomes": [],
   "issue": {
     "title": "Fix the flaky login test",
@@ -2981,7 +2995,13 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     "dispatched_at": "2026-02-24T19:58:40Z",
     "last_event": "turn_completed",
     "last_message": "Working on tests",
+    "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
     "last_event_at": "2026-02-24T20:14:59Z",
+    "quiet_at": "2026-02-24T20:17:29Z",
+    "stall_at": "2026-02-24T20:19:59Z",
+    "stall_text": null,
+    "stall_text_full": null,
+    "stall_off_text": null,
     "workspace_path": "/tmp/sortie_workspaces/MT-649",
     "tokens": {
       "input_tokens": 1200,
@@ -3033,7 +3053,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     "issue_estimated_cost_usd": 0.235095,
     "issue_cost_status": "estimated",
     "status_text": "Fixing CI on #927, fix 1 of 2",
-    "status_text_full": "MT-649 is fixing CI on PR #927, fix 1 of 2."
+    "status_text_full": "Fixing CI on PR #927, fix 1 of 2."
   },
   "retry": null,
   "budget_exhausted": null,
@@ -3111,7 +3131,39 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     },
     "issue_outcome": null
   },
-  "recent_events": [],
+  "recent_events": [
+    {
+      "seq": 41,
+      "at": "2026-02-24T20:14:31Z",
+      "event": "tool_result",
+      "message": "",
+      "tool_name": "Bash",
+      "duration_ms": 2400,
+      "tool_error": false,
+      "text": "Ran Bash in 2.4s."
+    },
+    {
+      "seq": 42,
+      "at": "2026-02-24T20:14:52Z",
+      "event": "turn_completed",
+      "message": "",
+      "usage": {
+        "input_tokens": 1200,
+        "output_tokens": 800,
+        "total_tokens": 2000,
+        "cache_read_tokens": 400,
+        "cache_write_tokens": 100
+      },
+      "text": "Turn completed."
+    },
+    {
+      "seq": 43,
+      "at": "2026-02-24T20:14:59Z",
+      "event": "notification",
+      "message": "Working on tests",
+      "text": "Working on tests"
+    }
+  ],
   "last_error": null,
   "tracked": {}
 }
@@ -3131,6 +3183,8 @@ The `running` object uses the same per-session field schema as `GET /api/v1/stat
 | `between_stages`                                 | `title`, `url`, `issue_type`, `labels`, and `state` of the issue's row |
 | `history`                                        | `title` and `url` of the issue's newest run, each omitted when empty |
 
+`recent_events` is present on every `200` response: the newest 50 agent events of one run, oldest first, in the event shape of [`GET /api/v1/runs/{dispatch_id}/events`](#get-apiv1runsdispatch_idevents-run-events). The run is the issue's running run, the one `running.dispatch_id` names; otherwise the issue's newest run in run history that has a dispatch ID, so the recorded CI result, which has none, is passed over. It is `[]` when the issue has no such run or the run's events are not retained. The route serves 50 events so a client can refetch it often; the run-events route serves all of them.
+
 `next_outcomes` is present on every `200` response: a list of condition and sentence pairs that say what Sortie does next for the issue, with the exit of the work session first, then the retry or the wait for a stage label, then the pending reactions. It is `[]` when no pair applies, as in the example above, where a running CI fix has no pending reaction. A `history` response serves `[]`.
 
 **Next outcome fields:**
@@ -3145,6 +3199,7 @@ The rules are the same for every pair:
 - Sentences are English. Sortie renders them on each request from the snapshot, the `config` that `GET /api/v1/state` serves, and run history, and stores none. Each is masked like `issue_title`, and a sentence states no cost and no clock time or date.
 - The list follows the workflow in effect. Its pairs come from the exit of the issue's work session, its retry, its wait for a stage label, and each pending reaction of the issue. A running reaction continuation or label command run contributes no exit pair, because the issue's pending reactions say what follows it. A held or finished issue lists only the pairs of its pending reactions.
 - A pair never names a reaction that `config` lacks or a stage the workflow's rules do not hold, and uses stage wording only when the workflow has stage chains.
+- A pair calls the pull request it watches "the pull request", and names it by number only when the issue's pending reactions watch more than one pull request.
 - The condition of a watched reaction is worded as what a check finds, and carries the time left in which a check can still lead to the outcome, measured from `generated_at`. A reaction with no time left yields no pair.
 - An outcome that starts a session says so when the session budget or the token budget would stop it, and names the hold. An outcome that a configured triage command replaces says that the triage command runs, and an outcome that a spent fix count replaces says that Sortie escalates.
 - The list is not exhaustive. It leaves out what the configuration does not decide: a stop the agent requests, a person's tracker or pull request edit other than a label command, a failed tracker, forge, or store call, a withheld handoff and the park it leads to, and a wait for a free agent slot.
@@ -3156,7 +3211,7 @@ For a work session of `MT-654` on the `specify` stage, whose rule names `impleme
 {
   "next_outcomes": [
     {"condition": "If the run succeeds", "text": "Sortie adds `stage-implement`, and a poll tick then starts stage implement in a new session."},
-    {"condition": "If the run fails", "text": "Sortie retries MT-654 with exponential backoff."}
+    {"condition": "If the run fails", "text": "Sortie retries with exponential backoff."}
   ]
 }
 ```
@@ -3238,6 +3293,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
       "reaction_config_key": "ci_failure",
       "session_id": "thread-1-turn-1",
       "ssh_host": "",
+      "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
       "stage_chain": ["specify", "implement", "review"],
       "issue_outcome": {
         "kind": "merged",
@@ -3245,7 +3301,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
         "merge_path": "auto_merge",
         "pull_request": {"number": 936, "repository": "acme/web"},
         "status_text": "Merged #936",
-        "status_text_full": "MT-649 ended merged: auto-merge merged PR #936."
+        "status_text_full": "Ended merged: auto-merge merged PR #936."
       }
     }
   ],
@@ -3291,10 +3347,11 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `reaction_config_key`    | string or `null`   | The key of the `reactions` section of `WORKFLOW.md` that `reaction_kind` is configured under. `""` or `null` exactly when `reaction_kind` is. |
 | `session_id`             | string or `null`   | The agent session the run used, `""` when it started none, `null` when not recorded. Not masked. |
 | `ssh_host`               | string or `null`   | The SSH worker the run executed on, `""` for a local run, `null` when not recorded. |
+| `dispatch_id`            | string or `null`   | The dispatch ID of the run, the key of its agent events on [`GET /api/v1/runs/{dispatch_id}/events`](#get-apiv1runsdispatch_idevents-run-events). `""` on the recorded CI result, which no dispatch produced, and `null` for a run recorded before the dispatch ID existed. A run with either has no retained events. |
 | `stage_chain`            | array of strings or `null` | The stage chain the run's rule stands on, as the rule names of the chain in `next` order. It is the chain `stage_position.chain` serves for the run's `rule_name` and `stage_previous`, and it follows the configuration in effect, so a reload that edits the chains changes it for runs recorded before the reload. Always present. `null` when the run has no `rule_name`, when its rule is on no chain, and when the server holds no workflow shape. Not masked. On the per-issue response, `history.last_stage.chain` equals the `stage_chain` of the deciding run. |
 | `issue_outcome`          | object or `null`   | How the issue's latest work ended, as Sortie observed it, or `null` when Sortie observed no ending since it last picked the issue up, or when the issue ended before outcomes were recorded. Always present. It belongs to the issue, so every run of one issue carries the same object, and it is served as recorded whatever the issue's live state. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is when Sortie made or observed the ending, in UTC. `state` is present for `handed_off` and `terminal`: the state the handoff wrote, or the terminal state Sortie read. `merge_path` and `pull_request` are present for `merged`: `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key that observed the merge, and `pull_request` holds `number` and `repository`. `state` and `repository` are masked like `issue_title`. `status_text` and `status_text_full` are always present: the sentence of how the issue ended, worded from the outcome alone, so a stage hop that was not made appears only in the top-level pair of a `history` response. |
 
-The recorded CI result of a failing check is a run with `status` `ci_failed`, no agent kind, and `""` in each origin key, because it records a verdict and nothing started it.
+The recorded CI result of a failing check is a run with `status` `ci_failed`, no agent kind, and `""` in each origin key and in `dispatch_id`, because it records a verdict and nothing started it.
 
 **Errors:**
 
@@ -3334,14 +3391,14 @@ A group is one issue with at least one run that matches `rule`, `status`, and `s
       "issue_url": "https://github.com/acme/web/issues/9",
       "status": "history",
       "status_text": "Merged #936",
-      "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936.",
+      "status_text_full": "Ended merged: auto-merge merged PR #936.",
       "issue_outcome": {
         "kind": "merged",
         "observed_at": "2026-02-24T21:02:10Z",
         "merge_path": "auto_merge",
         "pull_request": {"number": 936, "repository": "acme/web"},
         "status_text": "Merged #936",
-        "status_text_full": "acme/web#9 ended merged: auto-merge merged PR #936."
+        "status_text_full": "Ended merged: auto-merge merged PR #936."
       },
       "runs": [
         {
@@ -3416,6 +3473,70 @@ Sortie reads the state before run history, as the per-issue route does, so a run
 A client that disconnects gets no response, and the reads stop.
 
 The route reads through the connection the orchestrator uses. One statement selects the page's groups and stops once it holds them, and Sortie reads each served issue's runs, newest run, and totals only after that statement closes, through an index on the issue ID. An `issue` key resolves through the indexes on the identifier and on the display identifier. A filter that matches few runs on a long history reads down to the start of run history, so a narrow filter takes longer than a page of recent issues.
+
+#### `GET /api/v1/runs/{dispatch_id}/events`: run events
+
+Returns the agent events Sortie retained for one run, oldest first. `{dispatch_id}` is the `dispatch_id` of a running row or of a run, one path segment. The route ignores the query string.
+
+A running run keeps its newest 1,000 retained events, within 256 KiB, in memory, so a very long run serves `first_seq` above `1`. At worker exit the events are written with the run's history row, and a finished run's events stay readable for at least 365 days after it ends, within 2 GiB across all runs. A write can fail while the run's history row succeeds; Sortie then retries the events from memory up to five times, 4 to 64 seconds apart, and until one retry succeeds, and after Sortie restarts, the run answers `404`. Liveness pings, `token_usage` events, and an event that repeats the newest retained notification, other message, or malformed message are not retained.
+
+```json
+{
+  "dispatch_id": "RLQFSIOFERWGDW2HZY45W55VXK",
+  "first_seq": 41,
+  "events": [
+    {
+      "seq": 41,
+      "at": "2026-02-24T20:14:31Z",
+      "event": "tool_result",
+      "message": "",
+      "tool_name": "Bash",
+      "duration_ms": 2400,
+      "tool_error": false,
+      "text": "Ran Bash in 2.4s."
+    },
+    {
+      "seq": 42,
+      "at": "2026-02-24T20:14:52Z",
+      "event": "turn_completed",
+      "message": "",
+      "usage": {
+        "input_tokens": 1200,
+        "output_tokens": 800,
+        "total_tokens": 2000,
+        "cache_read_tokens": 400,
+        "cache_write_tokens": 100
+      },
+      "text": "Turn completed."
+    }
+  ]
+}
+```
+
+`first_seq` is the `seq` of the first event served, `null` when `events` is `[]`, which only a running run that has retained no event yet serves. A value above `1` says earlier events were evicted.
+
+**Event members:**
+
+| Member | Present on | Value |
+| ------ | ---------- | ----- |
+| `seq` | every event | The event's number within the run, from 1, rising by one per retained event. Eviction never renumbers. |
+| `at` | every event | When the event arrived, an RFC 3339 timestamp in UTC. |
+| `event` | every event | The normalized event type. |
+| `message` | every event | The event's message, masked and cut to 999 runes followed by `…` when it exceeds 1,000 runes. `""` when the event carries none. Masked: a value registered as a secret after the event was retained is replaced by `[redacted]`. |
+| `text` | every event | One plain English sentence that words the event. The `text` of a `notification` and an `other_message` is the message itself. A session that fails to start gets a `startup_failed` event whose sentence states the failure. |
+| `session_id` | `session_started` | The session the run started, `""` when the event carries none. |
+| `tool_name` | `tool_result` | The tool. Omitted when the adapter reported none. |
+| `duration_ms` | `tool_result` | The tool call's duration in milliseconds. Omitted when the adapter reported none. |
+| `tool_error` | `tool_result` | Whether the tool call returned an error. |
+| `usage` | `turn_completed`, `turn_failed`, `turn_cancelled`, `turn_ended_with_error`, `turn_input_required` | The run's token totals after the event, with the members of a running row's `tokens`. `null` while the run has measured no usage, so an unmeasured figure never reads as zero. |
+
+**Errors:**
+
+| Condition | Status | `error.code` |
+| --------- | ------ | ------------ |
+| No run carries the dispatch ID, or its events were pruned, lost in a crash, recorded before retention existed, never retained, or not written | 404 | `run_events_not_retained` |
+| Run history cannot be read, or the server has none and the run is not running | 503 | `history_unavailable` |
+| A method other than `GET` | 405 | `method_not_allowed`, with `Allow: GET` |
 
 #### `GET /api/v1/stats`: run statistics
 

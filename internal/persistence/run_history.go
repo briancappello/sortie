@@ -112,11 +112,27 @@ type RunHistory struct {
 	// FirstAfterHop is true on the first run dispatched after the stage hop
 	// StagePrevious names, and false on every other run.
 	FirstAfterHop bool
+
+	// DispatchID keys the run's retained events: the agent run's dispatch
+	// ID, and "" on a row no agent run produced. Nil reads and writes NULL:
+	// only rows written before the column existed.
+	DispatchID *string
 }
 
 // AppendRunHistory inserts a completed run attempt. The input ID is
 // ignored; the returned record has the database-assigned ID.
 func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistory, error) {
+	return insertRunHistory(ctx, s.db, run)
+}
+
+// statementExecer is the part of *sql.DB and *sql.Tx that runs a statement.
+type statementExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// insertRunHistory inserts run through ex, so the plain append and the
+// append that stores events in the same transaction share one column list.
+func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (RunHistory, error) {
 	errVal := sql.NullString{}
 	if run.Error != nil {
 		errVal = sql.NullString{String: *run.Error, Valid: true}
@@ -142,10 +158,15 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 		triggerVal = sql.NullString{String: *run.Trigger, Valid: true}
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	dispatchIDVal := sql.NullString{}
+	if run.DispatchID != nil {
+		dispatchIDVal = sql.NullString{String: *run.DispatchID, Valid: true}
+	}
+
+	res, err := ex.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
@@ -154,6 +175,7 @@ func (s *Store) AppendRunHistory(ctx context.Context, run RunHistory) (RunHistor
 		run.StagePrevious, run.StagePreviousOutcome, run.ChainID, run.StageTarget, run.StageResult,
 		run.IssueTitle, run.IssueURL, run.DispatchedAt,
 		triggerVal, run.ReactionKind, run.SessionID, run.SSHHost, run.FirstAfterHop,
+		dispatchIDVal,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)
@@ -373,6 +395,9 @@ type RunHistoryFilter struct {
 	EndedSince  *time.Time
 	EndedBefore *time.Time
 
+	// HasDispatchID keeps rows whose dispatch_id is a non-empty string.
+	HasDispatchID bool
+
 	// BeforeID keeps rows with an id below it; 0 starts at the newest row.
 	BeforeID int64
 
@@ -424,6 +449,9 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 		conds = append(conds, "issue_id IN (SELECT issue_id FROM issue_outcomes WHERE unixepoch(observed_at, 'subsec') < unixepoch(?, 'subsec'))")
 		args = append(args, f.EndedBefore.UTC().Format(time.RFC3339Nano))
 	}
+	if f.HasDispatchID {
+		conds = append(conds, "dispatch_id <> ''")
+	}
 	if f.BeforeID > 0 {
 		conds = append(conds, "id < ?")
 		args = append(args, f.BeforeID)
@@ -435,7 +463,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 			configured_model, configured_effort, reported_model,
 			chain_id, stage_previous, stage_previous_outcome, stage_target, stage_result,
 			issue_title, issue_url, dispatched_at,
-			trigger, reaction_kind, session_id, ssh_host
+			trigger, reaction_kind, session_id, ssh_host, dispatch_id
 		FROM run_history`
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ") //nolint:gosec // conds holds only fixed predicates with ? placeholders; values are bound via args
@@ -452,7 +480,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 	entries := []RunHistory{}
 	for rows.Next() {
 		var r RunHistory
-		var errVal, wfVal, dispIDVal, reviewMetaVal, triggerVal, reactionVal, sessionVal, hostVal sql.NullString
+		var errVal, wfVal, dispIDVal, reviewMetaVal, triggerVal, reactionVal, sessionVal, hostVal, dispatchIDVal sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.IssueID, &r.Identifier, &dispIDVal, &r.Attempt, &r.AgentAdapter,
 			&r.Workspace, &r.StartedAt, &r.CompletedAt, &r.Status, &errVal, &wfVal,
@@ -461,7 +489,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel,
 			&r.ChainID, &r.StagePrevious, &r.StagePreviousOutcome, &r.StageTarget, &r.StageResult,
 			&r.IssueTitle, &r.IssueURL, &r.DispatchedAt,
-			&triggerVal, &reactionVal, &sessionVal, &hostVal,
+			&triggerVal, &reactionVal, &sessionVal, &hostVal, &dispatchIDVal,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}
@@ -484,6 +512,9 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 		r.SessionID = sessionVal.String
 		r.SSHHost = hostVal.String
 		r.OriginRecorded = sessionVal.Valid
+		if dispatchIDVal.Valid {
+			r.DispatchID = new(dispatchIDVal.String)
+		}
 		entries = append(entries, r)
 	}
 	if err := rows.Err(); err != nil {

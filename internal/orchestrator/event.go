@@ -29,7 +29,9 @@ func isTurnTerminalEvent(t domain.AgentEventType) bool {
 
 // HandleAgentEvent applies an incoming agent event from the worker's
 // OnEvent relay to the running map entry for issueID and, for
-// token_usage events, to the global agent totals.
+// token_usage events, to the global agent totals. It also retains the
+// event in the entry's bounded buffer, except those that carry nothing
+// to show.
 //
 // HandleAgentEvent is a no-op when issueID is not present in
 // state.Running.
@@ -237,6 +239,8 @@ func HandleAgentEvent(state *State, issueID string, event domain.AgentEvent, log
 	if isTurnTerminalEvent(event.Type) {
 		entry.APIRequestCountAtLastTurnEnd = entry.APIRequestCount
 	}
+
+	retainEvent(entry, event)
 }
 
 // hasUsage reports whether usage carries a non-zero component. Every
