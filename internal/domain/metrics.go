@@ -221,8 +221,10 @@ type Metrics interface {
 	// type of sortie_tokens_total, every exit_type of
 	// sortie_worker_exits_total, and sortie_agent_runtime_seconds_total,
 	// so rate() and increase() count the first sample recorded under
-	// model. A series that already exists keeps its value, and an empty
-	// model prepares "<none>".
+	// model once a scrape has read the zero. A model prepared in the
+	// same call path as its first sample gives no scrape that chance. A
+	// series that already exists keeps its value, and an empty model
+	// prepares "<none>".
 	PrepareModel(model string)
 }
 
