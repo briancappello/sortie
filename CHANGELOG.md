@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `GET /api/v1/plan/graph` gives each story, under plan control, its review gate, approver, satisfaction (with the merge commit and pull request, or the unverified reason), the blockers it waits on with their reasons, and a proposed supersede from a cited no-change claim. The fields are null without plan control.
+
 - A broker serving HTTP viewers reports its address and viewer token to Sortie once its listener is up (`POST /api/v1/{identifier}/broker`, with the run's session token), retrying with backoff while the session lives. `/api/v1/state` and the per-issue detail show each run's `broker.http_url`, and `GET /api/v1/{identifier}/broker` returns the address with the token to the control token only.
 
 - Under plan control, a `no-change-needed` run cites its evidence in `.sortie/evidence.json`: a commit, confirmed only on the base branch of the host mirror, or a plan key of another story. The worker checks it on the host, off the event loop. A confirmed claim satisfies dependents (a cited story only while that story is satisfied), and an unverified one is recorded with its reason. The file is cleared before each dispatch.

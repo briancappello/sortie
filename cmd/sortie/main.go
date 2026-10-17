@@ -964,6 +964,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			PlanCancelFn:     server.PlanControlFunc(o.PlanCancelFunc()),
 			BrokerReportFn:   server.BrokerReportFunc(o.BrokerReportFunc()),
 			BrokerReadFn:     server.BrokerReadFunc(o.BrokerReadFunc()),
+			PlanStatesFn:     func() domain.TrackerStates { return br.mgr.Config().Tracker.States() },
+			PlanSatisfaction: store,
 			PlanProjects:     planProjects,
 			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {

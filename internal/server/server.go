@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/plan"
 )
@@ -181,6 +182,13 @@ type Params struct {
 	// those routes answer 503.
 	PlanProjects *plan.Projects
 
+	// PlanStatesFn returns the workflow's states; plan control is on when
+	// it reports a release state. PlanSatisfaction reads what satisfies
+	// each plan story. With either nil, plan graph nodes carry no plan
+	// control fields.
+	PlanStatesFn     func() domain.TrackerStates
+	PlanSatisfaction orchestrator.PlanSatisfactionLoader
+
 	// TerminalStatesFn returns the workflow's current terminal states,
 	// which mark plan graph nodes terminal. When nil, no node is.
 	TerminalStatesFn func() []string
@@ -213,6 +221,8 @@ type Server struct {
 	escalateFn       EscalateFunc
 	pullBackFn       PlanControlFunc
 	brokerReportFn   BrokerReportFunc
+	planStatesFn     func() domain.TrackerStates
+	planSatisfaction orchestrator.PlanSatisfactionLoader
 	brokerReadFn     BrokerReadFunc
 	planCancelFn     PlanControlFunc
 	planProjects     *plan.Projects
@@ -267,6 +277,8 @@ func New(params Params) *Server {
 		holdFn:           params.HoldFn,
 		pullBackFn:       params.PullBackFn,
 		brokerReportFn:   params.BrokerReportFn,
+		planStatesFn:     params.PlanStatesFn,
+		planSatisfaction: params.PlanSatisfaction,
 		brokerReadFn:     params.BrokerReadFn,
 		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
