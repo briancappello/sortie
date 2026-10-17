@@ -900,20 +900,20 @@ func TestMigrate_Migration018_NoAgentTotalsRow(t *testing.T) {
 	}
 }
 
-func TestMigrate_Migration025_HeldMSDefaultsToZero(t *testing.T) {
+func TestMigrate_Migration1001_HeldMSDefaultsToZero(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
 	migrateToVersion(t, s, 24)
-	insertBareRun(t, s, "rh-pre025")
+	insertBareRun(t, s, "rh-pre1001")
 
 	migrateOrFatal(t, s)
 
 	var held int64
 	if err := s.db.QueryRowContext(context.Background(),
-		`SELECT held_ms FROM run_history WHERE issue_id = 'rh-pre025'`,
+		`SELECT held_ms FROM run_history WHERE issue_id = 'rh-pre1001'`,
 	).Scan(&held); err != nil || held != 0 {
-		t.Errorf("held_ms for a pre-migration-025 row = %d, %v, want 0, nil", held, err)
+		t.Errorf("held_ms for a pre-migration-1001 row = %d, %v, want 0, nil", held, err)
 	}
 
 	run, err := s.AppendRunHistory(context.Background(), RunHistory{
@@ -933,30 +933,30 @@ func TestMigrate_Migration025_HeldMSDefaultsToZero(t *testing.T) {
 	}
 }
 
-func TestMigrate_Migration026_EnvironmentImageDefaultsToEmpty(t *testing.T) {
+func TestMigrate_Migration1002_EnvironmentImageDefaultsToEmpty(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
-	migrateToVersion(t, s, 25)
-	insertBareRun(t, s, "rh-pre026")
+	migrateToVersion(t, s, 1001)
+	insertBareRun(t, s, "rh-pre1002")
 
 	migrateOrFatal(t, s)
 
 	var image string
 	if err := s.db.QueryRowContext(context.Background(),
-		`SELECT environment_image_sha256 FROM run_history WHERE issue_id = 'rh-pre026'`,
+		`SELECT environment_image_sha256 FROM run_history WHERE issue_id = 'rh-pre1002'`,
 	).Scan(&image); err != nil || image != "" {
-		t.Errorf("environment_image_sha256 for a pre-migration-026 row = %q, %v, want empty, nil", image, err)
+		t.Errorf("environment_image_sha256 for a pre-migration-1002 row = %q, %v, want empty, nil", image, err)
 	}
 	var applied int
 	if err := s.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = 26`,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 1002`,
 	).Scan(&applied); err != nil || applied != 1 {
-		t.Errorf("schema_migrations rows for version 26 = %d, %v, want 1", applied, err)
+		t.Errorf("schema_migrations rows for version 1002 = %d, %v, want 1", applied, err)
 	}
 }
 
-func TestMigrate_Migration026_FreshDBRecordsTheEnvironmentImage(t *testing.T) {
+func TestMigrate_Migration1002_FreshDBRecordsTheEnvironmentImage(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
@@ -989,30 +989,30 @@ func TestMigrate_Migration026_FreshDBRecordsTheEnvironmentImage(t *testing.T) {
 	}
 }
 
-func TestMigrate_Migration027_ExportedCommitDefaultsToEmpty(t *testing.T) {
+func TestMigrate_Migration1003_ExportedCommitDefaultsToEmpty(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)
-	migrateToVersion(t, s, 26)
-	insertBareRun(t, s, "rh-pre027")
+	migrateToVersion(t, s, 1002)
+	insertBareRun(t, s, "rh-pre1003")
 
 	migrateOrFatal(t, s)
 
 	var commit string
 	if err := s.db.QueryRowContext(context.Background(),
-		`SELECT exported_commit FROM run_history WHERE issue_id = 'rh-pre027'`,
+		`SELECT exported_commit FROM run_history WHERE issue_id = 'rh-pre1003'`,
 	).Scan(&commit); err != nil || commit != "" {
-		t.Errorf("exported_commit for a pre-migration-027 row = %q, %v, want empty, nil", commit, err)
+		t.Errorf("exported_commit for a pre-migration-1003 row = %q, %v, want empty, nil", commit, err)
 	}
 	var applied int
 	if err := s.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = 27`,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 1003`,
 	).Scan(&applied); err != nil || applied != 1 {
-		t.Errorf("schema_migrations rows for version 27 = %d, %v, want 1", applied, err)
+		t.Errorf("schema_migrations rows for version 1003 = %d, %v, want 1", applied, err)
 	}
 }
 
-func TestMigrate_Migration027_FreshDBRecordsTheExportedCommit(t *testing.T) {
+func TestMigrate_Migration1003_FreshDBRecordsTheExportedCommit(t *testing.T) {
 	t.Parallel()
 
 	s := openTestStore(t)

@@ -1,4 +1,4 @@
--- Migration 25: time a run spent held
+-- Migration 1001 (fork range): time a run spent held
 --
 -- held_ms is the total time, in milliseconds, a caller held the run
 -- through the control API, which pauses its stall and turn clocks. Rows

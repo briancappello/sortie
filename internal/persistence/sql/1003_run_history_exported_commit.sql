@@ -1,4 +1,4 @@
--- Migration 27: commit a run exported from its execution environment
+-- Migration 1003 (fork range): commit a run exported from its execution environment
 --
 -- exported_commit is the commit a run pushed to the upstream's issue
 -- branch when it ended. Empty for a run that pushed nothing, for a run

@@ -36,6 +36,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.refuseOldForkNumbering(ctx, applied); err != nil {
+		return err
+	}
+
 	maxRegistered := versions[len(versions)-1]
 	for v := range applied {
 		if v > maxRegistered {
@@ -52,6 +56,31 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// refuseOldForkNumbering stops a database that earlier fork builds
+// migrated with the fork's run_history columns recorded as versions 25
+// to 27, numbers that upstream uses for other migrations. Such a database
+// would otherwise fail on the renumbered migrations, or skip upstream's
+// own 25 to 27 after a merge. It is detected by version 25 being applied
+// together with the fork-only held_ms column, while version 1001 is not.
+func (s *Store) refuseOldForkNumbering(ctx context.Context, applied map[int]struct{}) error {
+	if _, ok := applied[25]; !ok {
+		return nil
+	}
+	if _, ok := applied[1001]; ok {
+		return nil
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('run_history') WHERE name = 'held_ms'`,
+	).Scan(&n); err != nil {
+		return fmt.Errorf("inspect run_history columns: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	return fmt.Errorf("database was created by an earlier fork build that recorded its own migrations as versions 25-27, which upstream uses for other migrations; delete the database file (it holds only run history and orchestrator state) and start again")
 }
 
 func (s *Store) appliedVersions(ctx context.Context) (map[int]struct{}, error) {

@@ -83,15 +83,21 @@ var migration023SQL string
 //go:embed sql/024_stage_chains.sql
 var migration024SQL string
 
-//go:embed sql/025_run_history_held_ms.sql
-var migration025SQL string
+//go:embed sql/1001_run_history_held_ms.sql
+var migration1001SQL string
 
-//go:embed sql/026_run_history_environment_image.sql
-var migration026SQL string
+//go:embed sql/1002_run_history_environment_image.sql
+var migration1002SQL string
 
-//go:embed sql/027_run_history_exported_commit.sql
-var migration027SQL string
+//go:embed sql/1003_run_history_exported_commit.sql
+var migration1003SQL string
 
+// migrations lists upstream's migrations, numbered from 1 in upstream's
+// sequence, then the fork's, numbered from 1001. Upstream merges add lower
+// numbers, so a database that already ran fork migrations applies new
+// upstream migrations after them. Fork migrations must therefore only add fork-owned tables and
+// columns, and never depend on, or change, anything an upstream migration
+// may add later.
 var migrations = []Migration{
 	{Version: 1, Description: "core persistence tables", SQL: migration001SQL},
 	{Version: 2, Description: "extended token metrics", SQL: migration002SQL},
@@ -117,7 +123,7 @@ var migrations = []Migration{
 	{Version: 22, Description: "review comments each issue's runs were given", SQL: migration022SQL},
 	{Version: 23, Description: "stage hop counts and the previous stage on retry entries and run history", SQL: migration023SQL},
 	{Version: 24, Description: "stage chain identifier and hop result on run history, retry entries, and stage hops", SQL: migration024SQL},
-	{Version: 25, Description: "held_ms column on run_history", SQL: migration025SQL},
-	{Version: 26, Description: "environment_image_sha256 column on run_history", SQL: migration026SQL},
-	{Version: 27, Description: "exported_commit column on run_history", SQL: migration027SQL},
+	{Version: 1001, Description: "held_ms column on run_history", SQL: migration1001SQL},
+	{Version: 1002, Description: "environment_image_sha256 column on run_history", SQL: migration1002SQL},
+	{Version: 1003, Description: "exported_commit column on run_history", SQL: migration1003SQL},
 }

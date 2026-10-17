@@ -4,6 +4,8 @@
 
 Sortie uses an embedded SQLite database for durable state. The database file path defaults to `.sortie.db` in the same directory as `WORKFLOW.md` and can be overridden with the `db_path` front matter field (see Section 5.3.6). On startup, Sortie opens or creates the database and runs all pending schema migrations before beginning normal operation.
 
+Migrations 1 to 999 follow upstream's sequence. This fork's own migrations are numbered from 1001, so an upstream merge never reuses one of their numbers. They only add fork-owned tables and columns, because a database that already ran them applies later upstream migrations after them. A database from an earlier fork build, which recorded the fork's columns as versions 25 to 27, is refused at startup with a message to delete it.
+
 ### 19.2 Tables
 
 **`retry_entries`**: pending retries to be reconstructed on restart
@@ -60,9 +62,9 @@ Note: `timer_handle` is runtime-only and is not stored.
 | `chain_id` | TEXT | Stage chain identifier of the run; empty on a row written before migration 024, or on a `ci_failed` row whose pending reaction was recovered from such a row (migration 024) |
 | `stage_target` | TEXT | Dispatch rule the run's hop decision targeted; empty when the run reached no hop decision (migration 024) |
 | `stage_result` | TEXT | Result of that decision: `advanced`, `partial`, `failed`, or `ceiling`; empty exactly when `stage_target` is empty (migration 024) |
-| `held_ms` | INTEGER | Total time, in milliseconds, the run spent held through the hold endpoint (§13.7), written when the run ends; `0` for a run never held, a `ci_failed` row, and a row written before migration 025 (migration 025) |
-| `environment_image_sha256` | TEXT | Hex SHA-256 of the image the run's execution environment instance was created from: for `smolvm`, the pack file, as the VM's `sortie.pack` label recorded it when the VM was created, so a pack rebuilt since does not change it; empty for a run on the host, and for a row written before migration 026 (migration 026) |
-| `exported_commit` | TEXT | The commit the run pushed to the upstream issue branch when it ended, under `smolvm` with `environment.smolvm.repository`; empty for a run that pushed nothing, a run on the host, and a row written before migration 027 (migration 027) |
+| `held_ms` | INTEGER | Total time, in milliseconds, the run spent held through the hold endpoint (§13.7), written when the run ends; `0` for a run never held, a `ci_failed` row, and a row written before migration 1001 (migration 1001) |
+| `environment_image_sha256` | TEXT | Hex SHA-256 of the image the run's execution environment instance was created from: for `smolvm`, the pack file, as the VM's `sortie.pack` label recorded it when the VM was created, so a pack rebuilt since does not change it; empty for a run on the host, and for a row written before migration 1002 (migration 1002) |
+| `exported_commit` | TEXT | The commit the run pushed to the upstream issue branch when it ended, under `smolvm` with `environment.smolvm.repository`; empty for a run that pushed nothing, a run on the host, and a row written before migration 1003 (migration 1003) |
 
 Neither execution environment column is backfilled. A failed export records its error in `error` and an empty `exported_commit`.
 
