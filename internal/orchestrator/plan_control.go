@@ -11,6 +11,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
+	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
@@ -336,4 +337,116 @@ func warnCriteriaNeedsReview(state *State, params ReconcileParams, pending *Pend
 	log.Warn("criteria story waits for a review the forge requires: branch protection requires an approving review, so auto-merge cannot merge it; use review: human for this repository",
 		slog.Int("pr_number", prNumber),
 	)
+}
+
+// NoChangeVerdict is what the worker found when it checked a no-change
+// claim's citation. Zero when no claim was checked.
+type NoChangeVerdict struct {
+	// Checked is true when a plan-control run ended no-change-needed.
+	Checked bool
+	// Ref is commit:<sha> or plan:<key> for a confirmed claim.
+	Ref string
+	// Cites is the issue id of a cited plan story.
+	Cites string
+	// Unverified is the reason the claim satisfies nothing, empty when
+	// it is confirmed.
+	Unverified string
+}
+
+// commitConfirmer is the capability of a repository to tell whether a
+// commit is on its base branch, as gitsync's mirror does.
+type commitConfirmer interface {
+	CommitOnBase(ctx context.Context, commit string) (bool, error)
+}
+
+// Reasons a no-change claim is unverified, beyond the file's own.
+const (
+	NoChangeNoMirror         = "no_mirror"
+	NoChangeCommitNotOnBase  = "commit_not_on_base"
+	NoChangeUnknownPlanKey   = "unknown_plan_key"
+	NoChangeCycle            = "cycle"
+	NoChangeCheckFailed      = "check_failed"
+	noChangeConfirmTimeLimit = 30 * time.Second
+)
+
+// confirmNoChange reads the claim's evidence from the workspace and
+// confirms its citation on the host: a commit against the repository's
+// mirror, a plan key against the tracker. It runs on the worker goroutine,
+// never on the event loop, and never runs git in the workspace.
+func confirmNoChange(ctx context.Context, tracker domain.TrackerAdapter, repo any, wsPath, issueID string, log *slog.Logger) NoChangeVerdict {
+	v := NoChangeVerdict{Checked: true}
+	ev, why := workspace.ReadEvidenceFile(wsPath, log)
+	if why != "" {
+		v.Unverified = why
+		return v
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), noChangeConfirmTimeLimit)
+	defer cancel()
+	switch ev.Kind {
+	case workspace.EvidenceCommit:
+		confirmer, ok := repo.(commitConfirmer)
+		if !ok || repo == nil {
+			v.Unverified = NoChangeNoMirror
+			return v
+		}
+		onBase, err := confirmer.CommitOnBase(ctx, ev.SHA)
+		switch {
+		case err != nil:
+			log.Warn("no-change commit check failed", slog.Any("error", err))
+			v.Unverified = NoChangeCheckFailed
+		case !onBase:
+			v.Unverified = NoChangeCommitNotOnBase
+		default:
+			v.Ref = "commit:" + ev.SHA
+		}
+	case workspace.EvidencePlanKey:
+		finder, ok := tracker.(domain.PlanKeyFinder)
+		if !ok {
+			v.Unverified = NoChangeUnknownPlanKey
+			return v
+		}
+		cited, err := finder.FindIssueByPlanKey(ctx, ev.PlanKey)
+		switch {
+		case err != nil:
+			v.Unverified = NoChangeUnknownPlanKey
+		case cited.ID == issueID:
+			v.Unverified = NoChangeCycle
+		default:
+			v.Ref, v.Cites = "plan:"+ev.PlanKey, cited.ID
+		}
+	}
+	return v
+}
+
+// recordNoChange records a checked claim on the event loop: confirmed, as
+// satisfaction, or unverified, with its reason. A plan-key claim whose
+// cited story itself cites this one is a cycle and satisfies nothing.
+func recordNoChange(ctx context.Context, store any, issueID string, v NoChangeVerdict, log *slog.Logger) {
+	if !v.Checked {
+		return
+	}
+	rec, ok := store.(PlanSatisfactionRecorder)
+	if !ok {
+		return
+	}
+	if v.Unverified == "" && v.Cites != "" {
+		if loader, ok := store.(PlanSatisfactionLoader); ok {
+			if rows, err := loader.LoadPlanSatisfaction(ctx, []string{v.Cites}); err == nil {
+				for _, r := range rows[v.Cites] {
+					if r.Kind == persistence.PlanSatisfactionNoChange && r.Cites == issueID {
+						v.Unverified, v.Ref, v.Cites = NoChangeCycle, "", ""
+					}
+				}
+			}
+		}
+	}
+	row := persistence.PlanSatisfaction{IssueID: issueID, Kind: persistence.PlanSatisfactionNoChange, Ref: v.Ref, Cites: v.Cites}
+	if v.Unverified != "" {
+		row = persistence.PlanSatisfaction{IssueID: issueID, Kind: persistence.PlanSatisfactionUnverified, Ref: v.Unverified}
+	}
+	if err := rec.UpsertPlanSatisfaction(ctx, row); err != nil {
+		log.Warn("no-change claim record failed", slog.Any("error", err))
+		return
+	}
+	log.Info("no-change claim recorded", slog.String("kind", row.Kind), slog.String("ref", row.Ref))
 }

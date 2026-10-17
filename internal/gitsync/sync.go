@@ -297,3 +297,15 @@ func (s *Syncer) guest(ctx context.Context, env environment.Environment, ws envi
 	}
 	return nil
 }
+
+// CommitOnBase reports whether commit is on the base branch, as the
+// mirror last fetched it. It runs only on the host mirror, never in a
+// workspace the agent controls.
+func (s *Syncer) CommitOnBase(ctx context.Context, commit string) (bool, error) {
+	locked, err := s.mirror.Lock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer locked.Unlock()
+	return locked.IsAncestor(ctx, commit, s.repo.Base)
+}

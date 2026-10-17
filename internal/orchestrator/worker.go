@@ -92,6 +92,10 @@ func writeWorkerState(workspacePath string, state workerState) error {
 // WorkerResult is the terminal outcome of a single worker attempt,
 // delivered to the orchestrator via [WorkerDeps.OnExit].
 type WorkerResult struct {
+	// NoChange is the check of a no-change claim's evidence under plan
+	// control. Zero when no claim was checked.
+	NoChange NoChangeVerdict
+
 	IssueID string
 
 	Identifier string
@@ -979,6 +983,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		// from ending the run on turn one.
 		PreRunFunc: func(wsPath string) {
 			workspace.CleanupStatusFile(wsPath, logger)
+			workspace.CleanupEvidenceFile(wsPath, logger)
 		},
 	})
 	cancelledAtEnding = ctx.Err() != nil
@@ -1815,7 +1820,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		slog.Int("turns_completed", turnsCompleted),
 	)
 
+	var noChange NoChangeVerdict
+	if cfg.Tracker.PlanControl() && pendingSoftStopReason == string(workspace.StatusNoChangeNeeded) {
+		noChange = confirmNoChange(ctx, deps.TrackerAdapter, repo, wsResult.Path, issue.ID, logger)
+	}
+
 	report(WorkerResult{
+		NoChange:                     noChange,
 		IssueID:                      issue.ID,
 		Identifier:                   issue.Identifier,
 		ExitKind:                     WorkerExitNormal,

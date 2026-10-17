@@ -952,6 +952,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// A made hop leaves the issue active on its next stage, which owns any
 		// reaction from here on, so the run that hopped seeds none.
 		reactionEnqueueAllowed := claimedAtExit && (handoffPath || stillClaimed) && !terminalSuppressed && !hopMade
+		recordNoChange(ctx, params.Store, workerResult.IssueID, workerResult.NoChange, log)
+
 		// A failed criteria check seeds no reaction: auto-merge must never
 		// merge the pull request a check refused.
 		if criteriaFailed := criteriaCheckFailed(params, entry, workerResult); criteriaFailed {
