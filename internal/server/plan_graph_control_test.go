@@ -83,6 +83,9 @@ func TestPlanGraph_PlanControlFields(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status %d %v", code, body)
 	}
+	if ps, _ := body["plan_states"].(map[string]any); ps["release"] != "Todo" || ps["backlog"] != "Backlog" || ps["cancel"] != "Canceled" || ps["done"] != "Done" {
+		t.Errorf("plan_states = %v", body["plan_states"])
+	}
 	if len(body["nodes"].([]any)) != 4 {
 		t.Errorf("nodes = %d, want the 4 plan-keyed issues only", len(body["nodes"].([]any)))
 	}
@@ -116,6 +119,9 @@ func TestPlanGraph_PlanControlFieldsNullWhenOff(t *testing.T) {
 	t.Parallel()
 	ts := planControlGraphServer(t, graphTracker(), rowsLoader{}, false)
 	_, body := planRequest(t, ts, http.MethodGet, "/api/v1/plan/graph", "", planTestToken)
+	if v, present := body["plan_states"]; !present || v != nil {
+		t.Errorf("plan_states = %v (present %v), want null", v, present)
+	}
 	b1 := nodeByKey(t, body, "billing/b1")
 	for _, f := range []string{"review", "approved_by", "approved_at", "satisfaction", "unverified_reason", "merge_commit", "pull_request", "waiting_on", "proposed_supersede"} {
 		v, present := b1[f]
