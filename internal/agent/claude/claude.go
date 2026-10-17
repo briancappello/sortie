@@ -182,7 +182,9 @@ func (s *sessionState) settleResult(event rawEvent, spend *agentcore.TurnSpend) 
 		s.processSpend = agentcore.AddUsage(s.processSpend, breakdown)
 		s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, s.resume.Run()))
 		s.turnResume = s.resume.Resume()
-		spend.MarkSettled()
+		if breakdown.InputTokens > 0 || breakdown.OutputTokens > 0 {
+			spend.MarkSettled()
+		}
 		return
 	}
 	if len(event.ModelUsage) == 0 || (breakdown.InputTokens == 0 && breakdown.OutputTokens == 0) {

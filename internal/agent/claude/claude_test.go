@@ -1195,6 +1195,8 @@ func TestRunTurn_ResumedSessionUsage(t *testing.T) {
 	capture := func(n string) string { return string(loadFixture(t, "usage_resume_turn"+n+".jsonl")) }
 	zeroedCrash := `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"` + sid + `","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":0,"outputTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0}}}` + "\n"
 
+	servedFrame := `{"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg_served","type":"message","role":"assistant","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":2,"output_tokens":1}},"session_id":"` + sid + `"}` + "\n"
+
 	breakdown1, breakdown2, breakdown3 := usage(2, 53, 31381, 13787), usage(6, 136, 31597, 104230), usage(8, 141, 31635, 149614)
 	zero := domain.TokenUsage{}
 	delta2, delta3 := usage(4, 83, 216, 90443), usage(6, 88, 254, 135827)
@@ -1229,6 +1231,10 @@ func TestRunTurn_ResumedSessionUsage(t *testing.T) {
 		{"zeroed crash result changes nothing", "2.1.302", false, nil, [2]turn{
 			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &breakdown1},
 			{stdout: zeroedCrash, wantErr: true, wantUsage: breakdown1},
+		}},
+		{"zeroed crash result after output on a release that saves no totals flags the turn", "2.1.276", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &zero},
+			{stdout: servedFrame + zeroedCrash, wantErr: true, wantUsage: usage(4, 54, 31381, 13787), wantFlag: true, wantResume: &zero},
 		}},
 		{"release that saves no totals adds each result", "2.1.276", false, nil, [2]turn{
 			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &zero},
