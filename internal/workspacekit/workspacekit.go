@@ -8,7 +8,9 @@
 // ReadSortieFile, WriteSortieFile, and RemoveSortieFile compose those
 // handles with a bounded read, an exclusive-create-then-rename write, and a
 // refusal-safe removal, so a symbolic link swapped in after preparation
-// fails the operation instead of redirecting it.
+// fails the operation instead of redirecting it. OpenHostDir, ReadHostFile,
+// and WriteHostFile do the same for the orchestrator-only .sortie-host
+// directory beside .sortie.
 package workspacekit
 
 import (
@@ -23,6 +25,12 @@ import (
 // SortieDir is the reserved directory name inside a workspace that holds
 // files exchanged between the agent and the orchestrator.
 const SortieDir = ".sortie"
+
+// HostDir is the reserved directory name inside a workspace that holds
+// files only the orchestrator writes, for a workspace whose agent runs in
+// an environment that mounts [SortieDir] alone: the agent there has no
+// path to this directory.
+const HostDir = ".sortie-host"
 
 var (
 	// ErrLink reports that a path names a symbolic link where a real
@@ -112,12 +120,16 @@ func openDir(path string) (*os.Root, error) {
 // When create is true, OpenSubdir creates name with mode 0o750 if it is
 // absent. The caller closes the returned root.
 func OpenSubdir(parent *os.Root, name string, create bool) (*os.Root, error) {
+	return openSubdir(parent, name, create, 0o750)
+}
+
+func openSubdir(parent *os.Root, name string, create bool, perm os.FileMode) (*os.Root, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
 
 	if create {
-		if err := parent.Mkdir(name, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
+		if err := parent.Mkdir(name, perm); err != nil && !errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 	}
@@ -161,6 +173,19 @@ func OpenSortieDir(workspacePath string, create bool) (*os.Root, error) {
 	defer root.Close() //nolint:errcheck // the workspace handle is not needed once .sortie is open
 
 	return OpenSubdir(root, SortieDir, create)
+}
+
+// OpenHostDir opens a verified handle on <workspacePath>/[HostDir]. When
+// create is true, OpenHostDir creates the directory with mode 0o700 if it
+// is absent. The caller closes the returned root.
+func OpenHostDir(workspacePath string, create bool) (*os.Root, error) {
+	root, err := openDir(workspacePath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close() //nolint:errcheck // the workspace handle is not needed once the host directory is open
+
+	return openSubdir(root, HostDir, create, 0o700)
 }
 
 // validateName reports an error unless name is a single, non-empty path

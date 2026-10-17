@@ -24,6 +24,7 @@
   - [2.9 `reactions` — Reaction-Based Feedback Loops](#29-reactions--reaction-based-feedback-loops)
   - [2.10 `dispatch` — Rule-based Routing](#210-dispatch--rule-based-routing)
   - [2.11 `notifications` (operator notification backends)](#211-notifications-operator-notification-backends)
+  - [2.12 `environment` — Execution Environment](#212-environment--execution-environment)
 - [3. Environment Variable Overrides](#3-environment-variable-overrides)
   - [3.1 Source Precedence](#31-source-precedence)
   - [3.2 Curated Variable List](#32-curated-variable-list)
@@ -135,7 +136,7 @@ After parsing, the loader produces a struct with three fields:
 
 ### 2.1 Top-Level Keys
 
-The core schema recognizes ten top-level keys:
+The core schema recognizes eleven top-level keys:
 
 ```yaml
 tracker: # Issue tracker connection and query settings
@@ -148,6 +149,7 @@ reactions: # Reaction-based feedback loops (CI failure, review comments)
 self_review: # Self-review verification loop (optional)
 dispatch: # Rule-based dispatch routing
 notifications: # Operator notification backends (notify_operator tool)
+environment: # Where workspace code runs: on the host or in a VM per issue
 ```
 
 **Unknown top-level keys are ignored** by the core schema for forward compatibility. They are collected into an `Extensions` map and made available to consumers (e.g., `server`, `worker`, adapter-specific blocks like `claude-code`).
@@ -455,6 +457,8 @@ workspace:
 
 **Workspace key sanitization:** Only `[A-Za-z0-9._-]` are allowed. All other characters in the issue identifier are replaced with `_`.
 
+Under `environment.kind: smolvm`, the code lives in the issue's VM at `/workspace`, and the per-issue host directory holds only Sortie's control files: `.sortie`, shared with the VM, and the host-only `.sortie-host`. See [Section 2.12](#212-environment--execution-environment).
+
 #### Changing `workspace.root`
 
 > **Warning:** Changing `workspace.root` and restarting the orchestrator will leave the old workspace directory on disk. Sortie's startup cleanup scans only the path that is currently configured, so any directories under the previous root become orphans and accumulate disk space until removed manually.
@@ -501,6 +505,8 @@ hooks:
 > **Note:** `after_create` runs only when Sortie first creates the per-issue workspace directory, so the directory is empty when the clone runs. If `after_create` fails, Sortie removes the directory before the next retry, so a retry also starts from an empty directory. A clone error such as "destination path already exists" or "directory not empty" does not come from this example on the normal path.
 >
 > Hooks also run with a restricted environment: an allowlist (including `HOME` and `SSH_AUTH_SOCK`) plus `SORTIE_*` variables. Sortie strips any variable outside that set, such as `GIT_SSH_COMMAND`, so an SSH clone must reach its key through the SSH agent (`SSH_AUTH_SOCK`) or through `~/.ssh` via `HOME`, not through a stripped variable. See Section 6.2 for the full allowlist.
+>
+> Under `environment.kind: smolvm`, every hook runs in the issue's VM, in `/workspace`. With `environment.smolvm.repository` set, the repository is already checked out on the issue branch when `after_create` runs, the VM cannot reach the git host, and Sortie pushes the branch itself, so drop the clone, fetch, push, and branch-delete steps of this example; `after_create` installs dependencies. See [Section 2.12](#212-environment--execution-environment).
 
 | Field           | Type                           | Required | Default  | Dynamic Reload         | Description                                                                          |
 | --------------- | ------------------------------ | -------- | -------- | ---------------------- | ------------------------------------------------------------------------------------ |
@@ -569,6 +575,8 @@ agent:
 | `SORTIE_SESSION_PURPOSE`  | `credential-check` for the credential verification, `work` for the working session.                       |
 | `SORTIE_SESSION_TOKEN`    | Working session only. A random token that authorizes the per-issue control routes of this issue only, and stops working when the run ends. See [Section 4.1](#41-http-server-serverport-serverhost-servercontrol_token). |
 
+Under `environment.kind: smolvm`, the agent in the VM receives these variables with `SORTIE_WORKSPACE` set to `/workspace`, and without `SORTIE_API_URL` and `SORTIE_SESSION_TOKEN`: the VM cannot reach Sortie's HTTP server. A process in `environment.host_prefix` runs on the host and receives all of them. See [Section 2.12](#212-environment--execution-environment).
+
 ---
 
 ### 2.7 `db_path` — SQLite Database Path
@@ -616,7 +624,7 @@ The self-review section configures an optional post-coding verification and iter
 | -------------------------- | -------- | ------------------ | ---------- | ----------------------------------------------------------------- |
 | `enabled`                  | boolean  | No                 | `false`    | Activates the self-review loop.                                   |
 | `max_iterations`           | integer  | No                 | `3`        | Hard cap on review iterations. Range: 1–10.                       |
-| `verification_commands`    | [string] | When `enabled: true` | —        | Shell commands to run during each review iteration.               |
+| `verification_commands`    | [string] | When `enabled: true` | —        | Shell commands to run during each review iteration, in the workspace, through the execution environment: in the issue's VM under `environment.kind: smolvm`. |
 | `verification_timeout_ms`  | integer  | No                 | `120000`   | Per-command timeout in milliseconds.                              |
 | `max_diff_bytes`           | integer  | No                 | `102400`   | Max bytes of diff to include in review prompt.                    |
 | `reviewer`                 | string   | No                 | `"same"`   | Which agent reviews. Only `"same"` in v1.                         |
@@ -713,7 +721,9 @@ reactions:
 
 The command never creates the workspace directory. A workspace that does not exist ends the run before a subprocess starts, and the reaction dispatches the agent exactly as it would have without the block.
 
-**Input document.** Both paths sit in a fresh temporary directory created for the run and removed when it returns. Externally authored text, including review comment bodies, CI check names, and branch names, reaches the command only inside the input file, never through an environment variable or a shell word.
+Under `environment.kind: smolvm`, the command runs in the issue's VM, in `/workspace`, like a hook. When the VM is stopped, Sortie starts it for the run.
+
+**Input document.** Both paths sit in a directory created for the run and removed when it returns, outside the workspace. Under the `local` kind it is a fresh host temporary directory. Under `smolvm` it is `/run/sortie/triage/<run id>/` in the VM, on the guest's tmpfs, readable only by its owner: Sortie writes `input.json` there and reads `result.json` back through commands it runs in the VM, and whatever a run leaves there goes when the VM stops. The `workspace` member of the input names the workspace as the command sees it, `/workspace` under `smolvm`. Externally authored text, including review comment bodies, CI check names, and branch names, reaches the command only inside the input file, never through an environment variable or a shell word.
 
 ```json
 {
@@ -1701,6 +1711,220 @@ A backend secret MUST be given as a reference to a `SORTIE_`-prefixed environmen
 
 ---
 
+### 2.12 `environment` — Execution Environment
+
+```yaml
+environment:
+  kind: smolvm                     # local (default) or smolvm
+  host_prefix: [acp-broker, -http, 127.0.0.1:7701, --]   # optional
+  smolvm:
+    binary: smolvm                 # optional
+    pack: /var/lib/smol-builder/app.smolmachine
+    cpus: 4
+    memory_mib: 8192
+    storage_gib: 20
+    allow_hosts: [openrouter.ai, models.opencode.ai, registry.npmjs.org]
+    credentials:
+      - {name: openrouter, env: OPENROUTER_API_KEY, hosts: [openrouter.ai]}
+    repository:                    # optional
+      url: git@github.com:org/app.git
+      base: main
+      branch_prefix: sortie/
+      provider: github
+      project: org/app
+      max_bundle_mib: 512
+    pass_env: []
+    ssh_agent: false
+```
+
+The `environment` block selects where the code of an issue's workspace runs. Every operation that runs workspace code goes through it:
+
+- the agent session, and its credential verification session;
+- auxiliary agent commands, such as a usage export or a session delete;
+- the `after_create`, `before_run`, `after_run`, and `before_remove` hooks;
+- the `self_review.verification_commands`;
+- the reaction `triage` command;
+- every `git` command Sortie runs to inspect the workspace: the handoff evidence and the self-review diff.
+
+Without the block, the kind is `local`, and Sortie runs all of these on its own host, in the host workspace directory, exactly as it did before the block existed.
+
+| Field         | Type             | Required | Default  | Dynamic Reload | Description |
+| ------------- | ---------------- | -------- | -------- | -------------- | ----------- |
+| `kind`        | string           | No       | `local`  | Environments created after the reload | `local` or `smolvm`. Any other value fails validation with an error that names `environment.kind` and the value. |
+| `host_prefix` | list of strings  | No       | _(none)_ | Future session launches | An argv that stays on Sortie's host in front of the agent session launch and the credential verification launch. See [Host prefix](#host-prefix). The list must not be empty, and no element may be an empty string. |
+| `smolvm`      | map              | With `kind: smolvm` | _(none)_ | Environments created after the reload | The settings of the `smolvm` kind. Under any other kind the block is ignored and not validated. |
+
+The kind is not overridable by a `SORTIE_*` environment variable. Unknown keys under `environment`, `environment.smolvm`, and `environment.smolvm.repository` draw an `unknown_sub_key` warning from `sortie validate`.
+
+#### Kind `smolvm`
+
+The `smolvm` kind runs each issue workspace in its own smolvm microVM. The VM is created from a stack pack, a `.smolmachine` file. Sortie drives smolvm through its command line only. For installation, pack building, the hosts each agent needs, and operation, see the [smolvm environment guide](smolvm-environment-guide.md).
+
+Requirements and limits:
+
+- Sortie runs on Linux. The VM runs a copy of Sortie's own binary, so another host OS is refused at startup and on reload, with an error on `environment.kind`.
+- smolvm `1.26.x` only. Sortie runs `<binary> --version` once at startup and on every reload that selects the kind. A missing binary, or a version outside `1.26.x`, stops startup, or makes the reload keep the previous configuration. The error is on `environment.smolvm.binary` and names the version found and `1.26.x`.
+- `smolvm` cannot be combined with `worker.ssh_hosts`. Validation fails with an error that names both settings.
+- There is no fallback to the host. A VM that cannot be created or started fails the workspace preparation. That failure is retried like any other preparation failure, and no hook or agent of that issue runs on the host.
+
+`environment.smolvm` fields:
+
+| Field         | Type             | Required | Default  | Description |
+| ------------- | ---------------- | -------- | -------- | ----------- |
+| `binary`      | path string      | No       | `smolvm` | The smolvm program. `~` and `$VAR` are expanded. A bare name is looked up on `PATH`. |
+| `pack`        | path string      | **Yes**  | _(none)_ | The pack file every new VM is created from. `~` and `$VAR` are expanded. It must name a readable regular file at startup and on every reload. |
+| `cpus`        | integer          | No       | `0`      | vCPUs of each new VM. `0` selects smolvm's own default. Must not be negative. |
+| `memory_mib`  | integer          | No       | `0`      | Memory of each new VM, in MiB. `0` selects smolvm's own default. Must not be negative. |
+| `storage_gib` | integer          | No       | `0`      | Disk of each new VM, in GiB. The guest workspace lives on this disk. `0` selects smolvm's own default. Must not be negative. |
+| `allow_hosts` | list of strings  | No       | `[]`     | The hosts the VM may reach. Each entry is an exact host name or a `*.domain` pattern, with no scheme, port, or path. An empty list allows no egress at all, except to the hosts of `credentials`. |
+| `credentials` | list of maps     | No       | `[]`     | Credential bindings. See [Credential bindings](#credential-bindings). |
+| `repository`  | map              | No       | _(none)_ | The repository Sortie seeds the guest workspace from and exports the issue branch to. See [Repository sync](#repository-sync). |
+| `pass_env`    | list of strings  | No       | `[]`     | Names of Sortie's own environment variables to copy into every guest command, in plain text. A name that is not set on the host is left out. `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never cross, even when listed. Each entry must be a valid environment variable name. |
+| `ssh_agent`   | boolean          | No       | `false`  | Forwards Sortie's SSH agent into each new VM. Off by default. With `repository` set, the guest needs no SSH agent. |
+
+`environment.smolvm.credentials[]` fields:
+
+| Field    | Type            | Required | Description |
+| -------- | --------------- | -------- | ----------- |
+| `name`   | string          | **Yes**  | The binding's name, `[A-Za-z0-9_-]+`, unique in the list. |
+| `env`    | string          | **Yes**  | The host variable that holds the secret. The guest variable of the same name holds only a placeholder. |
+| `hosts`  | list of strings | **Yes**  | At least one host, as in `allow_hosts`. The placeholder is replaced with the secret only on HTTPS requests to these hosts. These hosts are added to the VM's allowlist. |
+| `header` | string          | No       | The request header to set. smolvm `1.26.x` has no such option, so a non-empty `header` is refused at startup and on reload, with an error on `environment.smolvm.credentials[<i>].header`. An empty string fails validation. |
+
+`environment.smolvm.repository` fields:
+
+| Field            | Type    | Required | Default   | Description |
+| ---------------- | ------- | -------- | --------- | ----------- |
+| `url`            | string  | **Yes**  | _(none)_  | The upstream repository. Sortie's host fetches and pushes it with the host's own git credentials. |
+| `base`           | string  | **Yes**  | _(none)_  | The branch a new issue branch starts from, and the base of the pull request. |
+| `branch_prefix`  | string  | No       | `sortie/` | The issue branch is this prefix followed by the workspace key, for example `sortie/ENG-42`. |
+| `provider`       | string  | No       | _(none)_  | The SCM adapter that opens the pull request after a push: `github`, `gitlab`, or `gitea`. Absent: Sortie pushes and opens no pull request. |
+| `project`        | string  | With `provider` | _(none)_ | The repository for `provider`, as `owner/repo`. On GitLab, everything before the last `/` is the namespace. |
+| `max_bundle_mib` | integer | No       | `512`     | The largest bundle Sortie reads out of the VM at export, in MiB. Must be positive. |
+
+#### The VM and its workspace
+
+**One VM per issue workspace.** The VM is named `sortie-<workspace key>`. A key that smolvm does not accept in a name, or that makes the name longer than 63 characters, is rewritten to the accepted characters, cut, and followed by a short hash of the key. Sortie labels every VM it creates with `sortie.managed=1`, `sortie.workspace=<key>`, `sortie.pack=<SHA-256 of the pack>`, and `sortie.workflow=<hash of the workflow path>`. Sortie touches only VMs that carry its labels for this workflow. A VM with the issue's name that belongs to another workflow, or that Sortie did not label, fails the preparation and is left as it is.
+
+**Lifecycle.**
+
+- **First preparation:** Sortie creates the VM from `pack`, with the sizing, the allowlist, and the credential bindings, starts it, and then runs `after_create` in it. `after_create` runs only after a VM was created.
+- **Worker exit:** Sortie stops the VM. Its disk, and so the guest workspace, is kept.
+- **Next dispatch:** Sortie starts the existing VM. `after_create` does not run again. A rebuilt pack file does not change an existing VM.
+- **Workspace removal** (terminal state, the retention sweep, removal by path): Sortie starts the VM when it is stopped, runs `before_remove` in it, deletes the VM, and then removes the host workspace directory.
+- **Sweep:** at startup and on each periodic workspace sweep, Sortie deletes every VM labeled for this workflow whose host workspace directory no longer exists, unless its issue has a running worker. VMs left from a time the workflow selected `smolvm` are swept after it selects `local` again.
+
+**The guest workspace** is `/workspace`, on the VM's own disk. `SORTIE_WORKSPACE` is `/workspace` for every command in the VM. No part of the repository is on a host mount. The host workspace directory, `<workspace.root>/<key>`, holds only Sortie's control files.
+
+**The control directory is the only shared directory.** Sortie creates the host workspace's `.sortie` directory before it creates the VM, and mounts it read-write at `/run/sortie/control`. After `after_create` succeeds, Sortie links `/workspace/.sortie` to `/run/sortie/control`. So the agent writes `.sortie/status`, `.sortie/review_verdict.json`, and `.sortie/pr.json` in the guest, and Sortie reads them on the host with the same link refusal and size limits as for a local workspace. A repository that commits its own `.sortie` entry fails preparation with an error that names `/workspace/.sortie`, and Sortie does not change that entry.
+
+**Exactly three host resources** are given to the VM: the issue's `.sortie` directory (read-write, at `/run/sortie/control`), the issue's tool socket (at `/run/sortie/tools.sock`), and a read-only directory that holds only a copy of the Sortie binary (at `/opt/sortie`). Sortie never enables nested virtualization, system mounts, a Docker socket, or published ports, and mounts no other host path. `ssh_agent: true` adds the SSH agent forwarding.
+
+**Environment variables in the guest.** A command in the VM receives:
+
+- the session variables: `SORTIE_ISSUE_ID`, `SORTIE_ISSUE_IDENTIFIER`, `SORTIE_DISPATCH_ID`, `SORTIE_ATTEMPT`, `SORTIE_RULE`, `SORTIE_CHAIN_ID`, `SORTIE_SESSION_PURPOSE`, and `SORTIE_WORKSPACE=/workspace`, as each command has them on the host;
+- `SORTIE_ENVIRONMENT=smolvm`;
+- every other `SORTIE_*` variable the command has on the host, such as the hook variables;
+- the `pass_env` variables that are set on the host, in plain text;
+- the placeholders of the credential bindings.
+
+`SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never reach the VM: the guest cannot reach Sortie's HTTP server. No other host variable reaches the VM. `PATH`, `HOME`, and the rest of the guest's environment come from the pack.
+
+**Agent credentials.** An agent kind declares the variables its runtime reads as its credential, for example `ANTHROPIC_API_KEY` for `claude-code`. When such a variable is set in Sortie's environment and neither `credentials` nor `pass_env` lists it, the dispatch preflight fails under the check `environment.agent_credential`, naming the kind and the variable. Sortie never copies the variable into the VM, and never drops it without a word. Bind it as a credential, list it in `pass_env`, or unset it. `sortie validate` reports the same error.
+
+**No graceful stop.** smolvm delivers no termination signal to a guest command. When Sortie stops a session, the agent in the VM ends at once, and `agent.stop_grace_ms` gives it no time. The agent's own session state is on the VM's disk, so a later session can resume it.
+
+#### Credential bindings
+
+A credential binding keeps a secret out of the VM:
+
+- The guest variable named by `env` holds a placeholder that starts with `SMOL_PLACEHOLDER_`.
+- smolvm reads the real value from Sortie's environment each time it starts the VM. A variable that is not set then is logged as a warning, and requests that need it fail.
+- smolvm replaces the placeholder with the value only in HTTPS requests to the binding's `hosts`. A request with the placeholder in its query string is refused.
+- On the binding's hosts, requests are HTTP/1.1 only, a WebSocket upgrade is not possible, and a request body is at most 8 MiB.
+- The binding's hosts are added to the VM's allowlist. smolvm opens the whole network to a VM that has a binding and no allowlist, so Sortie always passes the hosts.
+
+The VM trusts smolvm's interception certificate through `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, and similar variables that smolvm sets. A client that ignores all of them cannot use a binding.
+
+#### Host prefix
+
+`host_prefix` is an argv that stays on Sortie's host. Sortie launches the agent session, and its credential verification session, as the prefix followed by the launch the environment builds:
+
+```text
+<host_prefix...> smolvm machine exec --name sortie-ENG-42 -i -w /workspace -e ... -- opencode acp
+```
+
+The prefix process runs with the session's full host environment, `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` included. The agent behind it does not get them. This is how [`acp-broker`](https://github.com/briancappello/agentic-orchestration/blob/main/acp-broker/docs/guide.md) runs on the host while the agent runs in the VM. Hooks, verification commands, triage, auxiliary agent commands, and git inspection never run behind the prefix.
+
+Under `local`, the session launch is the prefix followed by the agent command, the same launch as a prefix written into `agent.command`. Unlike a prefix in `agent.command`, `host_prefix` does not wrap auxiliary commands or version canaries.
+
+#### Sortie's tools in the VM
+
+The `sortie mcp-server` tool server, the workflow file, the tracker credentials, and the database stay on the host. For each workspace with a VM, Sortie listens on a host Unix socket at `<state dir>/env/<key>/tools.sock` (`<state dir>` is the directory that holds `db_path`). The socket is mounted at `/run/sortie/tools.sock`. For each connection, Sortie starts `sortie mcp-server` on the host, with that issue's session environment.
+
+The generated `.sortie/mcp.json` names `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock` as the `sortie-tools` server, with no env block, so no secret is in the file. Servers from an agent block's `mcp_config` are merged into it as written and run in the VM: their programs must be in the pack, their hosts in `allow_hosts`, and any value in their env block is visible in the VM. `mcp-relay` copies standard input and output to the socket. When no tool server answers, it writes `tool server unavailable` to standard error and exits non-zero. After a Sortie restart, Sortie listens again at the same path, and a running VM reaches it without a restart. Every agent kind that receives MCP servers on a local launch also receives them in the VM; see [MCP configuration and the generated file](#45-adapter-specific-pass-through-config).
+
+#### Repository sync
+
+With `environment.smolvm.repository` set, only Sortie talks to the git host. The guest gets no git credential, and no route to the git host: do not list it in `allow_hosts`. Without `repository`, Sortie neither seeds nor exports, and `after_create`, which runs in the VM, must get the code itself.
+
+**The mirror.** For each distinct `url`, Sortie keeps a bare mirror at `<state dir>/repos/<first 16 hex digits of the URL's SHA-256>.git`, outside every workspace. Only Sortie writes it. Every git command Sortie runs on the mirror disables hooks and the filesystem monitor and checks every object it receives. One lock file serializes the operations on a mirror. Sortie fetches and pushes with the host's own git configuration and credentials: an SSH agent, a credential helper, or a deploy key. They never reach the VM.
+
+**The issue branch** is `branch_prefix` followed by the workspace key, for example `sortie/ENG-42`. A name that is not a valid git branch name fails the preparation with an error that names the branch.
+
+**Seeding a new VM.** Before `after_create` runs, Sortie:
+
+1. fetches the upstream into the mirror (a failure fails the preparation);
+2. sends a bundle of `base`, and of the issue branch when it exists upstream, into the VM, outside the workspace;
+3. clones the bundle into `/workspace` in the VM;
+4. checks out the issue branch: at `origin/<issue branch>` when it exists upstream, otherwise as a new branch at `origin/<base>`;
+5. sets `origin`'s URL to `url`, without credentials, so tools show the real remote.
+
+So `after_create` starts in a checked-out repository. It installs dependencies and does not clone. Sortie also adds `/.sortie` to the repository's `.git/info/exclude`, so `git add -A` does not commit the control directory link.
+
+**Refreshing before each later run.** In an existing VM, Sortie fetches the upstream into the mirror and updates the guest's `origin/<base>` and `origin/<issue branch>`. It does not touch the guest's local branches, index, or work tree. So a merge-conflict reaction can rebase, and commits a person pushed to the issue branch are visible. When the upstream fetch fails, Sortie logs a warning and refreshes from the mirror's last state.
+
+**Export after each run.** After every run that ends normally, after `after_run`, and before any tracker handoff, Sortie exports the issue branch:
+
+1. The VM writes a bundle of `refs/heads/<issue branch>` outside the workspace.
+2. Sortie reads it out, up to `max_bundle_mib`. A larger bundle fails the export.
+3. A bundle that names any ref other than `refs/heads/<issue branch>` fails the export.
+4. Sortie imports the branch into the mirror only.
+
+Only committed work is exported. Uncommitted changes stay in the VM for the next run. When the issue branch is missing in the VM, equals the upstream branch, or equals `origin/<base>` while no upstream branch exists, the export succeeds and pushes nothing.
+
+**Push.** Sortie pushes the imported commits to `refs/heads/<issue branch>` with a lease. The push succeeds only when the upstream branch is absent and Sortie never pushed it, or when it is still at the commit Sortie pushed last. So an agent may rebase its own branch, and Sortie replaces its own earlier push. When someone else pushed to the branch since, the export fails with `branch moved upstream`, and the upstream branch is not changed. The next run's refresh shows that commit to the agent as `origin/<issue branch>`.
+
+**Pull request.** After a push, when `provider` is set, Sortie finds the open pull request (merge request on GitLab) from the issue branch to `base` in `project`, or opens one. The agent may suggest the title and body of a new pull request in `.sortie/pr.json`:
+
+```json
+{"title": "Fix add()", "body": "Adds a test for negative numbers."}
+```
+
+Sortie reads that file with the same link refusal as other control files, at most 64 KiB, removes control characters other than newline and tab, and cuts the title to 256 characters. When the file is absent or not an object with string `title` and `body`, the title is `<identifier>: <issue title>`, and the body names the issue and its URL. Sortie never passes the text through a shell, and never changes the title or body of a pull request that already exists.
+
+`provider` must equal the provider of every active SCM reaction, because one SCM adapter serves both. Its adapter settings come from the same top-level block the reactions use, for example `github:`, plus the tracker credentials when the tracker is the same forge. A provider whose adapter cannot open pull requests fails validation.
+
+**Export failure.** When any step of the export, the push, or the pull request fails, the run fails with an export error. The tracker issue is not transitioned. The VM and its workspace are kept, so the committed work is still there, and the issue is retried with the normal backoff.
+
+**The trusted SCM record.** Under `smolvm` with `repository`, Sortie writes the issue's SCM record itself, to `<workspace.root>/<key>/.sortie-host/scm.json`. That directory is not under the shared `.sortie`, and the VM has no path to it. The record holds `branch`, `sha`, `pushed_at`, and, once a pull request is known, `pr_number`, `owner`, and `repo`. Every reader of SCM metadata (CI, review comments, bot reviews, auto-merge, merge conflicts, label commands, merge completion, the workspace age bound, the handoff evidence, and startup recovery) reads this record and ignores `.sortie/scm.json`. So an agent cannot point a reaction at another pull request. Run history records the commit each run exported in `exported_commit`.
+
+#### Changing the kind
+
+Sortie records the kind that created a workspace, and the VM name, in `.sortie/environment` (for example `{"kind":"smolvm","name":"sortie-ENG-42"}`). `local` writes no record, and a workspace without a record counts as `local`. When an issue is dispatched and its existing workspace was created by another kind, Sortie removes that workspace with the kind that created it, VM included, creates it again, and runs `after_create` again. Removal follows only a recorded kind other than `local`: an agent in a VM can write the record through the shared directory, so a record that names `local` never moves removal to the host.
+
+To switch back, set `kind: local` and restore the clone in `after_create` and any push and pull-request steps in hooks or the prompt. Each workspace is recreated on the host at its next dispatch, and the sweep deletes the leftover VMs. Branches and pull requests Sortie created stay upstream.
+
+#### Reload
+
+`environment` reloads. A reload that fails validation, the smolvm version check, or the repository provider check keeps the previous configuration and reports the error through the workflow's last load error, as any invalid reload does.
+
+- `kind`, `smolvm.pack`, the sizing, `allow_hosts`, `credentials`, and `ssh_agent` apply to VMs created after the reload. A VM keeps the settings it was created with. To move an issue to a new pack or new settings, remove its workspace.
+- `host_prefix` applies to the next session launch.
+- `pass_env` and `repository` apply to the next run.
+
+---
+
 ## 3. Environment Variable Overrides
 
 Sortie supports a curated set of `SORTIE_*` environment variables that override YAML front matter values. This enables twelve-factor app deployment patterns: operators inject secrets, endpoint URLs, and tuning parameters via environment rather than committing them to a workflow file.
@@ -1867,6 +2091,7 @@ For path fields (`workspace.root`, `db_path`), tilde (`~`) expansion still appli
 | `reactions.*` (including `reactions.label_commands`) | No override variables exist; reaction configuration comes from WORKFLOW.md |
 | `dispatch.*`                           | No override variables exist; rule definitions and template paths come from WORKFLOW.md |
 | `self_review.*`                        | Verification commands are security-sensitive privileged configuration that must come from the version-controlled WORKFLOW.md |
+| `environment.*`                        | No override variables exist; the execution environment is a security boundary and comes from WORKFLOW.md. `binary` and `pack` accept `$VAR` indirection |
 | Extensions (`server`, `worker`, etc.)  | Extension-defined; would couple core env parsing to extensions  |
 | `logging.level` (via extensions)       | Resolved from `--log-level` flag; not part of typed config layer |
 
@@ -2091,6 +2316,9 @@ Returns the system-wide runtime state including running sessions, retry queue, a
 | `holder`             | string            | Who holds the run, as the hold request named it (for example `acp-broker`); empty when not held. |
 | `held_since`         | string or `null`  | When the current hold began (RFC 3339, UTC); `null` when not held. |
 | `held_total_ms`      | integer           | Time the run has spent held so far, in milliseconds, the current hold included. Recorded in run history as `held_ms` when the run ends. |
+| `environment`        | object or absent  | The execution environment instance the issue's workspace runs in: `{"kind": "smolvm", "name": "sortie-MT-649"}`. `name` is the VM name, as `smolvm machine ls` and `smolvm machine egress-events --name` take it. Omitted for a workspace that runs on the host. |
+
+A `retrying` entry carries the same `environment` object, described from the current configuration, and omits it in the same case.
 
 **Aggregate totals:**
 
@@ -2164,7 +2392,7 @@ Returns issue-specific runtime and debug details for a single issue. Returns `40
 }
 ```
 
-The `running` object uses the same per-session field schema as `GET /api/v1/state` (see the per-session fields table above). `status` is `"running"` when the issue has a running session, `"retrying"` when it does not but has a pending retry, and `"budget_exhausted"` when it has neither but is held out of dispatch by a per-issue budget ceiling; the two fields for whichever case does not apply are `null`, and `budget_exhausted` carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state`.
+The `running` object uses the same per-session field schema as `GET /api/v1/state` (see the per-session fields table above). A top-level `environment` object, `{"kind": ..., "name": ...}`, names the VM the issue's workspace runs in, taken from the running entry or else the retry entry; it is omitted for a workspace that runs on the host. `status` is `"running"` when the issue has a running session, `"retrying"` when it does not but has a pending retry, and `"budget_exhausted"` when it has neither but is held out of dispatch by a per-issue budget ceiling; the two fields for whichever case does not apply are `null`, and `budget_exhausted` carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state`.
 
 #### `POST /api/v1/refresh`
 
@@ -2331,6 +2559,8 @@ worker:
 When `worker.ssh_hosts` is configured, Sortie dispatches agent runs to remote hosts over SSH using the system `ssh` binary. Each dispatch selects the host with the fewest active sessions (least-loaded selection). When a per-host concurrency cap is set, hosts at capacity are skipped. On retry, the previous host is preferred if it still has capacity.
 
 When `worker.ssh_hosts` is absent or empty, all agents run locally on the host where Sortie is started (the default behavior).
+
+`worker.ssh_hosts` cannot be combined with `environment.kind: smolvm`; validation fails with an error that names both settings. In SSH mode the hooks run on Sortie's host, as described below; the execution environment is the way to run them elsewhere ([Section 2.12](#212-environment--execution-environment)).
 
 | Field                                   | Type             | Required | Default                        | Description                                                                                 |
 | --------------------------------------- | ---------------- | -------- | ------------------------------ | ------------------------------------------------------------------------------------------- |
@@ -2574,7 +2804,7 @@ codex:
   personality: concise            # Personality preset
   turn_sandbox_policy:            # Per-turn sandbox policy override (optional)
     networkAccess: true
-  mcp_config: ./mcp-servers.json  # Local launch only; ignored over SSH
+  mcp_config: ./mcp-servers.json  # Local launch and VM only; ignored over SSH
 ```
 
 The `codex` block is forwarded to the Codex adapter, which launches `codex app-server` once per session and sends these fields on the `thread/start` and `turn/start` JSON-RPC requests as the session starts and as each turn runs. One key is checked before a run starts, `approval_policy`; the preflight refuses any value other than `never`, while the adapter itself refuses nothing further once a run starts. A string key whose YAML value carries another type fails the session start and, offline, is reported by `sortie validate` under the check `codex.<key>.wrong_type`.
@@ -2589,7 +2819,7 @@ The Codex adapter uses a persistent subprocess model: the app-server is launched
 | `codex.thread_sandbox` | string | `workspaceWrite` | Reaches two protocol fields: normalized to kebab-case (`workspace-write`, `read-only`, `danger-full-access`, `external-sandbox`) for `thread/start`'s `sandbox` field, and denormalized back to camelCase for `turn/start`'s `sandboxPolicy.type` field. Values: `workspaceWrite`, `readOnly`, `dangerFullAccess`, `externalSandbox`. |
 | `codex.turn_sandbox_policy` | map | _(absent)_ | Merged over the default `sandboxPolicy` sent on `turn/start` (`writableRoots` defaulting to the workspace path, `networkAccess` defaulting to `false`); a key here replaces the matching default key, including `writableRoots` and `networkAccess`. Sent on the first turn of every session, and on every later turn once it is set. |
 | `codex.personality` | string | _(absent)_ | Forwarded to `thread/start`'s `personality` field when non-empty. |
-| `codex.mcp_config` | string | _(absent)_ | Path to an MCP server configuration JSON file, resolved relative to the directory holding WORKFLOW.md when it is not absolute, same as the other adapters. On a local launch, the generated file's servers are re-expressed as `-c mcp_servers.<name>=<table>` overrides on the app-server launch arguments, each approving every tool on its server in advance, because the `never` approval policy would otherwise refuse every call to a tool that asks for approval. An SSH launch delivers neither form; see the MCP configuration section above. |
+| `codex.mcp_config` | string | _(absent)_ | Path to an MCP server configuration JSON file, resolved relative to the directory holding WORKFLOW.md when it is not absolute, same as the other adapters. On a local launch, the generated file's servers are re-expressed as `-c mcp_servers.<name>=<table>` overrides on the app-server launch arguments, each approving every tool on its server in advance, because the `never` approval policy would otherwise refuse every call to a tool that asks for approval. A launch in an execution environment's VM delivers them the same way; an SSH launch delivers neither form; see the MCP configuration section below. |
 
 > **Important:** `never` is the only `approval_policy` value that survives the dispatch preflight. Any other non-empty value, including `untrusted` and `on-request`, fails the check `codex.approval_policy.interactive` and no agent is dispatched while that value stands. Codex also accepts an object form of this policy, a `granular` member whose booleans decide each approval category, but this key is read as a string only, so a map value is a type fault that fails the session start rather than a value Codex sees.
 
@@ -2645,7 +2875,7 @@ The `agent-client-protocol` block is forwarded to the Agent Client Protocol adap
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `agent-client-protocol.mcp_config` | string | _(absent)_ | Path to an MCP server configuration JSON file, resolved relative to the directory holding WORKFLOW.md when it is not absolute, same as the other adapters. On a local launch, the generated file's servers are re-expressed inside the `session/new` request. A remote launch delivers neither form; see the MCP configuration section above. |
+| `agent-client-protocol.mcp_config` | string | _(absent)_ | Path to an MCP server configuration JSON file, resolved relative to the directory holding WORKFLOW.md when it is not absolute, same as the other adapters. On a local launch and in an execution environment's VM, the generated file's servers are re-expressed inside the `session/new` request. An SSH launch delivers neither form; see the MCP configuration section below. |
 
 **MCP configuration and the generated file:**
 
@@ -2655,14 +2885,14 @@ Which adapters hand that generated file's servers to the agent process differs b
 
 | Agent kind | Servers reach the agent | How |
 | --- | --- | --- |
-| `claude-code` | Yes | the generated file's path is passed to `--mcp-config` |
-| `copilot-cli` | Yes | the generated file's path is passed to `--additional-mcp-config` as `@<path>` |
-| `codex` | Yes, local launch only | the generated servers are re-expressed as configuration overrides on the app-server command line, which the runtime parses into its own configuration |
-| `opencode` | Yes, local launch only | the generated servers are re-expressed as the runtime's own configuration document, delivered through an inline configuration environment variable |
+| `claude-code` | Yes | the generated file's path is passed to `--mcp-config`; in a VM, its guest path |
+| `copilot-cli` | Yes | the generated file's path is passed to `--additional-mcp-config` as `@<path>`; in a VM, its guest path |
+| `codex` | Yes, on a local launch and in a VM | the generated servers are re-expressed as configuration overrides on the app-server command line, which the runtime parses into its own configuration |
+| `opencode` | Yes, on a local launch and in a VM | the generated servers are re-expressed as the runtime's own configuration document, delivered through an inline configuration environment variable |
 | `mock` | No | the adapter launches no process |
-| `agent-client-protocol` | Yes, local launch only | the generated servers are re-expressed inside the session-creation request |
+| `agent-client-protocol` | Yes, on a local launch and in a VM | the generated servers are re-expressed inside the session-creation request |
 
-An SSH session on `codex` or `opencode` receives neither form of delivery: both translating kinds carry the generated servers only on a local launch.
+An SSH session on `codex`, `opencode`, or `agent-client-protocol` receives neither form of delivery: the translating kinds carry the generated servers only on a local launch and in an execution environment's VM. In a VM, the generated file names `sortie-tools` as `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, and the tool server itself runs on the host ([Section 2.12](#212-environment--execution-environment)). The generated file is in the shared `.sortie` directory, so the guest reads it at `/workspace/.sortie/mcp.json`.
 
 Setting `mcp_config` in a block belonging to `mock` therefore has no effect on the agent. `sortie validate` reports that combination as a warning naming the kind, under the check `agent.mcp_config`. A separate warning, `agent.kind.no_tool_channel`, fires for any agent kind whose disposition delivers no channel on a local launch, stating that Sortie's tools will be neither advertised nor callable for it. Both are warnings and not errors: such a configuration stays valid, the run proceeds, and the exit code is unchanged.
 
@@ -3092,10 +3322,10 @@ A define block is a named piece of template text: `{{ define "name" }}...{{ end 
 
 ### 6.1 Execution Contract
 
-Hooks execute as shell scripts in a local shell context:
+Hooks execute as shell scripts in the workflow's execution environment ([Section 2.12](#212-environment--execution-environment)): under the default `local` kind, in a local shell on Sortie's host; under `smolvm`, in the issue's VM.
 
 - **Shell:** `sh -c <script>` (POSIX default). The orchestrator invokes hooks via `sh`, not `bash`. There is no `hooks.shell` configuration field.
-- **Working directory:** The per-issue workspace directory.
+- **Working directory:** The per-issue workspace directory: `/workspace` under `smolvm`.
 - **Timeout:** Controlled by `hooks.timeout_ms` (default: 60,000 ms).
 - **Logging:** Hook start, completion, failures, and timeouts are logged by the orchestrator.
 - **Process lifetime:** When a hook's shell exits, whatever its exit status, Sortie terminates every process still in its process group (its Job Object on Windows), resending that termination until no process of the group or job is still alive or a 2-second bound elapses. On Windows, a hook whose Job Object could not be created or assigned still runs, with the failure logged, and that teardown then reaches only the shell itself; Sortie then checks after the shell exits for processes descended from it that are still running, and logs the WARN record `subprocess tree did not settle` when it finds one or cannot check one. A background command inside the script ends with the hook: on Linux and macOS `&`, `nohup … &`, `( … & )`, and on Linux `systemd-run --scope`; on Windows `start /b`, `pg_ctl start`, and `pm2 start`. A process meant to outlive the hook needs a supervisor outside that tree:
@@ -3174,6 +3404,8 @@ If a hook needs additional secrets or environment values, arrange for them expli
 
 - Expose the value under a `SORTIE_`-prefixed name in the Sortie process environment (for example, `SORTIE_JIRA_API_TOKEN`) and read that variable inside the hook.
 - Load credentials from a file or external secrets manager inside the hook script (for example, `source /etc/sortie/hooks-env` or `aws sts get-caller-identity`).
+
+**Hooks in a VM.** Under `environment.kind: smolvm`, a hook inherits nothing from Sortie's process. It receives only the variables Sortie sets for it, listed above, with `SORTIE_WORKSPACE=/workspace` and `SORTIE_SELF_REVIEW_SUMMARY_PATH` pointing into `/workspace/.sortie`, plus `SORTIE_ENVIRONMENT=smolvm`, the `environment.smolvm.pass_env` variables that are set on the host, and the placeholders of the credential bindings. A `SORTIE_`-prefixed variable of Sortie's own environment does not reach it: list it in `pass_env` to copy it in. `PATH`, `HOME`, and the rest come from the pack. `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never reach the VM.
 
 ### 6.3 Failure Semantics
 
@@ -3261,6 +3493,11 @@ Sortie watches `WORKFLOW.md` for filesystem changes and automatically re-reads a
 | `agent.max_tokens`                     | **Immediate** — the poll tick carries the new ceiling to the event loop, and the first usage figure after it stops a run already over the ceiling; also affects future retry timer evaluations. |
 | `agent.token_warning_percent`          | **Immediate** — the poll tick carries the new threshold to the event loop; an unwarned run in flight is evaluated against it from its next usage figure, a warned run never warns again, and a run dispatched after the tick is evaluated against it from dispatch. |
 | `agent.max_consecutive_absences`       | **Immediate** — affects future worker exits, retry timer evaluations, and poll-tick park sweeps. |
+| `environment.kind`                     | Workspaces prepared after the reload. An existing workspace created by another kind is recreated at its next dispatch. A reload that selects `smolvm` runs the smolvm version check, and a failed check keeps the previous configuration. |
+| `environment.host_prefix`              | Future session launches, not in-flight sessions.                                               |
+| `environment.smolvm.binary`            | Future worker runs. The reload runs the version check against the new binary.                  |
+| `environment.smolvm.pack`, sizing, `allow_hosts`, `credentials`, `ssh_agent` | VMs created after the reload. An existing VM keeps the settings it was created with. |
+| `environment.smolvm.pass_env`, `environment.smolvm.repository` | Future worker runs. A reload whose `repository.provider` differs from an active SCM reaction's provider is rejected. |
 | `db_path`                              | **No effect** — requires restart. In-memory config updated, but database connection unchanged. |
 | `reactions.<kind>.provider`                     | **No effect** — requires restart. Adapters are created once at process start.                  |
 | `reactions.ci_failure.max_retries`              | Future dispatches.                                                                             |
@@ -3340,6 +3577,9 @@ Before dispatching work, the orchestrator validates the workflow configuration. 
 | `tracker.handoff_state` and `tracker.in_progress_state` free of collisions against the state lists | The state collides with `active_states` or `terminal_states` as written. |
 | `tracker.no_change_state` requires `tracker.handoff_state` | `no_change_state` is set while `handoff_state` is empty. Checked entirely offline, with no tracker call. |
 | `tracker.no_change_state` names a permitted value | `no_change_state` is neither equal to `handoff_state` nor a member of `terminal_states` exactly as written in front matter. Checked entirely offline, with no tracker call. |
+| `environment.agent_credential` | `environment.kind` runs the agent outside Sortie's host (`smolvm`), and a credential variable that an agent kind the configuration reaches declares is set in Sortie's environment but listed in neither `environment.smolvm.credentials[].env` nor `environment.smolvm.pass_env`. The message reads `agent kind "<kind>" reads the credential variable <NAME>, which is set in Sortie's environment, but execution environment "smolvm" neither binds nor passes it to the agent; bind it as a credential or list it in pass_env in the environment block, or unset it`. One error per variable. |
+| The execution environment can run on this host | Checked at startup, on every reload, and by `sortie validate`, as a load error: with `environment.kind: smolvm`, a host OS other than Linux (`environment.kind`), a credential binding that sets `header` (`environment.smolvm.credentials[<i>].header`), or a smolvm binary that is missing or not version `1.26.x` (`environment.smolvm.binary`). |
+| `environment.smolvm.repository.provider` matches the SCM reactions | Checked at startup, on every reload, and by `sortie validate`, as a load error: the provider differs from the provider of an active SCM reaction, names no registered SCM adapter, or names an adapter that cannot open pull requests. |
 
 An empty `tracker.active_states` draws the warning `tracker.active_states.empty` (`tracker.active_states is empty, so no issue is dispatched`) and does not block startup.
 
@@ -3503,6 +3743,50 @@ These errors are raised during typed config construction from the parsed front m
 | `config: notifications[N].kind: <reason>` | The entry receives an event Sortie produces and its `kind` is not a registered backend. | Use `webhook`, `slack`, or `tracker_comment`. |
 | `config: notifications[N]: <reason>` | The entry receives an event Sortie produces and its backend cannot be built, such as a required secret that resolved to an empty string. | Fix the field the reason names. |
 | `config: reactions.<kind>.escalation: must be "label", "comment", or "none", got "<v>"` | `escalation` of a reaction is any other value. | Use `label`, `none`, or the deprecated `comment`. |
+| `config: environment: expected mapping, got <type>` | `environment` is not a map. | Write the block as keys, or remove it for the `local` kind. |
+| `config: environment.kind: expected string, got <type>` | `environment.kind` is not a string. | Write `local` or `smolvm`. |
+| `config: environment.kind: unknown environment kind "<v>"; valid: local, smolvm` | `environment.kind` names no kind. A reload keeps the previous configuration. | Write `local` or `smolvm`. |
+| `config: environment.host_prefix: expected list, got <type>` | `host_prefix` is not a list. | Write a list of strings, such as `[acp-broker, --]`. |
+| `config: environment.host_prefix: must not be an empty list; remove the key to launch without a host prefix` | `host_prefix: []`. | Remove the key, or list the prefix. |
+| `config: environment.host_prefix[<i>]: expected string, got <type>` | An element is not a string. | Quote the element. |
+| `config: environment.host_prefix[<i>]: must not be an empty string` | An element is `""`. | Remove the element or give it a value. |
+| `config: environment.kind: environment.kind smolvm cannot be combined with worker.ssh_hosts (<n> host(s) listed); remove one of the two settings` | `kind: smolvm` with a non-empty `worker.ssh_hosts`. | Remove `worker.ssh_hosts`, or use `kind: local`. |
+| `config: environment.kind: smolvm VMs run this host's Sortie binary, which must be a Linux executable; this host is <os>` | `kind: smolvm` on a host other than Linux. Startup and reload. | Run Sortie on Linux, or use `kind: local`. |
+| `config: environment.smolvm: expected mapping, got <type>` | `environment.smolvm` is not a map. | Write the block as keys. |
+| `config: environment.smolvm.<key>: expected string, got <type>` | `binary`, `pack`, or a `repository` string key holds another type. | Write a string, quoted if necessary. |
+| `config: environment.smolvm.<key>: cannot expand ~: <err>` | `~` in `binary` or `pack` cannot be expanded. | Check that `HOME` is set, or write an absolute path. |
+| `config: environment.smolvm.pack: is required with environment.kind smolvm` | `kind: smolvm` without `pack`. | Set `pack` to a `.smolmachine` file. |
+| `config: environment.smolvm.pack: pack "<path>" is not readable: <err>` | The pack file does not exist or cannot be opened. | Build the pack, or fix the path or its permissions. |
+| `config: environment.smolvm.pack: pack "<path>" is not a regular file` | The pack path names a directory or another non-file. | Name the `.smolmachine` file itself. |
+| `config: environment.smolvm.<key>: invalid integer value: <val>` | `cpus`, `memory_mib`, or `storage_gib` is not an integer. | Write an integer. |
+| `config: environment.smolvm.<key>: must not be negative, got <n>` | `cpus`, `memory_mib`, or `storage_gib` is negative. | Use `0` for smolvm's default, or a positive integer. |
+| `config: environment.smolvm.allow_hosts: expected list, got <type>` | `allow_hosts` is not a list. | Write a list of host names. |
+| `config: environment.smolvm.allow_hosts[<i>]: expected string, got <type>` | An entry is not a string. | Quote the entry. |
+| `config: environment.smolvm.allow_hosts[<i>]: invalid host "<v>": <reason>` | `<reason>` is `must not be empty`, `a wildcard is allowed only as a leading "*."`, `longer than 253 characters`, or `want an exact host name or "*.domain"` (for a scheme, a port, a path, or another character a host name cannot hold). | Write an exact host name, such as `openrouter.ai`, or `*.example.com`. |
+| `config: environment.smolvm.credentials: expected list, got <type>` | `credentials` is not a list. | Write a list of maps. |
+| `config: environment.smolvm.credentials[<i>]: expected mapping, got <type>` | An entry is not a map. | Write `{name, env, hosts}`. |
+| `config: environment.smolvm.credentials[<i>].name: is required and must be a non-empty string` | `name` is absent or empty (same message for `env`). | Set the key. |
+| `config: environment.smolvm.credentials[<i>].name: invalid credential name "<v>"; use letters, digits, '_' and '-'` | `name` has another character. | Rename the binding. |
+| `config: environment.smolvm.credentials[<j>].name: credential name "<v>" is already used by environment.smolvm.credentials[<i>]` | Two bindings share a name. | Give each binding its own name. |
+| `config: environment.smolvm.credentials[<i>].env: invalid environment variable name "<v>"` | `env` is not `[A-Za-z_][A-Za-z0-9_]*`. | Write the variable name. |
+| `config: environment.smolvm.credentials[<i>].hosts: is required and must list at least one host` | `hosts` is absent, or `must list at least one host` when it is an empty list. | List the API host the secret is for. |
+| `config: environment.smolvm.credentials[<i>].hosts[<j>]: invalid host "<v>": <reason>` | As for `allow_hosts`. | As for `allow_hosts`. |
+| `config: environment.smolvm.credentials[<i>].header: must not be an empty string; remove the key for the default` | `header: ""`. | Remove the key. |
+| `config: environment.smolvm.credentials[<i>].header: smolvm 1.26.x has no header option for a credential binding; remove header "<h>" from credential "<name>"` | `header` is set. Startup and reload. | Remove `header`. |
+| `config: environment.smolvm.repository: expected mapping, got <type>` | `repository` is not a map. | Write the block as keys. |
+| `config: environment.smolvm.repository.url: is required and must be a non-empty string` | `url` is absent or empty (same message for `base`). | Set the key. |
+| `config: environment.smolvm.repository.project: is required when repository.provider is set (provider "<p>")` | `provider` without `project`. | Set `project` to `owner/repo`, or remove `provider`. |
+| `config: environment.smolvm.repository.max_bundle_mib: invalid integer value: <val>` | Not an integer. | Write an integer. |
+| `config: environment.smolvm.repository.max_bundle_mib: must be a positive integer, got <n>` | `0` or negative. | Use a positive value, or remove the key for `512`. |
+| `config: environment.smolvm.repository.provider: is "<p>" but reactions.<kind>.provider is "<q>": the repository and every active SCM reaction share one SCM adapter, so they must name the same provider` | The repository and an active SCM reaction name different providers. Startup and reload. | Use one provider for both. |
+| `config: environment.smolvm.repository.provider: names "<p>", which is no registered SCM adapter (registered: [...])` | `provider` names no SCM adapter. Startup and reload. | Use `github`, `gitlab`, or `gitea`. |
+| `config: environment.smolvm.repository.provider: names "<p>", whose SCM adapter cannot open pull requests` | The adapter has no pull request support. Startup and reload. | Use `github`, `gitlab`, or `gitea`, or remove `provider`. |
+| `config: environment.smolvm.pass_env: expected list, got <type>` | `pass_env` is not a list. | Write a list of names. |
+| `config: environment.smolvm.pass_env[<i>]: expected string, got <type>` | An entry is not a string. | Quote the entry. |
+| `config: environment.smolvm.pass_env[<i>]: invalid environment variable name "<v>"` | The entry is not `[A-Za-z_][A-Za-z0-9_]*`. | Write the variable name, not `$VAR`. |
+| `config: environment.smolvm.ssh_agent: expected boolean, got <type>` | `ssh_agent` is not `true` or `false`. | Write `true` or `false`. |
+| `config: environment.smolvm.binary: cannot read the version of smolvm binary "<b>" (supported: 1.26.x): <err>` | The binary is missing, fails, or its `--version` output is not a version (`<err>` is then `smolvm --version printed "<line>", not a smolvm version`). Startup and reload. | Install smolvm 1.26.x, or set `binary`. |
+| `config: environment.smolvm.binary: smolvm binary "<b>": smolvm version <v> is not supported; supported: 1.26.x` | Another smolvm release. Startup and reload. | Install smolvm 1.26.x. |
 
 ### 9.3 Environment Variable Errors
 
@@ -3625,6 +3909,23 @@ A flat reference of every configuration field, for quick lookup. The "Env Overri
 | `notifications[].kind`                  | string           | _(required)_                 | —                                        | Destination discriminator; v1: `webhook`, `slack`, and the built-in `tracker_comment`  |
 | `notifications[].events`                | `[string]`       | `[agent.message]` for `webhook` and `slack`; _(required)_ for `tracker_comment` | — | Event types the entry receives; names from the closed catalog, none repeated; omitting it on `webhook` or `slack` is deprecated; `agent.message` is rejected on `tracker_comment` |
 | `notifications[].max_per_session`       | integer          | `20`                         | —                                        | `notify_operator` cap for the whole agent run, drawn from entries that receive `agent.message`; `0` selects the default; never unlimited; non-negative |
+| `environment.kind`                      | string           | `local`                      | —                                        | `local` or `smolvm`; `smolvm` excludes `worker.ssh_hosts`                              |
+| `environment.host_prefix`               | `[string]`       | _(absent)_                   | —                                        | Host argv in front of the session and credential-check launch; non-empty, no empty element |
+| `environment.smolvm.binary`             | path             | `smolvm`                     | —                                        | Version `1.26.x` checked at startup and reload                                         |
+| `environment.smolvm.pack`               | path             | _(required with `smolvm`)_   | —                                        | Readable `.smolmachine` file; new VMs only                                             |
+| `environment.smolvm.cpus`               | integer          | `0`                          | —                                        | `0` is smolvm's default; non-negative; new VMs only                                    |
+| `environment.smolvm.memory_mib`         | integer          | `0`                          | —                                        | `0` is smolvm's default; non-negative; new VMs only                                    |
+| `environment.smolvm.storage_gib`        | integer          | `0`                          | —                                        | `0` is smolvm's default; non-negative; new VMs only                                    |
+| `environment.smolvm.allow_hosts`        | `[string]`       | `[]`                         | —                                        | Exact host or `*.domain`; empty allows no egress beyond credential hosts               |
+| `environment.smolvm.credentials`        | `[map]`          | `[]`                         | —                                        | `name`, `env`, `hosts` required; `header` refused with smolvm 1.26                     |
+| `environment.smolvm.repository.url`     | string           | _(required in `repository`)_ | —                                        | Fetched and pushed by the host with its own credentials                                |
+| `environment.smolvm.repository.base`    | string           | _(required in `repository`)_ | —                                        | Branch a new issue branch starts from; pull request base                               |
+| `environment.smolvm.repository.branch_prefix` | string     | `sortie/`                    | —                                        | Issue branch = prefix + workspace key                                                  |
+| `environment.smolvm.repository.provider` | string          | _(absent)_                   | —                                        | `github`, `gitlab`, or `gitea`; must match every active SCM reaction                  |
+| `environment.smolvm.repository.project` | string           | _(required with `provider`)_ | —                                        | `owner/repo`                                                                           |
+| `environment.smolvm.repository.max_bundle_mib` | integer   | `512`                        | —                                        | Export bundle cap; positive                                                            |
+| `environment.smolvm.pass_env`           | `[string]`       | `[]`                         | —                                        | Host variables copied into the VM in plain text                                        |
+| `environment.smolvm.ssh_agent`          | boolean          | `false`                      | —                                        | Forwards the host SSH agent into new VMs                                               |
 | **Extensions**                          |                  |                              |                                          |                                                                                        |
 | `server.port`                           | integer          | `7678`                       | —                                        | CLI `--port` overrides; `0` disables server                                    |
 | `server.host`                           | string (IP)      | `127.0.0.1`                  | —                                        | CLI `--host` overrides                                                         |

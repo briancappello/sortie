@@ -86,6 +86,12 @@ var migration024SQL string
 //go:embed sql/025_run_history_held_ms.sql
 var migration025SQL string
 
+//go:embed sql/026_run_history_environment_image.sql
+var migration026SQL string
+
+//go:embed sql/027_run_history_exported_commit.sql
+var migration027SQL string
+
 var migrations = []Migration{
 	{Version: 1, Description: "core persistence tables", SQL: migration001SQL},
 	{Version: 2, Description: "extended token metrics", SQL: migration002SQL},
@@ -112,4 +118,6 @@ var migrations = []Migration{
 	{Version: 23, Description: "stage hop counts and the previous stage on retry entries and run history", SQL: migration023SQL},
 	{Version: 24, Description: "stage chain identifier and hop result on run history, retry entries, and stage hops", SQL: migration024SQL},
 	{Version: 25, Description: "held_ms column on run_history", SQL: migration025SQL},
+	{Version: 26, Description: "environment_image_sha256 column on run_history", SQL: migration026SQL},
+	{Version: 27, Description: "exported_commit column on run_history", SQL: migration027SQL},
 }

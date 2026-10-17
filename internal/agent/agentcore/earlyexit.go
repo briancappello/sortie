@@ -8,7 +8,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
@@ -35,6 +34,7 @@ type EarlyExit struct {
 	waitErr    error
 	incomplete bool
 	remote     bool
+	carrier    domain.LaunchCarrier
 	grace      time.Duration
 }
 
@@ -83,7 +83,8 @@ func ObserveEarlyExit(ctx context.Context, target LaunchTarget, reaper *procutil
 	return EarlyExit{
 		observed: true,
 		waitErr:  reaper.Err(),
-		remote:   target.RemoteCommand != "",
+		remote:   target.Remote(),
+		carrier:  target.Carrier,
 		grace:    grace,
 	}
 }
@@ -96,7 +97,8 @@ func ExitedEarly(target LaunchTarget, result procutil.CaptureResult) EarlyExit {
 		observed:   true,
 		waitErr:    result.WaitErr,
 		incomplete: !result.OutputComplete,
-		remote:     target.RemoteCommand != "",
+		remote:     target.Remote(),
+		carrier:    target.Carrier,
 		grace:      procutil.DefaultDrainGrace,
 	}
 }
@@ -132,7 +134,8 @@ func (w *OutputWatch) ExitedBeforeOutput(target LaunchTarget, waitErr error) Ear
 	return EarlyExit{
 		observed: true,
 		waitErr:  waitErr,
-		remote:   target.RemoteCommand != "",
+		remote:   target.Remote(),
+		carrier:  target.Carrier,
 		grace:    procutil.DefaultDrainGrace,
 	}
 }
@@ -146,8 +149,16 @@ func (e EarlyExit) Report(stderr *procutil.StderrCollector) *domain.AgentError {
 	if !e.observed {
 		return nil
 	}
-	if e.remote && sshutil.ConnectionFailed(procutil.ExtractExitCode(e.waitErr)) {
-		return ConnectionFailedError()
+	if e.remote {
+		stderrTail := func() []string {
+			if stderr == nil {
+				return nil
+			}
+			return stderr.FinishAndCollect(e.grace)
+		}
+		if remoteConnectionFailed(e.carrier, procutil.ExtractExitCode(e.waitErr), stderrTail) {
+			return remoteConnectionFailedError(e.carrier)
+		}
 	}
 
 	var lines []string

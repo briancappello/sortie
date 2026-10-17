@@ -17,11 +17,13 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/toolsocket"
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
@@ -126,6 +128,12 @@ type WorkerResult struct {
 	// preparation failed.
 	WorkspacePath string
 
+	// EnvironmentInstance describes the execution environment instance
+	// the attempt's workspace was prepared in, with the image digest its
+	// preparation reported. Zero when preparation failed and for an
+	// environment that names no instance.
+	EnvironmentInstance environment.Instance
+
 	// HandoffEvidencePolicy is frozen from the run's initial config
 	// snapshot; reloads during the run cannot change it.
 	HandoffEvidencePolicy config.HandoffEvidencePolicy
@@ -205,14 +213,21 @@ type WorkerResult struct {
 	// run's first prompt presented under that kind's template variable.
 	// Set only on [WorkerExitNormal].
 	HandedOffComments map[string][]string
+
+	// ExportedCommit is the commit the run's export pushed to the
+	// upstream's issue branch. Empty when the run configures no
+	// repository, or its export pushed nothing.
+	ExportedCommit string
 }
 
 // SessionToolRegistryFunc builds the first-turn tool advertisement.
 type SessionToolRegistryFunc func(ctx context.Context, issueID, workspacePath string) (*domain.ToolRegistry, error)
 
 // AgentToolChannelFunc reports whether a session of the given kind, in the
-// given mode, can execute the registry's tools. remote is true for SSH. A
-// nil [WorkerDeps.AgentToolChannelFunc] means the answer is unknown, not
+// given mode, can execute the registry's tools. remote is true for SSH,
+// where the generated MCP configuration is not valid; a session an
+// execution environment carries receives that configuration, so it passes
+// false. A nil [WorkerDeps.AgentToolChannelFunc] means the answer is unknown, not
 // that no channel exists.
 type AgentToolChannelFunc func(kind string, remote bool) bool
 
@@ -367,6 +382,26 @@ type WorkerDeps struct {
 	// NewOrchestrator falls back to NoopMetrics.
 	Metrics domain.Metrics
 
+	// EnvironmentFunc returns the execution environment for the
+	// attempt-start config's environment block. The workspace hooks,
+	// handoff evidence, and self-review commands of the attempt run in
+	// it. Nil builds it through [environment.New]. Optional.
+	EnvironmentFunc EnvironmentFunc
+
+	// RepositoryFunc returns the repository the attempt-start config's
+	// environment block configures, called only when it configures one
+	// and the dispatch runs the setup hooks. The repository is seeded or
+	// refreshed in the workspace's environment during preparation and
+	// exported from it when the run ends normally. Nil builds it through
+	// gitsync. Optional.
+	RepositoryFunc RepositoryFunc
+
+	// PullRequestOpenerFunc returns the opener of the pull request for
+	// the issue branch the export pushes, called only when the
+	// attempt-start config's repository names a provider. Nil fails
+	// such an export. Optional.
+	PullRequestOpenerFunc PullRequestOpenerFunc
+
 	// WorkflowPath is the absolute WORKFLOW.md path, passed to MCP config
 	// generation. Empty disables MCP config generation.
 	WorkflowPath string
@@ -377,6 +412,11 @@ type WorkerDeps struct {
 	// MCPServerBinary is the absolute path to the sortie binary spawned as
 	// the tool server. Empty resolves to the running executable.
 	MCPServerBinary string
+
+	// ToolSockets serves the tool server on the host to an environment
+	// that reaches Sortie's tools through a socket. Nil serves none, and
+	// such an environment's agent then finds no tool server. Optional.
+	ToolSockets *toolsocket.Registry
 
 	// ContinuationContext carries reaction continuation data to inject into
 	// the first-turn prompt. Non-nil only for reaction continuations.
@@ -697,10 +737,24 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// cancelledAtEnding is read right after the call that last ended a run attempt.
 	var cancelledAtEnding bool
 
+	// releaseTarget is the workspace whose execution environment the
+	// worker releases as its last step, set once the environment is
+	// resolved. Nil releases nothing.
+	var releaseTarget *workspace.Target
+
+	// workspaceInstance describes the instance the workspace was
+	// prepared in, set once preparation succeeds.
+	var workspaceInstance environment.Instance
+
 	report := func(result WorkerResult) {
 		result.StoppedByTokenCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errTokenCeilingStop)
 		result.SessionID = acceptedSessionID
+		result.EnvironmentInstance = workspaceInstance
 		reported = true
+		// The release follows every other step of the worker, the
+		// session's end and after_run included, and precedes the exit
+		// report, so no cleanup the exit triggers races it.
+		releaseEnvironment(ctx, releaseTarget, logger)
 		deps.OnExit(issue.ID, result)
 	}
 
@@ -769,6 +823,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	var sessionStartedAt time.Time
 	var handoffEvidenceBaseline *workspace.HandoffEvidenceBaseline
 	var handoffEvidenceBaselineErr error
+	var workspaceEnv environment.Environment
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -787,6 +842,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 					HookTimeoutMS: cfg.Hooks.TimeoutMS,
 					Logger:        logger,
 					SSHHost:       deps.SSHHost,
+					Environment:   workspaceEnv,
 				})
 			}
 			if !reported {
@@ -812,79 +868,142 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		}
 	}()
 
-	// A dispatch with no setup hooks gets a scratch directory via
-	// workspace.Ensure (no clone, no build); a hook-running dispatch runs
-	// the full lifecycle.
-	var wsResult workspace.PrepareResult
-	var err error
-	if !deps.Posture.RunsSetupHooks() {
-		// workspace.Ensure does not inspect the context, so honor an
-		// already-cancelled dispatch here, matching the normal path's early
-		// return.
-		var ensureResult workspace.EnsureResult
-		prepErr := ctx.Err()
-		if prepErr == nil {
-			ensureResult, prepErr = workspace.Ensure(cfg.Workspace.Root, issue.Identifier)
-		}
-		cancelledAtEnding = ctx.Err() != nil
-		if prepErr != nil {
-			report(WorkerResult{
-				IssueID:          issue.ID,
-				Identifier:       issue.Identifier,
-				ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
-				Error:            fmt.Errorf("workspace preparation: %w", prepErr),
-				AgentAdapter:     agentKind,
-				Attempt:          attempt,
-				SSHHost:          deps.SSHHost,
-				Usage:            localUsage,
-				UsageMeasured:    localMeasured,
-				UnaccountedTurns: localUnaccounted,
-				ModelName:        localModelName,
-				APIRequestCount:  localRequestCount,
-			})
-			return
-		}
-		// The read-only path reuses the per-issue directory, which may hold
-		// a stale .sortie/status; clear it so a stale recognized status does
-		// not end the review on turn one.
-		workspace.CleanupStatusFile(ensureResult.Path, logger)
-		wsResult = workspace.PrepareResult(ensureResult)
-	} else {
-		wsResult, err = workspace.Prepare(ctx, workspace.PrepareParams{
-			Root:          cfg.Workspace.Root,
-			Identifier:    issue.Identifier,
-			IssueID:       issue.ID,
-			Attempt:       attemptInt,
-			AfterCreate:   cfg.Hooks.AfterCreate,
-			BeforeRun:     cfg.Hooks.BeforeRun,
-			HookTimeoutMS: cfg.Hooks.TimeoutMS,
-			Logger:        logger,
-			SSHHost:       deps.SSHHost,
-			PreRunFunc: func(wsPath string) {
-				workspace.CleanupStatusFile(wsPath, logger)
-			},
+	// The attempt's workspace code runs in the environment its
+	// attempt-start config selects. One that cannot be built fails the
+	// preparation: nothing falls back to the host.
+	stateDir := ""
+	if deps.DBPath != "" {
+		stateDir = filepath.Dir(deps.DBPath)
+	}
+	buildEnvironment := func(envCfg config.EnvironmentConfig) (environment.Environment, error) {
+		return environment.New(environment.Params{
+			Config: envCfg, StateDir: stateDir, WorkflowPath: deps.WorkflowPath, SortieBinary: deps.MCPServerBinary, Logger: logger,
 		})
+	}
+	resolveEnvironment := deps.EnvironmentFunc
+	if resolveEnvironment == nil {
+		resolveEnvironment = buildEnvironment
+	}
+	resolvedEnv, envErr := resolveEnvironment(cfg.Environment)
+	if envErr != nil {
 		cancelledAtEnding = ctx.Err() != nil
-		if err != nil {
-			report(WorkerResult{
-				IssueID:          issue.ID,
-				Identifier:       issue.Identifier,
-				ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
-				Error:            fmt.Errorf("workspace preparation: %w", err),
-				AgentAdapter:     agentKind,
-				Attempt:          attempt,
-				SSHHost:          deps.SSHHost,
-				Usage:            localUsage,
-				UsageMeasured:    localMeasured,
-				UnaccountedTurns: localUnaccounted,
-				ModelName:        localModelName,
-				APIRequestCount:  localRequestCount,
-			})
-			return
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: execution environment: %w", envErr),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
+		})
+		return
+	}
+	// The workspace's environment is released on every exit from here
+	// on, a failed preparation included: it may have started an
+	// instance before failing.
+	if pathResult, pathErr := workspace.ComputePath(cfg.Workspace.Root, issue.Identifier); pathErr == nil {
+		target := workspace.NewTarget(resolvedEnv, pathResult.Key, pathResult.Path, issue.ID, issue.Identifier)
+		releaseTarget = &target
+	}
+
+	// A dispatch with no setup hooks gets a scratch directory: no clone,
+	// no build. It is prepared like any other, so its execution
+	// environment is ready for the session, with the operator's setup
+	// hooks left out. A hook-running dispatch runs the full lifecycle.
+	afterCreate, beforeRun := cfg.Hooks.AfterCreate, cfg.Hooks.BeforeRun
+	// The configured repository is placed in the environment by the same
+	// rule: a scratch dispatch gets none.
+	var repo Repository
+	var repoErr error
+	if deps.Posture.RunsSetupHooks() {
+		if configuresRepository(cfg.Environment) {
+			newRepository := deps.RepositoryFunc
+			if newRepository == nil {
+				newRepository = repositorySync
+			}
+			repo, repoErr = newRepository(cfg.Environment, stateDir, logger)
 		}
+	} else {
+		afterCreate, beforeRun = "", ""
+	}
+	var repoSync workspace.RepositorySync
+	if repo != nil {
+		repoSync = repo
+	}
+	if repoErr != nil {
+		cancelledAtEnding = ctx.Err() != nil
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: repository: %w", repoErr),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
+		})
+		return
+	}
+	wsResult, err := workspace.Prepare(ctx, workspace.PrepareParams{
+		Root:          cfg.Workspace.Root,
+		Identifier:    issue.Identifier,
+		IssueID:       issue.ID,
+		Attempt:       attemptInt,
+		AfterCreate:   afterCreate,
+		BeforeRun:     beforeRun,
+		HookTimeoutMS: cfg.Hooks.TimeoutMS,
+		Logger:        logger,
+		SSHHost:       deps.SSHHost,
+		Environment:   resolvedEnv,
+		Repository:    repoSync,
+		// A workspace another kind created is removed by that kind,
+		// built from the attempt's environment block with only the
+		// kind changed. It is built apart from the shared instance,
+		// which keeps serving the configured kind.
+		EnvironmentForKind: func(kind string) (environment.Environment, error) {
+			envCfg := cfg.Environment
+			envCfg.Kind = kind
+			return buildEnvironment(envCfg)
+		},
+		// A reused per-issue directory may hold a stale
+		// .sortie/status; clearing it keeps a stale recognized status
+		// from ending the run on turn one.
+		PreRunFunc: func(wsPath string) {
+			workspace.CleanupStatusFile(wsPath, logger)
+		},
+	})
+	cancelledAtEnding = ctx.Err() != nil
+	if err != nil {
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: %w", err),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
+		})
+		return
 	}
 
 	workspacePath = wsResult.Path
+	workspaceEnv = resolvedEnv
+	workspaceInstance = wsResult.Instance
+	wsTarget := workspace.NewTarget(workspaceEnv, wsResult.Key, wsResult.Path, issue.ID, issue.Identifier)
 	logger.Info("workspace prepared", slog.String("workspace", wsResult.Path))
 
 	// finishWorkspace runs the after_run hook best-effort on every exit path
@@ -903,6 +1022,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			HookTimeoutMS: cfg.Hooks.TimeoutMS,
 			Logger:        logger,
 			SSHHost:       deps.SSHHost,
+			Environment:   workspaceEnv,
 		})
 	}
 
@@ -930,7 +1050,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			return
 		}
 
-		generatedPath, genErr := GenerateMCPConfig(MCPConfigParams{
+		mcpParams := MCPConfigParams{
 			BinaryPath:            execPath,
 			WorkflowPath:          deps.WorkflowPath,
 			WorkspacePath:         wsResult.Path,
@@ -941,8 +1061,18 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			Attempt:               attempt,
 			AgentKind:             agentKind,
 			OperatorMCPConfigPath: deps.AgentSettings.MCPConfigPath,
+			GuestCommand:          guestToolCommand(workspaceEnv),
 			ProcessEnv:            CollectSortieEnv(),
-		})
+		}
+		generatedPath, genErr := GenerateMCPConfig(mcpParams)
+		if genErr == nil {
+			// An environment that reaches the tools through a socket
+			// gets its listener before the agent starts, serving this
+			// session's identity from now on.
+			if _, sockErr := serveToolSocket(deps.ToolSockets, workspaceEnv, wsTarget.Workspace, mcpParams); sockErr != nil {
+				genErr = fmt.Errorf("tool socket: %w", sockErr)
+			}
+		}
 		if genErr != nil {
 			finishWorkspace()
 			report(WorkerResult{
@@ -1026,6 +1156,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		MCPConfigPath:            mcpConfigPath,
 		Settings:                 deps.AgentSettings.Passthrough,
 		SessionEnv:               buildSessionEnv(sessionEnv),
+		// An environment that runs the workspace elsewhere carries the
+		// session there; the credential check below shares it.
+		Carrier: wsTarget.LaunchCarrier(),
+		// The host prefix wraps the session launch and the credential
+		// check on this host; hooks, verification, triage, and git
+		// inspection run without it.
+		HostPrefix: slices.Clone(cfg.Environment.HostPrefix),
 	}
 	verificationParams := params
 	sessionEnv.Purpose = sessionPurposeCredentialCheck
@@ -1055,7 +1192,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	}
 
 	if handoffEvidencePolicy != config.HandoffEvidenceOff {
-		baseline, baselineErr := workspace.CaptureHandoffEvidenceBaseline(ctx, wsResult.Path)
+		baseline, baselineErr := wsTarget.CaptureHandoffEvidenceBaseline(ctx)
 		if baselineErr != nil {
 			handoffEvidenceBaselineErr = baselineErr
 		} else {
@@ -1280,6 +1417,8 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		}
 
 		if turnNumber == 1 {
+			// Only SSH withholds the generated MCP configuration: an
+			// environment's launch carrier delivers it into the guest.
 			remote := strings.TrimSpace(deps.SSHHost) != ""
 			switch {
 			case deps.AgentToolChannelFunc == nil:
@@ -1471,6 +1610,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			Session:       session,
 			Issue:         issue,
 			WorkspacePath: wsResult.Path,
+			Target:        wsTarget,
 			Config:        reviewCfg.SelfReview,
 			AgentAdapter:  deps.AgentAdapter,
 			OnEvent: func(_ string, event domain.AgentEvent) {
@@ -1544,6 +1684,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				SSHHost:               deps.SSHHost,
 				SelfReviewStatus:      selfReviewStatus,
 				SelfReviewSummaryPath: selfReviewSummaryPath,
+				Environment:           workspaceEnv,
 			})
 		}
 		report(WorkerResult{
@@ -1584,6 +1725,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				SSHHost:               deps.SSHHost,
 				SelfReviewStatus:      selfReviewStatus,
 				SelfReviewSummaryPath: selfReviewSummaryPath,
+				Environment:           workspaceEnv,
 			})
 		}
 		report(WorkerResult{
@@ -1620,7 +1762,52 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			SSHHost:               deps.SSHHost,
 			SelfReviewStatus:      selfReviewStatus,
 			SelfReviewSummaryPath: selfReviewSummaryPath,
+			Environment:           workspaceEnv,
 		})
+	}
+
+	// The committed work leaves the environment after after_run and
+	// before the exit report, whose handling makes the tracker handoff,
+	// and before the environment is released. A failed export fails the
+	// run, so no handoff happens without the work upstream.
+	var exportedCommit string
+	if repo != nil {
+		var exportErr error
+		if ctx.Err() != nil {
+			exportErr = &ExportError{Err: fmt.Errorf("run stopped before the export: %w", context.Cause(ctx))}
+		} else {
+			exportedCommit, exportErr = exportIssueBranch(ctx, exportParams{
+				Repo:        repo,
+				Env:         workspaceEnv,
+				Workspace:   wsTarget.Workspace,
+				Issue:       issue,
+				PullRequest: pullRequestTargetFor(cfg, deps.PullRequestOpenerFunc),
+				Logger:      logger,
+			})
+		}
+		if exportErr != nil {
+			cancelledAtEnding = ctx.Err() != nil
+			report(WorkerResult{
+				IssueID:            issue.ID,
+				Identifier:         issue.Identifier,
+				ExitKind:           exitKindAtEnding(ctx, cancelledAtEnding),
+				Error:              exportErr,
+				ReviewMetadata:     reviewMeta,
+				TurnsCompleted:     turnsCompleted,
+				TurnsStarted:       turnsStarted,
+				WorkspacePath:      wsResult.Path,
+				AgentAdapter:       agentKind,
+				Attempt:            attempt,
+				SSHHost:            deps.SSHHost,
+				ObservedIssueState: observedIssueState,
+				Usage:              localUsage,
+				UsageMeasured:      localMeasured,
+				UnaccountedTurns:   localUnaccounted,
+				ModelName:          localModelName,
+				APIRequestCount:    localRequestCount,
+			})
+			return
+		}
 	}
 
 	logger.Info("worker exiting",
@@ -1652,6 +1839,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		UsageMeasured:                localMeasured,
 		UnaccountedTurns:             localUnaccounted,
 		HandedOffComments:            presentedComments,
+		ExportedCommit:               exportedCommit,
 	})
 }
 

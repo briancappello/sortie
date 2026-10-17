@@ -68,8 +68,9 @@ func checkRuntimeVersion(ctx context.Context, state *sessionState) *domain.Agent
 				agentcore.AuxiliaryTimeout(state.agentConfig).Milliseconds()),
 		}
 	case result.WaitErr != nil:
-		if state.target.RemoteCommand != "" && sshutil.ConnectionFailed(procutil.ExtractExitCode(result.WaitErr)) {
-			return agentcore.ConnectionFailedError()
+		stderrTail := func() []string { return stderr.Collector(state.logger()).Lines() }
+		if state.target.ConnectionFailed(procutil.ExtractExitCode(result.WaitErr), stderrTail) {
+			return state.target.ConnectionFailedError()
 		}
 		return agentcore.ExitedEarly(state.target, result).Report(stderr.Collector(state.logger()))
 	}

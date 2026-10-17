@@ -118,6 +118,16 @@ The job log is one stream. Nothing in a line names its step, so the step has to 
 
 **Deleting an already-absent branch is a not-found that the caller treats as a successful no-op**, which is what lets a retry after a partial-failure tail complete the issue rather than block it. A refused delete against a protected or default branch arrives as one of two different statuses depending on the case, so handle both; the auto-merge loop never targets a default branch, making either an operator-configuration error rather than a runtime condition.
 
+## Opening a pull request for an issue branch
+
+The SCM adapter also implements the optional `domain.PullRequestOpener`. Its one method, `EnsurePullRequest`, serves the repository export of the `smolvm` execution environment: after Sortie pushes an issue branch, it needs the open pull request for that branch, or a new one. It is not part of `SCMAdapter`, so no other implementer or fake changed.
+
+**Find first, then create.** The adapter lists the open pull requests filtered by `head=<owner>:<branch>` and returns the one whose head ref is the branch, unchanged, with `Created` false. Only when there is none does it create one with the given title, body, head, and base. The `owner:` qualifier keeps a fork's branch of the same name out of the result.
+
+**A lost create race is a 422, not an error to report.** GitHub refuses a second pull request for the same head and base with 422. The adapter then re-reads the open pull requests and returns the one another caller created; only when there is none does it return the 422.
+
+**The scope error names the scope.** A 403 that is not a rate limit, or a 404 on create after the list succeeded, means the token can read the repository but not open pull requests in it. Both map to `ErrSCMAuth` with a message naming what the token needs: the classic `repo` scope, or the fine-grained permission "Pull requests: write". A rate-limited 403 stays an API error, so it is retried rather than reported as a configuration fault.
+
 ## The scope preflight can only verify one token kind
 
 The auto-merge scope preflight reads the scopes header GitHub returns on a rate-limit read. Classic personal access tokens populate that header. Fine-grained tokens and GitHub App installation tokens do not, and there is no substitute surface for them.

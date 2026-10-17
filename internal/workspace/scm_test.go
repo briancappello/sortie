@@ -185,3 +185,53 @@ func TestReadSCMMetadata_NilLogger(t *testing.T) {
 		t.Errorf("ReadSCMMetadata(nil logger, absent) = %+v, want zero value", got)
 	}
 }
+
+func TestHostSCMRecord_RoundTripAndIgnoresTheAgentFile(t *testing.T) {
+	t.Parallel()
+
+	wsPath := t.TempDir()
+	writeSCMFile(t, wsPath, []byte(`{"branch":"forged","pr_number":999,"owner":"evil","repo":"other"}`))
+
+	if got := ReadHostSCMRecord(wsPath, nil); got != (domain.SCMMetadata{}) {
+		t.Errorf("ReadHostSCMRecord(no record) = %+v, want zero value, never the agent's file", got)
+	}
+
+	want := domain.SCMMetadata{Branch: "sortie/PROJ-1", SHA: "abc123", PushedAt: "2026-10-12T10:00:00Z", PRNumber: 7, Owner: "org", Repo: "app"}
+	if err := WriteHostSCMRecord(wsPath, want); err != nil {
+		t.Fatalf("WriteHostSCMRecord: %v", err)
+	}
+	if got := ReadHostSCMRecord(wsPath, nil); got != want {
+		t.Errorf("ReadHostSCMRecord = %+v, want %+v", got, want)
+	}
+	if got := ReadSCMMetadata(wsPath, nil); got.PRNumber != 999 {
+		t.Errorf("ReadSCMMetadata = %+v, want the agent's file unchanged", got)
+	}
+	data, err := os.ReadFile(filepath.Join(wsPath, ".sortie-host", "scm.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(.sortie-host/scm.json): %v", err)
+	}
+	const wantJSON = `{"branch":"sortie/PROJ-1","sha":"abc123","pushed_at":"2026-10-12T10:00:00Z","pr_number":7,"owner":"org","repo":"app"}`
+	if string(data) != wantJSON {
+		t.Errorf("record = %s, want %s", data, wantJSON)
+	}
+}
+
+func TestReadHostSCMRecord_LinkedRecordIsRefused(t *testing.T) {
+	t.Parallel()
+
+	wsPath := t.TempDir()
+	forged := filepath.Join(t.TempDir(), "scm.json")
+	if err := os.WriteFile(forged, []byte(`{"branch":"b","pr_number":999,"owner":"o","repo":"r"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(wsPath, ".sortie-host"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(forged, filepath.Join(wsPath, ".sortie-host", "scm.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := ReadHostSCMRecord(wsPath, slog.New(slog.DiscardHandler)); got != (domain.SCMMetadata{}) {
+		t.Errorf("ReadHostSCMRecord(linked) = %+v, want zero value", got)
+	}
+}

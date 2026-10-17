@@ -633,6 +633,7 @@ type freshRunSeedParams struct {
 	SCMAdapter          domain.SCMAdapter
 	Store               ReconcileStore
 	WorkspaceRoot       string
+	SCMMetadata         SCMMetadataReader
 	ReviewConfigured    bool
 	ReviewConfig        ReviewReactionConfig
 	BotReviewConfigured bool
@@ -643,7 +644,7 @@ type freshRunSeedParams struct {
 // carries, holding for each seedable kind the pull request's actionable
 // comments when one of them is new. A kind is seedable when it is configured
 // and has no triage block, since triage decides whether an agent gets the
-// comments. Nothing is seeded for a workspace whose scm.json names no pull
+// comments. Nothing is seeded for a workspace whose SCM metadata names no pull
 // request. A fetch or load failure skips only the kind concerned. It returns
 // nil when nothing is seeded.
 func freshRunSeed(ctx context.Context, state *State, p freshRunSeedParams, issue domain.Issue, log *slog.Logger) map[string]any {
@@ -666,7 +667,7 @@ func freshRunSeed(ctx context.Context, state *State, p freshRunSeedParams, issue
 		}
 		return nil
 	}
-	meta := workspace.ReadSCMMetadata(pathResult.Path, log)
+	meta := p.SCMMetadata.Read(pathResult.Path, log)
 	if meta.PRNumber <= 0 || meta.Owner == "" || meta.Repo == "" || meta.Branch == "" {
 		return nil
 	}

@@ -223,7 +223,7 @@ func geminiExecutableToken(normalized string, optionValue bool) bool {
 // CLI; with runtime non-empty, the relaunch offer, it is armed exactly when
 // Recognize(runtime) is true, regardless of the command line.
 func (r *geminiReader) Claim(target agentcore.LaunchTarget, runtime string) ([]string, bool) {
-	if target.RemoteCommand != "" {
+	if target.Remote() {
 		return nil, false
 	}
 	if runtime != "" {

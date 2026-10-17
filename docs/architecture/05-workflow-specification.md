@@ -47,6 +47,7 @@ Top-level keys:
 - `reactions`
 - `dispatch`
 - `notifications`
+- `environment`
 
 Unknown keys should be ignored for forward compatibility.
 
@@ -696,6 +697,25 @@ Validation and resolution:
 - An entry that is not `tracker_comment` omits `events`.
 
 No removal date or removal version is set for any deprecated form.
+
+#### 5.3.11 `environment` (object, optional)
+
+The execution environment: where the code of an issue's workspace runs. Every operation that runs workspace code goes through it: the agent session and its credential verification session, auxiliary agent commands, the four hooks, self-review verification commands, reaction triage, and every `git` command Sortie runs to inspect the workspace (Section 9.7).
+
+Fields:
+
+- `kind` (string)
+  - Default: `local`. Accepted values: `local` and `smolvm`. An unknown value fails validation with an error that names `environment.kind` and the value.
+  - `local` runs everything on Sortie's host, in the host workspace directory, exactly as without the block.
+  - `smolvm` runs each issue workspace in its own smolvm microVM. It requires Linux and smolvm `1.26.x`, and it excludes `worker.ssh_hosts`: validation fails with an error that names both settings.
+- `host_prefix` (list of strings, optional)
+  - An argv that stays on Sortie's host in front of the agent session launch and the credential verification launch (Section 10.10). An empty list, or an empty element, fails validation. It never wraps hooks, verification commands, triage, auxiliary commands, or git inspection.
+- `smolvm` (object)
+  - Read and validated only when `kind` is `smolvm`.
+  - `binary` (path, default `smolvm`), `pack` (path, required, a readable regular file), `cpus`, `memory_mib`, `storage_gib` (non-negative integers, `0` for smolvm's default), `allow_hosts` (exact host names or `*.domain` patterns), `credentials` (list of `{name, env, hosts, header}` bindings), `repository` (optional object), `pass_env` (list of variable names), `ssh_agent` (boolean, default `false`).
+  - `repository`: `url` and `base` required; `branch_prefix` default `sortie/`; `provider` and `project` optional, with `project` required when `provider` is set; `max_bundle_mib` a positive integer, default `512`.
+
+The full field reference, every validation error, and the reload rules are in the [workflow reference](../workflow-reference.md#212-environment--execution-environment). Changes apply to environments created after a reload; a running VM keeps the settings it was created with. A reload that fails validation, the smolvm version check, or the repository provider check keeps the previous configuration.
 
 ### 5.4 Prompt Template Contract
 

@@ -17,7 +17,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/typeutil"
 )
@@ -245,9 +244,12 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		return domain.Session{}, agentErr
 	}
 
-	remote := target.RemoteCommand != ""
+	remote := target.Remote()
+	// A remote runtime gets the MCP servers only where the generated
+	// configuration is valid; they are parsed from the host copy.
+	noMCP := remote && !target.MCPInGuest()
 
-	parsedServers, agentErr := parseMCPServers(params.MCPConfigPath, remote)
+	parsedServers, agentErr := parseMCPServers(params.MCPConfigPath, noMCP)
 	if agentErr != nil {
 		return domain.Session{}, agentErr
 	}
@@ -295,16 +297,15 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		}
 		state.inbox = jsonrpc.NewInbox[pumpItem]()
 
-		var cmd *exec.Cmd
-		var launch sshutil.SSHLaunch
-		if remote {
-			launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, target.SSHOptions())
-			cmd = exec.CommandContext(ctx, target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
-		} else {
-			cmd = exec.CommandContext(ctx, target.Command, target.Args...) //nolint:gosec // args are constructed programmatically
+		launch, agentErr := target.SessionLaunch(nil)
+		if agentErr != nil {
+			return domain.Session{}, agentErr
 		}
+		cmd := exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 		cmd.Env = append(os.Environ(), readerEnv...)
-		if !remote {
+		// An SSH launch carries the session variables itself; every other
+		// launch binds them, and the workspace, to the host process.
+		if target.RemoteCommand == "" {
 			if bindErr := target.BindWorkspace(cmd); bindErr != nil {
 				return domain.Session{}, bindErr
 			}
@@ -375,7 +376,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		// The capability record is built here, before the pump starts, so the pump
 		// is its sole mutator afterward: StartSession must not touch state.caps past
 		// this point.
-		state.caps = newCapabilityRecord(remote, len(claims.claimed) > 0)
+		state.caps = newCapabilityRecord(noMCP, len(claims.claimed) > 0)
 		state.usage = usage
 
 		// Start the pump before the handshake, so it is the sole mutator of session
@@ -476,7 +477,10 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 		caps = *initResp.AgentCapabilities
 	}
 
-	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, target.WorkspacePath, wireServers)
+	// The runtime resolves cwd where it runs: inside an execution
+	// environment that is the guest workspace, not the host path.
+	cwd := target.GuestPath(target.WorkspacePath)
+	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, cwd, wireServers)
 	if agentErr != nil {
 		teardownOnFailure()
 		procutil.EmitWarnLines(state.stderrCollector.Lines(), state.logger)
@@ -606,13 +610,24 @@ func translateCallError(state *sessionState, err error, callCtx context.Context,
 	}
 	state.earlyExit = agentcore.ObserveEarlyExit(startCtx, state.target, state.reaper, state.drainGrace)
 	if state.sshConnectionFailed() {
-		return agentcore.ConnectionFailedError()
+		return state.target.ConnectionFailedError()
 	}
 	return &domain.AgentError{Kind: domain.ErrPortExit, Message: "agent connection ended before responding", Err: err}
 }
 
 func (state *sessionState) sshConnectionFailed() bool {
-	return agentcore.ReaperConnectionFailed(state.target.RemoteCommand != "", state.reaper, state.drainGrace)
+	return agentcore.TargetReaperConnectionFailed(state.target, state.reaper, state.drainGrace, state.stderrTail)
+}
+
+// stderrTail returns the lines the runtime's host process wrote to
+// standard error once its drain finishes within the session's drain
+// grace, and nil otherwise. It never abandons the drain, which the
+// session's teardown owns.
+func (state *sessionState) stderrTail() []string {
+	if state.stderrCollector == nil || !state.stderrCollector.WaitDone(state.drainGrace) {
+		return nil
+	}
+	return state.stderrCollector.Lines()
 }
 
 // textContentBlock builds a text content block from scratch: contentBlock's

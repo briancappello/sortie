@@ -740,6 +740,9 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 		WorkerDone:             workerCtx.Done(),
 		SSHHost:                sshHost,
 	}
+	if state.DescribeEnvironment != nil {
+		state.Running[issue.ID].Environment = state.DescribeEnvironment(issue.Identifier)
+	}
 
 	CancelRetry(state, issue.ID)
 

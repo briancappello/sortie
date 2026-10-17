@@ -262,6 +262,37 @@ type SCMAdapter interface {
 	RemoveLabel(ctx context.Context, prNumber int, owner, repo, label string) error
 }
 
+// PullRequest identifies a pull request (a merge request on GitLab)
+// that [PullRequestOpener.EnsurePullRequest] found or created.
+type PullRequest struct {
+	// Number is the repository-scoped pull request number.
+	Number int
+
+	// URL is the pull request's web page.
+	URL string
+
+	// Created reports whether the call created the pull request rather
+	// than finding an open one.
+	Created bool
+}
+
+// PullRequestOpener is an optional capability of an [SCMAdapter]: an
+// adapter that implements it can open a pull request for a branch.
+// Implementations must be safe for concurrent use.
+type PullRequestOpener interface {
+	// EnsurePullRequest returns the open pull request in owner/repo
+	// whose head is the branch head of that same repository, whatever
+	// its base, leaving its title and body unchanged. When there is
+	// none it creates one from head to base with title and body and
+	// reports it as created. A create that loses a race with another
+	// creating the same pull request returns the one that won.
+	//
+	// A permission or scope failure is a [*SCMError] of Kind
+	// [ErrSCMAuth] whose Message names the scope the provider
+	// requires. Any other failure is a [*SCMError] of its own Kind.
+	EnsurePullRequest(ctx context.Context, owner, repo, head, base, title, body string) (PullRequest, error)
+}
+
 // SCMErrorKind enumerates the normalized error categories that SCM
 // adapter implementations map their native errors to. The orchestrator
 // uses these categories for logging and observability; all SCM errors

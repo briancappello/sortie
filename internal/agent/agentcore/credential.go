@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -106,7 +105,7 @@ func verificationTurnBoundElapsed(ctx, turnCtx context.Context) bool {
 
 // isTerminalVerificationError reports whether err must not be reclassified.
 func isTerminalVerificationError(err error) bool {
-	if errors.Is(err, sshutil.ErrConnectionFailed) {
+	if IsConnectionFailure(err) {
 		return true
 	}
 	if _, isEarlyExit := errors.AsType[*EarlyExitError](err); isEarlyExit {

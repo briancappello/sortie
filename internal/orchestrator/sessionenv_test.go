@@ -247,7 +247,13 @@ func TestSessionToken_DoesNotTrimTruncatedText(t *testing.T) {
 	t.Parallel()
 
 	index := NewSessionTokenIndex()
+	// A first random character equal to the prefix byte begins every
+	// token, so masking rightly cuts it; draw a token whose first random
+	// character is any other.
 	token := mintSessionToken()
+	for i := 0; i < 64 && strings.HasPrefix(token[len(sessionTokenPrefix):], sessionTokenPrefix); i++ {
+		token = mintSessionToken()
+	}
 	index.register(token, "id-trim", "TRIM-1")
 	defer index.revoke(token)
 

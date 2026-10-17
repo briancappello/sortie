@@ -69,9 +69,19 @@ var CIProviders = NewRegistry[CIProviderConstructor, struct{}]("ci_provider")
 type SCMAdapterConstructor func(adapterConfig map[string]any) (domain.SCMAdapter, error)
 
 // SCMAdapters is the default SCM adapter registry. Adapter packages
-// register themselves via [Registry.Register] in their init functions;
-// the orchestrator resolves adapters via [Registry.Get] at runtime.
-var SCMAdapters = NewRegistry[SCMAdapterConstructor, struct{}]("scm")
+// register themselves via [Registry.Register] or, to declare a
+// capability, [Registry.RegisterWithMeta] in their init functions; the
+// orchestrator resolves adapters via [Registry.Get] at runtime.
+var SCMAdapters = NewRegistry[SCMAdapterConstructor, SCMMeta]("scm")
+
+// SCMMeta holds optional SCM-adapter-declared capabilities queried when
+// a configuration is validated, before any adapter is constructed. Zero
+// value means no optional capability.
+type SCMMeta struct {
+	// OpensPullRequests declares that the adapter implements
+	// [domain.PullRequestOpener].
+	OpensPullRequests bool
+}
 
 // NotifierConstructor creates a [domain.Notifier] from the backend
 // entry's pass-through config map. Implementations validate their
@@ -521,10 +531,11 @@ const (
 // DeliversTools reports whether a session of this disposition,
 // launched in the given mode, can reach the servers declared in the
 // generated configuration. remote is true when the session runs over
-// SSH. It is total over the value set: true for
-// MCPInjectionSupported; true for MCPInjectionTranslated only when
-// remote is false; false for every other value, including a value
-// outside the declared set.
+// SSH, where that configuration is not valid; a session launched into
+// an execution environment, where it is valid, passes false. It is
+// total over the value set: true for MCPInjectionSupported; true for
+// MCPInjectionTranslated only when remote is false; false for every
+// other value, including a value outside the declared set.
 func (m MCPInjection) DeliversTools(remote bool) bool {
 	switch m {
 	case MCPInjectionSupported:

@@ -37,7 +37,7 @@ Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
 Implications:
 
 - Hooks are fully trusted configuration.
-- Hooks run inside the workspace directory.
+- Hooks run inside the workspace directory, through the execution environment: on the host under `local`, in the issue's VM under `smolvm` (Section 15.8). A hook in a VM still runs code from the repository, such as a package install script, but that code then runs in the VM.
 - Hook output should be truncated in logs.
 - Hook timeouts are required to avoid hanging the orchestrator.
 
@@ -77,8 +77,30 @@ The sandbox does not help in either case. It governs filesystem and network reac
 
 Two credentials of Sortie's own HTTP control surface (§13.7) are bounded on purpose. The operator's `server.control_token` never reaches an agent: every variable of the orchestrator's environment holding its value is removed at startup. Each work session instead receives `SORTIE_SESSION_TOKEN`, a token that authorizes only the per-issue control routes of its own issue and stops working when its run ends. A local agent can read that token, as it can read anything its wrapper holds, so the worst a leaked session token does is act on its own run, in ways the run's limits still bound and the run's state shows.
 
+The `smolvm` execution environment (Section 15.8) moves this exposure off the host: the runtime, its configuration loader, and every helper it starts run in the issue's VM, with only the variables Sortie gives the VM.
+
 ### 15.7 Control API Exposure
 
 The state-changing HTTP endpoints accept requests without a token only while no control token is set, and Sortie then refuses any bind address that is not a loopback address. A deployment that exposes the server, a container bound to `0.0.0.0` among them, sets `server.control_token`. Read-only endpoints keep no authentication: put the server behind a network boundary or an authenticating proxy when the dashboard, the runtime snapshot, or the metrics must not be readable.
 
 Which runtimes read workspace configuration, which files they key on, and how any of this differs between their releases are adapter concerns and belong in the adapter notes.
+
+### 15.8 Execution Environment Isolation
+
+`environment.kind: smolvm` (Section 9.7) is Sortie's built-in sandbox. Its goal: no code from the workspace or the agent runs on the host, and that includes `git` reading a repository the guest controls. The `local` kind keeps the host-execution model of the sections above.
+
+**What runs in the VM.** The agent, its credential verification session, auxiliary agent commands, the four hooks, self-review verification commands, reaction triage, and every `git` command that inspects the workspace. The host only reads the output bytes of the inspection commands, with the existing caps. There is no fallback to the host when the VM cannot be prepared.
+
+**No host git on a guest repository.** The repository lives on the VM's disk. When `environment.smolvm.repository` is set, git data crosses only as bundles piped through a guest command, outside the workspace. The host imports exactly one ref, `refs/heads/<issue branch>`, from a bundle into its own bare mirror, after checking that the bundle names nothing else and stays under `max_bundle_mib`. Every host git command on the mirror runs with hooks disabled, the filesystem monitor off, and every received object checked, so a planted hook, filter driver, or `.gitattributes` entry in an exported commit runs nothing on the host. A planted fsmonitor or filter can still run in the guest, where the agent can run anything anyway; at worst it falsifies its own handoff evidence. Reading `.git` objects through a shared mount is never done.
+
+**Credentials.** Sortie pushes with the host's own git credentials (SSH agent, credential helper, deploy key); they never enter the VM, and the only ref Sortie pushes is the issue branch, with a lease, so a commit someone else pushed is never overwritten. Prefer a deploy key or a token scoped to the one repository. An agent's API key enters only as a smolvm credential binding: the guest holds a placeholder, and the proxy substitutes the value only on HTTPS requests to the bound hosts. `pass_env` copies a host variable into the VM in plain text, by explicit opt-in. An agent credential variable that is set on the host and neither bound nor passed fails the dispatch preflight; it is never copied silently. No other host variable reaches the VM: hooks and inspection commands there inherit nothing from Sortie's process, `SORTIE_*` variables included. `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never reach the VM; a host prefix keeps them on the host. The generated MCP configuration carries no env block for Sortie's own server, but servers an operator adds through an agent block's `mcp_config` are merged as written and run in the VM, so any value in their env blocks is visible there.
+
+**Egress.** A VM reaches no network host unless `allow_hosts` lists it, plus the hosts of its credential bindings, which Sortie always adds because a binding without an allowlist opens the whole network. With `repository` set, the git host needs no entry, so git is not an exfiltration path. Every listed host still is one: a package registry, or the model API itself. Denials are logged by smolvm (`smolvm machine egress-events --name <vm>`); the VM name is in `/api/v1/state`.
+
+**Host resources.** Exactly three: the issue's `.sortie` directory read-write, the issue's tool socket, and a read-only directory that holds only the Sortie binary. A guest write to `/opt/sortie` fails, also after a remount from inside the guest. No nested virtualization, system mounts, Docker socket, published ports, or other host path. SSH agent forwarding is an explicit opt-in (`ssh_agent`).
+
+**The shared control directory.** Files the agent writes there are read on the host through `workspacekit`, with links refused and sizes capped (Invariant 7). A guest can plant a link there; it is refused, not followed. The environment record there is agent-writable, so removal never follows a record to the host (Invariant 11). The trusted SCM record lives in `.sortie-host`, outside the shared directory, so an agent cannot point CI polling, reviews, or auto-merge at another pull request.
+
+**The tool socket.** Any process in the VM can connect to it, as any process the agent starts can already call its tools. Each socket serves only its own issue, and the tool server it starts runs on the host with that issue's identity. The workflow file, the tracker credentials, and the database stay on the host.
+
+**What isolation does not cover.** Everything the agent commits reaches the upstream issue branch, including changes to CI configuration or to the repository's own sandbox setup; branch protection on the base branch stays the merge gate. Data can leave through any allowed host. The shared control directory can fill the host disk up to the workspace root's filesystem; Sortie never reads past its caps. Stopping a session ends the agent at once, with no graceful signal. The VM boundary is smolvm's; Sortie accepts only smolvm `1.26.x`, the release whose behavior was measured.

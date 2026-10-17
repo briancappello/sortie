@@ -16,7 +16,7 @@ import (
 )
 
 func init() {
-	registry.SCMAdapters.Register("gitlab", NewGitLabSCMAdapter)
+	registry.SCMAdapters.RegisterWithMeta("gitlab", NewGitLabSCMAdapter, registry.SCMMeta{OpensPullRequests: true})
 }
 
 // Compile-time interface satisfaction check.

@@ -37,27 +37,28 @@ type stateCounts struct {
 }
 
 type runningEntryResponse struct {
-	IssueID           string         `json:"issue_id"`
-	IssueIdentifier   string         `json:"issue_identifier"`
-	DisplayIdentifier string         `json:"display_identifier,omitempty"`
-	State             string         `json:"state"`
-	SessionID         string         `json:"session_id"`
-	TurnCount         int            `json:"turn_count"`
-	LastEvent         string         `json:"last_event"`
-	LastMessage       string         `json:"last_message"`
-	StartedAt         time.Time      `json:"started_at"`
-	LastEventAt       time.Time      `json:"last_event_at"`
-	WorkspacePath     string         `json:"workspace_path"`
-	Tokens            tokenInfo      `json:"tokens"`
-	ModelName         string         `json:"model_name,omitempty"`
-	RuleName          string         `json:"rule_name,omitempty"`
-	ConfiguredModel   string         `json:"configured_model,omitempty"`
-	ConfiguredEffort  string         `json:"configured_effort,omitempty"`
-	APIRequestCount   *int           `json:"api_request_count"`
-	RequestsByModel   map[string]int `json:"requests_by_model,omitempty"`
-	ToolTimePercent   *float64       `json:"tool_time_percent"`
-	APITimePercent    *float64       `json:"api_time_percent"`
-	TokensMeasured    bool           `json:"tokens_measured"`
+	IssueID           string           `json:"issue_id"`
+	IssueIdentifier   string           `json:"issue_identifier"`
+	DisplayIdentifier string           `json:"display_identifier,omitempty"`
+	State             string           `json:"state"`
+	SessionID         string           `json:"session_id"`
+	TurnCount         int              `json:"turn_count"`
+	LastEvent         string           `json:"last_event"`
+	LastMessage       string           `json:"last_message"`
+	StartedAt         time.Time        `json:"started_at"`
+	LastEventAt       time.Time        `json:"last_event_at"`
+	WorkspacePath     string           `json:"workspace_path"`
+	Environment       *environmentInfo `json:"environment,omitempty"`
+	Tokens            tokenInfo        `json:"tokens"`
+	ModelName         string           `json:"model_name,omitempty"`
+	RuleName          string           `json:"rule_name,omitempty"`
+	ConfiguredModel   string           `json:"configured_model,omitempty"`
+	ConfiguredEffort  string           `json:"configured_effort,omitempty"`
+	APIRequestCount   *int             `json:"api_request_count"`
+	RequestsByModel   map[string]int   `json:"requests_by_model,omitempty"`
+	ToolTimePercent   *float64         `json:"tool_time_percent"`
+	APITimePercent    *float64         `json:"api_time_percent"`
+	TokensMeasured    bool             `json:"tokens_measured"`
 
 	// UsageArrival and UsageAttribution mirror
 	// [orchestrator.SnapshotRunningEntry]'s frozen pair verbatim, as
@@ -105,12 +106,29 @@ type tokenInfo struct {
 }
 
 type retryEntryResponse struct {
-	IssueID           string    `json:"issue_id"`
-	IssueIdentifier   string    `json:"issue_identifier"`
-	DisplayIdentifier string    `json:"display_identifier,omitempty"`
-	Attempt           int       `json:"attempt"`
-	DueAt             time.Time `json:"due_at"`
-	Error             string    `json:"error"`
+	IssueID           string           `json:"issue_id"`
+	IssueIdentifier   string           `json:"issue_identifier"`
+	DisplayIdentifier string           `json:"display_identifier,omitempty"`
+	Attempt           int              `json:"attempt"`
+	DueAt             time.Time        `json:"due_at"`
+	Error             string           `json:"error"`
+	Environment       *environmentInfo `json:"environment,omitempty"`
+}
+
+// environmentInfo names the execution environment instance an issue's
+// workspace runs in, such as a VM. It is omitted for a workspace that
+// runs on the host.
+type environmentInfo struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// toEnvironmentInfo returns the wire form of e, nil when e is nil.
+func toEnvironmentInfo(e *orchestrator.SnapshotEnvironment) *environmentInfo {
+	if e == nil {
+		return nil
+	}
+	return &environmentInfo{Kind: e.Kind, Name: e.Name}
 }
 
 // budgetExhaustedResponse is the JSON wire format for one issue held out
@@ -134,6 +152,7 @@ type issueDetailResponse struct {
 	IssueID         string                   `json:"issue_id"`
 	Status          string                   `json:"status"`
 	Workspace       *workspaceInfo           `json:"workspace"`
+	Environment     *environmentInfo         `json:"environment,omitempty"`
 	Attempts        *attemptsInfo            `json:"attempts"`
 	Running         *runningEntryResponse    `json:"running"`
 	Retry           *retryEntryResponse      `json:"retry"`
@@ -181,6 +200,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 		StartedAt:           e.StartedAt.UTC(),
 		LastEventAt:         e.LastAgentTimestamp.UTC(),
 		WorkspacePath:       e.WorkspacePath,
+		Environment:         toEnvironmentInfo(e.Environment),
 		ModelName:           e.ModelName,
 		RuleName:            e.RuleName,
 		ConfiguredModel:     e.ConfiguredModel,
@@ -231,6 +251,7 @@ func toRetryEntryResponse(e orchestrator.SnapshotRetryEntry) retryEntryResponse 
 		Attempt:           e.Attempt,
 		DueAt:             time.UnixMilli(e.DueAtMS).UTC(),
 		Error:             e.Error,
+		Environment:       toEnvironmentInfo(e.Environment),
 	}
 }
 
@@ -507,6 +528,14 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 		ws = &workspaceInfo{Path: runEntry.WorkspacePath}
 	}
 
+	var env *environmentInfo
+	switch {
+	case runEntry != nil && runEntry.Environment != nil:
+		env = runEntry.Environment
+	case retryEntry != nil && retryEntry.Environment != nil:
+		env = retryEntry.Environment
+	}
+
 	var attempts *attemptsInfo
 	if retryEntry != nil {
 		restartCount := retryEntry.Attempt
@@ -531,6 +560,7 @@ func buildIssueDetail(identifier string, snap orchestrator.RuntimeSnapshotResult
 		IssueID:         issueID,
 		Status:          status,
 		Workspace:       ws,
+		Environment:     env,
 		Attempts:        attempts,
 		Running:         runEntry,
 		Retry:           retryEntry,

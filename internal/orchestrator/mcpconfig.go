@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
@@ -80,6 +81,14 @@ type MCPConfigParams struct {
 	// config file. Empty when no operator config is specified.
 	OperatorMCPConfigPath string
 
+	// GuestCommand, when set, is the command, program first, that the
+	// session's agent starts inside its execution environment to reach
+	// the tool server running on this host. The sortie-tools entry then
+	// names it with no env block: the tool server's environment, its
+	// credentials included, stays on this host. Nil names the tool
+	// server command itself, BinaryPath with the env block.
+	GuestCommand []string
+
 	// ProcessEnv carries SORTIE_*-prefixed environment variables from
 	// the orchestrator's process environment. These are merged into the
 	// MCP config env block so the MCP server can resolve $VAR
@@ -99,28 +108,22 @@ type MCPConfigParams struct {
 // error if the operator's config is unreadable, contains invalid
 // JSON, or contains a server named "sortie-tools" (name collision).
 func GenerateMCPConfig(params MCPConfigParams) (string, error) {
-	// Build the env block with a two-layer merge: process-level SORTIE_*
-	// variables first (lower precedence), then per-session variables
-	// (higher precedence, always win).
-	env := make(map[string]string, len(params.ProcessEnv)+6)
-	maps.Copy(env, params.ProcessEnv)
-
-	delete(env, "SORTIE_SESSION_ID")
-	env["SORTIE_ISSUE_ID"] = params.IssueID
-	env["SORTIE_ISSUE_IDENTIFIER"] = params.Identifier
-	env["SORTIE_WORKSPACE"] = params.WorkspacePath
-	env["SORTIE_DB_PATH"] = params.DBPath
-	env["SORTIE_DISPATCH_ID"] = params.DispatchID
-	env["SORTIE_SESSION_AGENT_KIND"] = params.AgentKind
-	if params.Attempt != nil {
-		env["SORTIE_ATTEMPT"] = strconv.Itoa(*params.Attempt)
-	}
-
+	env := toolServerEnv(params)
 	entry := map[string]any{
 		"type":    "stdio",
 		"command": params.BinaryPath,
-		"args":    []string{"mcp-server", "--workflow", params.WorkflowPath},
+		"args":    toolServerArgs(params),
 		"env":     env,
+	}
+	if len(params.GuestCommand) > 0 {
+		entry = map[string]any{
+			"type":    "stdio",
+			"command": params.GuestCommand[0],
+			"args":    append([]string{}, params.GuestCommand[1:]...),
+		}
+		// The host tool server still carries these values; registering
+		// them keeps them masked wherever they surface.
+		registerToolServerNamedStrings("mcpServers.sortie-tools.env", env)
 	}
 
 	var merged map[string]any
@@ -186,6 +189,45 @@ func GenerateMCPConfig(params MCPConfigParams) (string, error) {
 	}
 
 	return filepath.Join(params.WorkspacePath, workspacekit.SortieDir, "mcp.json"), nil
+}
+
+// guestToolCommand returns the command an agent in env starts to reach
+// the tool server through env's tool socket: the environment's copy of
+// the Sortie binary, run as mcp-relay on the socket. It returns nil for
+// an environment without a tool socket, whose agent starts the tool
+// server itself.
+func guestToolCommand(env environment.Environment) []string {
+	socketer, ok := env.(environment.ToolSocketer)
+	if !ok {
+		return nil
+	}
+	return []string{socketer.GuestSortieBinaryPath(), "mcp-relay", socketer.GuestToolSocketPath()}
+}
+
+// toolServerArgs returns the arguments of the tool server command,
+// after the binary path.
+func toolServerArgs(params MCPConfigParams) []string {
+	return []string{"mcp-server", "--workflow", params.WorkflowPath}
+}
+
+// toolServerEnv returns the tool server's env block: a two-layer merge
+// of the process-level SORTIE_* variables first (lower precedence), then
+// the per-session variables (higher precedence, always win).
+func toolServerEnv(params MCPConfigParams) map[string]string {
+	env := make(map[string]string, len(params.ProcessEnv)+7)
+	maps.Copy(env, params.ProcessEnv)
+
+	delete(env, "SORTIE_SESSION_ID")
+	env["SORTIE_ISSUE_ID"] = params.IssueID
+	env["SORTIE_ISSUE_IDENTIFIER"] = params.Identifier
+	env["SORTIE_WORKSPACE"] = params.WorkspacePath
+	env["SORTIE_DB_PATH"] = params.DBPath
+	env["SORTIE_DISPATCH_ID"] = params.DispatchID
+	env["SORTIE_SESSION_AGENT_KIND"] = params.AgentKind
+	if params.Attempt != nil {
+		env["SORTIE_ATTEMPT"] = strconv.Itoa(*params.Attempt)
+	}
+	return env
 }
 
 // registerToolServerCredentials registers every credential merged's

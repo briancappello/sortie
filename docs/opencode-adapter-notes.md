@@ -95,9 +95,9 @@ Work evidence for the turn is this turn's own parsed assistant parts, text, reas
 
 `StartSession` translates the worker-generated MCP configuration into OpenCode's own server entries under the `mcp` key of the inline configuration document. The runtime rejects the standard `mcpServers` key, so the generated file cannot be handed over as is. The entries add to whatever the operator's own configuration declares.
 
-The document is set only in the turn's own environment (local) or on the SSH carrier (remote), never in the shared managed-environment builder. So the export and delete helper invocations never carry it and never start a tool server of their own.
+The document is set only in the turn's own environment (local), on the SSH carrier, or on an execution environment's carrier, never in the shared managed-environment builder. So the export and delete helper invocations never carry it and never start a tool server of their own.
 
-Tool servers reach a local launch only. An SSH turn carries the document without the `mcp` member, so a remote session has no tools.
+Tool servers reach a local launch and a launch in an execution environment's VM. In the VM the document's `sortie-tools` entry is the relay, `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, and the document travels on the carrier's argv as `-e OPENCODE_CONFIG_CONTENT=...`. An SSH turn carries the document without the `mcp` member, so an SSH session has no tools.
 
 The `run` output has no MCP startup status. A server that fails to start shows up only as failing tool calls. The runtime starts each server in the background and does not wait for it before the turn begins.
 

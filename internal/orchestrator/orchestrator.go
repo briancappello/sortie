@@ -17,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/toolsocket"
 )
 
 // WorkflowManager provides the current workflow config and prompt template.
@@ -153,6 +154,12 @@ type OrchestratorParams struct {
 	// review comment routing is not configured.
 	SCMAdapter domain.SCMAdapter
 
+	// PullRequestOpenerFunc returns the opener of the pull request for
+	// each issue branch Sortie pushes when the configuration's
+	// repository names a provider. Nil when no configuration the
+	// program loads can name one.
+	PullRequestOpenerFunc PullRequestOpenerFunc
+
 	// ReviewConfig holds validated review reaction configuration. Zero when
 	// SCMAdapter is nil.
 	ReviewConfig ReviewReactionConfig
@@ -262,6 +269,7 @@ type Orchestrator struct {
 	sessionAPIURL                     string
 	ciProvider                        domain.CIStatusProvider
 	scmAdapter                        domain.SCMAdapter
+	pullRequestOpenerFunc             PullRequestOpenerFunc
 	reviewConfig                      ReviewReactionConfig
 	reviewReactionConfigured          bool
 	autoMergeConfig                   AutoMergeReactionConfig
@@ -277,6 +285,14 @@ type Orchestrator struct {
 	mergeCompletionConfig             MergeCompletionReactionConfig
 	mergeCompletionReactionConfigured bool
 	handoffParkingLabel               string
+
+	// environments resolves the execution environment of the current
+	// configuration for workers, cleanups, and reaction triage.
+	environments *environmentResolver
+
+	// toolSockets serves the tool server on the host to each workspace
+	// whose environment reaches Sortie's tools through a socket.
+	toolSockets *toolsocket.Registry
 
 	// ciTriage is the frozen ci_failure triage configuration, captured once
 	// at construction. Unlike every other CI feedback field, it does not
@@ -410,6 +426,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		sessionAPIURL:                     params.SessionAPIURL,
 		ciProvider:                        params.CIProvider,
 		scmAdapter:                        params.SCMAdapter,
+		pullRequestOpenerFunc:             params.PullRequestOpenerFunc,
 		reviewConfig:                      params.ReviewConfig,
 		reviewReactionConfigured:          params.ReviewConfigured,
 		autoMergeConfig:                   params.AutoMergeConfig,
@@ -429,12 +446,40 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		blockerResolver:                   params.BlockerResolver,
 		abandonCh:                         params.AbandonCh,
 	}
+	workflowPath := ""
+	if params.WorkflowManager != nil {
+		workflowPath = params.WorkflowManager.WorkflowAbsPath()
+	}
+	o.environments = newEnvironmentResolver(params.DBPath, workflowPath, logger)
+	o.environments.sortieBinary = params.MCPServerBinary
+	o.toolSockets = toolsocket.NewRegistry(logger)
+	if o.preflightParams.EnvironmentFunc == nil {
+		o.preflightParams.EnvironmentFunc = o.environments.resolve
+	}
 	if params.WorkflowManager != nil {
 		o.updateRouter(params.WorkflowManager.Config())
 	}
 	// Startup preflight must have passed for construction to reach here.
 	o.preflightOK.Store(true)
 	return o
+}
+
+// recoverToolSockets listens again on the tool socket of every
+// workspace whose environment, under cfg, reaches Sortie's tools through
+// one, as [recoverToolSockets] describes.
+func (o *Orchestrator) recoverToolSockets(cfg config.ServiceConfig) {
+	env, err := o.environments.resolve(cfg.Environment)
+	if err != nil {
+		return
+	}
+	recoverToolSockets(cfg, toolSocketRecovery{
+		Sockets:      o.toolSockets,
+		Environment:  env,
+		BinaryPath:   o.mcpServerBinary,
+		WorkflowPath: o.workflowManager.WorkflowAbsPath(),
+		DBPath:       o.dbPath,
+		Logger:       o.logger,
+	})
 }
 
 // applyQueued calls apply for each message ch holds, in order, without
@@ -528,6 +573,8 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			Logger:                            o.logger,
 			BeforeRemoveHook:                  cfg.Hooks.BeforeRemove,
 			HookTimeoutMS:                     cfg.Hooks.TimeoutMS,
+			Environment:                       o.environmentOrUnavailable(cfg.Environment),
+			EnvironmentForKind:                o.environments.forKind(cfg.Environment),
 			TrackerAdapter:                    o.trackerAdapter,
 			HandoffState:                      cfg.Tracker.HandoffState,
 			NoChangeState:                     cfg.Tracker.NoChangeState,
@@ -539,6 +586,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			Router:                            o.router,
 			CIProvider:                        o.ciProvider,
 			SCMAdapter:                        o.scmAdapter,
+			SCMMetadata:                       SCMMetadataSource(cfg.Environment),
 			AutoMergeReactionConfigured:       o.autoMergeReactionConfigured,
 			BotReviewReactionConfigured:       o.botReviewReactionConfigured,
 			MergeConflictReactionConfigured:   o.mergeConflictReactionConfigured,
@@ -561,6 +609,10 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	// the first tick, so the worker settings it launches under must be in
 	// force before it is activated.
 	o.applyWorkerConfig(o.workflowManager.Config())
+	if o.toolSockets != nil {
+		o.recoverToolSockets(o.workflowManager.Config())
+		defer o.toolSockets.Close()
+	}
 	o.activateReconstructedRetries()
 
 	tickTimer := time.NewTimer(0)
@@ -717,6 +769,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	// Applied unconditionally, not gated on preflight success.
 	o.state.PollIntervalMS = cfg.Polling.IntervalMS
+	o.state.DescribeEnvironment = o.describeEnvironment(cfg)
 	o.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
 	o.state.MaxTokens = cfg.Agent.MaxTokens
 	o.state.TokenWarningThreshold = cfg.Agent.TokenWarningThreshold()
@@ -763,6 +816,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		MergeCompletionConfig:             o.mergeCompletionConfig,
 		MergeCompletionReactionConfigured: o.mergeCompletionReactionConfigured,
 		WorkspaceRoot:                     cfg.Workspace.Root,
+		Environment:                       o.environmentOrUnavailable(cfg.Environment),
 		CITriage:                          o.ciTriage,
 	})
 
@@ -771,17 +825,29 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.SweepTickCounter++
 	if o.state.SweepTickCounter >= sweepEveryNTicks {
 		o.state.SweepTickCounter = 0
+		env := o.environmentOrUnavailable(cfg.Environment)
 		SweepWorkspaces(o.state, SweepWorkspacesParams{
-			WorkspaceRoot:    cfg.Workspace.Root,
-			TrackerAdapter:   o.trackerAdapter,
-			TerminalStates:   cfg.Tracker.TerminalStates,
-			BeforeRemoveHook: cfg.Hooks.BeforeRemove,
-			HookTimeoutMS:    cfg.Hooks.TimeoutMS,
-			RetentionDays:    cfg.Workspace.RetentionDays,
-			Store:            o.store,
-			Ctx:              ctx,
-			Logger:           o.logger,
-			Metrics:          o.metrics,
+			WorkspaceRoot:      cfg.Workspace.Root,
+			TrackerAdapter:     o.trackerAdapter,
+			TerminalStates:     cfg.Tracker.TerminalStates,
+			BeforeRemoveHook:   cfg.Hooks.BeforeRemove,
+			HookTimeoutMS:      cfg.Hooks.TimeoutMS,
+			Environment:        env,
+			EnvironmentForKind: o.environments.forKind(cfg.Environment),
+			RetentionDays:      cfg.Workspace.RetentionDays,
+			SCMMetadata:        SCMMetadataSource(cfg.Environment),
+			Store:              o.store,
+			Ctx:                ctx,
+			Logger:             o.logger,
+			Metrics:            o.metrics,
+		})
+		SweepEnvironments(SweepEnvironmentsParams{
+			WorkspaceRoot:   cfg.Workspace.Root,
+			Environment:     env,
+			SweepUnselected: o.environments.sweepUnselected(cfg.Environment),
+			Running:         RunningWorkspaceKeys(o.state, o.logger),
+			Ctx:             ctx,
+			Logger:          o.logger,
 		})
 	}
 
@@ -902,6 +968,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			SCMAdapter:          o.scmAdapter,
 			Store:               o.store,
 			WorkspaceRoot:       cfg.Workspace.Root,
+			SCMMetadata:         SCMMetadataSource(cfg.Environment),
 			ReviewConfigured:    o.reviewReactionConfigured,
 			ReviewConfig:        o.reviewConfig,
 			BotReviewConfigured: o.botReviewReactionConfigured,
@@ -1101,13 +1168,16 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 				declared := append(meta.CredentialEnv.Names(), convertedCredentialEnv...)
 				return carriedEnvNames(declared, sshPassEnv, sshDisallowPassEnv)
 			},
-			Metrics:         o.metrics,
-			WorkflowPath:    o.workflowManager.WorkflowAbsPath(),
-			DBPath:          o.dbPath,
-			MCPServerBinary: o.mcpServerBinary,
-			SessionAPIURL:   o.sessionAPIURL,
-			ReactionKind:    reactionKind,
-			Posture:         posture,
+			Metrics:               o.metrics,
+			EnvironmentFunc:       o.environments.resolve,
+			PullRequestOpenerFunc: o.pullRequestOpenerFunc,
+			WorkflowPath:          o.workflowManager.WorkflowAbsPath(),
+			DBPath:                o.dbPath,
+			MCPServerBinary:       o.mcpServerBinary,
+			ToolSockets:           o.toolSockets,
+			SessionAPIURL:         o.sessionAPIURL,
+			ReactionKind:          reactionKind,
+			Posture:               posture,
 		}
 
 		RunWorkerAttempt(ctx, issue, attempt, deps)
@@ -1603,6 +1673,8 @@ func (o *Orchestrator) drainRunningWorkers() {
 				Logger:                            o.logger,
 				BeforeRemoveHook:                  cfg.Hooks.BeforeRemove,
 				HookTimeoutMS:                     cfg.Hooks.TimeoutMS,
+				Environment:                       o.environmentOrUnavailable(cfg.Environment),
+				EnvironmentForKind:                o.environments.forKind(cfg.Environment),
 				TrackerAdapter:                    o.trackerAdapter,
 				HandoffState:                      cfg.Tracker.HandoffState,
 				NoChangeState:                     cfg.Tracker.NoChangeState,
@@ -1614,6 +1686,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				Router:                            o.router,
 				CIProvider:                        o.ciProvider,
 				SCMAdapter:                        o.scmAdapter,
+				SCMMetadata:                       SCMMetadataSource(cfg.Environment),
 				AutoMergeReactionConfigured:       o.autoMergeReactionConfigured,
 				BotReviewReactionConfigured:       o.botReviewReactionConfigured,
 				MergeConflictReactionConfigured:   o.mergeConflictReactionConfigured,

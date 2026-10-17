@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	registry.SCMAdapters.Register("github", NewGitHubSCMAdapter)
+	registry.SCMAdapters.RegisterWithMeta("github", NewGitHubSCMAdapter, registry.SCMMeta{OpensPullRequests: true})
 }
 
 var _ domain.SCMAdapter = (*GitHubSCMAdapter)(nil)

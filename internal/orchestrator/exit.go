@@ -14,6 +14,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
@@ -83,6 +84,16 @@ type HandleWorkerExitParams struct {
 
 	HookTimeoutMS int
 
+	// Environment is the execution environment of the current
+	// configuration. The deferred workspace cleanup and the handoff
+	// evidence comparison run in it. Nil runs them on the host.
+	Environment environment.Environment
+
+	// EnvironmentForKind builds the environment of another kind, which
+	// removes a workspace its record names that kind as the creator of.
+	// Nil removes every workspace with Environment.
+	EnvironmentForKind func(kind string) (environment.Environment, error)
+
 	// TrackerAdapter performs handoff transitions. Required when
 	// HandoffState is non-empty; nil is safe when it is empty.
 	TrackerAdapter domain.TrackerAdapter
@@ -127,6 +138,10 @@ type HandleWorkerExitParams struct {
 	// identity, lets HandleWorkerExit seed pending SCM reactions on normal
 	// exits.
 	SCMAdapter domain.SCMAdapter
+
+	// SCMMetadata reads each workspace's SCM metadata; see
+	// [SCMMetadataSource]. Nil reads the agent's .sortie/scm.json.
+	SCMMetadata SCMMetadataReader
 
 	// The *ReactionConfigured flags mark whether each feature is active for
 	// the process; each enqueue path gates on its flag and a non-nil
@@ -249,13 +264,15 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	// worker has fully exited. Guarded on WorkspacePath being non-empty.
 	if entry.PendingCleanup && entry.WorkspacePath != "" {
 		if err := workspace.CleanupByPath(ctx, workspace.CleanupByPathParams{
-			Path:          entry.WorkspacePath,
-			Identifier:    entry.Identifier,
-			IssueID:       workerResult.IssueID,
-			Attempt:       normalizeAttempt(entry.RetryAttempt),
-			BeforeRemove:  params.BeforeRemoveHook,
-			HookTimeoutMS: params.HookTimeoutMS,
-			Logger:        log,
+			Path:               entry.WorkspacePath,
+			Identifier:         entry.Identifier,
+			IssueID:            workerResult.IssueID,
+			Attempt:            normalizeAttempt(entry.RetryAttempt),
+			BeforeRemove:       params.BeforeRemoveHook,
+			HookTimeoutMS:      params.HookTimeoutMS,
+			Logger:             log,
+			Environment:        params.Environment,
+			EnvironmentForKind: params.EnvironmentForKind,
 		}); err != nil {
 			log.Warn("workspace cleanup failed",
 				slog.Any("error", err),
@@ -310,7 +327,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 		policy := workerResult.HandoffEvidencePolicy.Effective()
 		if handoffPath && !terminal && policy != config.HandoffEvidenceOff {
-			evidenceResult = evaluateHandoffEvidence(ctx, workerResult, log)
+			evidenceResult = evaluateHandoffEvidence(ctx, workerResult, params.Environment, params.SCMMetadata, log)
 			if evidenceResult.Verdict == handoffEvidenceUndetermined {
 				log.Info("handoff evidence not determinable",
 					slog.String("policy", string(policy)),
@@ -424,6 +441,9 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		ChainID:              entry.StageLineage.ChainID,
 
 		HeldMS: entry.HeldTotal.Milliseconds(),
+
+		EnvironmentImageSHA256: workerResult.EnvironmentInstance.ImageDigest,
+		ExportedCommit:         workerResult.ExportedCommit,
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
@@ -934,7 +954,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// eligible even after the claim is released.
 		if params.CIProvider != nil && params.SCMAdapter != nil && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Owner != "" && scm.Repo != "" && scm.Branch != "" {
 					nowCI := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -976,7 +996,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// the workspace has PR metadata with repository identity.
 		if params.SCMAdapter != nil && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Branch != "" && scm.Owner != "" && scm.Repo != "" {
 					nowReview := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -1016,7 +1036,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// Independent of the review-kind enqueue: both fire from the same exit.
 		if params.SCMAdapter != nil && params.BotReviewReactionConfigured && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Branch != "" && scm.Owner != "" && scm.Repo != "" {
 					nowBotReview := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -1054,7 +1074,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// auto-merge is enabled, and the workspace has PR metadata.
 		if params.SCMAdapter != nil && params.AutoMergeReactionConfigured && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Branch != "" && scm.Owner != "" && scm.Repo != "" {
 					nowMerge := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -1093,7 +1113,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// metadata.
 		if params.SCMAdapter != nil && params.MergeConflictReactionConfigured && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Branch != "" && scm.Owner != "" && scm.Repo != "" {
 					nowMergeConflict := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -1135,7 +1155,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// releases the claim.
 		if params.SCMAdapter != nil && params.LabelReviewReactionConfigured && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Owner != "" && scm.Repo != "" {
 					nowLabelReview := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -1174,7 +1194,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// from the reconcile re-enqueue on dispatch.
 		if params.SCMAdapter != nil && params.LabelFixReactionConfigured && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Owner != "" && scm.Repo != "" && scm.Branch != "" {
 					nowLabelFix := time.Now().UTC()
 					if params.NowFunc != nil {
@@ -1212,7 +1232,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// metadata. No branch is needed (the pass performs no checkout).
 		if params.SCMAdapter != nil && params.MergeCompletionReactionConfigured && workerResult.WorkspacePath != "" {
 			if reactionEnqueueAllowed {
-				scm := workspace.ReadSCMMetadata(workerResult.WorkspacePath, log)
+				scm := params.SCMMetadata.Read(workerResult.WorkspacePath, log)
 				if scm.PRNumber > 0 && scm.Owner != "" && scm.Repo != "" {
 					nowMergeCompletion := time.Now().UTC()
 					if params.NowFunc != nil {

@@ -1562,3 +1562,37 @@ func TestManager_ReloadRetainsOnConversionFaultAndMalformedList(t *testing.T) {
 		})
 	}
 }
+
+func TestManager_ReloadRetainsOnUnknownEnvironmentKind(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "WORKFLOW.md")
+	mustWriteFile(t, path, []byte("---\npolling:\n  interval_ms: 5000\nenvironment:\n  kind: local\n  host_prefix: [broker, --]\n---\nDo the task for {{ .issue.title }}.\n"))
+	mgr, err := NewManager(path, testLogger())
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	previous := mgr.Config()
+	previousPrompt := mgr.PromptTemplate()
+	mustWriteFile(t, path, []byte("---\npolling:\n  interval_ms: 9999\nenvironment:\n  kind: firecracker\n---\nAnother prompt.\n"))
+
+	err = mgr.Reload()
+
+	var ce *config.ConfigError
+	if !errors.As(err, &ce) || ce.Field != "environment.kind" {
+		t.Fatalf("Reload() error = %v, want *config.ConfigError with Field %q", err, "environment.kind")
+	}
+	loadErr := mgr.LastLoadError()
+	if !errors.Is(loadErr, err) {
+		t.Errorf("LastLoadError() = %v, want %v", loadErr, err)
+	}
+	if loadErr == nil || !strings.Contains(loadErr.Error(), "environment.kind") || !strings.Contains(loadErr.Error(), "firecracker") {
+		t.Errorf("LastLoadError() = %v, want an error naming environment.kind and firecracker", loadErr)
+	}
+	if !reflect.DeepEqual(mgr.Config(), previous) {
+		t.Errorf("Config() after the failed reload = %+v, want the previous %+v", mgr.Config().Environment, previous.Environment)
+	}
+	if mgr.PromptTemplate() != previousPrompt {
+		t.Error("PromptTemplate() changed after the failed reload, want the previous template")
+	}
+}

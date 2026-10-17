@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/blockers"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
@@ -29,16 +30,26 @@ const (
 
 // workflowValidate is the shared promotion-validation hook every
 // [workflow.Manager] the program constructs wires through
-// [workflow.WithValidateFunc]. It adds the notification destination check
-// to the orchestrator's own rules, so a reload whose destinations cannot
-// be constructed is rejected and the previous configuration stays in
-// force.
+// [workflow.WithValidateFunc]. It adds the notification destination
+// check, the repository provider check, and the execution environment's
+// host check to the orchestrator's own rules, so a reload whose
+// destinations cannot be constructed, whose repository provider differs
+// from an active SCM reaction's or cannot open pull requests, or that
+// selects an environment this host cannot run, is rejected and the
+// previous configuration stays in force. The first load runs it too, so
+// any such refusal stops startup.
 var workflowValidate workflow.ValidateFunc = func(cfg config.ServiceConfig) error {
 	trackerMeta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
 	if err := orchestrator.ValidateConfigForPromotion(cfg, trackerMeta); err != nil {
 		return err
 	}
-	return route.CheckDestinations(cfg.Notifications.Backends, registry.Notifiers.Get)
+	if err := route.CheckDestinations(cfg.Notifications.Backends, registry.Notifiers.Get); err != nil {
+		return err
+	}
+	if err := checkRepositoryProvider(cfg); err != nil {
+		return err
+	}
+	return environment.CheckHost(cfg.Environment)
 }
 
 // workflowAdvisories is the shared advisory hook every [workflow.Manager]
@@ -104,6 +115,9 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 	}
 	if len(p.args) > 0 && p.args[0] == "mcp-server" {
 		return bootResult{}, runMCPServer(ctx, p.args[1:], p.stdout, p.stderr)
+	}
+	if len(p.args) > 0 && p.args[0] == "mcp-relay" {
+		return bootResult{}, runMCPRelay(ctx, p.args[1:], os.Stdin, p.stdout, p.stderr)
 	}
 
 	fs := flag.NewFlagSet("sortie", flag.ContinueOnError)

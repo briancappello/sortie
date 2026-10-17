@@ -223,6 +223,8 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"stage_target", "TEXT", true, 0},
 				{"stage_result", "TEXT", true, 0},
 				{"held_ms", "INTEGER", true, 0},
+				{"environment_image_sha256", "TEXT", true, 0},
+				{"exported_commit", "TEXT", true, 0},
 			},
 		},
 		{
@@ -928,5 +930,117 @@ func TestMigrate_Migration025_HeldMSDefaultsToZero(t *testing.T) {
 	recent, err := s.QueryRecentRunHistory(context.Background(), 1, 0)
 	if err != nil || len(recent) != 1 || recent[0].HeldMS != 90000 {
 		t.Errorf("QueryRecentRunHistory(1) = %+v, %v, want HeldMS 90000", recent, err)
+	}
+}
+
+func TestMigrate_Migration026_EnvironmentImageDefaultsToEmpty(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateToVersion(t, s, 25)
+	insertBareRun(t, s, "rh-pre026")
+
+	migrateOrFatal(t, s)
+
+	var image string
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT environment_image_sha256 FROM run_history WHERE issue_id = 'rh-pre026'`,
+	).Scan(&image); err != nil || image != "" {
+		t.Errorf("environment_image_sha256 for a pre-migration-026 row = %q, %v, want empty, nil", image, err)
+	}
+	var applied int
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 26`,
+	).Scan(&applied); err != nil || applied != 1 {
+		t.Errorf("schema_migrations rows for version 26 = %d, %v, want 1", applied, err)
+	}
+}
+
+func TestMigrate_Migration026_FreshDBRecordsTheEnvironmentImage(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	ctx := context.Background()
+	const digest = "a0eb79a1790b6b758340bc1c1568027e80241a1b19efb5ddb0389509935f526c"
+
+	for _, run := range []RunHistory{
+		{IssueID: "rh-vm", Identifier: "VM-1", Attempt: 1, AgentAdapter: "mock", Workspace: "/tmp/VM-1",
+			StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:01:00Z", Status: "succeeded", EnvironmentImageSHA256: digest},
+		{IssueID: "rh-host", Identifier: "HOST-1", Attempt: 1, AgentAdapter: "mock", Workspace: "/tmp/HOST-1",
+			StartedAt: "2026-01-01T00:02:00Z", CompletedAt: "2026-01-01T00:03:00Z", Status: "succeeded"},
+	} {
+		if _, err := s.AppendRunHistory(ctx, run); err != nil {
+			t.Fatalf("AppendRunHistory(%s): %v", run.IssueID, err)
+		}
+	}
+
+	byIssue, err := s.QueryRunHistoryByIssue(ctx, "rh-vm")
+	if err != nil || len(byIssue) != 1 || byIssue[0].EnvironmentImageSHA256 != digest {
+		t.Errorf("QueryRunHistoryByIssue(rh-vm) = %+v, %v, want the image digest", byIssue, err)
+	}
+	recent, err := s.QueryRecentRunHistory(ctx, 2, 0)
+	if err != nil || len(recent) != 2 || recent[0].EnvironmentImageSHA256 != "" || recent[1].EnvironmentImageSHA256 != digest {
+		t.Errorf("QueryRecentRunHistory(2) = %+v, %v, want the host run without a digest and the VM run with it", recent, err)
+	}
+	page, err := s.QueryRecentRunHistory(ctx, 1, recent[0].ID)
+	if err != nil || len(page) != 1 || page[0].EnvironmentImageSHA256 != digest {
+		t.Errorf("QueryRecentRunHistory(after %d) = %+v, %v, want the VM run with its digest", recent[0].ID, page, err)
+	}
+}
+
+func TestMigrate_Migration027_ExportedCommitDefaultsToEmpty(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateToVersion(t, s, 26)
+	insertBareRun(t, s, "rh-pre027")
+
+	migrateOrFatal(t, s)
+
+	var commit string
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT exported_commit FROM run_history WHERE issue_id = 'rh-pre027'`,
+	).Scan(&commit); err != nil || commit != "" {
+		t.Errorf("exported_commit for a pre-migration-027 row = %q, %v, want empty, nil", commit, err)
+	}
+	var applied int
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM schema_migrations WHERE version = 27`,
+	).Scan(&applied); err != nil || applied != 1 {
+		t.Errorf("schema_migrations rows for version 27 = %d, %v, want 1", applied, err)
+	}
+}
+
+func TestMigrate_Migration027_FreshDBRecordsTheExportedCommit(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	ctx := context.Background()
+	const commit = "0b4c5d3e2f1a0b4c5d3e2f1a0b4c5d3e2f1a0b4c"
+
+	for _, run := range []RunHistory{
+		{IssueID: "rh-pushed", Identifier: "VM-1", Attempt: 1, AgentAdapter: "mock", Workspace: "/tmp/VM-1",
+			StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:01:00Z", Status: "succeeded", ExportedCommit: commit},
+		{IssueID: "rh-none", Identifier: "VM-2", Attempt: 1, AgentAdapter: "mock", Workspace: "/tmp/VM-2",
+			StartedAt: "2026-01-01T00:02:00Z", CompletedAt: "2026-01-01T00:03:00Z", Status: "succeeded"},
+	} {
+		if _, err := s.AppendRunHistory(ctx, run); err != nil {
+			t.Fatalf("AppendRunHistory(%s): %v", run.IssueID, err)
+		}
+	}
+
+	byIssue, err := s.QueryRunHistoryByIssue(ctx, "rh-pushed")
+	if err != nil || len(byIssue) != 1 || byIssue[0].ExportedCommit != commit {
+		t.Errorf("QueryRunHistoryByIssue(rh-pushed) = %+v, %v, want the exported commit", byIssue, err)
+	}
+	recent, err := s.QueryRecentRunHistory(ctx, 2, 0)
+	if err != nil || len(recent) != 2 || recent[0].ExportedCommit != "" || recent[1].ExportedCommit != commit {
+		t.Errorf("QueryRecentRunHistory(2) = %+v, %v, want the run without a push and the run with its commit", recent, err)
+	}
+	page, err := s.QueryRecentRunHistory(ctx, 1, recent[0].ID)
+	if err != nil || len(page) != 1 || page[0].ExportedCommit != commit {
+		t.Errorf("QueryRecentRunHistory(after %d) = %+v, %v, want the run with its commit", recent[0].ID, page, err)
 	}
 }

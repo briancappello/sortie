@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,7 +142,7 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 		return domain.Session{}, agentErr
 	}
 
-	servers, translateErr := translateMCPServers(params.MCPConfigPath, target.RemoteCommand != "")
+	servers, translateErr := translateMCPServers(params.MCPConfigPath, target.Remote() && !target.MCPInGuest())
 	if translateErr != nil {
 		return domain.Session{}, &domain.AgentError{
 			Kind:    domain.ErrResponseError,
@@ -225,22 +224,17 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 	cmdArgs := buildRunArgs(state, state.passthrough)
 	logger := state.loggerLocked()
 
-	var cmd *exec.Cmd
-	var launch sshutil.SSHLaunch
-	if state.target.RemoteCommand != "" {
+	var carried []sshutil.EnvVar
+	if state.target.Remote() {
 		managedEnv["OPENCODE_CONFIG_CONTENT"] = state.turnConfigContent
-		launch = sshutil.BuildSSHLaunch(
-			state.target.SSHHost,
-			state.target.WorkspacePath,
-			state.target.RemoteCommand,
-			cmdArgs,
-			state.target.SSHOptions(sortedEnvVars(managedEnv)...),
-		)
-		cmd = exec.CommandContext(ctx, state.target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
-	} else {
-		allArgs := append(slices.Clone(state.target.Args), cmdArgs...)
-		cmd = exec.CommandContext(ctx, state.target.Command, allArgs...) //nolint:gosec // args are constructed programmatically
+		carried = sortedEnvVars(managedEnv)
 	}
+	launch, launchErr := state.target.SessionLaunch(cmdArgs, carried...)
+	if launchErr != nil {
+		state.mu.Unlock()
+		return domain.TurnResult{}, launchErr
+	}
+	cmd := exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	procutil.SetGroupCancel(cmd, procutil.StopGrace(state.agentConfig.StopGraceMS))
 	cmd.Env = env
 	if bindErr := state.target.BindWorkspace(cmd); bindErr != nil {
@@ -307,7 +301,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 	startWait(runtime, cmd, logger)
 
 	emit := func(event domain.AgentEvent) {
-		if state.target.RemoteCommand == "" {
+		if !state.target.Remote() {
 			event.AgentPID = runtime.pid
 		}
 		params.OnEvent(event)
@@ -676,12 +670,12 @@ func (a *OpenCodeAdapter) finalizeExitedTurn(ctx context.Context, state *session
 		ev.EarlyExit = runtime.output.ExitedBeforeOutput(state.target, exit.err).Report(runtime.stderrCollector)
 	}
 
-	sshFailed := state.target.RemoteCommand != "" && sshutil.ConnectionFailed(exit.exitCode)
+	sshFailed := state.target.ConnectionFailed(exit.exitCode, func() []string { return stderrLines })
 	hasTerminalResult := runtime.terminalOutcome == domain.EventTurnFailed || runtime.turnFinished
 
 	switch {
 	case agentcore.ConnectionFailedForRequest(sshFailed, hasTerminalResult):
-		connErr := agentcore.ConnectionFailedError()
+		connErr := state.target.ConnectionFailedError()
 		ev.Terminal = agentcore.TerminalFailure
 		ev.TerminalErrorKind = connErr.Kind
 		ev.TerminalMessage = connErr.Message

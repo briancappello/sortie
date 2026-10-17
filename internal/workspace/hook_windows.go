@@ -4,7 +4,6 @@ package workspace
 
 import (
 	"context"
-	"os/exec"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
@@ -15,6 +14,10 @@ import (
 // and assigned to a Job Object with KILL_ON_JOB_CLOSE before it is
 // resumed, so nothing it spawns can start before the job assignment
 // takes effect.
+//
+// The process is built through params.Target, so with an environment
+// the script runs inside it; the timeout, the teardown, and the output
+// capture stay on the host side either way.
 //
 // On success (exit code 0), returns a [HookResult] with truncated
 // output. On failure, returns a [*HookError] with Op indicating the
@@ -39,9 +42,10 @@ func RunHook(ctx context.Context, params HookParams) (HookResult, error) {
 	hookCtx, cancel := context.WithTimeout(ctx, time.Duration(params.TimeoutMS)*time.Millisecond)
 	defer cancel()
 
-	cmd := exec.CommandContext(hookCtx, "cmd.exe", "/C", params.Script) //nolint:gosec // G204: hook scripts are from trusted workflow configuration
-	cmd.Dir = params.Dir
-	cmd.Env = hookEnv(params.Env)
+	cmd, err := hookCommand(hookCtx, params, "cmd.exe", "/C", params.Script)
+	if err != nil {
+		return HookResult{}, err
+	}
 
 	// A hook that overran its timeout, or whose caller cancelled ctx,
 	// has already had its whole budget, so cancellation force-kills

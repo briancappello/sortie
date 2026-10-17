@@ -363,11 +363,12 @@ type inlineCompaction struct {
 }
 
 // translateMCPServers parses mcpConfigPath into the runtime's own MCP
-// server entries, or returns nil for a remote launch, an empty path,
+// server entries, or returns nil with noMCP set (a remote launch where
+// the generated configuration is not valid, over SSH), an empty path,
 // or a configuration declaring no server. A nil Server.Enabled renders
 // true, matching the runtime's own default.
-func translateMCPServers(mcpConfigPath string, remote bool) (map[string]mcpConfigDocumentEntry, error) {
-	if mcpConfigPath == "" || remote {
+func translateMCPServers(mcpConfigPath string, noMCP bool) (map[string]mcpConfigDocumentEntry, error) {
+	if mcpConfigPath == "" || noMCP {
 		return nil, nil
 	}
 

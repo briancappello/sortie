@@ -101,6 +101,10 @@ type PendingReactionRecoveryParams struct {
 	MaxCandidates                     int
 	NowFunc                           func() time.Time
 	Logger                            *slog.Logger
+
+	// SCMMetadata reads each candidate workspace's SCM metadata; see
+	// [SCMMetadataSource]. Nil reads the agent's .sortie/scm.json.
+	SCMMetadata SCMMetadataReader
 }
 
 // PendingReactionRecoveryResult reports outcome counts from a single
@@ -211,7 +215,7 @@ func RecoverPendingReactions(ctx context.Context, state *State, runs []persisten
 			continue
 		}
 
-		meta := workspace.ReadSCMMetadata(pathResult.Path, log)
+		meta := params.SCMMetadata.Read(pathResult.Path, log)
 		if meta == (domain.SCMMetadata{}) {
 			outcome.Skipped++
 			continue

@@ -104,7 +104,8 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 - each running row should include `tokens_awaited`, true only when the session has recorded no figure and the moment its frozen arrival names for one has not passed: no turn has begun for an arrival that reports during a turn, and no turn has ended for one that settles at most one figure per turn. A row whose arrival reports figures and whose `tokens_awaited` is false recorded nothing and will record nothing, so a consumer must not present it as a figure still to come
 - each running row should include `api_requests_measured`, true when the row's `api_request_count` is a count of model API requests the session measured
 - each running row should include `rule_name`, `configured_model`, and `configured_effort`, the dispatch rule the session runs under and the model and reasoning level its resolved settings block carries, empty (and omitted from the JSON form) when unset; `model_name` keeps the model the runtime reported, which can differ from the configured one under routing aliases and runtime fallbacks
-- `retrying` (list of retry queue rows)
+- each running row should include `environment`, `{kind, name}`, naming the execution environment instance the issue's workspace runs in, as described at dispatch; omitted for a workspace that runs on the host
+- `retrying` (list of retry queue rows); each row carries the same `environment` object, described from the current configuration on every poll tick, and omits it in the same case
 - `agent_totals`
   - `input_tokens`
   - `output_tokens`
@@ -370,6 +371,7 @@ Minimum endpoints:
     ```
 
   - `status` is `"running"` when the issue has a running session, otherwise `"retrying"` when it has a pending retry, otherwise `"budget_exhausted"` when it is held out of dispatch by a per-issue budget ceiling; `budget_exhausted` in the response body carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state` and is `null` when the issue is not in that set.
+  - `environment`, a top-level `{kind, name}` object, names the execution environment instance the issue's workspace runs in, such as `{"kind": "smolvm", "name": "sortie-MT-649"}`, taken from the running entry or else the retry entry. It is omitted for a workspace that runs on the host. The same object appears on the running and retrying rows of `GET /api/v1/state`. The name is what `smolvm machine ls` and `smolvm machine egress-events --name` take.
   - If the issue is unknown to the current in-memory state, return `404` with an error response (for example `{"error":{"code":"issue_not_found","message":"..."}}`); an issue held by a budget ceiling is not unknown to it, so this case is distinct from that one.
 
 - `POST /api/v1/refresh`

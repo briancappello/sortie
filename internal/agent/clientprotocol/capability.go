@@ -38,8 +38,9 @@ type capabilityRecord struct {
 }
 
 // newCapabilityRecord builds a session's capability record with its stage-one
-// states. remote reports whether the launch target is remote; measured reports
-// whether a measurement source claimed the launch.
+// states. remote reports whether the launch target is remote and gets no MCP
+// servers (over SSH); measured reports whether a measurement source claimed the
+// launch.
 //
 // tokenCounts never reaches protocol because the wire carries no spend counter.
 // toolServers starts at protocol for a local launch, since nothing is withheld

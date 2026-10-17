@@ -18,6 +18,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
 // mustSelfReviewGit runs git args in dir, failing t on error.
@@ -32,7 +33,7 @@ func mustSelfReviewGit(t *testing.T, dir string, args ...string) {
 
 // TestGenerateWorkspaceDiff_HeldDescendantHoldingOutput pins that, with
 // a held descendant holding the output of the git diff invocations
-// generateWorkspaceDiff makes, the call returns within its timer with
+// workspaceDiff makes, the call returns within its timer with
 // the diff text.
 func TestGenerateWorkspaceDiff_HeldDescendantHoldingOutput(t *testing.T) {
 	realGit, err := exec.LookPath("git")
@@ -68,7 +69,7 @@ func TestGenerateWorkspaceDiff_HeldDescendantHoldingOutput(t *testing.T) {
 	done := make(chan outcome, 1)
 	start := time.Now()
 	go func() {
-		diff, _, _, diffErr := generateWorkspaceDiff(context.Background(), dir, 0)
+		diff, _, _, diffErr := workspaceDiff(context.Background(), workspace.HostTarget(dir), 0)
 		done <- outcome{diff, diffErr}
 	}()
 
@@ -76,13 +77,13 @@ func TestGenerateWorkspaceDiff_HeldDescendantHoldingOutput(t *testing.T) {
 	select {
 	case oc = <-done:
 	case <-time.After(20 * time.Second):
-		t.Fatal("generateWorkspaceDiff() did not return within 20s, want a bounded return despite the held descendant")
+		t.Fatal("workspaceDiff() did not return within 20s, want a bounded return despite the held descendant")
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("generateWorkspaceDiff() took %v, want within 5s", elapsed)
+		t.Errorf("workspaceDiff() took %v, want within 5s", elapsed)
 	}
 	if oc.err != nil {
-		t.Fatalf("generateWorkspaceDiff() error = %v", oc.err)
+		t.Fatalf("workspaceDiff() error = %v", oc.err)
 	}
 	if !strings.Contains(oc.diff, "world") {
 		t.Errorf("diff = %q, want it to contain the new line", oc.diff)
@@ -90,12 +91,12 @@ func TestGenerateWorkspaceDiff_HeldDescendantHoldingOutput(t *testing.T) {
 }
 
 // TestGenerateWorkspaceDiff_IntentToAddReapsHeldDescendant covers
-// generateWorkspaceDiff's git add --intent-to-add call, which runs
+// workspaceDiff's git add --intent-to-add call, which runs
 // through RunCapture with an empty CaptureParams, so it captures no
 // output and TestGenerateWorkspaceDiff_HeldDescendantHoldingOutput
 // cannot observe it. What it can assert is that the reap still
 // terminates that launch's process group: a held descendant the
-// intent-to-add invocation starts is gone once generateWorkspaceDiff
+// intent-to-add invocation starts is gone once workspaceDiff
 // returns, which the git launch's prior route (a plain cmd.Run with no
 // process group) would never guarantee.
 func TestGenerateWorkspaceDiff_IntentToAddReapsHeldDescendant(t *testing.T) {
@@ -131,17 +132,17 @@ exec "%s" "$@"
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, _, diffErr := generateWorkspaceDiff(context.Background(), dir, 0)
+		_, _, _, diffErr := workspaceDiff(context.Background(), workspace.HostTarget(dir), 0)
 		done <- diffErr
 	}()
 
 	select {
 	case diffErr := <-done:
 		if diffErr != nil {
-			t.Fatalf("generateWorkspaceDiff() error = %v", diffErr)
+			t.Fatalf("workspaceDiff() error = %v", diffErr)
 		}
 	case <-time.After(20 * time.Second):
-		t.Fatal("generateWorkspaceDiff() did not return within 20s")
+		t.Fatal("workspaceDiff() did not return within 20s")
 	}
 
 	pid := pollVerificationPID(t, pidPath, 5*time.Second)
@@ -170,9 +171,9 @@ func TestRunSingleVerification_HeldDescendantSucceedsAndLogsLeftoverRecord(t *te
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	start := time.Now()
-	result := runSingleVerification(context.Background(), command, wsPath, 5000, logger, &domain.NoopMetrics{})
+	result := runVerification(context.Background(), workspace.HostTarget(wsPath), command, 5000, logger, &domain.NoopMetrics{})
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("runSingleVerification() took %v, want within 2s", elapsed)
+		t.Errorf("runVerification() took %v, want within 2s", elapsed)
 	}
 
 	if result.ExitCode != 0 {
@@ -220,7 +221,7 @@ func TestRunSingleVerification_SelfSignalledCommandReportsItsExitAndLeftovers(t 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	result := runSingleVerification(context.Background(), "sleep 30 & kill -TERM $$", t.TempDir(), 5000, logger, &domain.NoopMetrics{})
+	result := runVerification(context.Background(), workspace.HostTarget(t.TempDir()), "sleep 30 & kill -TERM $$", 5000, logger, &domain.NoopMetrics{})
 
 	if result.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1", result.ExitCode)
@@ -272,7 +273,7 @@ func TestRunVerification_TimeoutSignalsDescendantGroup(t *testing.T) {
 
 	done := make(chan domain.VerificationResult, 1)
 	go func() {
-		done <- runSingleVerification(context.Background(), command, wsPath, 1000, discardLogger(), &domain.NoopMetrics{})
+		done <- runVerification(context.Background(), workspace.HostTarget(wsPath), command, 1000, discardLogger(), &domain.NoopMetrics{})
 	}()
 
 	descendantPID := pollVerificationPID(t, pidFile, 5*time.Second)
@@ -282,17 +283,17 @@ func TestRunVerification_TimeoutSignalsDescendantGroup(t *testing.T) {
 	select {
 	case result = <-done:
 	case <-time.After(30 * time.Second):
-		t.Fatal("runSingleVerification did not return within 30s, want a timed-out result")
+		t.Fatal("runVerification did not return within 30s, want a timed-out result")
 	}
 
 	if !result.TimedOut {
-		t.Errorf("runSingleVerification().TimedOut = false, want true")
+		t.Errorf("runVerification().TimedOut = false, want true")
 	}
 	if !pollVerificationFile(marker, 5*time.Second) {
-		t.Errorf("runSingleVerification() left %q absent, want the descendant to have caught a graceful signal", marker)
+		t.Errorf("runVerification() left %q absent, want the descendant to have caught a graceful signal", marker)
 	}
 	if err := syscall.Kill(descendantPID, 0); err == nil {
-		t.Errorf("runSingleVerification() left descendant %d alive, want gone", descendantPID)
+		t.Errorf("runVerification() left descendant %d alive, want gone", descendantPID)
 	}
 }
 

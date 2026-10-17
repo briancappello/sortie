@@ -142,9 +142,10 @@ const (
 )
 
 const (
-	contractAgentFamilyPath  = "github.com/sortie-ai/sortie/internal/agent"
-	contractNotifyFamilyPath = "github.com/sortie-ai/sortie/internal/notify"
-	contractInternalPrefix   = "github.com/sortie-ai/sortie/internal/"
+	contractAgentFamilyPath       = "github.com/sortie-ai/sortie/internal/agent"
+	contractNotifyFamilyPath      = "github.com/sortie-ai/sortie/internal/notify"
+	contractEnvironmentFamilyPath = "github.com/sortie-ai/sortie/internal/environment"
+	contractInternalPrefix        = "github.com/sortie-ai/sortie/internal/"
 )
 
 // contractLoggingImportPath is the one package rule HANDLER lets build
@@ -158,6 +159,7 @@ var contractFamilyRoots = []string{
 	contractSCMFamilyPath,
 	contractAgentFamilyPath,
 	contractNotifyFamilyPath,
+	contractEnvironmentFamilyPath,
 }
 
 // contractSharedPackage records why a package under a family root holds no
@@ -188,6 +190,8 @@ var contractSharedFamilyPackages = map[string]contractSharedPackage{
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest":  {reason: "shared credential-verification conformance assertion, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel":       {reason: "shared scripted model endpoint and scripted-model conformance driver; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/notify/route":                    {reason: "shared notification routing for orchestrator events; registers no kind and holds no adapter", coreImportable: true},
+	"github.com/sortie-ai/sortie/internal/environment":                     {reason: "the execution environment interface and kind registry; registers no kind and holds no adapter", coreImportable: true},
+	"github.com/sortie-ai/sortie/internal/environment/environmenttest":     {reason: "shared execution environment test doubles; registers no kind and holds no adapter; only tests reach it", coreImportable: false},
 }
 
 // contractPackageBannedImports maps one package's import path to the
@@ -537,6 +541,7 @@ var contractBoundedSinkTypes = map[string]string{
 	"bytes.Buffer":        "grows in memory and never blocks on Write",
 	"procutil.TailBuffer": "drops the earliest bytes once its cap is exceeded",
 	"cappedWriter":        "discards bytes past its cap and always reports success",
+	"cappedFile":          "writes at most its cap to a local regular file, then discards and stops the command, always reporting success",
 }
 
 // contractSinkTypeOwner is the map rule SINK directs a caller to extend
@@ -2757,15 +2762,16 @@ var contractAnchorSortieDirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "RunWorkerAttempt", reason: "exported summary path"},
 	{importPath: "github.com/sortie-ai/sortie/tools/qualify/probe", name: "writeToolServerMCPConfig", reason: "fixture path"},
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "NewSortieTools", reason: "returned path"},
+	{importPath: "github.com/sortie-ai/sortie/internal/environment/smolvm", name: "Environment.preparePaths", reason: "VM mount source"},
+	{importPath: "github.com/sortie-ai/sortie/internal/environment/smolvm", name: "guestControlLink", reason: "guest path"},
 }
 
 // contractWorkdirSites pairs each exec.Cmd.Dir assignment rule WORKDIR
 // permits with the workspace verification that precedes it.
 var contractWorkdirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agentcore", name: "LaunchTarget.BindWorkspace", reason: "workspace verified before launch"},
-	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "GitCommand", reason: "workspace verified before launch"},
-	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "RunHook", reason: "workspace verified before launch"},
-	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "runSingleVerification", reason: "workspace verified before launch"},
+	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "Target.Command", reason: "workspace verified before launch"},
+	{importPath: "github.com/sortie-ai/sortie/internal/environment/local", name: "Environment.Command", reason: "workspace verified before launch"},
 }
 
 // contractAnchorOwner is the package rule ANCHOR directs every .sortie

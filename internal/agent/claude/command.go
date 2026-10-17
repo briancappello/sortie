@@ -131,7 +131,9 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 		args = append(args, "--tools", "", "--strict-mcp-config", "--no-session-persistence")
 	} else {
 		if state.mcpConfigPath != "" {
-			args = append(args, "--mcp-config", state.mcpConfigPath)
+			// The runtime opens the file where it runs, so it gets the
+			// path at which it sees the file there.
+			args = append(args, "--mcp-config", state.target.GuestPath(state.mcpConfigPath))
 		} else if pt.MCPConfig != "" {
 			args = append(args, "--mcp-config", pt.MCPConfig)
 		}

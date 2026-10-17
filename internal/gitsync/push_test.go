@@ -1,0 +1,184 @@
+//go:build unix
+
+package gitsync
+
+import (
+	"context"
+	"errors"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sortie-ai/sortie/internal/config"
+)
+
+// mirrorRef returns the commit ref holds in the fixture's mirror, or ""
+// when the mirror has no such ref.
+func (f *syncFixture) mirrorRef(ref string) string {
+	f.t.Helper()
+	m := f.syncer.mirror.Dir()
+	out, err := exec.Command("git", "--git-dir="+m, "rev-parse", "--verify", "--quiet", ref).Output() //nolint:gosec // G204: the test's own check
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// upstreamBranch returns the upstream's commit of branch, or "" when the
+// upstream has no such branch.
+func (f *syncFixture) upstreamBranch(branch string) string {
+	f.t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", "refs/heads/"+branch) //nolint:gosec // G204: the test's own check
+	cmd.Dir = f.up.dir
+	cmd.Env = f.up.env
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// humanCommit commits name on the upstream's branch, creating the branch
+// at main when it does not exist, and leaves main checked out.
+func (f *syncFixture) humanCommit(branch, name string) string {
+	f.t.Helper()
+	if f.upstreamBranch(branch) == "" {
+		f.up.git("checkout", "--quiet", "-b", branch)
+	} else {
+		f.up.git("checkout", "--quiet", branch)
+	}
+	commit := f.up.commit(name, "a human pushed this\n")
+	f.up.git("checkout", "--quiet", "main")
+	return commit
+}
+
+func (f *syncFixture) export() (ExportResult, error) {
+	f.t.Helper()
+	return f.syncer.Export(context.Background(), f.env, f.ws)
+}
+
+func TestExport_FirstPush(t *testing.T) {
+	f := seeded(t, "ENG-70", config.SmolvmRepository{})
+	head := f.agentCommit("feature.txt", []byte("feature\n"))
+	start := time.Now()
+
+	res, err := f.export()
+	if err != nil {
+		t.Fatalf("Export() error = %v", err)
+	}
+	if !res.Pushed || res.Commit != head || res.PushedAt.Before(start.Add(-time.Second)) || res.UpToDate {
+		t.Errorf("Export() = %+v, want %s pushed now", res, head)
+	}
+	if got := f.upstreamBranch("sortie/ENG-70"); got != head {
+		t.Errorf("upstream sortie/ENG-70 = %q, want %s", got, head)
+	}
+	if got := f.mirrorRef(PushedRef("ENG-70")); got != head {
+		t.Errorf("%s = %q, want %s", PushedRef("ENG-70"), got, head)
+	}
+	if got := f.mirrorRef("refs/heads/sortie/ENG-70"); got != head {
+		t.Errorf("mirror refs/heads/sortie/ENG-70 = %q, want %s", got, head)
+	}
+
+	// Exporting again with nothing new pushes nothing.
+	res, err = f.export()
+	if err != nil || res.Pushed || res.Commit != head || !res.UpToDate {
+		t.Errorf("second Export() = %+v, %v; want %s up to date without a push", res, err, head)
+	}
+}
+
+func TestExport_RebaseReplacesSortiesOwnPush(t *testing.T) {
+	f := seeded(t, "ENG-71", config.SmolvmRepository{})
+	first := f.agentCommit("feature.txt", []byte("feature\n"))
+	if _, err := f.export(); err != nil {
+		t.Fatalf("first Export() error = %v", err)
+	}
+
+	// main moves on; the agent rebases its branch onto it.
+	f.up.commit("main.txt", "moved on\n")
+	ctx := context.Background()
+	if err := f.syncer.Refresh(ctx, f.env, f.ws); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	f.git("rebase", "--quiet", "origin/main")
+	rebased := f.git("rev-parse", "HEAD")
+	if rebased == first {
+		t.Fatal("the rebase kept the commit, want a replacement")
+	}
+
+	res, err := f.export()
+	if err != nil {
+		t.Fatalf("Export() after the rebase error = %v", err)
+	}
+	if !res.Pushed || res.Commit != rebased {
+		t.Errorf("Export() = %+v, want %s pushed", res, rebased)
+	}
+	if got := f.upstreamBranch("sortie/ENG-71"); got != rebased {
+		t.Errorf("upstream sortie/ENG-71 = %q, want the rebased %s", got, rebased)
+	}
+	if got := f.mirrorRef(PushedRef("ENG-71")); got != rebased {
+		t.Errorf("%s = %q, want %s", PushedRef("ENG-71"), got, rebased)
+	}
+}
+
+func TestExport_HumanCommitAfterSortiesPushFails(t *testing.T) {
+	f := seeded(t, "ENG-72", config.SmolvmRepository{})
+	first := f.agentCommit("feature.txt", []byte("feature\n"))
+	if _, err := f.export(); err != nil {
+		t.Fatalf("first Export() error = %v", err)
+	}
+	human := f.humanCommit("sortie/ENG-72", "human.txt")
+	f.agentCommit("more.txt", []byte("more\n"))
+
+	res, err := f.export()
+	if !errors.Is(err, ErrBranchMoved) || !strings.Contains(err.Error(), "branch moved upstream") {
+		t.Fatalf("Export() error = %v, want %v", err, ErrBranchMoved)
+	}
+	if res.Pushed {
+		t.Errorf("Export().Pushed = true, want false")
+	}
+	if got := f.upstreamBranch("sortie/ENG-72"); got != human {
+		t.Errorf("upstream sortie/ENG-72 = %q, want the human's %s", got, human)
+	}
+	if got := f.mirrorRef(PushedRef("ENG-72")); got != first {
+		t.Errorf("%s = %q, want Sortie's earlier push %s", PushedRef("ENG-72"), got, first)
+	}
+}
+
+func TestExport_HumanCreatedTheBranchBeforeSortiesFirstPush(t *testing.T) {
+	f := seeded(t, "ENG-73", config.SmolvmRepository{})
+	human := f.humanCommit("sortie/ENG-73", "human.txt")
+	f.agentCommit("feature.txt", []byte("feature\n"))
+
+	_, err := f.export()
+	if !errors.Is(err, ErrBranchMoved) {
+		t.Fatalf("Export() error = %v, want %v", err, ErrBranchMoved)
+	}
+	if got := f.upstreamBranch("sortie/ENG-73"); got != human {
+		t.Errorf("upstream sortie/ENG-73 = %q, want the human's %s", got, human)
+	}
+	if got := f.mirrorRef(PushedRef("ENG-73")); got != "" {
+		t.Errorf("%s = %q, want it absent", PushedRef("ENG-73"), got)
+	}
+}
+
+func TestLeaseRejected(t *testing.T) {
+	t.Parallel()
+
+	const dst = "refs/heads/sortie/K"
+	tests := []struct {
+		name, out string
+		want      bool
+	}{
+		{"stale info", "To /up\n!\trefs/sortie/incoming/K:refs/heads/sortie/K\t[rejected] (stale info)\nDone\n", true},
+		{"hook declined", "To /up\n!\trefs/sortie/incoming/K:refs/heads/sortie/K\t[remote rejected] (pre-receive hook declined)\nDone\n", false},
+		{"other ref stale", "To /up\n!\trefs/sortie/incoming/K:refs/heads/sortie/KX\t[rejected] (stale info)\nDone\n", false},
+		{"accepted", "To /up\n*\trefs/sortie/incoming/K:refs/heads/sortie/K\t[new branch]\nDone\n", false},
+		{"no output", "", false},
+	}
+	for _, tt := range tests {
+		if got := leaseRejected(tt.out, dst); got != tt.want {
+			t.Errorf("leaseRejected(%s) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
