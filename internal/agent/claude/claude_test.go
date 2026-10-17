@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -1180,6 +1181,95 @@ func TestRunTurn_SubAgentUsage(t *testing.T) {
 			t.Errorf("Usage.InputTokens = %d, want 1000 (fallback to usage)", result.Usage.InputTokens)
 		}
 	})
+}
+
+func TestRunTurn_ResumedSessionUsage(t *testing.T) {
+	t.Parallel()
+
+	const sid = "5cf8c387-6196-4296-86e4-eaaf85e8b944"
+
+	usage := func(input, output, cacheWrite, cacheRead int64) domain.TokenUsage {
+		in := input + cacheWrite + cacheRead
+		return domain.TokenUsage{InputTokens: in, OutputTokens: output, TotalTokens: in + output, CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite}
+	}
+	capture := func(n string) string { return string(loadFixture(t, "usage_resume_turn"+n+".jsonl")) }
+	zeroedCrash := `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"` + sid + `","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":0,"outputTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0}}}` + "\n"
+
+	breakdown1, breakdown2, breakdown3 := usage(2, 53, 31381, 13787), usage(6, 136, 31597, 104230), usage(8, 141, 31635, 149614)
+	zero := domain.TokenUsage{}
+	delta2, delta3 := usage(4, 83, 216, 90443), usage(6, 88, 254, 135827)
+
+	type turn struct {
+		stdout     string
+		wantErr    bool
+		wantUsage  domain.TokenUsage
+		wantFlag   bool
+		wantResume *domain.TokenUsage
+	}
+
+	tests := []struct {
+		name         string
+		version      string
+		continuation bool
+		resume       *domain.TokenUsage
+		turns        [2]turn
+	}{
+		{"new session on a restoring release counts each turn once", "2.1.302", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &breakdown1},
+			{stdout: capture("2"), wantUsage: breakdown2, wantResume: &breakdown2},
+		}},
+		{"continuation seeded with the previous reading is exact", "2.1.302", true, &breakdown1, [2]turn{
+			{stdout: capture("2"), wantUsage: delta2, wantResume: &breakdown2},
+			{stdout: capture("3"), wantUsage: delta3, wantResume: &breakdown3},
+		}},
+		{"continuation without a reading flags only its first turn", "2.1.302", true, nil, [2]turn{
+			{stdout: capture("2"), wantUsage: delta2, wantFlag: true, wantResume: &breakdown2},
+			{stdout: capture("3"), wantUsage: delta3, wantResume: &breakdown3},
+		}},
+		{"zeroed crash result changes nothing", "2.1.302", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &breakdown1},
+			{stdout: zeroedCrash, wantErr: true, wantUsage: breakdown1},
+		}},
+		{"release that saves no totals adds each result", "2.1.276", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &zero},
+			{stdout: capture("2"), wantUsage: usage(8, 189, 62978, 118017), wantResume: &zero},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			initLine := `{"type":"system","subtype":"init","session_id":"` + sid + `","claude_code_version":"` + tt.version + `","cwd":"/tmp"}` + "\n"
+			script := fakeSequentialClaude(t, tmpDir,
+				agenttest.Output{Stdout: initLine + tt.turns[0].stdout},
+				agenttest.Output{Stdout: initLine + tt.turns[1].stdout},
+			)
+			params := domain.StartSessionParams{WorkspacePath: tmpDir, AgentConfig: domain.AgentConfig{Command: script}, ResumeUsage: tt.resume}
+			if tt.continuation {
+				params.ResumeSessionID = sid
+			}
+
+			adapter, _ := NewClaudeCodeAdapter()
+			session, err := adapter.StartSession(context.Background(), params)
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+
+			for i, want := range tt.turns {
+				result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{Prompt: "turn", OnEvent: func(domain.AgentEvent) {}})
+
+				if (err != nil) != want.wantErr {
+					t.Fatalf("RunTurn(turn %d) error = %v, wantErr %v", i+1, err, want.wantErr)
+				}
+				if result.Usage != want.wantUsage || result.SpendUnaccounted != want.wantFlag || !reflect.DeepEqual(result.ResumeUsage, want.wantResume) {
+					t.Errorf("RunTurn(turn %d) = usage %+v, spendUnaccounted %v, resume %+v, want %+v, %v, %+v",
+						i+1, result.Usage, result.SpendUnaccounted, result.ResumeUsage, want.wantUsage, want.wantFlag, want.wantResume)
+				}
+			}
+		})
+	}
 }
 
 func TestRunTurn_ErrorResult(t *testing.T) {

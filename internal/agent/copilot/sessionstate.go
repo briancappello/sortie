@@ -50,29 +50,28 @@ func sessionStateRoot(env func(string) string, home func() (string, error)) (str
 
 // readSessionUsage scans the session-state events journal at path and
 // returns the totals of the last line whose decoded type is
-// "session.shutdown" as current, and the totals of the line before that
-// as previous (the zero value when at most one such record exists).
-// model names the model [shutdownModelName] selects between those two
-// records, empty whenever found is false or err is non-nil. found is
-// false when the file holds no session.shutdown record.
+// "session.shutdown" as current. model names the model [shutdownModelName]
+// selects between that record and the one before it, empty whenever found is
+// false or err is non-nil. found is false when the file holds no
+// session.shutdown record.
 //
 // The read is abandoned and err is non-nil when the file exceeds 64 MB
 // or a single line exceeds 10 MB. A line that fails to decode is
 // skipped without failing the read. readSessionUsage never logs the
 // file's contents.
-func readSessionUsage(path string) (current, previous domain.TokenUsage, model string, found bool, err error) {
+func readSessionUsage(path string) (current domain.TokenUsage, model string, found bool, err error) {
 	info, statErr := os.Stat(path)
 	if statErr != nil {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, statErr
+		return domain.TokenUsage{}, "", false, statErr
 	}
 	if info.Size() > maxSessionStateFileBytes {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false,
+		return domain.TokenUsage{}, "", false,
 			fmt.Errorf("session-state events file exceeds %d bytes: %w", maxSessionStateFileBytes, errSessionStateCapExceeded)
 	}
 
 	f, openErr := os.Open(path) //nolint:gosec // path is derived from a validated session id, not user input
 	if openErr != nil {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, openErr
+		return domain.TokenUsage{}, "", false, openErr
 	}
 	defer f.Close() //nolint:errcheck // read-only handle
 
@@ -95,24 +94,21 @@ func readSessionUsage(path string) (current, previous domain.TokenUsage, model s
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		if errors.Is(scanErr, bufio.ErrTooLong) {
-			return domain.TokenUsage{}, domain.TokenUsage{}, "", false,
+			return domain.TokenUsage{}, "", false,
 				fmt.Errorf("session-state events file line exceeds %d bytes: %w", maxSessionStateLineBytes, errSessionStateCapExceeded)
 		}
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, fmt.Errorf("scan session-state events file: %w", scanErr)
+		return domain.TokenUsage{}, "", false, fmt.Errorf("scan session-state events file: %w", scanErr)
 	}
 
 	if len(records) == 0 {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, nil
+		return domain.TokenUsage{}, "", false, nil
 	}
 	last := records[len(records)-1]
 	var prevRecord shutdownEvent
 	if len(records) == 2 {
 		prevRecord = records[0]
-		previous = shutdownTotals(prevRecord)
 	}
-	current = shutdownTotals(last)
-	model = shutdownModelName(last, prevRecord)
-	return current, previous, model, true, nil
+	return shutdownTotals(last), shutdownModelName(last, prevRecord), true, nil
 }
 
 // shutdownModelName returns the trimmed modelMetrics key of current

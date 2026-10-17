@@ -870,6 +870,50 @@ func TestLatestAgentRuns(t *testing.T) {
 	}
 }
 
+func TestLatestResumeUsage(t *testing.T) {
+	t.Parallel()
+
+	older := &ResumeUsage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 30, CacheWriteTokens: 40}
+	newer := &ResumeUsage{InputTokens: 11, OutputTokens: 22, CacheReadTokens: 33, CacheWriteTokens: 44}
+	foreign := &ResumeUsage{InputTokens: 99, OutputTokens: 98, CacheReadTokens: 97, CacheWriteTokens: 96}
+	run := func(issueID, sessionID string, usage *ResumeUsage) RunHistory {
+		r := newTestRun(1)
+		r.IssueID, r.SessionID, r.ResumeUsage = issueID, sessionID, usage
+		return r
+	}
+
+	tests := []struct {
+		name string
+		seed []RunHistory
+		want *ResumeUsage
+	}{
+		{"newest matching row wins", []RunHistory{run("ISS-A", "sess-1", older), run("ISS-A", "sess-1", newer)}, newer},
+		{"newest row without a figure hides an older figure", []RunHistory{run("ISS-A", "sess-1", older), run("ISS-A", "sess-1", nil)}, nil},
+		{"newer rows of another session and another issue are ignored", []RunHistory{
+			run("ISS-A", "sess-1", older), run("ISS-A", "sess-2", foreign), run("ISS-B", "sess-1", foreign),
+		}, older},
+		{"only another session has rows", []RunHistory{run("ISS-A", "sess-2", foreign)}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			for _, r := range tt.seed {
+				appendOrFatal(t, s, r)
+			}
+
+			got, err := s.LatestResumeUsage(context.Background(), "ISS-A", "sess-1")
+
+			if err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("LatestResumeUsage(ISS-A, sess-1) = %+v, %v, want %+v, nil", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadLatestSuccessfulRunsForIssues(t *testing.T) {
 	t.Parallel()
 

@@ -475,6 +475,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 		FirstAfterHop: entry.FirstAfterHop,
 		AgentBlocked:  blockedSoftStop,
+		ResumeUsage:   persistedResumeUsage(workerResult.ResumeUsage),
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
@@ -1599,6 +1600,20 @@ func classifyWorkerError(err error) domain.RetryClassification {
 	}
 
 	return domain.RetryClassification{Retryable: true, Backoff: domain.BackoffExponential}
+}
+
+// persistedResumeUsage drops TotalTokens, which domainResumeUsage derives
+// again.
+func persistedResumeUsage(usage *domain.TokenUsage) *persistence.ResumeUsage {
+	if usage == nil {
+		return nil
+	}
+	return &persistence.ResumeUsage{
+		InputTokens:      usage.InputTokens,
+		OutputTokens:     usage.OutputTokens,
+		CacheReadTokens:  usage.CacheReadTokens,
+		CacheWriteTokens: usage.CacheWriteTokens,
+	}
 }
 
 func errorStringPtr(err error) *string {

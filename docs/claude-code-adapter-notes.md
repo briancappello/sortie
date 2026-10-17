@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's Claude Code adapter in `internal/agent/claude`.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-17
 
 ## Where to get the volatile facts
 
@@ -44,7 +44,17 @@ Streamed assistant usage is a snapshot, not a final count. The CLI repeats one m
 
 The terminal event's top-level usage object excludes sub-agent activity, while its per-model breakdown includes it. The adapter prefers the per-model breakdown, summed across models, and falls back to the top-level object only when the breakdown is absent. Reading the top-level object first silently undercounts any turn that spawned a subagent.
 
-The figure that leaves the adapter is run-cumulative and monotone. `agentcore.RunUsage` holds the session total: assistant events set the in-flight turn's provisional contribution, the terminal event settles it, and the snapshot never decreases. The turn result carries that cumulative snapshot, not a per-turn delta. When you write an assertion about usage, be clear about which of the two you are asserting.
+The figure that leaves the adapter is run-cumulative and monotone. `agentcore.RunUsage` holds the run's total and `agentcore.ResumeBaseline` holds the session's starting point: assistant events set the in-flight turn's provisional contribution, the terminal event replaces it with the run figure, and the snapshot never decreases. The turn result carries that cumulative snapshot, not a per-turn delta. When you write an assertion about usage, be clear about which of the two you are asserting.
+
+What the terminal event's breakdown means depends on the process. A process that restores its session's saved totals reports a breakdown cumulative over the whole session, every earlier turn and every earlier run on it included; an older process reports only its own call. `system/init` names the release in `claude_code_version`, and the adapter compares it with `firstRestoringRelease` on every turn, because every turn is a new process: at or above it, or a value that is not valid semver, means restoring; below it, or an absent field, means not.
+
+On a restoring process the adapter feeds the breakdown to the session's `ResumeBaseline`, with the result's top-level usage as the turn's own figure, and sets the run total to the spend of earlier non-restoring processes plus what the baseline reports. Adding the breakdown to the run total on every turn multiplies the count by the number of turns. `StartSession` seeds the baseline with zero for a session the run creates and with the `StartSessionParams.ResumeUsage` handed over for a continuation. A result with no `modelUsage` entry, or one whose components are all zero, such as an `error_during_execution` result, settles nothing and reports no resume figure, so it never lowers the total or becomes a starting point.
+
+On a non-restoring process the breakdown is that process's own spend. The adapter adds it to a process-spend counter that is never reset, and the run total is that counter plus the baseline's run figure. Such a process neither saves nor restores totals, so the resume figure passes through unchanged.
+
+The resume figure a turn reports is the baseline's latest reading, which the worker records and hands to the next run that resumes the session. A turn that ends without a result (stopped, killed, or failed start) reports none. A stopped process saves the calls it completed and a killed one saves nothing, and the adapter cannot tell which, so handing over the last result would count a stopped turn's saved calls twice.
+
+An unknown baseline is estimated as the first breakdown less the result's own usage. That equals the restored figure whenever the turn spawned no sub-agent, and the turn reports `SpendUnaccounted` because sub-agent calls cannot be separated from the restored figure. This covers a continuation after a turn that ended without a result, a continuation of a session whose previous run recorded no resume figure, and a counter restart (a breakdown below the previous one). A continuation after a turn that ended with a result is exact and unflagged. The estimate can carry one extra call when the top-level usage double-reports a retried request.
 
 The adapter reports no cost figure at all, even though the stream carries one. It reports API timing instead: a clock that starts when the session opens, restarts after every tool-result message because the next API call follows tool execution, and is attached to the next usage event it emits. When no per-request timing was emitted during a turn, the finalize path falls back to the terminal event's own API duration, so the two are never double-counted.
 

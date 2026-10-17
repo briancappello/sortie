@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -98,31 +99,9 @@ type sessionState struct {
 	// StartSession and never reset between turns.
 	usage *agentcore.TurnEndUsage
 
-	// runCreatedSession is true when this run started a new session
-	// (StartSessionParams.ResumeSessionID was empty), as opposed to
-	// resuming one from a prior worker attempt. Recorded once in
-	// StartSession; used by the post-exit recovery baseline logic to
-	// distinguish a run with nothing to recover from one that cannot
-	// separate its own spend from a resumed session's prior spend.
-	runCreatedSession bool
-
-	// baseline is the session-cumulative total to subtract from a
-	// successful session-state read to recover this run's own
-	// contribution. Resolved once per run; never reset between turns.
-	baseline         domain.TokenUsage
-	baselineResolved bool
-
-	// recoveryUnavailable is set when this run cannot separate its own
-	// spend from a resumed session's prior spend after missing its
-	// first read attempt. Once set, recoverUsage returns nil, so no
-	// later turn of the run reports a usage figure.
-	recoveryUnavailable bool
-
-	// priorFinalizeOccurred is true once any turn of this run has
-	// completed OnFinalize, regardless of whether a session-state read
-	// was attempted, skipped, or failed. It distinguishes a read that
-	// is this run's first read attempt from one that is not.
-	priorFinalizeOccurred bool
+	// resume separates this run's spend from the usage the session held
+	// when the run started. Never reset between turns.
+	resume agentcore.ResumeBaseline
 
 	// sessionIDRejectionLogged suppresses repeating the invalid-session-id
 	// Warn on every turn of a run whose session id never becomes valid.
@@ -173,31 +152,17 @@ func (s *sessionState) refreshForkLogger() {
 	}
 }
 
-// recoverUsage attempts to recover this run's authoritative token usage
-// and its model from the runtime's session-state journal after the
-// subprocess has exited. It returns nil on exactly the conditions that
-// leave the run without a settled figure: recovery already marked
-// unavailable, an unknown or invalid session id, a remote launch,
-// unresolved session-state root, a read error, the boundary-resolution
-// branch that marks recovery unavailable, or no session.shutdown record
-// found. On every other path it returns the run's own contribution and
-// the model the journal record names.
+// recoverUsage reads the runtime's session-state journal after the
+// subprocess has exited and returns this run's usage with the model the
+// journal's newest record names, whether that figure is an estimate, and the
+// session's own usage for hand-over to a later run.
 //
-// The baseline is resolved once per run: at the run's first read
-// attempt it is the record preceding the current one (zero when none
-// exists); at a later first-successful read it is zero when this run
-// created the session, and otherwise recovery is marked unavailable for
-// the remainder of the run because the boundary record that would
-// separate this run's spend from a resumed session's prior spend is no
-// longer available.
-func (s *sessionState) recoverUsage(logger *slog.Logger) *agentcore.RecoveredUsage {
-	hadPriorFinalize := s.priorFinalizeOccurred
-	defer func() { s.priorFinalizeOccurred = true }()
-
-	if s.recoveryUnavailable {
-		return nil
-	}
-
+// A skipped or failed read returns no figure, false, and no hand-over
+// figure. A journal without a record, or one whose newest record equals the
+// last reading, means the turn wrote none: no figure, and the session's
+// usage is unchanged. A reading the baseline cannot place exactly returns no
+// figure and true.
+func (s *sessionState) recoverUsage(logger *slog.Logger) (recovered *agentcore.RecoveredUsage, estimated bool, resume *domain.TokenUsage) {
 	remote := s.target.RemoteCommand != ""
 	sessionID := s.copilotSessionID
 	validID := sessionID != "" && sessionIDPattern.MatchString(sessionID)
@@ -208,18 +173,18 @@ func (s *sessionState) recoverUsage(logger *slog.Logger) *agentcore.RecoveredUsa
 				slog.String("reason", "invalid_session_id"))
 			s.sessionIDRejectionLogged = true
 		}
-		return nil
+		return nil, false, nil
 	}
 
 	root, err := sessionStateRoot(os.Getenv, os.UserHomeDir)
 	if err != nil {
 		logger.Debug("copilot session-state root resolution failed",
 			slog.String("session_id", sessionID), slog.String("reason", "root_unresolved"))
-		return nil
+		return nil, false, nil
 	}
 	eventsPath := filepath.Join(root, sessionID, "events.jsonl")
 
-	current, previous, model, found, err := readSessionUsage(eventsPath)
+	current, model, found, err := readSessionUsage(eventsPath)
 	if err != nil {
 		if errors.Is(err, errSessionStateCapExceeded) {
 			logger.Warn("copilot session-state read abandoned",
@@ -228,31 +193,62 @@ func (s *sessionState) recoverUsage(logger *slog.Logger) *agentcore.RecoveredUsa
 			logger.Debug("copilot session-state read failed",
 				slog.String("session_id", sessionID), slog.String("reason", "unreadable"))
 		}
-		return nil
-	}
-
-	if !s.baselineResolved {
-		switch {
-		case !hadPriorFinalize:
-			s.baseline = previous
-		case s.runCreatedSession:
-			s.baseline = domain.TokenUsage{}
-		default:
-			s.recoveryUnavailable = true
-			logger.Warn("copilot session-state recovery abandoned for this run",
-				slog.String("session_id", sessionID), slog.String("reason", "boundary_record_unavailable"))
-			return nil
-		}
-		s.baselineResolved = true
+		return nil, false, nil
 	}
 
 	if !found {
 		logger.Debug("copilot session-state has no session.shutdown record yet",
 			slog.String("session_id", sessionID), slog.String("reason", "no_record"))
+		return nil, false, s.resume.Resume()
+	}
+
+	if last := s.resume.Resume(); last != nil && *last == current {
+		return nil, false, last
+	}
+
+	run, estimated := s.resume.Observe(current, nil)
+	if estimated {
+		return nil, true, s.resume.Resume()
+	}
+	return &agentcore.RecoveredUsage{Run: run, Model: model}, false, s.resume.Resume()
+}
+
+// seedResumeBaseline returns the baseline a session starts from: zero for a
+// session the run creates, the figure handed over for a resumed one, and
+// otherwise the newest record of the resumed session's local journal. A
+// remote launch, an invalid session id, or an unreadable journal leaves the
+// baseline unknown; none fails the session start.
+func seedResumeBaseline(params domain.StartSessionParams, target agentcore.LaunchTarget, sessionID string, logger *slog.Logger) agentcore.ResumeBaseline {
+	switch {
+	case params.ResumeSessionID == "":
+		return *agentcore.NewResumeBaseline(&domain.TokenUsage{})
+	case params.ResumeUsage != nil:
+		return *agentcore.NewResumeBaseline(params.ResumeUsage)
+	case target.RemoteCommand != "" || !sessionIDPattern.MatchString(sessionID):
+		return agentcore.ResumeBaseline{}
+	}
+	return *agentcore.NewResumeBaseline(journalResumeUsage(sessionID, logger))
+}
+
+// journalResumeUsage returns the totals of the newest session.shutdown record
+// in the session's journal, zero when the journal is missing or holds no
+// record, and nil when the journal cannot be read.
+func journalResumeUsage(sessionID string, logger *slog.Logger) *domain.TokenUsage {
+	root, err := sessionStateRoot(os.Getenv, os.UserHomeDir)
+	if err != nil {
+		logger.Debug("copilot session-state root resolution failed", slog.String("reason", "root_unresolved"))
 		return nil
 	}
 
-	return &agentcore.RecoveredUsage{Run: agentcore.SubtractUsage(current, s.baseline), Model: model}
+	current, _, found, err := readSessionUsage(filepath.Join(root, sessionID, "events.jsonl"))
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !found) {
+		return &domain.TokenUsage{}
+	}
+	if err != nil {
+		logger.Debug("copilot session-state baseline read failed", slog.String("reason", "unreadable"))
+		return nil
+	}
+	return &current
 }
 
 // NewCopilotAdapter creates a [CopilotAdapter]. Settings and command
@@ -314,17 +310,19 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 		copilotSessionID = uuid
 	}
 
+	baseLogger := slog.Default().With(slog.String("component", "copilot-adapter"))
+
 	state := &sessionState{
 		target:                 target,
 		copilotSessionID:       copilotSessionID,
 		passthrough:            pt,
 		agentConfig:            params.AgentConfig,
-		baseLogger:             slog.Default().With(slog.String("component", "copilot-adapter")),
+		baseLogger:             baseLogger,
 		mcpConfigPath:          params.MCPConfigPath,
 		isContinuation:         params.ResumeSessionID != "",
 		credentialVerification: params.CredentialVerification,
-		runCreatedSession:      params.ResumeSessionID == "",
 		usage:                  agentcore.NewTurnEndUsage(),
+		resume:                 seedResumeBaseline(params, target, copilotSessionID, logging.WithSession(baseLogger, copilotSessionID)),
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
@@ -489,7 +487,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				state.refreshForkLogger()
 			}
 
-			recovered := state.recoverUsage(state.logger())
+			recovered, estimated, resume := state.recoverUsage(state.logger())
 
 			ev := agentcore.TurnEvidence{
 				ExitObserved: true,
@@ -529,7 +527,10 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				}
 			}
 
-			return state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, recovered)
+			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, recovered)
+			result.ResumeUsage = resume
+			result.SpendUnaccounted = estimated
+			return result, agentErr
 		},
 		// Copilot emits EventSessionStarted before the scan loop using the
 		// session's own ID, assigned in StartSession.

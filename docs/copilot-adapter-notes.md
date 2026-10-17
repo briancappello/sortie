@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's GitHub Copilot CLI adapter in `internal/agent/copilot`.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-17
 
 ## Where to get the volatile facts
 
@@ -32,7 +32,7 @@ This is the thing that ruins an afternoon when writing tests. A stand-in binary 
 
 The adapter reads no token figure from the event stream. The session-state journal is its only source, an on-disk record the adapter reads after the subprocess exits.
 
-That journal is session-cumulative across every process that resumes the session, not per-invocation. A second turn's record includes the first turn's spend. Recovering one run's own contribution means subtracting a baseline: the record that predates the run. The adapter resolves that baseline once, at its first read attempt, and the consequence is unforgiving. Miss the first attempt on a session someone else started and the boundary record is gone for good; the run then marks recovery unavailable and reports no further figure for the rest of the run rather than reporting a figure inflated by a previous run's spend. Journal reads are also skipped in SSH mode, on an ID that fails the path-segment check, and on a file that breaches the size or line caps.
+That journal is session-cumulative across every process that resumes the session, not per-invocation. A second turn's record includes the first turn's spend. Recovering one run's own contribution means subtracting a baseline held in an `agentcore.ResumeBaseline`. `StartSession` seeds it with zero for a session the run creates and with the resume usage handed over for a resumed one. With no hand-over, a local launch whose id passes the path-segment check reads the journal's newest record once: a journal without a record, or a missing file, seeds zero, and any other failure leaves the baseline unknown. No outcome fails `StartSession`. Each turn's finalize read compares the newest record with the baseline's latest reading. Equal totals mean the turn wrote no record, so it reports no figure and emits no `token_usage` event; otherwise the baseline turns the record into the run figure. An unknown baseline takes the record as its starting point, so that turn reports no figure and `SpendUnaccounted`. A skipped or failed read reports no figure and nothing is abandoned: the next turn reads again. Journal reads are also skipped in SSH mode, on an ID that fails the path-segment check, and on a file that breaches the size or line caps.
 
 The practical rule: a usage figure from this adapter is run-cumulative and never decreases, a failed journal read never lowers a figure already reported, and the "measured" flag distinguishes an unknown spend from a genuine zero. Assertions that ignore that distinction pass for the wrong reason.
 

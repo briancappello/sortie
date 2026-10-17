@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -18,8 +20,9 @@ type rawEvent struct {
 	Subtype string `json:"subtype,omitempty"`
 
 	// System/init fields.
-	SessionID string `json:"session_id,omitempty"`
-	Cwd       string `json:"cwd,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	Cwd               string `json:"cwd,omitempty"`
+	ClaudeCodeVersion string `json:"claude_code_version,omitempty"`
 
 	// System/permission_denied fields.
 	ToolName string `json:"tool_name,omitempty"`
@@ -123,16 +126,19 @@ func usageFromAssistant(raw *rawUsage) domain.TokenUsage {
 	}
 }
 
-// usageFromResult returns the authoritative per-turn usage and the
-// model that produced it from a result event. It prefers the
-// modelUsage map, which is present whenever the turn touched at least
-// one model and includes sub-agent activity that the top-level usage
-// object excludes; it falls back to the top-level usage object when
-// modelUsage is absent or empty. The reported model is the modelUsage
-// key with the greatest OutputTokens, ties broken by the
-// lexicographically smallest key. InputTokens includes prompt-cache
-// reads and prompt-cache writes in both cases; TotalTokens is computed
-// as InputTokens plus OutputTokens.
+// usageFromResult returns the usage the result event reports and the
+// model that produced it. It prefers the modelUsage map, which is present
+// whenever the turn touched at least one model and includes sub-agent
+// activity that the top-level usage object excludes; it falls back to the
+// top-level usage object when modelUsage is absent or empty. The reported
+// model is the modelUsage key with the greatest OutputTokens, ties broken
+// by the lexicographically smallest key. InputTokens includes prompt-cache
+// reads and prompt-cache writes in both cases; TotalTokens is computed as
+// InputTokens plus OutputTokens.
+//
+// On a process that restored its session's saved totals the figure is
+// cumulative over the whole session, so callers subtract a baseline
+// instead of adding it to a run total.
 func usageFromResult(event rawEvent) (usage domain.TokenUsage, model string) {
 	if len(event.ModelUsage) > 0 {
 		var bestOutput int64 = -1
@@ -151,6 +157,23 @@ func usageFromResult(event rawEvent) (usage domain.TokenUsage, model string) {
 		return usage, model
 	}
 	return usageFromAssistant(event.Usage), ""
+}
+
+// firstRestoringRelease is the first release whose resumed process
+// restores the totals its session saved.
+const firstRestoringRelease = "2.1.277"
+
+// restoresSavedTotals reports whether a process that names version on its
+// init event restores saved session totals. An absent version is an
+// older release; a version that is not valid semver is a newer one.
+func restoresSavedTotals(version string) bool {
+	if version == "" {
+		return false
+	}
+	if !semver.IsValid("v" + version) {
+		return true
+	}
+	return semver.Compare("v"+version, "v"+firstRestoringRelease) >= 0
 }
 
 // sumTurnMessages sums every stored per-message-id usage into one

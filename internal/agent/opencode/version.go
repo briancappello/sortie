@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
@@ -14,11 +15,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
-
-// opencodeVersionPattern matches a bare semantic version, with an
-// optional leading "v" already stripped by the caller and an optional
-// pre-release or build suffix kept but not decomposed.
-var opencodeVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.+-]+)?$`)
 
 // checkRuntimeVersion launches the configured command with --version,
 // bounded by [agentcore.AuxiliaryTimeout], and refuses a command that
@@ -113,8 +109,8 @@ func versionQueryEnv(base []string) []string {
 // parseRuntimeVersion extracts the version and major number from a
 // version query's standard output. ok is false when out is truncated
 // or carries no field, among the first non-empty line's whitespace-
-// separated fields, that (after dropping one leading "v") matches a
-// bare semantic version.
+// separated fields, that (after dropping one leading "v") is a full
+// semantic version.
 func parseRuntimeVersion(out []byte, truncated bool) (version string, major int, ok bool) {
 	if truncated {
 		return "", 0, false
@@ -127,17 +123,24 @@ func parseRuntimeVersion(out []byte, truncated bool) (version string, major int,
 
 	for field := range strings.FieldsSeq(line) {
 		candidate := strings.TrimPrefix(field, "v")
-		match := opencodeVersionPattern.FindStringSubmatch(candidate)
-		if match == nil {
+		prefixed := "v" + candidate
+		if !isFullSemver(prefixed) {
 			continue
 		}
-		majorInt, err := strconv.Atoi(match[1])
+		majorInt, err := strconv.Atoi(strings.TrimPrefix(semver.Major(prefixed), "v"))
 		if err != nil {
 			return "", 0, false
 		}
 		return candidate, majorInt, true
 	}
 	return "", 0, false
+}
+
+// isFullSemver reports whether version, with its leading "v", is valid
+// semver that spells out major, minor and patch. semver.IsValid alone
+// also accepts shorthand such as "v1.18".
+func isFullSemver(version string) bool {
+	return semver.Canonical(version) == strings.TrimSuffix(version, semver.Build(version))
 }
 
 // firstReadableLine returns the first line of out that is non-empty

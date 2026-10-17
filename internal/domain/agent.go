@@ -213,6 +213,11 @@ type StartSessionParams struct {
 	// without session continuity ignore it.
 	ResumeSessionID string
 
+	// ResumeUsage is the figure the newest run on ResumeSessionID ended
+	// with; nil when ResumeSessionID is empty or that run recorded none.
+	// Adapters whose runtime keeps no such figure ignore it.
+	ResumeUsage *TokenUsage
+
 	// SSHHost, when non-empty, launches the agent on that host via SSH
 	// instead of as a local subprocess.
 	SSHHost string
@@ -282,6 +287,13 @@ type TurnResult struct {
 	// lower bound. Unlike UsageMeasured it is per turn and not monotone,
 	// and any partial figure is still reported in Usage.
 	SpendUnaccounted bool
+
+	// ResumeUsage is the usage the agent runtime itself holds for the
+	// session at this turn's end, earlier runs on the session included,
+	// which a later run resuming the session receives as
+	// StartSessionParams.ResumeUsage. Nil when the runtime keeps no such
+	// figure or the adapter cannot state it exactly.
+	ResumeUsage *TokenUsage
 }
 
 // AgentAdapter is the contract every coding-agent integration must

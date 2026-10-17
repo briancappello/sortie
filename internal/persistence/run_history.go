@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,15 @@ const (
 	HandoffVerdictAbsence      = "absence of work observed"
 	HandoffVerdictUndetermined = "evidence not determinable"
 )
+
+// ResumeUsage is the usage figure an agent runtime kept for a session, which
+// a later run resuming the session starts from.
+type ResumeUsage struct {
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+}
 
 // RunHistory is a single completed run attempt in the run_history table.
 // ID is assigned by the database on insert; leave it zero when calling
@@ -129,6 +139,11 @@ type RunHistory struct {
 	// AgentBlocked is true when the run's agent ended it with a blocked soft
 	// stop. Only the appends write it; the run-history reads do not select it.
 	AgentBlocked bool
+
+	// ResumeUsage is the figure the run's session held at the run's last
+	// reporting turn; nil writes four NULLs. Only the appends write it; the
+	// run-history reads do not select it. [Store.LatestResumeUsage] reads it.
+	ResumeUsage *ResumeUsage
 }
 
 // AppendRunHistory inserts a completed run attempt. The input ID is
@@ -175,10 +190,18 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 		dispatchIDVal = sql.NullString{String: *run.DispatchID, Valid: true}
 	}
 
+	var resumeInput, resumeOutput, resumeCacheRead, resumeCacheWrite sql.NullInt64
+	if run.ResumeUsage != nil {
+		resumeInput = sql.NullInt64{Int64: run.ResumeUsage.InputTokens, Valid: true}
+		resumeOutput = sql.NullInt64{Int64: run.ResumeUsage.OutputTokens, Valid: true}
+		resumeCacheRead = sql.NullInt64{Int64: run.ResumeUsage.CacheReadTokens, Valid: true}
+		resumeCacheWrite = sql.NullInt64{Int64: run.ResumeUsage.CacheWriteTokens, Valid: true}
+	}
+
 	res, err := ex.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id, agent_blocked)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id, agent_blocked, resume_input_tokens, resume_output_tokens, resume_cache_read_tokens, resume_cache_write_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
@@ -188,6 +211,7 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 		run.IssueTitle, run.IssueURL, run.DispatchedAt,
 		triggerVal, run.ReactionKind, run.SessionID, run.SSHHost, run.FirstAfterHop,
 		dispatchIDVal, run.AgentBlocked,
+		resumeInput, resumeOutput, resumeCacheRead, resumeCacheWrite,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)
@@ -921,6 +945,34 @@ func (s *Store) LatestAgentRuns(ctx context.Context, issueIDs []string) (map[str
 		return nil, fmt.Errorf("query latest agent runs: %w", err)
 	}
 	return runs, nil
+}
+
+// LatestResumeUsage returns the resume usage of the run_history row with the
+// greatest id that matches both issueID and sessionID. It returns nil with a
+// nil error when no row matches or the row recorded none.
+func (s *Store) LatestResumeUsage(ctx context.Context, issueID, sessionID string) (*ResumeUsage, error) {
+	var input, output, cacheRead, cacheWrite sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT resume_input_tokens, resume_output_tokens, resume_cache_read_tokens, resume_cache_write_tokens
+		FROM run_history
+		WHERE issue_id = ? AND session_id = ?
+		ORDER BY id DESC
+		LIMIT 1`, issueID, sessionID).Scan(&input, &output, &cacheRead, &cacheWrite)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query latest resume usage for %q session %q: %w", issueID, sessionID, err)
+	}
+	if !input.Valid || !output.Valid || !cacheRead.Valid || !cacheWrite.Valid {
+		return nil, nil
+	}
+	return &ResumeUsage{
+		InputTokens:      input.Int64,
+		OutputTokens:     output.Int64,
+		CacheReadTokens:  cacheRead.Int64,
+		CacheWriteTokens: cacheWrite.Int64,
+	}, nil
 }
 
 // IssueTokenUsage is the per-issue token spend read by the token ceiling

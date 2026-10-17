@@ -93,6 +93,14 @@ type sessionState struct {
 	// once in StartSession and never reset between turns.
 	acc *agentcore.RunUsage
 
+	// resume tracks the runtime's session-cumulative counter. Never reset
+	// between turns.
+	resume agentcore.ResumeBaseline
+
+	// processSpend sums the results of processes that do not restore saved
+	// totals, each of which reports only its own spend. Never reset.
+	processSpend domain.TokenUsage
+
 	// usageMeasured reports whether an assistant usage object or a
 	// result-event usage figure has been observed for this session.
 	// Monotone: set true once and never cleared.
@@ -101,6 +109,9 @@ type sessionState struct {
 	// Per-turn scan state owned by the ParseLine and OnFinalize hook
 	// closures. Reset at the top of each RunTurn call before delegating
 	// to forkSession.
+	restoresTotals   bool
+	turnResume       *domain.TokenUsage
+	turnEstimated    bool
 	turnMessages     map[string]domain.TokenUsage
 	lastModel        string
 	apiCallStart     time.Time
@@ -150,6 +161,34 @@ func (s *sessionState) relayEffortReport(effort string, stderrLines []string) {
 		slog.String(registry.EffortKey, effort),
 		slog.String("line", stderrLines[idx]))
 	s.effortReported = true
+}
+
+// settleResult folds a result event into the run total.
+//
+// A process that restored its session's saved totals reports the whole
+// session in modelUsage, so the figure is a reading of the session counter
+// and the baseline subtracts what the run did not add. A result with no
+// usable modelUsage, such as a crash result with zeroed figures, settles
+// nothing and hands no resume figure over, because the runtime may still
+// have saved spend the result does not show. An older process saves and
+// restores nothing, so each result covers only that process and adds to
+// the run.
+func (s *sessionState) settleResult(event rawEvent) {
+	breakdown, _ := usageFromResult(event)
+	if !s.restoresTotals {
+		s.processSpend = agentcore.AddUsage(s.processSpend, breakdown)
+		s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, s.resume.Run()))
+		s.turnResume = s.resume.Resume()
+		return
+	}
+	if len(event.ModelUsage) == 0 || (breakdown.InputTokens == 0 && breakdown.OutputTokens == 0) {
+		return
+	}
+	own := usageFromAssistant(event.Usage)
+	run, estimated := s.resume.Observe(breakdown, &own)
+	s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run))
+	s.turnResume = s.resume.Resume()
+	s.turnEstimated = estimated
 }
 
 func (s *sessionState) refreshForkLogger() {
@@ -209,6 +248,11 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		sessionUUID = uuid
 	}
 
+	resumeFrom := &domain.TokenUsage{}
+	if isContinuation {
+		resumeFrom = params.ResumeUsage
+	}
+
 	state := &sessionState{
 		target:                 target,
 		claudeSessionID:        sessionUUID,
@@ -219,6 +263,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		mcpConfigPath:          params.MCPConfigPath,
 		credentialVerification: params.CredentialVerification,
 		acc:                    agentcore.NewRunUsage(),
+		resume:                 *agentcore.NewResumeBaseline(resumeFrom),
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
@@ -241,6 +286,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 						state.claudeSessionID = event.SessionID
 						state.refreshForkLogger()
 					}
+					state.restoresTotals = restoresSavedTotals(event.ClaudeCodeVersion)
 					agentcore.EmitSessionStarted(emit, pid, state.claudeSessionID)
 					// The first API call is imminent. Start the monotonic timer.
 					state.apiCallStart = time.Now()
@@ -332,14 +378,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 
 			case "result":
 				captured := event
-				// The result event's modelUsage (or, absent that, its usage
-				// object) is the authoritative per-turn figure: it includes
-				// sub-agent activity the streamed assistant events never
-				// carry. It settles into the run total regardless of what
-				// the assistant events already contributed, so a message
-				// only some of whose usage streamed still counts in full.
-				authoritative, _ := usageFromResult(event)
-				state.acc.AddTurn(authoritative)
+				state.settleResult(event)
 				if len(event.ModelUsage) > 0 || event.Usage != nil {
 					state.usageMeasured = true
 				}
@@ -360,7 +399,9 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 			usage := state.acc.Snapshot()
 
 			finalize := func(ev agentcore.TurnEvidence, meta agentcore.TurnMeta) (domain.TurnResult, *domain.AgentError) {
+				meta.ResumeUsage = state.turnResume
 				result, agentErr := agentcore.FinalizeTurn(emit, state.logger(), ev, meta)
+				result.SpendUnaccounted = state.turnEstimated
 				if agentErr == nil {
 					state.relayEffortReport(state.passthrough.Effort, stderrLines)
 				}
@@ -448,9 +489,12 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 
 	state.refreshForkLogger()
 
-	// Reset per-turn scan state before delegation. state.acc is
-	// constructed once in StartSession and carries the run-cumulative
-	// snapshot across turns, so it is not reset here.
+	// Reset per-turn scan state before delegation. state.acc, state.resume,
+	// and state.processSpend are constructed once in StartSession and carry
+	// the run's usage across turns, so they are not reset here.
+	state.restoresTotals = false
+	state.turnResume = nil
+	state.turnEstimated = false
 	state.turnMessages = make(map[string]domain.TokenUsage)
 	state.lastModel = ""
 	state.apiCallStart = time.Time{}

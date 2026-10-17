@@ -247,6 +247,10 @@ type TurnMeta struct {
 	// APIDurationMS is the LLM API response wait time in milliseconds for
 	// this turn, or 0 when unavailable.
 	APIDurationMS int64
+
+	// ResumeUsage is the runtime's own usage figure for the session at the
+	// end of this turn, or nil when the turn produced no exact reading.
+	ResumeUsage *domain.TokenUsage
 }
 
 // DecideTurn returns the normalized disposition for one agent turn. It is
@@ -434,6 +438,7 @@ func FinalizeTurn(
 		SessionID:     meta.SessionID,
 		Usage:         meta.Usage,
 		UsageMeasured: meta.UsageMeasured,
+		ResumeUsage:   meta.ResumeUsage,
 		ExitReason:    disposition.ExitReason,
 	}
 

@@ -5288,6 +5288,74 @@ func TestRunWorkerAttempt_RegistersDotEnvCredentialBeforeVerifyCredential(t *tes
 	}
 }
 
+type verificationFigureAdapter struct {
+	*mockAgentAdapter
+	figure *domain.TokenUsage
+}
+
+func (a *verificationFigureAdapter) RunTurn(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+	if isMockVerificationSession(session) {
+		return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted, ResumeUsage: a.figure}, nil
+	}
+	return a.mockAgentAdapter.RunTurn(ctx, session, params)
+}
+
+func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
+	t.Parallel()
+
+	handedOver := &domain.TokenUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}
+	verification := &domain.TokenUsage{InputTokens: 7, OutputTokens: 1, TotalTokens: 8}
+	earlier := &domain.TokenUsage{InputTokens: 300, OutputTokens: 30, TotalTokens: 330}
+	last := &domain.TokenUsage{InputTokens: 500, OutputTokens: 50, TotalTokens: 550}
+
+	tests := []struct {
+		name        string
+		turnFigures []*domain.TokenUsage
+		want        *domain.TokenUsage
+	}{
+		{"verification figure is never kept", []*domain.TokenUsage{earlier, last}, last},
+		{"last turn without a figure overwrites an earlier one", []*domain.TokenUsage{last, nil}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := defaultWorkerConfig(t.TempDir())
+			cfg.Agent.MaxTurns = len(tt.turnFigures)
+			ec := newExitCapture()
+			turn := 0
+			adapter := &verificationFigureAdapter{
+				figure: verification,
+				mockAgentAdapter: &mockAgentAdapter{
+					runTurnFn: func(_ context.Context, session domain.Session, _ domain.RunTurnParams) (domain.TurnResult, error) {
+						turn++
+						return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted, ResumeUsage: tt.turnFigures[turn-1]}, nil
+					},
+				},
+			}
+
+			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+				TrackerAdapter:         &mockTrackerAdapter{},
+				AgentAdapter:           adapter,
+				ConfigFunc:             func() config.ServiceConfig { return cfg },
+				PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+				OnEvent:                func(_ string, _ domain.AgentEvent) {},
+				OnExit:                 ec.onExit,
+				Logger:                 discardLogger(),
+				Metrics:                &domain.NoopMetrics{},
+				ResumeUsage:            handedOver,
+			})
+
+			got := ec.waitResult(t).ResumeUsage
+
+			if !reflect.DeepEqual(got, tt.want) || turn != len(tt.turnFigures) {
+				t.Errorf("WorkerResult.ResumeUsage = %+v after %d working turns, want %+v after %d", got, turn, tt.want, len(tt.turnFigures))
+			}
+		})
+	}
+}
+
 func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 	t.Parallel()
 
