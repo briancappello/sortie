@@ -839,6 +839,11 @@ type StageHopEntry struct {
 // TrackerOpsWg, which are goroutine-safe. The agent_totals and completed set are backed by SQLite
 // and survive restarts.
 type State struct {
+	// BlockerJudge decides blockers for dispatch and retry. Nil means the
+	// terminal-state rule. With plan control on, each tick replaces it
+	// with a [PlanJudge] primed for that tick's candidates.
+	BlockerJudge BlockerJudge
+
 	// WorkerWg tracks in-flight worker goroutines spawned by
 	// [DispatchIssue]. Callers dispatching outside the Run() loop can
 	// Wait() before cleanup.

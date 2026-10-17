@@ -131,8 +131,8 @@ func ShouldDispatch(issue domain.Issue, state *State, activeStates, terminalStat
 		return false
 	}
 
-	// Any non-terminal blocker blocks dispatch.
-	if isBlockedByNonTerminalSet(issue, terminalSet) {
+	// Any unsatisfied blocker blocks dispatch.
+	if isBlockedFor(judgeOf(state), issue, terminalSet) {
 		return false
 	}
 
@@ -184,8 +184,8 @@ func ShouldDispatchWithSets(issue domain.Issue, state *State, activeSet, termina
 		return false
 	}
 
-	// Any non-terminal blocker blocks dispatch.
-	if isBlockedByNonTerminalSet(issue, terminalSet) {
+	// Any unsatisfied blocker blocks dispatch.
+	if isBlockedFor(judgeOf(state), issue, terminalSet) {
 		return false
 	}
 
@@ -207,21 +207,11 @@ func IsBlockedByNonTerminal(issue domain.Issue, terminalStates []string) bool {
 //
 // An issue whose BlockersUnresolved is true is treated as blocked,
 // because BlockedBy is not authoritative for it. This is the one
-// authority for the blocker-hold decision; every caller, including
-// [EvaluateCandidate] and the retry lane, inherits it.
+// authority for the blocker-hold decision without plan control. With plan
+// control on, [EvaluateCandidate], [ShouldDispatch], and the retry lane use
+// the state's [BlockerJudge] instead, through [isBlockedFor].
 func isBlockedByNonTerminalSet(issue domain.Issue, terminalSet map[string]struct{}) bool {
-	if issue.BlockersUnresolved {
-		return true
-	}
-	for _, blocker := range issue.BlockedBy {
-		if blocker.State == "" {
-			return true
-		}
-		if _, terminal := terminalSet[strings.ToLower(blocker.State)]; !terminal {
-			return true
-		}
-	}
-	return false
+	return isBlockedFor(terminalJudge{}, issue, terminalSet)
 }
 
 // nextBlockerReadOffset returns the offset the next pass starts from:
@@ -393,22 +383,6 @@ func blockerErrorStatus(err error) int {
 	return 0
 }
 
-// firstNonTerminalBlocker returns the first blocker whose state is
-// empty or not in terminalSet, matching the criterion
-// [isBlockedByNonTerminalSet] uses to decide the hold. Returns the
-// zero [domain.BlockerRef] when blockers has no such entry.
-func firstNonTerminalBlocker(blockers []domain.BlockerRef, terminalSet map[string]struct{}) domain.BlockerRef {
-	for _, b := range blockers {
-		if b.State == "" {
-			return b
-		}
-		if _, terminal := terminalSet[strings.ToLower(b.State)]; !terminal {
-			return b
-		}
-	}
-	return domain.BlockerRef{}
-}
-
 // EvaluateCandidate applies the issue-level dispatch gates to one
 // candidate, resolving its blockers first when, and only when, every
 // cheaper gate has already passed and this pass still has both a
@@ -448,7 +422,7 @@ func EvaluateCandidate(ctx context.Context, issue domain.Issue, state *State,
 		}
 	}
 
-	if readErr == nil && !isBlockedByNonTerminalSet(issue, terminalSet) {
+	if readErr == nil && !isBlockedFor(judgeOf(state), issue, terminalSet) {
 		return CandidateDecision{Dispatch: true, Issue: issue}
 	}
 

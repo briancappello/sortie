@@ -526,7 +526,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	}
 
 	if isActive {
-		if isBlockedByNonTerminalSet(issue, terminalSet) {
+		if isBlockedFor(judgeOf(state), issue, terminalSet) {
 			if isKnownReaction {
 				nextAttempt := popped.Attempt + 1
 				delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)

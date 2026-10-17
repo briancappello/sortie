@@ -56,9 +56,12 @@ func (s *Store) LoadPlanSatisfaction(ctx context.Context, issueIDs []string) (ma
 		for i, id := range batch {
 			args[i] = id
 		}
-		rows, err := s.db.QueryContext(ctx,
-			`SELECT issue_id, kind, ref, pr, cites, recorded_at FROM plan_satisfaction WHERE issue_id IN (`+
-				strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")+`)`, args...)
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(batch); no user data in format string
+			`SELECT issue_id, kind, ref, pr, cites, recorded_at FROM plan_satisfaction WHERE issue_id IN (%s)`,
+			placeholders,
+		)
+		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("query plan_satisfaction: %w", err)
 		}

@@ -262,6 +262,14 @@ tracker:
 - `release_state` must be in `active_states`. `backlog_state` must be in neither list and must not equal `handoff_state`, because a sync releases stories only from `backlog_state`. `cancel_state` and `done_state` must be in `terminal_states`. All comparisons are case-insensitive, against the lists as written.
 - Each supports `$VAR` environment indirection and the `SORTIE_TRACKER_<NAME>` overrides. A value that resolves to empty is a configuration error.
 - A reload that breaks any rule keeps the previous configuration.
+
+**Blockers under plan control.** With plan control on, a blocker lets the issues it blocks start only as follows. Without plan control, any blocker in a terminal state does, as before.
+
+- A blocker with a plan key counts only when Sortie's own records show that its pull request merged (merge completion latched the merge commit), or that a no-change claim of its run was confirmed. Its tracker state alone never counts, so a card moved to `Done` by hand keeps its dependents waiting, logged as `awaiting_merge_record`. A merged pull request counts as reviewed even when the forge required no review.
+- A blocker without a plan key counts only in `done_state`.
+- A blocker in `cancel_state`, or whose state Sortie cannot read, never counts.
+- Merge records live in the database (`plan_satisfaction`), so they survive restarts and workspace removal. Every merge is recorded, plan control on or off, and upgrading fills the table from the merges merge completion already latched.
+- Dispatch, retries, and `--dry-run` apply the same rule. The dry run reads the database read-only. The debug record `candidate held by blocker` carries `blocker_reason`: `not_merged`, `awaiting_merge_record`, `canceled`, `not_done`, `unverified_no_change`, or `unknown`.
 - Requires **write permissions** on the tracker API token (same as `handoff_state`).
 
 **`api_key` environment resolution:**

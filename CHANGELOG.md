@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Under plan control, a blocker with a plan key lets its dependents start only after Sortie recorded its pull request's merge, or a confirmed no-change claim. A tracker state alone, a cancelled blocker, or an unreadable one never counts, and a blocker without a plan key counts only in `done_state`. Each latched merge is now recorded in the new `plan_satisfaction` table, filled at upgrade from earlier merges. Blocker holds log `blocker_reason`. Dispatch, retries, and `--dry-run` share the rule.
+
 - Plan control settings: `tracker.release_state` turns plan control on, and then requires `tracker.backlog_state`, `tracker.cancel_state`, `tracker.done_state`, both state lists written, and `reactions.merge_completion`. Release must be active, backlog must be in neither list and differ from `handoff_state`, and cancel and done must be terminal. Each setting has a `SORTIE_TRACKER_<NAME>` override. Without `release_state` nothing changes.
 
 - The plan routes serve several projects of the tracker's workspace: `?project=<key>` on `POST /api/v1/plan/sync`, `GET /api/v1/plan/graph`, and `GET /api/v1/plan/capabilities` names one, and without it they serve `tracker.project` as before. Each project has its own previews and apply lock. `GET /api/v1/plan/projects/<key>` reports whether a project exists and what keeps plan writes from working in it, and `PUT` creates it when it is missing; both take the control token. The graph response gains `project` and `dispatched`. Sortie still dispatches agents for `tracker.project` only. The Huly adapter supports this; other trackers answer `projects_unsupported` for any other project.

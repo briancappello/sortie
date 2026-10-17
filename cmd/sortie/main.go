@@ -314,7 +314,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 	if br.dryRun {
 		br.logger.Info("sortie dry-run starting", logAttrs...)
-		return runDryRun(ctx, br.cfg, br.logger, br.trackerAdapter, br.blockerResolver)
+		return runDryRun(ctx, br.cfg, br.logger, br.trackerAdapter, br.blockerResolver, dryRunSatisfaction(ctx, br.cfg, br.path, br.logger))
 	}
 	br.logger.Info("sortie starting", logAttrs...)
 
