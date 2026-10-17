@@ -92,6 +92,9 @@ var migration1002SQL string
 //go:embed sql/1003_run_history_exported_commit.sql
 var migration1003SQL string
 
+//go:embed sql/1004_plan_satisfaction.sql
+var migration1004SQL string
+
 // migrations lists upstream's migrations, numbered from 1 in upstream's
 // sequence, then the fork's, numbered from 1001. Upstream merges add lower
 // numbers, so a database that already ran fork migrations applies new
@@ -126,4 +129,5 @@ var migrations = []Migration{
 	{Version: 1001, Description: "held_ms column on run_history", SQL: migration1001SQL},
 	{Version: 1002, Description: "environment_image_sha256 column on run_history", SQL: migration1002SQL},
 	{Version: 1003, Description: "exported_commit column on run_history", SQL: migration1003SQL},
+	{Version: 1004, Description: "plan_satisfaction: what satisfies a plan blocker", SQL: migration1004SQL},
 }
