@@ -255,7 +255,7 @@ Prefer a deploy key, or a token scoped to the one repository, with write access:
 
 `provider` uses the SCM adapter settings of the top-level block of the same name, such as `github:` with `api_key`. It must be the same provider as every active SCM reaction. The token needs the right to open pull requests: the `repo` scope or "Pull requests: write" on GitHub, `api` and the Developer role on GitLab, `write:repository` on Gitea.
 
-Sortie records the push and the pull request on the host, in `<workspace>/.sortie-host/scm.json`. CI, review, and auto-merge reactions read that record, not the agent's `.sortie/scm.json`.
+Sortie records the push and the pull request on the host, in `<workspace>/.sortie-host/scm.json`. CI, review, and auto-merge reactions read that record, not the agent's `.sortie/scm.json`. Under plan control the same mirror confirms a `no-change-needed` claim that cites a commit: the commit counts only when it is on the base branch, and git never runs in the workspace. Without `environment.smolvm.repository`, such claims stay unverified. A repository whose branch protection requires an approving review cannot auto-merge plan stories with the `criteria` review gate; use `review: human` there.
 
 ### What `after_create` should do now
 
