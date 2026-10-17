@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A continuing `copilot-cli` run is no longer charged the previous run's last turn when its own first turn ends without the CLI saving usage. ([#1399](https://github.com/sortie-ai/sortie/issues/1399))
 
+- A turn that ends before the agent reports its final token use (a stop, a crash, a dropped connection, or a pause for a person's answer), or whose report Sortie could not read with no later turn's report covering it, now marks the run's tokens and cost as partial, and a `codex` run that continues a session recorded before this release marks its first turn partial, as `claude-code` does. ([#1363](https://github.com/sortie-ai/sortie/issues/1363))
+
 ## [1.28.0] - 2026-10-11
 
 ### Added
