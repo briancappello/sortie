@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Validated plan graph",
+  "description": "The combined plan of a spec store, output by the plan validator only when every check passes. It is the only form of the plan that leaves the store. Edges name nodes by plan key.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_digest", "nodes", "parents", "blocks", "unplanned_changes"],
+  "properties": {
+    "schema_version": {
+      "description": "Version of this format. Readers refuse versions they do not support. Version 2 adds the optional story fields release, review, approved_by, and approved_at.",
+      "const": 2
+    },
+    "source_digest": {
+      "description": "sha256 over the plan file and every breakdown file the graph was built from.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "parents": {
+      "description": "One edge from each story to its epic.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/parent_edge" }
+    },
+    "blocks": {
+      "description": "Blocking edges, between epics (from the plan) and between stories (from the breakdowns).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/block_edge" }
+    },
+    "unplanned_changes": {
+      "description": "Active changes in the store that the plan does not list. They are never synced.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change_name" }
+    }
+  },
+  "$defs": {
+    "change_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "plan_key": {
+      "description": "<change-name> for an epic, <change-name>/<id> for a story.",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(/[a-z0-9]+(-[a-z0-9]+)*)?$"
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_key", "kind", "change", "title", "body", "approval", "has_spec",
+        "depth", "deliverable_kind", "covers", "acceptance_criteria"
+      ],
+      "properties": {
+        "plan_key": { "$ref": "#/$defs/plan_key" },
+        "kind": { "enum": ["epic", "story"] },
+        "change": { "$ref": "#/$defs/change_name" },
+        "title": { "type": "string", "minLength": 1 },
+        "body": {
+          "description": "Markdown for the tracker issue's description.",
+          "type": "string"
+        },
+        "approval": {
+          "description": "approved or draft as read from the change's breakdown (a digest mismatch reads as draft); unplanned when the change has no breakdown.",
+          "enum": ["approved", "draft", "unplanned"]
+        },
+        "has_spec": {
+          "description": "For a story, whether it covers at least one requirement. For an epic, whether its change has requirements.",
+          "type": "boolean"
+        },
+        "depth": {
+          "description": "Column: the length of the longest dependency chain to this node within its view (epics among epics, stories within their epic).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "deliverable_kind": {
+          "description": "The breakdown kind of a story; null for an epic.",
+          "enum": ["story", "enabler", null]
+        },
+        "covers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "release": {
+          "description": "Version 2, stories only. True when the story is approved and every story it directly depends on is approved, so a sync releases it to the agents.",
+          "type": "boolean"
+        },
+        "review": {
+          "description": "Version 2, stories only. The review gate: human (a person merges the pull request) or criteria (a separate agent checks the acceptance criteria, then Sortie merges).",
+          "enum": ["human", "criteria"]
+        },
+        "approved_by": {
+          "description": "Version 2, stories only. The person who approved the story.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "id"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "id": { "description": "Stable identity: issuer and subject.", "type": "string" }
+          }
+        },
+        "approved_at": {
+          "description": "Version 2, stories only. When the story was approved, in RFC 3339.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "parent_edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["child", "parent"],
+      "properties": {
+        "child": { "$ref": "#/$defs/plan_key" },
+        "parent": { "$ref": "#/$defs/plan_key" }
+      }
+    },
+    "block_edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocker", "blocked"],
+      "properties": {
+        "blocker": { "$ref": "#/$defs/plan_key" },
+        "blocked": { "$ref": "#/$defs/plan_key" }
+      }
+    }
+  }
+}

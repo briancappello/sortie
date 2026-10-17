@@ -300,13 +300,7 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		return bootResult{}, 1
 	}
 	trackerAdapter.SetTrackerStates(func() domain.TrackerStates {
-		tracker := mgr.Config().Tracker
-		return domain.TrackerStates{
-			Active:     tracker.ActiveStates,
-			Terminal:   tracker.TerminalStates,
-			Handoff:    tracker.HandoffState,
-			InProgress: tracker.InProgressState,
-		}
+		return mgr.Config().Tracker.States()
 	})
 
 	trackerMeta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)

@@ -83,6 +83,9 @@ type hulyIssue struct {
 	Rank           string `json:"rank"`
 	PlanKey        string `json:"sortiePlanKey"`
 	PlanBodyDigest string `json:"sortiePlanBodyDigest"`
+	ApprovedBy     string `json:"sortieApprovedBy"`
+	ApprovedByID   string `json:"sortieApprovedById"`
+	ApprovedAt     string `json:"sortieApprovedAt"`
 }
 
 type hulyPerson struct {

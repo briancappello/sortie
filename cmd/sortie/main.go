@@ -314,7 +314,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 	if br.dryRun {
 		br.logger.Info("sortie dry-run starting", logAttrs...)
-		return runDryRun(ctx, br.cfg, br.logger, br.trackerAdapter, br.blockerResolver)
+		return runDryRun(ctx, br.cfg, br.logger, br.trackerAdapter, br.blockerResolver, dryRunSatisfaction(ctx, br.cfg, br.path, br.logger))
 	}
 	br.logger.Info("sortie starting", logAttrs...)
 
@@ -937,13 +937,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		tokenRates, _ := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
 
 		planProjects := newPlanProjects(br.trackerAdapter, br.cfg, br.mgr.Config, func() domain.TrackerStates {
-			tracker := br.mgr.Config().Tracker
-			return domain.TrackerStates{
-				Active:     tracker.ActiveStates,
-				Terminal:   tracker.TerminalStates,
-				Handoff:    tracker.HandoffState,
-				InProgress: tracker.InProgressState,
-			}
+			return br.mgr.Config().Tracker.States()
 		})
 		defer planProjects.Close()
 
@@ -966,6 +960,12 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			HoldFn:           server.HoldFunc(o.HoldFunc()),
 			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
 			EscalateFn:       server.EscalateFunc(o.EscalateFunc()),
+			PullBackFn:       server.PlanControlFunc(o.PullBackFunc()),
+			PlanCancelFn:     server.PlanControlFunc(o.PlanCancelFunc()),
+			BrokerReportFn:   server.BrokerReportFunc(o.BrokerReportFunc()),
+			BrokerReadFn:     server.BrokerReadFunc(o.BrokerReadFunc()),
+			PlanStatesFn:     func() domain.TrackerStates { return br.mgr.Config().Tracker.States() },
+			PlanSatisfaction: store,
 			PlanProjects:     planProjects,
 			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {

@@ -94,6 +94,26 @@ func reconcileAutoMerge(state *State, params ReconcileParams, log *slog.Logger, 
 			continue
 		}
 
+		if params.ReviewGate != nil {
+			allowed, why, gateErr := params.ReviewGate(ctx, pending)
+			if gateErr != nil {
+				delay := applyAutoMergeBackoff(state, key, pending, now, pollInterval)
+				entryLog.Warn("auto_merge review gate read failed",
+					slog.Any("error", gateErr),
+					slog.Int64("retry_after_ms", int64(delay/time.Millisecond)),
+				)
+				continue
+			}
+			if !allowed {
+				delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindAutoMerge))
+				entryLog.Info("auto_merge not allowed by the story's review gate, dropping",
+					slog.Int("pr_number", autoMergeData.PRNumber),
+					slog.String("reason", why),
+				)
+				continue
+			}
+		}
+
 		if ttl > 0 && now.Sub(pending.CreatedAt) > ttl {
 			delete(state.ReactionAttempts, ReactionKey(pending.IssueID, ReactionKindAutoMerge))
 			entryLog.Warn("auto_merge watch window elapsed, dropping",
@@ -170,6 +190,7 @@ func reconcileAutoMerge(state *State, params ReconcileParams, log *slog.Logger, 
 		if reviewDecision != domain.ReviewDecisionApproved && reviewDecision != domain.ReviewDecisionNotRequired {
 			pending.PendingRetryAt = now.Add(pollInterval)
 			state.PendingReactions[key] = pending
+			warnCriteriaNeedsReview(state, params, pending, reviewDecision, autoMergeData.PRNumber, entryLog)
 			entryLog.Debug("auto_merge deferred: review decision not approved",
 				slog.String("decision", string(reviewDecision)),
 				slog.Int("pr_number", autoMergeData.PRNumber),

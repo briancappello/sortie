@@ -142,7 +142,7 @@ func trackerWrites(kind string) []registry.WriteCapability {
 // replaced; otherwise only the configured project is served.
 func newPlanProjects(adapter domain.TrackerAdapter, cfg config.ServiceConfig, current func() config.ServiceConfig, states func() domain.TrackerStates) *plan.Projects {
 	meta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
-	def := plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta})
+	def := plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta, States: states})
 	var factory plan.TrackerFactory
 	if _, ok := adapter.(domain.PlanProjectEnsurer); ok {
 		factory = func(_ context.Context, project string) (plan.Tracker, func(), error) {
@@ -175,7 +175,7 @@ func projectTracker(cfg config.ServiceConfig, project string, states func() doma
 	if closer, ok := adapter.(io.Closer); ok {
 		release = func() { _ = closer.Close() }
 	}
-	return plan.Tracker{Adapter: adapter, Meta: meta}, release, nil
+	return plan.Tracker{Adapter: adapter, Meta: meta, States: states}, release, nil
 }
 
 // newPlanTracker is planTracker; tests substitute a fake tracker.
@@ -208,7 +208,8 @@ func planTracker(workflowPath string) (plan.Tracker, string, func(), error) {
 	if closer, ok := adapter.(io.Closer); ok {
 		closeFn = func() { _ = closer.Close() }
 	}
-	return plan.Tracker{Adapter: adapter, Meta: meta}, cfg.Tracker.Kind, closeFn, nil
+	states := cfg.Tracker.States()
+	return plan.Tracker{Adapter: adapter, Meta: meta, States: func() domain.TrackerStates { return states }}, cfg.Tracker.Kind, closeFn, nil
 }
 
 // errorKind names an error's category for reports: a tracker error kind,
@@ -237,6 +238,15 @@ func writePlanText(w io.Writer, r planSyncReport) {
 		p("plan sync preview (tracker %s):", r.TrackerKind)
 		p("  creates %d, updates %d, parents %d, relations added %d, relations removed %d, orphans %d",
 			c.Creates, c.Updates, c.Parents, c.RelationsAdded, c.RelationsRemoved, c.Orphans)
+		if c.Releases+c.Labels+c.Approvals > 0 {
+			p("  releases %d, review labels %d, approvals %d", c.Releases, c.Labels, c.Approvals)
+		}
+		for _, op := range pv.Releases {
+			p("  release %s to %s", op.PlanKey, op.To)
+		}
+		for _, u := range pv.Unsupported {
+			p("  not written: %s", u)
+		}
 		for _, op := range pv.Creates {
 			line := fmt.Sprintf("  create %s %s %q", op.Kind, op.PlanKey, op.Title)
 			if op.ParentKey != "" {

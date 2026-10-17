@@ -191,11 +191,14 @@ const (
 
 	// CapLinkDependency is [domain.DependencyLinker].
 	CapLinkDependency WriteCapability = "link_dependency"
+
+	// CapApprovalFields is [domain.ApprovalWriter].
+	CapApprovalFields WriteCapability = "approval_fields"
 )
 
 // AllWriteCapabilities lists every write capability in a stable order.
 func AllWriteCapabilities() []WriteCapability {
-	return []WriteCapability{CapCreateIssue, CapUpdateIssue, CapSetParent, CapLinkDependency}
+	return []WriteCapability{CapCreateIssue, CapUpdateIssue, CapSetParent, CapLinkDependency, CapApprovalFields}
 }
 
 // PlanKeyStorage declares how an adapter records a plan key on an
@@ -253,6 +256,8 @@ func CheckTrackerMeta(meta TrackerMeta) error {
 			_, ok = impl.(domain.IssueParenter)
 		case CapLinkDependency:
 			_, ok = impl.(domain.DependencyLinker)
+		case CapApprovalFields:
+			_, ok = impl.(domain.ApprovalWriter)
 		}
 		if !ok {
 			return fmt.Errorf("%T declares write capability %q and does not implement it", impl, c)

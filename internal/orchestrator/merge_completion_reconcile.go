@@ -11,6 +11,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
+	"github.com/sortie-ai/sortie/internal/persistence"
 )
 
 // mergeCompletionPendingBackoffBase is the floor for the merge-completion
@@ -225,6 +226,14 @@ func processMergeCompletionEntry(
 		backoffMergeCompletionReenqueue(state, key, pending, now, pollInterval)
 		entryLog.Warn("failed to upsert merge_completion reaction fingerprint",
 			slog.Any("error", upsertErr),
+		)
+		return
+	}
+	if recErr := recordPlanMerge(params.Store, pending.IssueID, status.MergeCommitSHA, data, ctx); recErr != nil {
+		backoffMergeCompletionReenqueue(state, key, pending, now, pollInterval)
+		entryLog.Warn("failed to record the plan merge, retrying with backoff",
+			slog.String("merge_commit_sha", status.MergeCommitSHA),
+			slog.Any("error", recErr),
 		)
 		return
 	}
@@ -620,4 +629,41 @@ func buildMergeCompletionMissingSHAEscalationComment(
 		waited.Round(time.Second),
 		targetState,
 	)
+}
+
+// PlanSatisfactionRecorder is the optional store capability that records
+// what satisfies a plan blocker. [persistence.Store] implements it; a store
+// without it records nothing.
+type PlanSatisfactionRecorder interface {
+	UpsertPlanSatisfaction(ctx context.Context, r persistence.PlanSatisfaction) error
+}
+
+// PlanSatisfactionLoader is the optional store capability that reads the
+// records [PlanSatisfactionRecorder] writes.
+type PlanSatisfactionLoader interface {
+	LoadPlanSatisfaction(ctx context.Context, issueIDs []string) (map[string][]persistence.PlanSatisfaction, error)
+}
+
+var (
+	_ PlanSatisfactionRecorder = (*persistence.Store)(nil)
+	_ PlanSatisfactionLoader   = (*persistence.Store)(nil)
+)
+
+// recordPlanMerge durably records that the issue's pull request merged at
+// sha. It runs for every latched merge, plan control on or off, so that
+// turning plan control on later finds every earlier merge. It runs before
+// the transition: a failure leaves the entry pending, so the record is
+// retried before the issue can move on.
+func recordPlanMerge(store any, issueID, sha string, data *MergeCompletionReactionData, ctx context.Context) error {
+	rec, ok := store.(PlanSatisfactionRecorder)
+	if !ok {
+		return nil
+	}
+	pr := ""
+	if data != nil && data.PRNumber > 0 {
+		pr = fmt.Sprintf("%s/%s#%d", data.Owner, data.Repo, data.PRNumber)
+	}
+	return rec.UpsertPlanSatisfaction(ctx, persistence.PlanSatisfaction{
+		IssueID: issueID, Kind: persistence.PlanSatisfactionMerged, Ref: sha, PR: pr,
+	})
 }

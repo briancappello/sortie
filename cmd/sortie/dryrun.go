@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/persistence"
 )
 
 // runDryRun executes a single poll cycle in read-only mode: fetches
@@ -21,7 +23,7 @@ import (
 // orchestrator's per-pass blocker-read budget, evaluated against one
 // [orchestrator.TickResolution] constructed at offset zero for the
 // whole cycle.
-func runDryRun(ctx context.Context, cfg config.ServiceConfig, logger *slog.Logger, trackerAdapter domain.TrackerAdapter, resolver orchestrator.BlockerResolver) int {
+func runDryRun(ctx context.Context, cfg config.ServiceConfig, logger *slog.Logger, trackerAdapter domain.TrackerAdapter, resolver orchestrator.BlockerResolver, satisfaction orchestrator.PlanSatisfactionLoader) int {
 	wc := orchestrator.ParseWorkerConfig(cfg.ExtensionSection("worker"), cfg.ExtensionEnvRefPaths("worker"))
 	hostPool := orchestrator.NewHostPool(wc.SSHHosts, wc.MaxPerHost)
 
@@ -45,6 +47,8 @@ func runDryRun(ctx context.Context, cfg config.ServiceConfig, logger *slog.Logge
 
 	activeSet := dryRunStateSet(cfg.Tracker.ActiveStates)
 	terminalSet := dryRunStateSet(cfg.Tracker.TerminalStates)
+
+	state.BlockerJudge = orchestrator.PlanJudgeFor(ctx, cfg.Tracker, satisfaction, sorted, logger)
 
 	pass := &orchestrator.TickResolution{}
 
@@ -156,4 +160,22 @@ func dryRunStateSet(states []string) map[string]struct{} {
 		set[strings.ToLower(s)] = struct{}{}
 	}
 	return set
+}
+
+// dryRunSatisfaction opens the database read-only so a dry run judges
+// plan blockers as the service would. It returns nil when plan control is
+// off or the database cannot be opened, and then a dry run reports every
+// plan-keyed blocker as unsatisfied.
+func dryRunSatisfaction(ctx context.Context, cfg config.ServiceConfig, workflowPath string, logger *slog.Logger) orchestrator.PlanSatisfactionLoader {
+	if !cfg.Tracker.PlanControl() {
+		return nil
+	}
+	dbPath := resolveDBPath(cfg.DBPath, filepath.Dir(workflowPath))
+	store, err := persistence.OpenReadOnly(ctx, dbPath)
+	if err != nil {
+		logger.Warn("dry-run: cannot read plan satisfaction, plan-keyed blockers count as unsatisfied",
+			slog.String("db_path", dbPath), slog.Any("error", err))
+		return nil
+	}
+	return store
 }

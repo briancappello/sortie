@@ -338,3 +338,21 @@ func TestRegistrationDeclaresWriteCapabilities(t *testing.T) {
 		t.Errorf("PlanKeyStorage = %q, want custom_field", meta.PlanKeyStorage)
 	}
 }
+
+// A plan story can start in a named state instead of the default.
+func TestCreateIssueInANamedState(t *testing.T) {
+	t.Parallel()
+	a, f := newPlanAdapter(t)
+	ctx := context.Background()
+	if _, err := a.CreateIssue(ctx, domain.NewIssue{Title: "e", Kind: domain.IssueKindEpic, PlanKey: "billing", State: "backlog"}); err != nil {
+		t.Fatalf("CreateIssue(State: backlog) error = %v", err)
+	}
+	creates := f.txsOf(classIssue)
+	if got := creates[len(creates)-1]["attributes"].(map[string]any)["status"]; got != "st-backlog" {
+		t.Errorf("status = %v, want st-backlog", got)
+	}
+	_, err := a.CreateIssue(ctx, domain.NewIssue{Title: "e2", Kind: domain.IssueKindEpic, PlanKey: "billing2", State: "Nowhere"})
+	if trackerKind(err) != domain.ErrTrackerPayload {
+		t.Errorf("CreateIssue(State: Nowhere) error = %v, want a payload error", err)
+	}
+}

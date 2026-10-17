@@ -368,3 +368,19 @@ func (l *Locked) CreateBundle(ctx context.Context, path string, branches ...stri
 	}
 	return nil
 }
+
+// IsAncestor reports whether commit is reachable from the mirror's branch.
+// A commit the mirror does not hold is not.
+func (l *Locked) IsAncestor(ctx context.Context, commit, branch string) (bool, error) {
+	_, err := l.m.git.run(ctx, "merge-base", "--is-ancestor", "--", commit, "refs/heads/"+branch)
+	if err == nil {
+		return true, nil
+	}
+	var gerr *Error
+	// Exit code 1 means not an ancestor; 128 means git does not know the
+	// commit, which the mirror then does not hold.
+	if errors.As(err, &gerr) && (gerr.ExitCode == 1 || gerr.ExitCode == 128) {
+		return false, nil
+	}
+	return false, err
+}

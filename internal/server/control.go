@@ -64,7 +64,7 @@ func decodeControlBody(r *http.Request, v any) error {
 }
 
 // writeControlReply writes reply with the status its outcome maps to.
-func (s *Server) writeControlReply(w http.ResponseWriter, r *http.Request, start time.Time, reply orchestrator.ControlReply, success int, body any) {
+func (s *Server) writeControlReply(w http.ResponseWriter, r *http.Request, start time.Time, reply orchestrator.ControlReply, body any) {
 	var status int
 	var code string
 	switch reply.Outcome {
@@ -80,15 +80,22 @@ func (s *Server) writeControlReply(w http.ResponseWriter, r *http.Request, start
 		status, code = http.StatusBadRequest, "invalid_request"
 	case orchestrator.ControlRateLimited:
 		status, code = http.StatusTooManyRequests, "rate_limited"
+	case orchestrator.ControlAlreadyClaimed:
+		status, code = http.StatusConflict, "already_claimed"
+	case orchestrator.ControlNotReleased:
+		status, code = http.StatusConflict, "not_released"
+	case orchestrator.ControlAlreadyTerminal:
+		status, code = http.StatusConflict, "already_terminal"
+	case orchestrator.ControlPlanOff:
+		status, code = http.StatusConflict, "plan_control_off"
+	case orchestrator.ControlTrackerFailed:
+		status, code = http.StatusBadGateway, "tracker_error"
 	default:
 		status, code = http.StatusServiceUnavailable, "orchestrator_unavailable"
 	}
 	if code != "" {
 		writeErrorJSON(w, s.logger, status, code, reply.Message)
 	} else {
-		if success != 0 {
-			status = success
-		}
 		writeJSON(w, s.logger, status, body)
 	}
 	s.logger.Debug("request served",
@@ -119,7 +126,7 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply := s.holdFn(r.PathValue("identifier"), req.Reason, req.Holder)
-	s.writeControlReply(w, r, start, reply, 0, toHoldResponse(reply.Hold))
+	s.writeControlReply(w, r, start, reply, toHoldResponse(reply.Hold))
 }
 
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +136,7 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply := s.releaseFn(r.PathValue("identifier"))
-	s.writeControlReply(w, r, start, reply, 0, toHoldResponse(reply.Hold))
+	s.writeControlReply(w, r, start, reply, toHoldResponse(reply.Hold))
 }
 
 // EscalateFunc escalates the running issue named by identifier to people.
@@ -161,5 +168,5 @@ func (s *Server) handleEscalate(w http.ResponseWriter, r *http.Request) {
 	}
 	identifier := r.PathValue("identifier")
 	reply := s.escalateFn(identifier, orchestrator.EscalationRequest{Message: req.Message, Kind: req.Kind, URL: req.URL})
-	s.writeControlReply(w, r, start, reply, 0, escalateResponse{IssueIdentifier: identifier, EventType: "session.escalated", Accepted: true})
+	s.writeControlReply(w, r, start, reply, escalateResponse{IssueIdentifier: identifier, EventType: "session.escalated", Accepted: true})
 }

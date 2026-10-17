@@ -143,7 +143,7 @@ func TestPreviewSkipsDrafts(t *testing.T) {
 		block("accounts-api/open", "billing/invoice").build()
 	g.UnplannedChanges = []string{"search-index"}
 	p := preview(t, g, newFakeTracker().tracker())
-	if !slices.Equal(p.SkippedDrafts, []string{"billing"}) || !slices.Equal(p.UnplannedChanges, []string{"search-index"}) {
+	if !slices.Equal(p.SkippedDrafts, []string{"billing", "billing/invoice"}) || !slices.Equal(p.UnplannedChanges, []string{"search-index"}) {
 		t.Errorf("skipped %v unplanned %v", p.SkippedDrafts, p.UnplannedChanges)
 	}
 	for _, c := range p.Creates {

@@ -42,8 +42,13 @@ type Result struct {
 	ParentsSet       []IssueRef   `json:"parents_set"`
 	RelationsAdded   []RelationOp `json:"relations_added"`
 	RelationsRemoved []RelationOp `json:"relations_removed"`
+	Labeled          []IssueRef   `json:"labeled"`
+	Approved         []IssueRef   `json:"approved"`
+	Released         []IssueRef   `json:"released"`
+	ReleaseSkipped   []IssueRef   `json:"release_skipped"`
 	Orphans          []IssueRef   `json:"orphans"`
 	SkippedDrafts    []string     `json:"skipped_drafts"`
+	Unsupported      []string     `json:"unsupported"`
 	Failed           *Failure     `json:"failed"`
 }
 
@@ -51,6 +56,7 @@ type storedPreview struct {
 	id            string
 	sourceDigest  string
 	trackerDigest string
+	releases      []string
 }
 
 // Syncer previews and applies plan graphs against one tracker. Only one
@@ -82,7 +88,11 @@ func (s *Syncer) Preview(ctx context.Context, g Graph) (Preview, string, error) 
 	}
 	id := newPreviewID()
 	s.mu.Lock()
-	s.previews = append(s.previews, storedPreview{id: id, sourceDigest: p.SourceDigest, trackerDigest: p.TrackerDigest})
+	var releases []string
+	for _, r := range p.Releases {
+		releases = append(releases, r.PlanKey)
+	}
+	s.previews = append(s.previews, storedPreview{id: id, sourceDigest: p.SourceDigest, trackerDigest: p.TrackerDigest, releases: releases})
 	if len(s.previews) > maxStoredPreviews {
 		s.previews = s.previews[len(s.previews)-maxStoredPreviews:]
 	}
@@ -133,7 +143,24 @@ func (s *Syncer) Apply(ctx context.Context, g Graph, previewID string) (Result, 
 	if p.TrackerDigest != stored.trackerDigest {
 		return Result{}, &ConflictError{Reason: "the tracker changed since the preview; request a new preview"}
 	}
-	return s.run(ctx, p)
+	r, err := s.run(ctx, p)
+	// The tracker digest leaves out state, so a story that left the
+	// backlog after the preview is dropped from the releases here, never
+	// forced: report it.
+	now := map[string]bool{}
+	for _, op := range p.Releases {
+		now[op.PlanKey] = true
+	}
+	for _, key := range stored.releases {
+		if !now[key] {
+			ref := IssueRef{PlanKey: key}
+			if issue, ok := p.existing[key]; ok {
+				ref.IssueID, ref.Identifier = issue.ID, issue.Identifier
+			}
+			r.ReleaseSkipped = append(r.ReleaseSkipped, ref)
+		}
+	}
+	return r, err
 }
 
 // ApplyNow previews g and applies that preview at once, under the same
@@ -169,7 +196,8 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 	r := Result{
 		Created: []IssueRef{}, Updated: []IssueRef{}, ParentsSet: []IssueRef{},
 		RelationsAdded: []RelationOp{}, RelationsRemoved: []RelationOp{},
-		Orphans: p.Orphans, SkippedDrafts: p.SkippedDrafts,
+		Labeled: []IssueRef{}, Approved: []IssueRef{}, Released: []IssueRef{}, ReleaseSkipped: []IssueRef{},
+		Orphans: p.Orphans, SkippedDrafts: p.SkippedDrafts, Unsupported: p.Unsupported,
 	}
 	if len(p.MissingCapabilities) > 0 {
 		return r, UnsupportedError(p.MissingCapabilities)
@@ -180,9 +208,12 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 		nodes[n.PlanKey] = n
 	}
 	ids := map[string]string{}
+	idents := map[string]string{}
 	for key, issue := range p.existing {
 		ids[key] = issue.ID
+		idents[key] = issue.Identifier
 	}
+	createdNow := map[string]bool{}
 	fail := func(op, key string, err error) (Result, error) {
 		r.Failed = &Failure{Op: op, PlanKey: key, Error: err.Error()}
 		return r, err
@@ -192,7 +223,7 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 		creator := s.tracker.Adapter.(domain.IssueCreator)
 		for _, c := range p.Creates {
 			n := nodes[c.PlanKey]
-			in := domain.NewIssue{Title: c.Title, Body: n.Body, Kind: domain.IssueKind(c.Kind), PlanKey: c.PlanKey}
+			in := domain.NewIssue{Title: c.Title, Body: n.Body, Kind: domain.IssueKind(c.Kind), PlanKey: c.PlanKey, State: c.State}
 			if c.ParentKey != "" {
 				in.ParentID = ids[c.ParentKey]
 			}
@@ -201,6 +232,8 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 				return fail("create", c.PlanKey, err)
 			}
 			ids[c.PlanKey] = created.ID
+			idents[c.PlanKey] = created.Identifier
+			createdNow[c.PlanKey] = true
 			r.Created = append(r.Created, IssueRef{PlanKey: c.PlanKey, IssueID: created.ID, Identifier: created.Identifier})
 		}
 	}
@@ -250,6 +283,58 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 				return fail("remove_relation", rel.Blocked, err)
 			}
 			r.RelationsRemoved = append(r.RelationsRemoved, rel)
+		}
+	}
+	for _, op := range p.Labels {
+		ref := IssueRef{PlanKey: op.PlanKey, IssueID: ids[op.PlanKey], Identifier: idents[op.PlanKey]}
+		if op.Add != "" {
+			if err := s.tracker.Adapter.AddLabel(ctx, ref.IssueID, op.Add); err != nil {
+				return fail("add_label", op.PlanKey, err)
+			}
+		}
+		for _, l := range op.Remove {
+			if err := s.tracker.Adapter.RemoveLabel(ctx, ref.IssueID, l); err != nil {
+				return fail("remove_label", op.PlanKey, err)
+			}
+		}
+		r.Labeled = append(r.Labeled, ref)
+	}
+	if len(p.Approvals) > 0 {
+		writer := s.tracker.Adapter.(domain.ApprovalWriter)
+		for _, op := range p.Approvals {
+			ref := IssueRef{PlanKey: op.PlanKey, IssueID: ids[op.PlanKey], Identifier: idents[op.PlanKey]}
+			if err := writer.SetApproval(ctx, ref.IssueID, domain.PlanApproval{By: op.By, ByID: op.ByID, At: op.At}); err != nil {
+				return fail("set_approval", op.PlanKey, err)
+			}
+			r.Approved = append(r.Approved, ref)
+		}
+	}
+	// Releases come last, after the story's blocking relations exist. A
+	// story this apply did not create is read again, and released only
+	// while it still waits in the backlog state.
+	if len(p.Releases) > 0 {
+		_, backlog, _ := s.tracker.planStates()
+		finder, _ := s.tracker.finder()
+		for _, op := range p.Releases {
+			ref := IssueRef{PlanKey: op.PlanKey, IssueID: ids[op.PlanKey], Identifier: idents[op.PlanKey]}
+			if !createdNow[op.PlanKey] {
+				if finder == nil {
+					r.ReleaseSkipped = append(r.ReleaseSkipped, ref)
+					continue
+				}
+				now, err := finder.FindIssueByPlanKey(ctx, op.PlanKey)
+				if err != nil {
+					return fail("release", op.PlanKey, err)
+				}
+				if !strings.EqualFold(now.State, backlog) {
+					r.ReleaseSkipped = append(r.ReleaseSkipped, ref)
+					continue
+				}
+			}
+			if err := s.tracker.Adapter.TransitionIssue(ctx, ref.IssueID, op.To); err != nil {
+				return fail("release", op.PlanKey, err)
+			}
+			r.Released = append(r.Released, ref)
 		}
 	}
 	return r, nil

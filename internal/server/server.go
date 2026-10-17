@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/plan"
 )
@@ -162,12 +163,31 @@ type Params struct {
 	// 503.
 	EscalateFn EscalateFunc
 
+	// PullBackFn and PlanCancelFn pull back and cancel a plan story by
+	// plan key. Called on POST /api/v1/plan/pull-back and
+	// /api/v1/plan/cancel. When nil, those routes answer 503.
+	PullBackFn   PlanControlFunc
+	PlanCancelFn PlanControlFunc
+
+	// BrokerReportFn and BrokerReadFn keep and read the address of a
+	// running issue's broker. Called on POST and GET
+	// /api/v1/{identifier}/broker. When nil, that route answers 503.
+	BrokerReportFn BrokerReportFunc
+	BrokerReadFn   BrokerReadFunc
+
 	// PlanProjects serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
 	// GET /api/v1/plan/capabilities, and GET and PUT
 	// /api/v1/plan/projects/{key}, for the configured project and, when
 	// the tracker supports it, other projects of its workspace. When nil,
 	// those routes answer 503.
 	PlanProjects *plan.Projects
+
+	// PlanStatesFn returns the workflow's states; plan control is on when
+	// it reports a release state. PlanSatisfaction reads what satisfies
+	// each plan story. With either nil, plan graph nodes carry no plan
+	// control fields.
+	PlanStatesFn     func() domain.TrackerStates
+	PlanSatisfaction orchestrator.PlanSatisfactionLoader
 
 	// TerminalStatesFn returns the workflow's current terminal states,
 	// which mark plan graph nodes terminal. When nil, no node is.
@@ -199,6 +219,12 @@ type Server struct {
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
+	pullBackFn       PlanControlFunc
+	brokerReportFn   BrokerReportFunc
+	planStatesFn     func() domain.TrackerStates
+	planSatisfaction orchestrator.PlanSatisfactionLoader
+	brokerReadFn     BrokerReadFunc
+	planCancelFn     PlanControlFunc
 	planProjects     *plan.Projects
 	terminalStatesFn func() []string
 }
@@ -249,6 +275,12 @@ func New(params Params) *Server {
 		controlToken:     params.ControlToken,
 		sessionTokenFn:   params.SessionTokenFn,
 		holdFn:           params.HoldFn,
+		pullBackFn:       params.PullBackFn,
+		brokerReportFn:   params.BrokerReportFn,
+		planStatesFn:     params.PlanStatesFn,
+		planSatisfaction: params.PlanSatisfaction,
+		brokerReadFn:     params.BrokerReadFn,
+		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
 		planProjects:     params.PlanProjects,
@@ -273,11 +305,14 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/plan/graph", s.controlGet(s.handlePlanGraph))
 	mux.HandleFunc("/api/v1/plan/capabilities", s.controlGet(s.handlePlanCapabilities))
 	mux.HandleFunc("/api/v1/plan/projects/{key}", s.routePlanProject)
+	mux.HandleFunc("/api/v1/plan/pull-back", s.controlRoute(scopeOperator, s.planControlHandler(func() PlanControlFunc { return s.pullBackFn })))
+	mux.HandleFunc("/api/v1/plan/cancel", s.controlRoute(scopeOperator, s.planControlHandler(func() PlanControlFunc { return s.planCancelFn })))
 	mux.HandleFunc("/api/v1/refresh", s.controlRoute(scopeOperator, s.handleRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
 	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
 	mux.HandleFunc("/api/v1/{identifier}/escalate", s.controlRoute(scopeSession, s.handleEscalate))
+	mux.HandleFunc("/api/v1/{identifier}/broker", s.routeBroker)
 
 	if params.MetricsRegistry != nil {
 		mux.Handle("GET /metrics", promhttp.InstrumentMetricHandler(

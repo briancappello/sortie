@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -74,6 +75,7 @@ func (f *fakeTracker) ListPlanIssues(_ context.Context, includeUnkeyed bool) ([]
 		if includeUnkeyed || i.PlanKey != "" {
 			c := *i
 			c.BlockedBy = slices.Clone(i.BlockedBy)
+			c.Labels = slices.Clone(i.Labels)
 			out = append(out, c)
 		}
 	}
@@ -90,7 +92,8 @@ func (f *fakeTracker) CreateIssue(_ context.Context, in domain.NewIssue) (domain
 	id := fmt.Sprintf("id-%d", f.seq)
 	f.issues = append(f.issues, &domain.PlanIssue{
 		ID: id, Identifier: fmt.Sprintf("T-%d", f.seq), PlanKey: in.PlanKey, Kind: in.Kind,
-		Title: in.Title, BodyDigest: BodyDigest(in.Body), State: "Backlog", ParentID: in.ParentID, BlockedBy: []string{},
+		Title: in.Title, BodyDigest: BodyDigest(in.Body), State: cmp.Or(in.State, "Backlog"), ParentID: in.ParentID, BlockedBy: []string{},
+		Labels: []string{},
 	})
 	return domain.CreatedIssue{ID: id, Identifier: fmt.Sprintf("T-%d", f.seq)}, nil
 }
@@ -178,3 +181,63 @@ func (b *graphBuilder) block(blocker, blocked string) *graphBuilder {
 }
 
 func (b *graphBuilder) build() Graph { return b.g }
+
+func (f *fakeTracker) TransitionIssue(_ context.Context, id, state string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i := f.byID(id)
+	if err := f.write("transition " + i.PlanKey + ">" + state); err != nil {
+		return err
+	}
+	i.State = state
+	return nil
+}
+
+func (f *fakeTracker) AddLabel(_ context.Context, id, label string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i := f.byID(id)
+	if err := f.write("label+ " + i.PlanKey + " " + label); err != nil {
+		return err
+	}
+	if !slices.Contains(i.Labels, label) {
+		i.Labels = append(i.Labels, label)
+	}
+	return nil
+}
+
+func (f *fakeTracker) RemoveLabel(_ context.Context, id, label string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i := f.byID(id)
+	if err := f.write("label- " + i.PlanKey + " " + label); err != nil {
+		return err
+	}
+	i.Labels = slices.DeleteFunc(i.Labels, func(l string) bool { return l == label })
+	return nil
+}
+
+func (f *fakeTracker) SetApproval(_ context.Context, id string, a domain.PlanApproval) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i := f.byID(id)
+	if err := f.write("approve " + i.PlanKey); err != nil {
+		return err
+	}
+	i.Approval = &a
+	return nil
+}
+
+// planControlled returns the tracker with plan control on.
+func (f *fakeTracker) planControlled() Tracker {
+	t := f.tracker()
+	t.States = func() domain.TrackerStates { return domain.TrackerStates{Release: "Todo", Backlog: "Backlog"} }
+	return t
+}
+
+// noApprovals is a fake whose kind does not declare approval fields.
+func (f *fakeTracker) noApprovals() Tracker {
+	t := f.planControlled()
+	t.Meta.WriteCapabilities = []registry.WriteCapability{registry.CapCreateIssue, registry.CapUpdateIssue, registry.CapSetParent, registry.CapLinkDependency}
+	return t
+}

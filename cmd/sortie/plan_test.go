@@ -105,7 +105,7 @@ func TestPlanSyncRejectsMalformedGraphBeforeTracker(t *testing.T) {
 
 	// A workflow path that does not exist proves the tracker is never built.
 	code, _, errOut := runPlanCLI("plan", "sync", "--graph", graph, "/nonexistent/WORKFLOW.md")
-	if code != 1 || !strings.Contains(errOut, "schema_version 7") || !strings.Contains(errOut, "version 1") {
+	if code != 1 || !strings.Contains(errOut, "schema_version 7") || !strings.Contains(errOut, "versions 1 to 2") {
 		t.Errorf("exit %d, stderr %q; want a version error naming both versions", code, errOut)
 	}
 }

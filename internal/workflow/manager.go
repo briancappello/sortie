@@ -390,6 +390,9 @@ func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[st
 	if err := config.ValidateNextRequiresHandoff(dispatchCfg, cfg.Tracker.HandoffState); err != nil {
 		return config.ServiceConfig{}, nil, nil, err
 	}
+	if err := config.ValidatePlanReviewGates(dispatchCfg, cfg.Tracker.PlanControl()); err != nil {
+		return config.ServiceConfig{}, nil, nil, err
+	}
 
 	partials, err := loadPartials(dispatchCfg.Partials)
 	if err != nil {

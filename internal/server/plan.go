@@ -12,6 +12,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/plan"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
@@ -72,6 +73,29 @@ type planGraphNode struct {
 	URL        *string      `json:"url"`
 	ParentID   *string      `json:"parent_id"`
 	Runtime    *planRuntime `json:"runtime"`
+
+	// Plan control fields: null on every node when plan control is off,
+	// and on epics.
+	Review            *string          `json:"review"`
+	ApprovedBy        *planApprover    `json:"approved_by"`
+	ApprovedAt        *string          `json:"approved_at"`
+	Satisfaction      *string          `json:"satisfaction"`
+	UnverifiedReason  *string          `json:"unverified_reason"`
+	MergeCommit       *string          `json:"merge_commit"`
+	PullRequest       *string          `json:"pull_request"`
+	WaitingOn         []planWaitReason `json:"waiting_on"`
+	ProposedSupersede *string          `json:"proposed_supersede"`
+}
+
+type planApprover struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// planWaitReason names a blocker that does not yet let a story start.
+type planWaitReason struct {
+	BlockerID string `json:"blocker_id"`
+	Reason    string `json:"reason"`
 }
 
 // planRuntime is a node's Sortie runtime state.
@@ -237,9 +261,18 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 	includeUnkeyed := r.URL.Query().Get("include_unkeyed") == "true"
 	t := syncer.Tracker()
 
+	var states domain.TrackerStates
+	if s.planStatesFn != nil {
+		states = s.planStatesFn()
+	}
+	planControl := states.Release != ""
+
 	issues := []domain.PlanIssue{}
 	if finder, ok := t.Adapter.(domain.PlanKeyFinder); ok {
-		got, err := finder.ListPlanIssues(r.Context(), includeUnkeyed)
+		// Under plan control the issues without a plan key are read too,
+		// so the blockers they are can be judged; they are left out of the
+		// response unless asked for.
+		got, err := finder.ListPlanIssues(r.Context(), includeUnkeyed || planControl)
 		if err != nil {
 			s.writeTrackerError(w, r, err)
 			return
@@ -273,16 +306,39 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 		Nodes:        make([]planGraphNode, 0, len(issues)),
 		Edges:        []planGraphEdge{},
 	}
+	byID := make(map[string]domain.PlanIssue, len(issues))
+	for _, i := range issues {
+		byID[i.ID] = i
+	}
 	listed := make(map[string]bool, len(issues))
 	for _, i := range issues {
-		listed[i.ID] = true
+		listed[i.ID] = includeUnkeyed || i.PlanKey != ""
+	}
+	var judge *orchestrator.PlanJudge
+	if planControl {
+		judge = orchestrator.NewPlanJudge(r.Context(), s.planSatisfaction, states.Cancel, states.Done, s.logger)
+		ids := make([]string, 0, len(issues))
+		for _, i := range issues {
+			ids = append(ids, i.ID)
+		}
+		judge.Prime(ids)
+	}
+	terminalSet := map[string]struct{}{}
+	for _, st := range terminal {
+		terminalSet[strings.ToLower(st)] = struct{}{}
 	}
 	for _, i := range issues {
+		if !listed[i.ID] {
+			continue
+		}
 		n := planGraphNode{
 			ID: i.ID, Identifier: i.Identifier, Title: i.Title, State: i.State,
 			Terminal: slices.ContainsFunc(terminal, func(s string) bool { return strings.EqualFold(s, i.State) }),
 			PlanKey:  optional(i.PlanKey), Kind: optional(string(i.Kind)), URL: optional(i.URL), ParentID: optional(i.ParentID),
 			Runtime: runtime[i.ID],
+		}
+		if judge != nil && i.Kind == domain.IssueKindStory {
+			planNodeFields(&n, i, byID, judge, terminalSet)
 		}
 		resp.Nodes = append(resp.Nodes, n)
 		for _, b := range i.BlockedBy {
@@ -292,6 +348,42 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, s.logger, http.StatusOK, resp)
+}
+
+// planNodeFields fills a story's plan control fields: its review gate,
+// approver, what satisfies it, and why it waits.
+func planNodeFields(n *planGraphNode, i domain.PlanIssue, byID map[string]domain.PlanIssue, judge *orchestrator.PlanJudge, terminalSet map[string]struct{}) {
+	for _, l := range i.Labels {
+		if after, ok := strings.CutPrefix(strings.ToLower(l), plan.ReviewLabelPrefix); ok {
+			n.Review = &after
+		}
+	}
+	if a := i.Approval; a != nil {
+		n.ApprovedBy = &planApprover{Name: a.By, ID: a.ByID}
+		n.ApprovedAt = optional(a.At)
+	}
+	n.Satisfaction = optional(judge.Satisfaction(i.ID))
+	if r, ok := judge.Record(i.ID, persistence.PlanSatisfactionMerged); ok {
+		n.MergeCommit, n.PullRequest = optional(r.Ref), optional(r.PR)
+	}
+	if r, ok := judge.Record(i.ID, persistence.PlanSatisfactionUnverified); ok {
+		n.UnverifiedReason = optional(r.Ref)
+	}
+	if r, ok := judge.Record(i.ID, persistence.PlanSatisfactionNoChange); ok && r.Cites != "" {
+		if cited, ok := byID[r.Cites]; ok {
+			n.ProposedSupersede = optional(cited.PlanKey)
+		}
+	}
+	n.WaitingOn = []planWaitReason{}
+	for _, b := range i.BlockedBy {
+		ref := domain.BlockerRef{ID: b}
+		if blocker, ok := byID[b]; ok {
+			ref.State, ref.PlanKey, ref.Identifier = blocker.State, blocker.PlanKey, blocker.Identifier
+		}
+		if why := judge.Unsatisfied(ref, terminalSet); why != "" {
+			n.WaitingOn = append(n.WaitingOn, planWaitReason{BlockerID: b, Reason: why})
+		}
+	}
 }
 
 func optional(s string) *string {

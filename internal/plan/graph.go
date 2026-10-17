@@ -12,10 +12,19 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
-// SupportedVersion is the plan graph schema version this package reads.
-const SupportedVersion = 1
+// SupportedVersion is the newest plan graph schema version this package
+// reads. Version 1 is still read. Version 2 adds the optional story
+// fields release, review, approved_by, and approved_at.
+const SupportedVersion = 2
+
+// Review gates a story can carry.
+const (
+	ReviewHuman    = "human"
+	ReviewCriteria = "criteria"
+)
 
 // Node kinds and approval states of the graph format.
 const (
@@ -56,7 +65,22 @@ type Node struct {
 	DeliverableKind    *string  `json:"deliverable_kind"`
 	Covers             []string `json:"covers"`
 	AcceptanceCriteria []string `json:"acceptance_criteria"`
+
+	// Version 2 only, all optional, stories only.
+	Release    *bool     `json:"release,omitempty"`
+	Review     string    `json:"review,omitempty"`
+	ApprovedBy *Approver `json:"approved_by,omitempty"`
+	ApprovedAt string    `json:"approved_at,omitempty"`
 }
+
+// Approver names the person who approved a story.
+type Approver struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// Released reports whether the node asks to be released.
+func (n Node) Released() bool { return n.Release != nil && *n.Release }
 
 // ParentEdge parents a story to its epic.
 type ParentEdge struct {
@@ -99,9 +123,9 @@ func Decode(raw []byte) (Graph, error) {
 	if err := json.Unmarshal(head["schema_version"], &version); err != nil || head["schema_version"] == nil {
 		return Graph{}, &GraphError{Problems: []string{"schema_version must be an integer"}}
 	}
-	if version != SupportedVersion {
+	if version < 1 || version > SupportedVersion {
 		return Graph{}, &GraphError{Problems: []string{fmt.Sprintf(
-			"schema_version %d is not supported; this Sortie reads plan graph version %d", version, SupportedVersion)}}
+			"schema_version %d is not supported; this Sortie reads plan graph versions 1 to %d", version, SupportedVersion)}}
 	}
 
 	var problems []string
@@ -136,6 +160,37 @@ func missing(where string, obj map[string]json.RawMessage, fields []string) []st
 		}
 	}
 	return out
+}
+
+// checkVersion2 checks the version 2 story fields: absent in version 1,
+// stories only, and well formed.
+func (g Graph) checkVersion2(where string, n Node) []string {
+	set := n.Release != nil || n.Review != "" || n.ApprovedBy != nil || n.ApprovedAt != ""
+	if !set {
+		return nil
+	}
+	if g.SchemaVersion < 2 {
+		return []string{where + ": release, review, approved_by, and approved_at need schema_version 2"}
+	}
+	var problems []string
+	if n.Kind != KindStory {
+		problems = append(problems, where+": release, review, approved_by, and approved_at are for stories only")
+	}
+	if n.Review != "" && n.Review != ReviewHuman && n.Review != ReviewCriteria {
+		problems = append(problems, fmt.Sprintf("%s: review %q is not human or criteria", where, n.Review))
+	}
+	if n.ApprovedBy != nil && strings.TrimSpace(n.ApprovedBy.Name) == "" {
+		problems = append(problems, where+": approved_by needs a name")
+	}
+	if n.ApprovedAt != "" {
+		if _, err := time.Parse(time.RFC3339, n.ApprovedAt); err != nil {
+			problems = append(problems, where+": approved_at is not an RFC 3339 time")
+		}
+	}
+	if n.Released() && n.Approval != ApprovalApproved {
+		problems = append(problems, where+": only an approved story can be released")
+	}
+	return problems
 }
 
 func (g Graph) check() []string {
@@ -178,6 +233,7 @@ func (g Graph) check() []string {
 		if n.Covers == nil || n.AcceptanceCriteria == nil {
 			problems = append(problems, where+": covers and acceptance_criteria must be lists")
 		}
+		problems = append(problems, g.checkVersion2(where, n)...)
 	}
 	for i, e := range g.Parents {
 		for _, key := range []string{e.Child, e.Parent} {

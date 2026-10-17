@@ -45,6 +45,11 @@ var _ ReconcileStore = (*persistence.Store)(nil)
 // are not part of the core [State]. This separates pure state mutation from
 // I/O side effects (tracker API, SQLite persistence).
 type ReconcileParams struct {
+	// ReviewGate, when non-nil, decides whether auto-merge may merge the
+	// pull request of a pending entry. Plan control sets it. Nil lets
+	// auto-merge merge as without plan control.
+	ReviewGate ReviewGateFunc
+
 	// TrackerAdapter fetches current issue states for running issues.
 	TrackerAdapter domain.TrackerAdapter
 

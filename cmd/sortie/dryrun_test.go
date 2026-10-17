@@ -445,7 +445,7 @@ func TestRunDryRun_SkipReasonBlockedBy(t *testing.T) {
 	var stderr bytes.Buffer
 	logger := discardStdoutLogger(&stderr)
 
-	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, nil)
+	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, nil, nil)
 	if code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}
@@ -477,7 +477,7 @@ func TestRunDryRun_SkipReasonBlockersUnresolved(t *testing.T) {
 	var stderr bytes.Buffer
 	logger := discardStdoutLogger(&stderr)
 
-	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, resolver)
+	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, resolver, nil)
 	if code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}
@@ -504,7 +504,7 @@ func TestRunDryRun_SkipReasonBlockersIncomplete(t *testing.T) {
 	var stderr bytes.Buffer
 	logger := discardStdoutLogger(&stderr)
 
-	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, resolver)
+	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, resolver, nil)
 	if code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}
@@ -535,7 +535,7 @@ func TestRunDryRun_CapacityFullMakesNoBlockerRead(t *testing.T) {
 	logger := discardStdoutLogger(&stderr)
 
 	// Zero concurrency budget: no candidate ever has a free slot.
-	code := runDryRun(context.Background(), dryRunTestConfig(0), logger, tracker, resolver)
+	code := runDryRun(context.Background(), dryRunTestConfig(0), logger, tracker, resolver, nil)
 	if code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}
@@ -572,7 +572,7 @@ func TestRunDryRun_ReadBudgetPerCycle(t *testing.T) {
 	var stderr bytes.Buffer
 	logger := discardStdoutLogger(&stderr)
 
-	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, resolver)
+	code := runDryRun(context.Background(), dryRunTestConfig(10), logger, tracker, resolver, nil)
 	if code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}
@@ -598,7 +598,7 @@ func TestRunDryRun_AdvisoriesLoggedBeforeCandidates(t *testing.T) {
 	}}
 
 	var noneStderr bytes.Buffer
-	if code := runDryRun(context.Background(), dryRunTestConfig(10), discardStdoutLogger(&noneStderr), tracker, nil); code != 0 {
+	if code := runDryRun(context.Background(), dryRunTestConfig(10), discardStdoutLogger(&noneStderr), tracker, nil, nil); code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}
 	if got := noneStderr.String(); strings.Contains(got, "level=WARN") {
@@ -615,7 +615,7 @@ func TestRunDryRun_AdvisoriesLoggedBeforeCandidates(t *testing.T) {
 	})
 
 	var stderr bytes.Buffer
-	code := runDryRun(context.Background(), cfg, discardStdoutLogger(&stderr), tracker, nil)
+	code := runDryRun(context.Background(), cfg, discardStdoutLogger(&stderr), tracker, nil, nil)
 	if code != 0 {
 		t.Fatalf("runDryRun = %d, want 0", code)
 	}

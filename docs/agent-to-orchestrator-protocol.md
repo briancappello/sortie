@@ -181,6 +181,22 @@ The self-review phase's verification commands and review turn are what can falsi
 
 Where the declaration stands, it is treated as positive evidence under `tracker.handoff_evidence`: no absence verdict is computed, the run is recorded as `succeeded`, no session-failure comment is written, no continuation retry is scheduled, the consecutive-absence count is not advanced, that count is reset, and a park held for consecutive absences is released. The transition target is `tracker.no_change_state` where that field is configured, and `tracker.handoff_state` otherwise; where no handoff path applies (Section 3.6), the declaration changes no issue state. On a rule that carries `next`, a stood declaration hops like any other successful run and selects `tracker.no_change_state` only when the hop is not made; the next stage's template learns of the declaration from `stage.previous_outcome`, which is `no_change`. A terminal tracker state observed at exit keeps its own meaning and is not affected by this value (Section 2.3.2).
 
+#### 2.3.7 Evidence for `no-change-needed` under plan control
+
+Under plan control (`tracker.release_state` set), a standing `no-change-needed` declaration satisfies the stories that a plan story blocks only when it cites where the work was done. The agent writes the citation to `.sortie/evidence.json`, beside the status file:
+
+```json
+{"kind": "commit", "sha": "<40-hex commit id>", "note": "optional, at most 2000 characters"}
+{"kind": "plan_key", "plan_key": "payments/http-client"}
+```
+
+The file holds exactly one citation and no other field, and is read with the status file's refusals: no links, a plain file, at most 4 KiB. The orchestrator removes it before each dispatch, as it does the status file. The agent's file is untrusted input. When the run ends, the worker confirms the citation on the host:
+
+- A commit counts only when it is on the base branch of the host-owned mirror (`environment.smolvm.repository`), as the mirror last fetched it. Git never runs in the workspace. Without a mirror the claim is unverified (`no_mirror`).
+- A plan key counts only when it names another story of the same project. The claim then satisfies dependents only while the cited story is satisfied, one level deep. A story that cites itself, or two stories that cite each other, are unverified (`cycle`).
+
+A confirmed claim is recorded in `plan_satisfaction` and survives restarts. An unverified claim is recorded with its reason (`no_evidence`, `evidence_unparsed`, `no_citation`, `no_mirror`, `commit_not_on_base`, `unknown_plan_key`, `cycle`, or `check_failed`) and satisfies nothing. Its dependents wait with `unverified_no_change`. Without plan control, the file is ignored.
+
 ### 2.4 Absent file
 
 If the `.sortie/status` file does not exist, the orchestrator proceeds with its default behavior: continuation retries are scheduled according to the standard algorithm ([architecture Section 8.4](architecture/08-polling-scheduling-and-reconciliation.md#84-retry-and-backoff)).

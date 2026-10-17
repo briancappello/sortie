@@ -254,15 +254,21 @@ func TestSessionToken_DoesNotTrimTruncatedText(t *testing.T) {
 	for i := 0; i < 64 && strings.HasPrefix(token[len(sessionTokenPrefix):], sessionTokenPrefix); i++ {
 		token = mintSessionToken()
 	}
-	index.register(token, "id-trim", "TRIM-1")
-	defer index.revoke(token)
-
 	if !strings.HasPrefix(token, sessionTokenPrefix) || len(token) < 1+43 {
 		t.Fatalf("token %q, want the prefix and 32 base64url-encoded bytes", token)
 	}
 	first := len(sessionTokenPrefix)
 	text := "cut text ending in the token's first random character " + token[first:first+1]
-	if got := redact.MaskTruncated(text); got != text {
-		t.Errorf("MaskTruncated(%q) = %q with a live session token, want it unchanged", text, got)
+	// The masker is process-wide, and parallel tests register secrets of
+	// their own; one that begins with the same character trims the text
+	// whatever this token does. Compare with the result before the token
+	// is registered, so only the token's effect is measured.
+	before := redact.MaskTruncated(text)
+
+	index.register(token, "id-trim", "TRIM-1")
+	defer index.revoke(token)
+
+	if got := redact.MaskTruncated(text); got != before {
+		t.Errorf("MaskTruncated(%q) = %q with a live session token, want %q as without it", text, got, before)
 	}
 }

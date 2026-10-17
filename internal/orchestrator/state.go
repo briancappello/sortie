@@ -108,6 +108,12 @@ type RunningEntry struct {
 	// memory alone and stops working when the entry is removed.
 	SessionToken string
 
+	// BrokerURL and BrokerViewerToken are the HTTP address and viewer
+	// token the run's broker reported. Kept only in memory, and the token
+	// never leaves through the state snapshot.
+	BrokerURL         string
+	BrokerViewerToken string
+
 	// HeldSince is when the current hold began; zero when the run is not
 	// held. HoldReason and Holder describe that hold. Mutated only by the
 	// event loop.
@@ -839,6 +845,20 @@ type StageHopEntry struct {
 // TrackerOpsWg, which are goroutine-safe. The agent_totals and completed set are backed by SQLite
 // and survive restarts.
 type State struct {
+	// BlockerJudge decides blockers for dispatch and retry. Nil means the
+	// terminal-state rule. With plan control on, each tick replaces it
+	// with a [PlanJudge] primed for that tick's candidates.
+	BlockerJudge BlockerJudge
+
+	// DispatchBlocks holds issues that a plan pull-back or cancel moved
+	// out of the active states, so a stale candidate read cannot dispatch
+	// them before the tracker confirms the move.
+	DispatchBlocks map[string]DispatchBlock
+
+	// CriteriaReviewWarned holds the plan stories already warned that the
+	// forge requires a review their criteria gate cannot give.
+	CriteriaReviewWarned map[string]struct{}
+
 	// WorkerWg tracks in-flight worker goroutines spawned by
 	// [DispatchIssue]. Callers dispatching outside the Run() loop can
 	// Wait() before cleanup.
@@ -1082,6 +1102,8 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		PendingReactions:          make(map[string]*PendingReaction),
 		AutoMergeAuthLogged:       make(map[string]struct{}),
 		TokenBudgetIncomplete:     make(map[string]struct{}),
+		DispatchBlocks:            make(map[string]DispatchBlock),
+		CriteriaReviewWarned:      make(map[string]struct{}),
 	}
 }
 
@@ -1113,6 +1135,7 @@ type SnapshotRunningEntry struct {
 	LastAgentEvent      domain.AgentEventType     `json:"last_event"`
 	LastAgentTimestamp  time.Time                 `json:"last_event_at"`
 	LastAgentMessage    string                    `json:"last_message"`
+	BrokerURL           string                    `json:"broker_url,omitempty"`
 	StartedAt           time.Time                 `json:"started_at"`
 	AgentInputTokens    int64                     `json:"input_tokens"`
 	AgentOutputTokens   int64                     `json:"output_tokens"`
@@ -1338,6 +1361,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			LastAgentEvent:      entry.LastAgentEvent,
 			LastAgentTimestamp:  entry.LastAgentTimestamp,
 			LastAgentMessage:    entry.LastAgentMessage,
+			BrokerURL:           entry.BrokerURL,
 			StartedAt:           entry.StartedAt,
 			AgentInputTokens:    entry.AgentInputTokens,
 			AgentOutputTokens:   entry.AgentOutputTokens,

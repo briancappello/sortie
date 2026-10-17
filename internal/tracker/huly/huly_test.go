@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -58,6 +59,37 @@ func TestNewAdapterRejectsUnknownState(t *testing.T) {
 		slog.New(slog.DiscardHandler))
 	if trackerKind(err) != domain.ErrTrackerPayload || !strings.Contains(err.Error(), "Review") {
 		t.Fatalf("newAdapter() error = %v, want payload error naming Review", err)
+	}
+}
+
+// Every single-state setting, plan-control states included, must name a
+// state the project has.
+func TestNewAdapterRejectsEachUnknownConfiguredState(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string]string{
+		"handoff_state": "Backlog", "in_progress_state": "In Progress", "no_change_state": "Done",
+		"release_state": "Todo", "backlog_state": "Backlog", "cancel_state": "Canceled", "done_state": "Done",
+	}
+	if len(valid) != len(stateKeys) {
+		t.Fatalf("test covers %d keys, stateKeys has %d", len(valid), len(stateKeys))
+	}
+	active, terminal := []string{"Todo", "In Progress"}, []string{"Done", "Canceled"}
+	if _, err := newAdapter(context.Background(), seedWorkspace(), "HULY", "", "", active,
+		configuredStates(active, terminal, valid), slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("newAdapter() with every state present: %v", err)
+	}
+	for _, key := range stateKeys {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			fields := maps.Clone(valid)
+			fields[key] = "Nowhere " + key
+			_, err := newAdapter(context.Background(), seedWorkspace(), "HULY", "", "", active,
+				configuredStates(active, terminal, fields), slog.New(slog.DiscardHandler))
+			if trackerKind(err) != domain.ErrTrackerPayload || !strings.Contains(err.Error(), "Nowhere "+key) {
+				t.Fatalf("newAdapter() error = %v, want payload error naming %q", err, "Nowhere "+key)
+			}
+		})
 	}
 }
 
@@ -299,4 +331,39 @@ func TestCandidatesFollowReloadedStates(t *testing.T) {
 	if err != nil || len(issues) != 1 || issues[0].Identifier != "HULY-2" {
 		t.Fatalf("FetchCandidateIssues() = %+v, %v; want only the Done issue HULY-2", issues, err)
 	}
+}
+
+// A blocker's plan key comes back with it; a blocker no plan created has
+// none.
+func TestFetchCandidateIssues_BlockerPlanKeys(t *testing.T) {
+	t.Parallel()
+	f := seedWorkspace()
+	f.add(classIssue, map[string]any{
+		"_id": "issue-keyed", "space": "proj1", "identifier": "HULY-7", "title": "Planned", "status": "st-done",
+		"attachedTo": noParent, "modifiedOn": 1700000000000, attrPlanKey: "billing/a3",
+	})
+	f.add(classIssue, map[string]any{
+		"_id": "issue-both", "space": "proj1", "identifier": "HULY-8", "title": "Blocked twice", "status": "st-todo",
+		"attachedTo": noParent, "modifiedOn": 1700000000000,
+		"blockedBy": []map[string]any{{"_id": "issue-keyed", "_class": classIssue}, {"_id": "issue2", "_class": classIssue}},
+	})
+	a := newTestAdapter(t, f)
+	issues, err := a.FetchCandidateIssues(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, is := range issues {
+		if is.Identifier != "HULY-8" {
+			continue
+		}
+		got := map[string]string{}
+		for _, b := range is.BlockedBy {
+			got[b.Identifier] = b.PlanKey
+		}
+		if got["HULY-7"] != "billing/a3" || got["HULY-2"] != "" || len(got) != 2 {
+			t.Errorf("blocker plan keys = %v, want HULY-7=billing/a3 and HULY-2 empty", got)
+		}
+		return
+	}
+	t.Fatal("HULY-8 not among the candidates")
 }

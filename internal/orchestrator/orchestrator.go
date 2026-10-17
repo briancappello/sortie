@@ -578,6 +578,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			TrackerAdapter:                    o.trackerAdapter,
 			HandoffState:                      cfg.Tracker.HandoffState,
 			NoChangeState:                     cfg.Tracker.NoChangeState,
+			PlanReleaseState:                  cfg.Tracker.ReleaseState,
 			Dispatch:                          cfg.Dispatch,
 			ActiveStates:                      cfg.Tracker.ActiveStates,
 			TerminalStates:                    cfg.Tracker.TerminalStates,
@@ -782,6 +783,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	// Reconcile unconditionally so in-flight workers are monitored even when
 	// dispatch is skipped.
 	ReconcileRunningIssues(o.state, ReconcileParams{
+		ReviewGate:                        planReviewGate(cfg, o.trackerAdapter),
 		TrackerAdapter:                    o.trackerAdapter,
 		Router:                            o.router,
 		ActiveStates:                      cfg.Tracker.ActiveStates,
@@ -872,6 +874,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	}
 
 	sorted := SortForDispatch(issues)
+	clearDispatchBlocks(o.state, sorted, time.Now(), o.logger)
 
 	o.rebuildBudgetExhausted(ctx, cfg, sorted)
 	o.refreshParkedIssues(ctx, sorted)
@@ -879,6 +882,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	activeSet := stateSet(cfg.Tracker.ActiveStates)
 	terminalSet := stateSet(cfg.Tracker.TerminalStates)
+	o.state.BlockerJudge = PlanJudgeFor(ctx, cfg.Tracker, o.store, sorted, o.logger)
 
 	// Break only on exhausted global capacity; skip individual issues whose
 	// per-state limit is full so other states can still dispatch.
@@ -1064,10 +1068,11 @@ func (o *Orchestrator) recordCandidateHold(decision CandidateDecision, pass *Tic
 
 	switch decision.Reason {
 	case SkipBlockedBy:
-		blocker := firstNonTerminalBlocker(issue.BlockedBy, terminalSet)
+		blocker, why := firstUnsatisfiedBlocker(judgeOf(o.state), issue.BlockedBy, terminalSet)
 		log.Debug("candidate held by blocker",
 			slog.String("blocker_identifier", blocker.Identifier),
 			slog.String("blocker_state", blocker.State),
+			slog.String("blocker_reason", why),
 		)
 	case SkipBlockersUnresolved:
 		if decision.Err != nil {
@@ -1678,6 +1683,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				TrackerAdapter:                    o.trackerAdapter,
 				HandoffState:                      cfg.Tracker.HandoffState,
 				NoChangeState:                     cfg.Tracker.NoChangeState,
+				PlanReleaseState:                  cfg.Tracker.ReleaseState,
 				Dispatch:                          cfg.Dispatch,
 				ActiveStates:                      cfg.Tracker.ActiveStates,
 				TerminalStates:                    cfg.Tracker.TerminalStates,
@@ -1870,6 +1876,22 @@ func (o *Orchestrator) handleControl(ctx context.Context, req controlRequest) Co
 			Ctx:    ctx,
 			Logger: o.logger,
 		})
+	case controlBrokerReport:
+		reply = applyBrokerReport(o.state, req.Identifier, req.Broker, o.logger)
+	case controlBrokerRead:
+		reply = readBroker(o.state, req.Identifier)
+	case controlPullBack, controlCancel:
+		cfg := o.workflowManager.Config()
+		p := planControlParams{
+			Release: cfg.Tracker.ReleaseState, Backlog: cfg.Tracker.BacklogState, Cancel: cfg.Tracker.CancelState,
+			Terminal: cfg.Tracker.TerminalStates, Tracker: o.trackerAdapter, Store: o.store,
+			Metrics: o.metrics, Now: now, Log: o.logger,
+		}
+		if req.Kind == controlPullBack {
+			reply = applyPullBack(ctx, o.state, req.Plan, p)
+		} else {
+			reply = applyCancel(ctx, o.state, req.Plan, p)
+		}
 	default:
 		reply = ControlReply{Outcome: ControlInvalid, Message: "unknown control request"}
 	}

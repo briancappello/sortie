@@ -525,8 +525,21 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		return
 	}
 
+	if _, blocked := state.DispatchBlocks[issueID]; blocked && isActive {
+		log.Info("issue pulled back or cancelled by the plan, releasing claim",
+			slog.String("issue_state", issue.State),
+		)
+		delete(state.Claimed, issueID)
+		if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
+			log.Error("failed to delete retry entry from store",
+				slog.Any("error", err),
+			)
+		}
+		return
+	}
+
 	if isActive {
-		if isBlockedByNonTerminalSet(issue, terminalSet) {
+		if isBlockedFor(judgeOf(state), issue, terminalSet) {
 			if isKnownReaction {
 				nextAttempt := popped.Attempt + 1
 				delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)

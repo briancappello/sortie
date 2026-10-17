@@ -192,6 +192,34 @@ type TrackerConfig struct {
 	InProgressState string
 	APIVersion      string
 	Comments        TrackerCommentsConfig
+
+	// ReleaseState turns plan control on when set: plan sync moves a
+	// released story from BacklogState to this state.
+	ReleaseState string
+	// BacklogState is where a plan story waits before release and
+	// returns to on a pull-back.
+	BacklogState string
+	// CancelState is where a cancelled plan story goes.
+	CancelState string
+	// DoneState satisfies a blocker that carries no plan key.
+	DoneState string
+}
+
+// PlanControl reports whether plan control is on for this tracker.
+func (t TrackerConfig) PlanControl() bool { return t.ReleaseState != "" }
+
+// States returns the workflow's state vocabulary as written.
+func (t TrackerConfig) States() domain.TrackerStates {
+	return domain.TrackerStates{
+		Active:     t.ActiveStates,
+		Terminal:   t.TerminalStates,
+		Handoff:    t.HandoffState,
+		InProgress: t.InProgressState,
+		Release:    t.ReleaseState,
+		Backlog:    t.BacklogState,
+		Cancel:     t.CancelState,
+		Done:       t.DoneState,
+	}
 }
 
 // HandoffEvidencePolicy controls whether the orchestrator requires
@@ -655,6 +683,15 @@ func NewServiceConfig(raw map[string]any, opts ...ServiceConfigOption) (ServiceC
 		return ServiceConfig{}, err
 	}
 
+	for _, key := range planStateKeys {
+		if rawVal, ok := rawTracker[key]; ok && rawVal != nil && tracker.planState(key) == "" {
+			return ServiceConfig{}, &ConfigError{
+				Field:   "tracker." + key,
+				Message: "resolved to empty (check environment variable)",
+			}
+		}
+	}
+
 	// Validate tracker.comments fields: reject non-boolean types.
 	if rawComments, ok := rawTracker["comments"]; ok && rawComments != nil {
 		commentsMap, isMap := rawComments.(map[string]any)
@@ -708,6 +745,9 @@ func NewServiceConfig(raw map[string]any, opts ...ServiceConfigOption) (ServiceC
 
 	reactions, err := buildReactionsConfig(extractSubMap(raw, "reactions"))
 	if err != nil {
+		return ServiceConfig{}, err
+	}
+	if err := ValidatePlanControl(tracker, reactions["merge_completion"].Provider != ""); err != nil {
 		return ServiceConfig{}, err
 	}
 
@@ -896,6 +936,21 @@ func buildTrackerConfig(m map[string]any, envKeys map[string]bool) (TrackerConfi
 		inProgressState = resolveEnvRef(inProgressState)
 	}
 
+	planStates := make(map[string]string, len(planStateKeys))
+	for _, key := range planStateKeys {
+		v, fault := typeutil.StringField(m, key)
+		if fault != nil {
+			return TrackerConfig{}, &ConfigError{Field: "tracker." + key, Message: fault.Reason()}
+		}
+		if rawVal, ok := m[key]; ok && rawVal != nil && v == "" {
+			return TrackerConfig{}, &ConfigError{Field: "tracker." + key, Message: "must not be empty"}
+		}
+		if !envKeys["tracker."+key] {
+			v = resolveEnvRef(v)
+		}
+		planStates[key] = v
+	}
+
 	apiVersion, fault := typeutil.StringField(m, "api_version")
 	if fault != nil {
 		// A bare YAML integer (api_version: 2) is not a string; coerce a
@@ -929,6 +984,10 @@ func buildTrackerConfig(m map[string]any, envKeys map[string]bool) (TrackerConfi
 		NoChangeState:   noChangeState,
 		InProgressState: inProgressState,
 		APIVersion:      apiVersion,
+		ReleaseState:    planStates["release_state"],
+		BacklogState:    planStates["backlog_state"],
+		CancelState:     planStates["cancel_state"],
+		DoneState:       planStates["done_state"],
 		Comments: TrackerCommentsConfig{
 			OnDispatch:   coerceBool(commentsMap, "on_dispatch"),
 			OnCompletion: coerceBool(commentsMap, "on_completion"),
@@ -1488,6 +1547,71 @@ func ValidateHandoffState(handoffState string, activeStates, terminalStates []st
 		}
 	}
 	return nil
+}
+
+// planStateKeys are the tracker keys that configure plan control.
+var planStateKeys = []string{"release_state", "backlog_state", "cancel_state", "done_state"}
+
+func (t TrackerConfig) planState(key string) string {
+	switch key {
+	case "release_state":
+		return t.ReleaseState
+	case "backlog_state":
+		return t.BacklogState
+	case "cancel_state":
+		return t.CancelState
+	case "done_state":
+		return t.DoneState
+	}
+	return ""
+}
+
+// ValidatePlanControl reports a [*ConfigError] when plan control is on
+// (release_state is set) and its settings are incomplete or name a state
+// of the wrong class. The state lists are compared as written in front
+// matter, so plan control requires both lists to be written. With
+// release_state unset the other plan states are accepted as written and
+// have no effect.
+func ValidatePlanControl(t TrackerConfig, mergeCompletion bool) error {
+	if !t.PlanControl() {
+		return nil
+	}
+	if len(t.ActiveStates) == 0 {
+		return &ConfigError{Field: "tracker.active_states", Message: "must be written when tracker.release_state is set"}
+	}
+	if len(t.TerminalStates) == 0 {
+		return &ConfigError{Field: "tracker.terminal_states", Message: "must be written when tracker.release_state is set"}
+	}
+	for _, key := range planStateKeys[1:] {
+		if t.planState(key) == "" {
+			return &ConfigError{Field: "tracker." + key, Message: "is required when tracker.release_state is set"}
+		}
+	}
+	active, terminal := lowerSet(t.ActiveStates), lowerSet(t.TerminalStates)
+	in := func(set map[string]bool, s string) bool { return set[strings.ToLower(s)] }
+	switch {
+	case !in(active, t.ReleaseState):
+		return &ConfigError{Field: "tracker.release_state", Message: fmt.Sprintf("%q is not in active_states", t.ReleaseState)}
+	case in(active, t.BacklogState) || in(terminal, t.BacklogState):
+		return &ConfigError{Field: "tracker.backlog_state", Message: fmt.Sprintf("%q must be in neither active_states nor terminal_states", t.BacklogState)}
+	case t.HandoffState != "" && strings.EqualFold(t.BacklogState, t.HandoffState):
+		return &ConfigError{Field: "tracker.backlog_state", Message: fmt.Sprintf("%q collides with handoff_state; sync would release handed-off stories again", t.BacklogState)}
+	case !in(terminal, t.CancelState):
+		return &ConfigError{Field: "tracker.cancel_state", Message: fmt.Sprintf("%q is not in terminal_states", t.CancelState)}
+	case !in(terminal, t.DoneState):
+		return &ConfigError{Field: "tracker.done_state", Message: fmt.Sprintf("%q is not in terminal_states", t.DoneState)}
+	case !mergeCompletion:
+		return &ConfigError{Field: "reactions.merge_completion", Message: "must be configured when tracker.release_state is set"}
+	}
+	return nil
+}
+
+func lowerSet(states []string) map[string]bool {
+	set := make(map[string]bool, len(states))
+	for _, s := range states {
+		set[strings.ToLower(s)] = true
+	}
+	return set
 }
 
 // ValidateInProgressState reports a [*ConfigError] when inProgressState

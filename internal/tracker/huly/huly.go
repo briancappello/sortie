@@ -102,7 +102,7 @@ type HulyAdapter struct {
 // type is absent from the project.
 func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 	fields := map[string]string{}
-	for _, key := range []string{"endpoint", "api_key", "project", "workspace", "user_agent", "handoff_state", "in_progress_state", "epic_type", "story_type"} {
+	for _, key := range append([]string{"endpoint", "api_key", "project", "workspace", "user_agent", "epic_type", "story_type"}, stateKeys...) {
 		value, fault := typeutil.StringField(config, key)
 		if fault != nil {
 			return nil, &domain.TrackerError{Kind: domain.ErrTrackerPayload, Message: fault.Error()}
@@ -142,14 +142,7 @@ func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 
 	issueURLBase := fmt.Sprintf("%s/workbench/%s/tracker/", conn.frontBaseURL, url.PathEscape(conn.login.WorkspaceURL))
 
-	configured := append(append([]string{}, active...), terminal...)
-	for _, key := range []string{"handoff_state", "in_progress_state"} {
-		if fields[key] != "" {
-			configured = append(configured, fields[key])
-		}
-	}
-
-	a, err := newAdapter(ctx, conn.rpc, fields["project"], conn.socialID, issueURLBase, active, configured, slog.Default())
+	a, err := newAdapter(ctx, conn.rpc, fields["project"], conn.socialID, issueURLBase, active, configuredStates(active, terminal, fields), slog.Default())
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +151,22 @@ func NewHulyAdapter(config map[string]any) (domain.TrackerAdapter, error) {
 	}
 	a.accountUUID = conn.accountUUID
 	return a, nil
+}
+
+// stateKeys are the single-state tracker settings whose names must exist
+// in the project, besides the active and terminal lists.
+var stateKeys = []string{"handoff_state", "in_progress_state", "no_change_state", "release_state", "backlog_state", "cancel_state", "done_state"}
+
+// configuredStates lists every state name the workflow configures, so the
+// constructor can refuse one the project does not have.
+func configuredStates(active, terminal []string, fields map[string]string) []string {
+	configured := append(append([]string{}, active...), terminal...)
+	for _, key := range stateKeys {
+		if fields[key] != "" {
+			configured = append(configured, fields[key])
+		}
+	}
+	return configured
 }
 
 // newAdapter resolves the project and its workflow states through rpc and

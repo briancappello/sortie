@@ -106,6 +106,11 @@ type HandleWorkerExitParams struct {
 	// needed. Empty falls back to HandoffState.
 	NoChangeState string
 
+	// PlanReleaseState is tracker.release_state: empty when plan control
+	// is off. A failed criteria check sends its story back to it when its
+	// rule's on_fail names a rework stage.
+	PlanReleaseState string
+
 	// Dispatch is the dispatch configuration in force, which holds the
 	// rule's next link and the hop ceiling read at this exit.
 	Dispatch config.DispatchConfig
@@ -212,6 +217,9 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	}
 	delete(state.Running, workerResult.IssueID)
 	state.SessionTokens.revoke(entry.SessionToken)
+	if entry.BrokerViewerToken != "" {
+		redact.Remove(entry.BrokerViewerToken)
+	}
 	endHoldRecorded(entry, time.Now().UTC(), metrics)
 	if entry.CancelFunc != nil {
 		entry.CancelFunc()
@@ -947,6 +955,14 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// A made hop leaves the issue active on its next stage, which owns any
 		// reaction from here on, so the run that hopped seeds none.
 		reactionEnqueueAllowed := claimedAtExit && (handoffPath || stillClaimed) && !terminalSuppressed && !hopMade
+		recordNoChange(ctx, params.Store, workerResult.IssueID, workerResult.NoChange, log)
+
+		// A failed criteria check seeds no reaction: auto-merge must never
+		// merge the pull request a check refused.
+		if criteriaFailed := criteriaCheckFailed(params, entry, workerResult); criteriaFailed {
+			reactionEnqueueAllowed = false
+			handleCriteriaFailure(ctx, state, params, entry, workerResult, log)
+		}
 
 		// Seed a pending CI check when CI provider and SCM adapter are both
 		// configured and the workspace carries PR identity: the reaction

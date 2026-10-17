@@ -15,6 +15,9 @@ import (
 const (
 	attrPlanKey        = "sortiePlanKey"
 	attrPlanBodyDigest = "sortiePlanBodyDigest"
+	attrApprovedBy     = "sortieApprovedBy"
+	attrApprovedByID   = "sortieApprovedById"
+	attrApprovedAt     = "sortieApprovedAt"
 
 	classAttribute  = "core:class:Attribute"
 	classTypeString = "core:class:TypeString"
@@ -29,6 +32,9 @@ var planAttributes = []struct {
 }{
 	{attrPlanKey, "Sortie plan key", false},
 	{attrPlanBodyDigest, "Sortie plan body digest", true},
+	{attrApprovedBy, "Approved by", false},
+	{attrApprovedByID, "Approver identity", true},
+	{attrApprovedAt, "Approved at", false},
 }
 
 type hulyAttribute struct {
@@ -160,6 +166,16 @@ func (a *HulyAdapter) toPlanIssues(ctx context.Context, issues []hulyIssue) ([]d
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, 0, len(issues))
+	for _, i := range issues {
+		ids = append(ids, i.ID)
+	}
+	labels := map[string][]string{}
+	if len(ids) > 0 {
+		if labels, err = a.labelsByIssue(ctx, ids); err != nil {
+			return nil, err
+		}
+	}
 
 	out := make([]domain.PlanIssue, 0, len(issues))
 	for _, i := range issues {
@@ -173,6 +189,10 @@ func (a *HulyAdapter) toPlanIssues(ctx context.Context, issues []hulyIssue) ([]d
 			State:      statuses[i.Status].Name,
 			URL:        a.issueURLBase + i.Identifier,
 			BlockedBy:  blockerIDs(i),
+			Labels:     append([]string{}, labels[i.ID]...),
+		}
+		if i.ApprovedBy != "" || i.ApprovedByID != "" || i.ApprovedAt != "" {
+			p.Approval = &domain.PlanApproval{By: i.ApprovedBy, ByID: i.ApprovedByID, At: i.ApprovedAt}
 		}
 		if i.AttachedTo != noParent {
 			p.ParentID = i.AttachedTo

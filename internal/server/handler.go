@@ -49,6 +49,7 @@ type runningEntryResponse struct {
 	LastEventAt       time.Time        `json:"last_event_at"`
 	WorkspacePath     string           `json:"workspace_path"`
 	Environment       *environmentInfo `json:"environment,omitempty"`
+	Broker            *brokerInfo      `json:"broker"`
 	Tokens            tokenInfo        `json:"tokens"`
 	ModelName         string           `json:"model_name,omitempty"`
 	RuleName          string           `json:"rule_name,omitempty"`
@@ -182,6 +183,13 @@ type errorResponse struct {
 	Error errorDetail `json:"error"`
 }
 
+// brokerInfo is the address a run's broker reported. It never carries the
+// viewer token: GET /api/v1/{identifier}/broker returns that, with the
+// control token.
+type brokerInfo struct {
+	HTTPURL string `json:"http_url"`
+}
+
 type errorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -201,6 +209,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 		LastEventAt:         e.LastAgentTimestamp.UTC(),
 		WorkspacePath:       e.WorkspacePath,
 		Environment:         toEnvironmentInfo(e.Environment),
+		Broker:              toBrokerInfo(e.BrokerURL),
 		ModelName:           e.ModelName,
 		RuleName:            e.RuleName,
 		ConfiguredModel:     e.ConfiguredModel,
@@ -652,4 +661,11 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		UptimeSeconds: uptime,
 		Checks:        checks,
 	})
+}
+
+func toBrokerInfo(url string) *brokerInfo {
+	if url == "" {
+		return nil
+	}
+	return &brokerInfo{HTTPURL: url}
 }

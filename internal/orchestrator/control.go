@@ -60,6 +60,7 @@ type ControlReply struct {
 	Outcome ControlOutcome
 	Hold    HoldState
 	Message string
+	Broker  BrokerAddress
 }
 
 type controlKind int
@@ -68,6 +69,10 @@ const (
 	controlHold controlKind = iota
 	controlRelease
 	controlEscalate
+	controlPullBack
+	controlCancel
+	controlBrokerReport
+	controlBrokerRead
 )
 
 // controlRequest asks the event loop to change one issue's run.
@@ -77,6 +82,8 @@ type controlRequest struct {
 	Reason     string
 	Holder     string
 	Escalation EscalationRequest
+	Plan       planTarget
+	Broker     BrokerAddress
 	ReplyCh    chan ControlReply
 }
 

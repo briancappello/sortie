@@ -48,7 +48,7 @@ huly:
 
 `examples/WORKFLOW.huly.md` is a complete workflow. It uses the mock agent.
 
-Each configured state name must be a status in the project's workflow, compared without regard to letter case. If a configured state is missing, the constructor fails and the error lists the project's states. The classic Huly workflow has no review status, and a handoff state must not be terminal. Before you set `handoff_state`, add a status such as `In Review` to the project in Huly.
+Each configured state name must be a status in the project's workflow, compared without regard to letter case. That covers `active_states`, `terminal_states`, `handoff_state`, `in_progress_state`, `no_change_state`, and the plan-control states `release_state`, `backlog_state`, `cancel_state`, and `done_state`. If a configured state is missing, the constructor fails and the error lists the project's states. The classic Huly workflow has no review status, and a handoff state must not be terminal. Before you set `handoff_state`, add a status such as `In Review` to the project in Huly.
 
 ## Plan task types
 
@@ -82,9 +82,11 @@ A blocking relation is an entry `{_id, _class: "tracker:class:Issue"}` in the bl
 
 Plan writes store each issue's plan key in a custom attribute, `sortiePlanKey`, on `tracker:class:Issue`. A second, hidden attribute, `sortiePlanBodyDigest`, holds the SHA-256 of the Markdown body the last plan write stored, so a sync can tell whether a body changed without reading it back. The adapter creates both on its first plan write, the way Huly's settings page creates a class attribute: a `TxCreateDoc` of `core:class:Attribute` in `core:space:Model`, marked custom and read-only. Before that it reads the model, so a second adapter, or a restart, creates nothing. On v0.7.426 this needs no workspace upgrade, and the issue page shows the key as **Sortie plan key**.
 
+Three more read-only attributes hold a story's approver, written by plan sync under plan control: `sortieApprovedBy` (**Approved by**, the display name), `sortieApprovedAt` (**Approved at**, RFC 3339), and the hidden `sortieApprovedById` (the stable identity). They are created the same way on the next plan write, so a workspace that already has the first two gets only these. The adapter declares the `approval_fields` capability for them. A plan story can also be created in a named status (`tracker.backlog_state` under plan control). The status must belong to the story's task type, or the create fails before it takes an issue number.
+
 The adapter finds an issue by key with `find-all` on the attribute, matched by `$in`. The key is separate from the title, status, and labels, so a rename does not affect it: a live check stored a key, renamed the issue in Huly's UI, and found it again by key.
 
-To remove the attributes, delete them in Settings, **Classes**, **Issue**, or send a `TxRemoveDoc` for each `core:class:Attribute` document named `sortiePlanKey` or `sortiePlanBodyDigest`. Issues keep the stored values in their data, and Huly no longer shows them.
+To remove the attributes, delete them in Settings, **Classes**, **Issue**, or send a `TxRemoveDoc` for each `core:class:Attribute` document named `sortiePlanKey`, `sortiePlanBodyDigest`, `sortieApprovedBy`, `sortieApprovedById`, or `sortieApprovedAt`. Issues keep the stored values in their data, and Huly no longer shows them.
 
 ## Creating issues
 

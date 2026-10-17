@@ -55,6 +55,10 @@ var knownFieldsRegistry = map[string]SectionSchema{
 			{Name: "handoff_evidence", Type: FieldString},
 			{Name: "no_change_state", Type: FieldString},
 			{Name: "in_progress_state", Type: FieldString},
+			{Name: "release_state", Type: FieldString},
+			{Name: "backlog_state", Type: FieldString},
+			{Name: "cancel_state", Type: FieldString},
+			{Name: "done_state", Type: FieldString},
 			{Name: "api_version", Type: FieldString},
 			{Name: "comments", Type: FieldMap, Nested: []FieldDef{
 				{Name: "on_dispatch", Type: FieldBool},

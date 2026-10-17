@@ -114,8 +114,9 @@ func TestEnsurePlanAttributesCreatesOnce(t *testing.T) {
 	if err := a.ensurePlanAttributes(ctx); err != nil {
 		t.Fatalf("ensurePlanAttributes() error = %v", err)
 	}
-	if got := attributeNames(f); !slices.Equal(got, []string{attrPlanKey, attrPlanBodyDigest}) {
-		t.Fatalf("attributes = %v, want the plan key and body digest", got)
+	want := []string{attrPlanKey, attrPlanBodyDigest, attrApprovedBy, attrApprovedByID, attrApprovedAt}
+	if got := attributeNames(f); !slices.Equal(got, want) {
+		t.Fatalf("attributes = %v, want %v", got, want)
 	}
 	created := f.txsOf(classAttribute)
 	attrs := created[0]["attributes"].(map[string]any)
@@ -130,8 +131,46 @@ func TestEnsurePlanAttributesCreatesOnce(t *testing.T) {
 	if err := newTestAdapter(t, f).ensurePlanAttributes(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(f.txsOf(classAttribute)); got != 2 {
-		t.Errorf("attribute transactions = %d, want 2", got)
+	if got := len(f.txsOf(classAttribute)); got != len(want) {
+		t.Errorf("attribute transactions = %d, want %d", got, len(want))
+	}
+}
+
+// A workspace that has only the two attributes of earlier versions gets
+// the approval attributes on its next plan write, and keeps the others.
+func TestEnsurePlanAttributesAddsTheApprovalAttributes(t *testing.T) {
+	t.Parallel()
+	f := seedWorkspace()
+	for _, name := range []string{attrPlanKey, attrPlanBodyDigest} {
+		f.add(classAttribute, map[string]any{"_id": "old-" + name, "attributeOf": classIssue, "name": name})
+	}
+	if err := newTestAdapter(t, f).ensurePlanAttributes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(f.txsOf(classAttribute)); got != 3 {
+		t.Errorf("attribute transactions = %d, want 3 (the approval attributes only)", got)
+	}
+}
+
+func TestSetApproval(t *testing.T) {
+	t.Parallel()
+	f := seedWorkspace()
+	a := newTestAdapter(t, f)
+	ctx := context.Background()
+	ap := domain.PlanApproval{By: "Ana Ruiz", ByID: "https://id.example|ana", At: "2026-10-16T14:02:00Z"}
+	if err := a.SetApproval(ctx, "issue1", ap); err != nil {
+		t.Fatalf("SetApproval() error = %v", err)
+	}
+	f.docs[classIssue][0][attrPlanKey] = "billing/x"
+	got, err := a.FindIssueByPlanKey(ctx, "billing/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Approval == nil || *got.Approval != ap {
+		t.Errorf("Approval = %+v, want %+v", got.Approval, ap)
+	}
+	if err := a.SetApproval(ctx, "nope", ap); trackerKind(err) != domain.ErrTrackerNotFound {
+		t.Errorf("SetApproval(unknown) error = %v, want not found", err)
 	}
 }
 
@@ -162,7 +201,7 @@ func TestPlanKeyFinder(t *testing.T) {
 	want := domain.PlanIssue{
 		ID: "issue9", Identifier: "HULY-9", PlanKey: "billing/invoice", Kind: domain.IssueKindStory,
 		Title: "Invoice", BodyDigest: "abc", State: "Todo", URL: "http://huly.test/workbench/ws/tracker/HULY-9",
-		ParentID: "issue1", BlockedBy: []string{"issue2"},
+		ParentID: "issue1", BlockedBy: []string{"issue2"}, Labels: []string{},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("FindIssueByPlanKey() = %+v, want %+v", got, want)

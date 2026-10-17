@@ -104,6 +104,11 @@ type BlockerRef struct {
 	// rule the adapter applies to an issue's own DisplayID. Empty
 	// means Identifier is already display-ready.
 	DisplayID string
+
+	// PlanKey is the blocker's plan key, set by adapters that store plan
+	// keys. Empty for a blocker no plan created, and for every blocker
+	// of an adapter that stores none.
+	PlanKey string
 }
 
 // ParentRef identifies the parent issue for a sub-task.

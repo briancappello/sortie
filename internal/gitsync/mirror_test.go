@@ -434,3 +434,37 @@ func TestGitEnv_DropsRepositoryAndCommandLineConfig(t *testing.T) {
 		t.Errorf("gitEnv() = %q, want %q", got, want)
 	}
 }
+
+func TestIsAncestor(t *testing.T) {
+	requireGit(t)
+	isolateGit(t, "")
+	up := newUpstream(t)
+	onMain := up.commit("main.txt", "main\n")
+	up.git("checkout", "--quiet", "-b", "feature")
+	offMain := up.commit("feature.txt", "feature\n")
+	up.git("checkout", "--quiet", "main")
+
+	m, err := OpenMirror(t.TempDir(), up.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := lockMirror(t, m)
+	defer l.Unlock()
+	ctx := context.Background()
+	if err := l.FetchUpstream(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		commit string
+		want   bool
+	}{
+		{onMain, true},
+		{offMain, false},
+		{strings.Repeat("e", 40), false},
+	} {
+		got, err := l.IsAncestor(ctx, tt.commit, "main")
+		if err != nil || got != tt.want {
+			t.Errorf("IsAncestor(%s) = %v, %v, want %v", tt.commit, got, err, tt.want)
+		}
+	}
+}

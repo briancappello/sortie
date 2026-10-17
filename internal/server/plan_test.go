@@ -236,7 +236,7 @@ func TestPlanSyncRejectsUnsupportedVersionWithoutTrackerRequest(t *testing.T) {
 	code, body := planRequest(t, ts, http.MethodPost, "/api/v1/plan/sync", syncBody(testGraph(9, 1), false, ""), planTestToken)
 	msg := body["error"].(map[string]any)["message"].(string)
 	if code != http.StatusBadRequest || body["error"].(map[string]any)["code"] != "invalid_graph" ||
-		!strings.Contains(msg, "schema_version 9") || !strings.Contains(msg, "version 1") {
+		!strings.Contains(msg, "schema_version 9") || !strings.Contains(msg, "versions 1 to 2") {
 		t.Errorf("response = %d %v", code, body)
 	}
 	if tr.reads != 0 || tr.writes != 0 {
