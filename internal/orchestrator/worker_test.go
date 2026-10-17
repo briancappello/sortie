@@ -5313,7 +5313,7 @@ func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 		turnFigures []*domain.TokenUsage
 		want        *domain.TokenUsage
 	}{
-		{"verification figure is never kept", []*domain.TokenUsage{earlier, last}, last},
+		{"last working turn figure is kept", []*domain.TokenUsage{earlier, last}, last},
 		{"last turn without a figure overwrites an earlier one", []*domain.TokenUsage{last, nil}, nil},
 	}
 
@@ -5354,6 +5354,37 @@ func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("verification figure is never kept when the working session fails to start", func(t *testing.T) {
+		t.Parallel()
+
+		ec := newExitCapture()
+		adapter := &verificationFigureAdapter{
+			figure: verification,
+			mockAgentAdapter: &mockAgentAdapter{
+				startSessionFn: func(context.Context, domain.StartSessionParams) (domain.Session, error) {
+					return domain.Session{}, errors.New("start failed")
+				},
+			},
+		}
+		cfg := defaultWorkerConfig(t.TempDir())
+
+		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+			TrackerAdapter:         &mockTrackerAdapter{},
+			AgentAdapter:           adapter,
+			ConfigFunc:             func() config.ServiceConfig { return cfg },
+			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+			OnEvent:                func(_ string, _ domain.AgentEvent) {},
+			OnExit:                 ec.onExit,
+			Logger:                 discardLogger(),
+			Metrics:                &domain.NoopMetrics{},
+			ResumeUsage:            handedOver,
+		})
+
+		if got := ec.waitResult(t).ResumeUsage; !reflect.DeepEqual(got, handedOver) {
+			t.Errorf("WorkerResult.ResumeUsage = %+v, want %+v", got, handedOver)
+		}
+	})
 }
 
 func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
