@@ -79,6 +79,15 @@ func (f *fakeRPC) FindAll(_ context.Context, class string, query map[string]any,
 				delete(result, field)
 			}
 		}
+		// Like Huly, return only the projected fields when a projection
+		// is given.
+		if proj, ok := options["projection"].(map[string]any); ok && len(proj) > 0 {
+			for field := range result {
+				if _, keep := proj[field]; !keep {
+					delete(result, field)
+				}
+			}
+		}
 		raw, err := json.Marshal(result)
 		if err != nil {
 			return nil, err

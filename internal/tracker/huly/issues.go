@@ -228,7 +228,7 @@ func (a *HulyAdapter) normalize(ctx context.Context, issues []hulyIssue) ([]doma
 	blockers := map[string]hulyIssue{}
 	if ids := dedupe(blockerIDs); len(ids) > 0 {
 		raws, err := a.rpc.FindAll(ctx, classIssue, map[string]any{"_id": idIn(ids)}, map[string]any{
-			"projection": map[string]any{"_id": 1, "identifier": 1, "status": 1},
+			"projection": map[string]any{"_id": 1, "identifier": 1, "status": 1, attrPlanKey: 1},
 		})
 		if err != nil {
 			return nil, err
@@ -294,6 +294,7 @@ func (a *HulyAdapter) normalize(ctx context.Context, issues []hulyIssue) ([]doma
 				ID:         b.ID,
 				Identifier: b.Identifier,
 				State:      statuses[b.Status].Name,
+				PlanKey:    b.PlanKey,
 			})
 		}
 		out = append(out, issue)
