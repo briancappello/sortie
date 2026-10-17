@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": {
       "description": "Version of this format. Readers refuse versions they do not support. Version 2 adds the optional story fields release, review, approved_by, and approved_at.",
-      "enum": [1, 2]
+      "const": 2
     },
     "source_digest": {
       "description": "sha256 over the plan file and every breakdown file the graph was built from.",

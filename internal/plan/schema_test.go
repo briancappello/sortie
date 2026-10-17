@@ -22,7 +22,7 @@ func TestPublishedSchemaMatchesTheDecoder(t *testing.T) {
 		Required   []string `json:"required"`
 		Properties struct {
 			SchemaVersion struct {
-				Enum []int `json:"enum"`
+				Const int `json:"const"`
 			} `json:"schema_version"`
 		} `json:"properties"`
 		Defs struct {
@@ -41,12 +41,10 @@ func TestPublishedSchemaMatchesTheDecoder(t *testing.T) {
 	if !slices.Equal(sortedCopy(schema.Defs.Node.Required), sortedCopy(requiredNode)) {
 		t.Errorf("node required = %v, decoder requires %v", schema.Defs.Node.Required, requiredNode)
 	}
-	var versions []int
-	for v := 1; v <= SupportedVersion; v++ {
-		versions = append(versions, v)
-	}
-	if !slices.Equal(schema.Properties.SchemaVersion.Enum, versions) {
-		t.Errorf("schema_version enum = %v, decoder reads %v", schema.Properties.SchemaVersion.Enum, versions)
+	// The schema describes the newest version, the one the plan validator
+	// writes. The decoder also reads every earlier one.
+	if schema.Properties.SchemaVersion.Const != SupportedVersion {
+		t.Errorf("schema_version const = %d, decoder's newest version is %d", schema.Properties.SchemaVersion.Const, SupportedVersion)
 	}
 	var fields []string
 	for f := range reflect.TypeFor[Node]().Fields() {
