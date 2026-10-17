@@ -58,8 +58,18 @@ type planGraphResponse struct {
 	Dispatched   bool                       `json:"dispatched"`
 	GeneratedAt  time.Time                  `json:"generated_at"`
 	Capabilities []registry.WriteCapability `json:"capabilities"`
-	Nodes        []planGraphNode            `json:"nodes"`
-	Edges        []planGraphEdge            `json:"edges"`
+	// PlanStates names the plan-control states, so a client can tell a
+	// story that waits from one that started. Null without plan control.
+	PlanStates *planStates     `json:"plan_states"`
+	Nodes      []planGraphNode `json:"nodes"`
+	Edges      []planGraphEdge `json:"edges"`
+}
+
+type planStates struct {
+	Release string `json:"release"`
+	Backlog string `json:"backlog"`
+	Cancel  string `json:"cancel"`
+	Done    string `json:"done"`
 }
 
 type planGraphNode struct {
@@ -309,6 +319,9 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 	byID := make(map[string]domain.PlanIssue, len(issues))
 	for _, i := range issues {
 		byID[i.ID] = i
+	}
+	if planControl {
+		resp.PlanStates = &planStates{Release: states.Release, Backlog: states.Backlog, Cancel: states.Cancel, Done: states.Done}
 	}
 	listed := make(map[string]bool, len(issues))
 	for _, i := range issues {
