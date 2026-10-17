@@ -111,7 +111,6 @@ type sessionState struct {
 	// to forkSession.
 	restoresTotals   bool
 	turnResume       *domain.TokenUsage
-	turnEstimated    bool
 	turnMessages     map[string]domain.TokenUsage
 	lastModel        string
 	apiCallStart     time.Time
@@ -173,12 +172,17 @@ func (s *sessionState) relayEffortReport(effort string, stderrLines []string) {
 // have saved spend the result does not show. An older process saves and
 // restores nothing, so each result covers only that process and adds to
 // the run.
-func (s *sessionState) settleResult(event rawEvent) {
+//
+// Only a restoring process with session persistence on reports a running
+// session total: without persistence nothing was saved to restore, and an
+// older process reports its own spend alone.
+func (s *sessionState) settleResult(event rawEvent, spend *agentcore.TurnSpend) {
 	breakdown, _ := usageFromResult(event)
 	if !s.restoresTotals {
 		s.processSpend = agentcore.AddUsage(s.processSpend, breakdown)
 		s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, s.resume.Run()))
 		s.turnResume = s.resume.Resume()
+		spend.MarkSettled()
 		return
 	}
 	if len(event.ModelUsage) == 0 || (breakdown.InputTokens == 0 && breakdown.OutputTokens == 0) {
@@ -188,7 +192,13 @@ func (s *sessionState) settleResult(event rawEvent) {
 	run, estimated := s.resume.Observe(breakdown, &own)
 	s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run))
 	s.turnResume = s.resume.Resume()
-	s.turnEstimated = estimated
+	spend.MarkSettled()
+	if s.passthrough.SessionPersistence && !s.credentialVerification {
+		spend.MarkSessionTotal()
+	}
+	if estimated {
+		spend.MarkEstimated()
+	}
 }
 
 func (s *sessionState) refreshForkLogger() {
@@ -270,7 +280,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		BuildArgs: func(turn int, prompt string) []string {
 			return buildArgs(state, turn, prompt, state.passthrough)
 		},
-		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string) (any, error) {
+		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string, spend *agentcore.TurnSpend) (any, error) {
 			now := time.Now().UTC()
 
 			event, parseErr := parseEvent(line)
@@ -312,6 +322,11 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 						state.humanInputDetail = detail
 					}
 					agentcore.EmitNotification(emit, posture.NoticeWithDetail(detail))
+				case "task_started", "task_progress", "task_notification":
+					// A sub-agent task event proves the model served this turn
+					// output; its usage figure is a context size, not spend.
+					spend.MarkModelReached()
+					agentcore.EmitNotification(emit, "")
 				default:
 					// Task and background-task bookkeeping carries no
 					// operator-readable text; a blank ping keeps stall
@@ -325,6 +340,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 					if err := json.Unmarshal(event.Message, &meta); err == nil {
 						if meta.Model != "" && meta.Model != syntheticModel {
 							state.lastModel = meta.Model
+							spend.MarkModelReached()
 						}
 						if meta.Usage != nil {
 							state.usageMeasured = true
@@ -378,7 +394,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 
 			case "result":
 				captured := event
-				state.settleResult(event)
+				state.settleResult(event, spend)
 				if len(event.ModelUsage) > 0 || event.Usage != nil {
 					state.usageMeasured = true
 				}
@@ -395,13 +411,12 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		},
 		GetUsage:     func() (domain.TokenUsage, bool) { return state.acc.Snapshot(), state.usageMeasured },
 		GetSessionID: func() string { return state.claudeSessionID },
-		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			usage := state.acc.Snapshot()
 
 			finalize := func(ev agentcore.TurnEvidence, meta agentcore.TurnMeta) (domain.TurnResult, *domain.AgentError) {
 				meta.ResumeUsage = state.turnResume
-				result, agentErr := agentcore.FinalizeTurn(emit, state.logger(), ev, meta)
-				result.SpendUnaccounted = state.turnEstimated
+				result, agentErr := agentcore.FinalizeTurn(emit, state.logger(), ev, meta, *spend)
 				if agentErr == nil {
 					state.relayEffortReport(state.passthrough.Effort, stderrLines)
 				}
@@ -494,7 +509,6 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 	// the run's usage across turns, so they are not reset here.
 	state.restoresTotals = false
 	state.turnResume = nil
-	state.turnEstimated = false
 	state.turnMessages = make(map[string]domain.TokenUsage)
 	state.lastModel = ""
 	state.apiCallStart = time.Time{}

@@ -147,11 +147,13 @@ func newTestTarget(tmpDir, absCmd string) *LaunchTarget {
 // no-op implementations. Individual tests override specific fields.
 func noopHooks() ForkPerTurnHooks {
 	return ForkPerTurnHooks{
-		BuildArgs:    func(turn int, prompt string) []string { return nil },
-		ParseLine:    func(line []byte, emit func(domain.AgentEvent), pid string) (any, error) { return nil, nil },
+		BuildArgs: func(turn int, prompt string) []string { return nil },
+		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string, _ *TurnSpend) (any, error) {
+			return nil, nil
+		},
 		GetUsage:     func() (domain.TokenUsage, bool) { return domain.TokenUsage{}, false },
 		GetSessionID: func() string { return "" },
-		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{})
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
 		},
@@ -166,12 +168,12 @@ func noopHooks() ForkPerTurnHooks {
 // ignores earlyExit entirely.
 func hooksWithEarlyExitDisposition() ForkPerTurnHooks {
 	hooks := noopHooks()
-	hooks.OnFinalize = func(emit func(domain.AgentEvent), _ any, exitCode int, _ error, _ []string, earlyExit *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+	hooks.OnFinalize = func(emit func(domain.AgentEvent), _ any, exitCode int, _ error, _ []string, earlyExit *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 		return FinalizeTurn(emit, slog.Default(), TurnEvidence{
 			ExitObserved: true,
 			ExitCode:     exitCode,
 			EarlyExit:    earlyExit,
-		}, TurnMeta{})
+		}, TurnMeta{}, TurnSpend{})
 	}
 	return hooks
 }
@@ -311,9 +313,9 @@ func runWithSessionStartCancel(t *testing.T, sess *ForkPerTurnSession) (domain.T
 // parseLineEmitSessionStartedOnce returns a ParseLine hook that emits
 // EventSessionStarted the first time it is called and does nothing on
 // every later call.
-func parseLineEmitSessionStartedOnce() func([]byte, func(domain.AgentEvent), string) (any, error) {
+func parseLineEmitSessionStartedOnce() func([]byte, func(domain.AgentEvent), string, *TurnSpend) (any, error) {
 	var started bool
-	return func(_ []byte, emit func(domain.AgentEvent), pid string) (any, error) {
+	return func(_ []byte, emit func(domain.AgentEvent), pid string, _ *TurnSpend) (any, error) {
 		if !started {
 			started = true
 			EmitSessionStarted(emit, pid, "")
@@ -683,10 +685,10 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		type resultToken struct{}
 		hooks := noopHooks()
-		hooks.ParseLine = func(line []byte, emit func(domain.AgentEvent), pid string) (any, error) {
+		hooks.ParseLine = func(line []byte, emit func(domain.AgentEvent), pid string, _ *TurnSpend) (any, error) {
 			return &resultToken{}, nil
 		}
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			if lastParsed == nil {
 				return domain.TurnResult{}, &domain.AgentError{Kind: domain.ErrTurnFailed, Message: "no result"}
 			}
@@ -714,7 +716,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		target := newTestTarget(tmpDir, script)
 
 		hooks := noopHooks()
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			EmitTurnFailed(emit, "finalize error", 0, domain.TokenUsage{})
 			return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{
 				Kind:    domain.ErrTurnFailed,
@@ -741,7 +743,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		target := newTestTarget(tmpDir, script)
 
 		hooks := noopHooks()
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			EmitTurnFailed(emit, "non-zero exit", 0, domain.TokenUsage{})
 			return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{
 				Kind:    domain.ErrPortExit,
@@ -768,7 +770,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		target := newTestTarget(tmpDir, script)
 
 		hooks := noopHooks()
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			EmitTurnFailed(emit, "no output", 0, domain.TokenUsage{})
 			return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{
 				Kind:    domain.ErrTurnFailed,
@@ -794,7 +796,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		target := newTestTarget(tmpDir, script)
 
 		hooks := noopHooks()
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			EmitTurnCompleted(emit, "implicit success", 0, domain.TokenUsage{OutputTokens: 10})
 			return domain.TurnResult{
 				ExitReason: domain.EventTurnCompleted,
@@ -830,7 +832,7 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		var gotStderrLines []string
 		hooks := noopHooks()
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			gotStderrLines = stderrLines
 			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{})
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
@@ -867,7 +869,7 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		var gotStderrLines []string
 		hooks := noopHooks()
-		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			gotStderrLines = stderrLines
 			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{})
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
@@ -1109,7 +1111,7 @@ func TestForkPerTurnSession_EarlyExit_RejectedLineIsNotAResponse(t *testing.T) {
 	script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Stdout: "not valid JSON\n"})
 	target := newTestTarget(tmpDir, script)
 	hooks := hooksWithEarlyExitDisposition()
-	hooks.ParseLine = func(line []byte, emit func(domain.AgentEvent), pid string) (any, error) {
+	hooks.ParseLine = func(line []byte, emit func(domain.AgentEvent), pid string, _ *TurnSpend) (any, error) {
 		return nil, errors.New("line is not valid JSON")
 	}
 	sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)
@@ -1287,13 +1289,13 @@ func TestForkPerTurnSession_SignalExitAfterOutputIsAPortExitWithTheWaitError(t *
 	tmpDir := t.TempDir()
 	script := agenttest.FakeRuntime(t, tmpDir, "agent", "lineThenSelfSignal", struct{}{})
 	hooks := noopHooks()
-	hooks.OnFinalize = func(emit func(domain.AgentEvent), _ any, exitCode int, waitErr error, _ []string, earlyExit *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+	hooks.OnFinalize = func(emit func(domain.AgentEvent), _ any, exitCode int, waitErr error, _ []string, earlyExit *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 		return FinalizeTurn(emit, slog.Default(), TurnEvidence{
 			ExitObserved: true,
 			ExitCode:     exitCode,
 			WaitErr:      waitErr,
 			EarlyExit:    earlyExit,
-		}, TurnMeta{})
+		}, TurnMeta{}, TurnSpend{})
 	}
 	sess := NewForkPerTurnSession(newTestTarget(tmpDir, script), hooks, slog.Default(), 0)
 

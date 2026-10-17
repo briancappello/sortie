@@ -1613,6 +1613,75 @@ func TestRunTurn_UsageMeasuredPersistsAcrossCancelledTurn(t *testing.T) {
 	}
 }
 
+func TestRunTurn_SubagentTurnWithoutResultIsFlaggedUnaccounted(t *testing.T) {
+	t.Parallel()
+
+	const wantSnapshots = 3
+
+	stream := string(loadFixture(t, "subagent_stop_no_result.jsonl"))
+	tests := []struct {
+		name         string
+		out          agenttest.Output
+		cancelOnLast bool
+	}{
+		{name: "ended by cancellation", out: agenttest.Output{Stdout: stream, Hang: true}, cancelOnLast: true},
+		{name: "ended by exit 143", out: agenttest.Output{Stdout: stream, ExitCode: 143}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			adapter, _ := NewClaudeCodeAdapter()
+			session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+				WorkspacePath: tmpDir,
+				AgentConfig:   domain.AgentConfig{Command: fakeClaude(t, tmpDir, tt.out)},
+			})
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			snapshots := 0
+			var lastSnapshot domain.TokenUsage
+			result, _ := adapter.RunTurn(ctx, session, domain.RunTurnParams{
+				Prompt: "delegate",
+				OnEvent: func(e domain.AgentEvent) {
+					if e.Type != domain.EventTokenUsage {
+						return
+					}
+					snapshots++
+					lastSnapshot = e.Usage
+					if tt.cancelOnLast && snapshots == wantSnapshots {
+						cancel()
+					}
+				},
+			})
+
+			if snapshots != wantSnapshots {
+				t.Fatalf("RunTurn(%s) token_usage events = %d, want %d", tt.name, snapshots, wantSnapshots)
+			}
+			if !result.UsageMeasured {
+				t.Errorf("RunTurn(%s).UsageMeasured = false, want true", tt.name)
+			}
+			if !result.SpendUnaccounted {
+				t.Errorf("RunTurn(%s).SpendUnaccounted = false, want true", tt.name)
+			}
+			if result.SpendCoverable {
+				t.Errorf("RunTurn(%s).SpendCoverable = true, want false", tt.name)
+			}
+			if result.Usage == (domain.TokenUsage{}) {
+				t.Errorf("RunTurn(%s).Usage is zero, want non-zero", tt.name)
+			}
+			if result.Usage != lastSnapshot {
+				t.Errorf("RunTurn(%s).Usage = %+v, want %+v (the last token_usage snapshot)", tt.name, result.Usage, lastSnapshot)
+			}
+		})
+	}
+}
+
 func TestRunTurn_PanicsOnNilOnEvent(t *testing.T) {
 	t.Parallel()
 

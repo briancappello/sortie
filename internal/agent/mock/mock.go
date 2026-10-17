@@ -336,7 +336,7 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 			Usage:         usage,
 			UsageMeasured: state.reportTokenUsage,
 		}
-		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta)
+		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta, agentcore.TurnSpend{})
 	}
 
 	if outcome == "incomplete" {
@@ -349,7 +349,7 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 			Usage:         usage,
 			UsageMeasured: state.reportTokenUsage,
 		}
-		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta)
+		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta, agentcore.TurnSpend{})
 	}
 
 	exitReason, errKind, isError := outcomeToEvent(outcome)

@@ -9907,6 +9907,72 @@ func TestRunWorkerAttempt_SelfReviewTurnResultsCountUnaccountedSpend(t *testing.
 	})
 }
 
+func TestRunWorkerAttempt_CoverRuleSettlesCoverableMarks(t *testing.T) {
+	t.Parallel()
+
+	coverable := func(session string) domain.TurnResult {
+		return domain.TurnResult{SessionID: session, SpendUnaccounted: true, SpendCoverable: true}
+	}
+	marked := func(session string) domain.TurnResult {
+		return domain.TurnResult{SessionID: session, SpendUnaccounted: true}
+	}
+	covers := func(session string) domain.TurnResult {
+		return domain.TurnResult{SessionID: session, CoversSession: true}
+	}
+
+	tests := []struct {
+		name  string
+		turns []domain.TurnResult
+		want  int
+	}{
+		{"a coverable mark clears on a later cover of its session", []domain.TurnResult{coverable("s1"), covers("s1")}, 0},
+		{"a non-coverable mark stays", []domain.TurnResult{marked("s1"), covers("s1")}, 1},
+		{"a coverable mark followed by a non-coverable one stays", []domain.TurnResult{coverable("s1"), marked("s1"), covers("s1")}, 2},
+		{"a coverable last turn stays", []domain.TurnResult{covers("s1"), coverable("s1")}, 1},
+		{"another session's cover leaves the mark counted", []domain.TurnResult{coverable("s1"), covers("s2")}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := defaultWorkerConfig(t.TempDir())
+			cfg.Agent.MaxTurns = len(tt.turns)
+			var next atomic.Int64
+			ec := newExitCapture()
+			deps := WorkerDeps{
+				TrackerAdapter: &mockTrackerAdapter{},
+				AgentAdapter: &mockAgentAdapter{
+					runTurnFn: func(_ context.Context, _ domain.Session, _ domain.RunTurnParams) (domain.TurnResult, error) {
+						result := tt.turns[next.Add(1)-1]
+						result.ExitReason = domain.EventTurnCompleted
+						return result, nil
+					},
+				},
+				ConfigFunc:             func() config.ServiceConfig { return cfg },
+				PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+				OnEvent:                func(_ string, _ domain.AgentEvent) {},
+				OnExit:                 ec.onExit,
+				Logger:                 discardLogger(),
+				WorkflowPath:           "/fake/WORKFLOW.md",
+			}
+
+			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
+
+			result := ec.waitResult(t)
+			if result.ExitKind != WorkerExitNormal {
+				t.Fatalf("ExitKind = %q, want %q (error: %v)", result.ExitKind, WorkerExitNormal, result.Error)
+			}
+			if got := next.Load(); got != int64(len(tt.turns)) {
+				t.Fatalf("RunTurn calls = %d, want %d", got, len(tt.turns))
+			}
+			if result.UnaccountedTurns != tt.want {
+				t.Errorf("WorkerResult.UnaccountedTurns = %d, want %d", result.UnaccountedTurns, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderFirstTurnPrompt(t *testing.T) {
 	t.Parallel()
 

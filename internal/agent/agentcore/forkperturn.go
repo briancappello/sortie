@@ -39,6 +39,10 @@ type ForkPerTurnHooks struct {
 	// emit EventSessionStarted from within ParseLine (e.g. Claude Code
 	// on the "system/init" event) use this to populate AgentPID.
 	//
+	// spend is the turn's spend evidence, one per RunTurn call and shared
+	// with OnFinalize. ParseLine marks on it what the line proves and
+	// MUST NOT retain the pointer past the turn.
+	//
 	// When parsing fails, ParseLine returns a non-nil err. The skeleton
 	// then calls [EmitMalformed] and continues to the next line. The
 	// returned result is ignored on error.
@@ -53,7 +57,7 @@ type ForkPerTurnHooks struct {
 	//
 	// ParseLine is called on a single goroutine and is not required to
 	// be concurrency-safe.
-	ParseLine func(line []byte, emit func(domain.AgentEvent), pid string) (result any, err error)
+	ParseLine func(line []byte, emit func(domain.AgentEvent), pid string, spend *TurnSpend) (result any, err error)
 
 	// GetUsage returns the session's run-cumulative token usage snapshot
 	// together with the session's measurement verdict. usage is the
@@ -96,12 +100,14 @@ type ForkPerTurnHooks struct {
 	// drain that hit its bound reports the abandonment marker instead.
 	// earlyExit is non-nil exactly when the turn's process exited on its
 	// own and no readable line reached standard output; the adapter MUST copy it onto [TurnEvidence.EarlyExit] in
-	// the evidence it finalizes.
+	// the evidence it finalizes. spend is the turn's spend evidence that
+	// ParseLine marked on; the adapter completes it and passes *spend to
+	// [FinalizeTurn] or [TurnEndUsage.Finalize].
 	//
 	// The skeleton calls [procutil.EmitWarnLines] automatically when
 	// OnFinalize returns a non-nil *[domain.AgentError]. The adapter MUST
 	// NOT call [procutil.EmitWarnLines] inside OnFinalize.
-	OnFinalize func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError) (domain.TurnResult, *domain.AgentError)
+	OnFinalize func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *TurnSpend) (domain.TurnResult, *domain.AgentError)
 
 	// EmitSessionStartID, when non-nil, causes the skeleton to call
 	// [EmitSessionStarted] immediately after cmd.Start() succeeds and
@@ -236,6 +242,15 @@ func (s *ForkPerTurnSession) RunTurn(
 		panic("agentcore: ForkPerTurnSession.RunTurn: emit must be non-nil")
 	}
 
+	var spend TurnSpend
+
+	// A result the skeleton builds is never a completed turn, so it
+	// carries the flag but is not coverable.
+	unfinished := func(result domain.TurnResult) domain.TurnResult {
+		spend.applyTo(&result, false)
+		return result
+	}
+
 	// ctx is read only to pick the message: whether the turn was
 	// cancelled is the launch record's verdict, not the context's.
 	cancelledTurn := func() (domain.TurnResult, error) {
@@ -247,12 +262,12 @@ func (s *ForkPerTurnSession) RunTurn(
 		} else {
 			EmitTurnCancelled(emit, "turn cancelled", usage)
 		}
-		return domain.TurnResult{
+		return unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			ExitReason:    domain.EventTurnCancelled,
 			Usage:         usage,
 			UsageMeasured: measured,
-		}, agentErr
+		}), agentErr
 	}
 
 	cmdCtx, cancelCmd := context.WithCancel(ctx)
@@ -281,11 +296,11 @@ func (s *ForkPerTurnSession) RunTurn(
 
 	if bindErr := s.target.BindWorkspace(cmd); bindErr != nil {
 		usage, measured := s.hooks.GetUsage()
-		return domain.TurnResult{
+		return unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			Usage:         usage,
 			UsageMeasured: measured,
-		}, bindErr
+		}), bindErr
 	}
 
 	// On Windows os/exec resolves the executable before it checks the
@@ -310,11 +325,11 @@ func (s *ForkPerTurnSession) RunTurn(
 		}
 
 		usage, measured := s.hooks.GetUsage()
-		startFailed := domain.TurnResult{
+		startFailed := unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			Usage:         usage,
 			UsageMeasured: measured,
-		}
+		})
 
 		if !isStartErr {
 			return startFailed, &domain.AgentError{
@@ -370,7 +385,7 @@ func (s *ForkPerTurnSession) RunTurn(
 	var lastParsed any
 	var output OutputWatch
 	parseLine := func(line []byte) {
-		result, parseErr := s.hooks.ParseLine(line, emit, pidStr)
+		result, parseErr := s.hooks.ParseLine(line, emit, pidStr, &spend)
 		if parseErr != nil {
 			EmitMalformed(emit, line)
 			return
@@ -465,12 +480,12 @@ loop:
 		procutil.EmitWarnLines(stderrLines, s.logger)
 		usage, measured := s.hooks.GetUsage()
 		EmitTurnFailed(emit, "stdout read error: "+scanErr.Error(), 0, usage)
-		result := domain.TurnResult{
+		result := unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			ExitReason:    domain.EventTurnFailed,
 			Usage:         usage,
 			UsageMeasured: measured,
-		}
+		})
 		return result, &domain.AgentError{
 			Kind:    domain.ErrPortExit,
 			Message: "stdout scanner error",
@@ -488,12 +503,12 @@ loop:
 	if ConnectionFailedForRequest(sshFailed, lastParsed != nil) {
 		usage, measured := s.hooks.GetUsage()
 		EmitTurnFailed(emit, "ssh connection failed", 0, usage)
-		result := domain.TurnResult{
+		result := unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			ExitReason:    domain.EventTurnFailed,
 			Usage:         usage,
 			UsageMeasured: measured,
-		}
+		})
 		return result, ConnectionFailedError()
 	}
 
@@ -504,12 +519,12 @@ loop:
 			procutil.EmitWarnLines(stderrLines, s.logger)
 			usage, measured := s.hooks.GetUsage()
 			EmitTurnFailed(emit, "agent binary not found", 0, usage)
-			result := domain.TurnResult{
+			result := unfinished(domain.TurnResult{
 				SessionID:     s.hooks.GetSessionID(),
 				ExitReason:    domain.EventTurnFailed,
 				Usage:         usage,
 				UsageMeasured: measured,
-			}
+			})
 			return result, &domain.AgentError{
 				Kind:    domain.ErrAgentNotFound,
 				Message: "exit code 127",
@@ -521,7 +536,7 @@ loop:
 	// becoming a non-nil error interface on the success path. The
 	// skeleton calls EmitWarnLines when agentErr is non-nil, so
 	// OnFinalize must not call it.
-	result, agentErr := s.hooks.OnFinalize(emit, lastParsed, exitCode, waitErr, stderrLines, earlyExit)
+	result, agentErr := s.hooks.OnFinalize(emit, lastParsed, exitCode, waitErr, stderrLines, earlyExit, &spend)
 	if agentErr != nil {
 		procutil.EmitWarnLines(stderrLines, s.logger)
 		return result, agentErr

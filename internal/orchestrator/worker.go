@@ -333,7 +333,7 @@ type WorkerDeps struct {
 	OnTurnStarted func(issueID string, turnsStarted int)
 
 	// OnUnaccountedTurns reports the run's cumulative count of turns that
-	// spent tokens no figure was proven to cover, each time a turn raises it.
+	// spent tokens no figure was proven to cover, each time a turn changes it.
 	// Called from the worker goroutine; must be concurrency-safe. Nil
 	// disables it.
 	OnUnaccountedTurns func(issueID string, unaccountedTurns int)
@@ -636,9 +636,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// localRequestCount mirror the last relayed token_usage event's model
 	// and count. This mirror never touches orchestrator state.
 	// localUnaccounted is summed, not latched: each turn carries its own
-	// spend-unaccounted verdict.
+	// spend-unaccounted verdict. localCoverable counts the trailing run of
+	// coverable marks within one session, which a later session total of
+	// that session clears.
 	localMeasured := true
 	localUnaccounted := 0
+	localCoverable := 0
+	previousSessionID := ""
 	discardWarned := false
 	var (
 		localUsage        domain.TokenUsage
@@ -686,11 +690,27 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	}
 
 	foldTurnResult := func(result domain.TurnResult) (carriesMeasurement bool) {
+		if result.SessionID != previousSessionID {
+			localCoverable = 0
+		}
+		previousSessionID = result.SessionID
+		unaccountedChanged := false
 		if result.SpendUnaccounted {
 			localUnaccounted++
-			if deps.OnUnaccountedTurns != nil {
-				deps.OnUnaccountedTurns(issue.ID, localUnaccounted)
+			unaccountedChanged = true
+			if result.SpendCoverable {
+				localCoverable++
+			} else {
+				localCoverable = 0
 			}
+		}
+		if result.CoversSession && localCoverable > 0 {
+			localUnaccounted -= localCoverable
+			localCoverable = 0
+			unaccountedChanged = true
+		}
+		if unaccountedChanged && deps.OnUnaccountedTurns != nil {
+			deps.OnUnaccountedTurns(issue.ID, localUnaccounted)
 		}
 		carriesMeasurement = hasUsage(result.Usage) || result.UsageMeasured
 		if carriesMeasurement && !admitMeasurement() {

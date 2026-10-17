@@ -392,6 +392,10 @@ func DecideTurn(ev TurnEvidence) TurnDisposition {
 // returns the paired TurnResult and error. The returned *domain.AgentError
 // is nil if and only if the disposition is domain.EventTurnCompleted.
 //
+// spend is the turn's evidence for the shared spend rule: FinalizeTurn
+// sets the result's SpendUnaccounted, SpendCoverable, and CoversSession
+// from it and leaves Usage and UsageMeasured as meta carries them.
+//
 // FinalizeTurn panics when emit is nil. It substitutes slog.Default() when
 // logger is nil. It is not idempotent, because it emits; callers MUST call
 // it at most once per turn.
@@ -400,6 +404,7 @@ func FinalizeTurn(
 	logger *slog.Logger,
 	ev TurnEvidence,
 	meta TurnMeta,
+	spend TurnSpend,
 ) (domain.TurnResult, *domain.AgentError) {
 	if emit == nil {
 		panic("agentcore: FinalizeTurn: emit must be non-nil")
@@ -441,6 +446,7 @@ func FinalizeTurn(
 		ResumeUsage:   meta.ResumeUsage,
 		ExitReason:    disposition.ExitReason,
 	}
+	spend.applyTo(&result, disposition.ExitReason == domain.EventTurnCompleted)
 
 	if disposition.ErrorKind == "" {
 		return result, nil

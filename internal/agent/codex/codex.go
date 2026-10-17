@@ -746,7 +746,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 			TerminalMessage:   fmt.Sprintf("turn/start error: %s", resp.Error.Message),
 		}
 		meta := agentcore.TurnMeta{SessionID: state.threadID, UsageMeasured: state.usageMeasured, ResumeUsage: state.resume.Resume()}
-		result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
+		result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, agentcore.TurnSpend{})
 		if agentErr != nil {
 			return result, agentErr
 		}
@@ -758,6 +758,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 		logger.Warn("turn/start result unmarshal failed", slog.Any("error", err))
 	}
 	turnID := turnResult.Turn.ID
+	var spend agentcore.TurnSpend
 
 	inFlight := agentcore.NewToolTracker()
 	ctxDone := ctx.Done()
@@ -795,7 +796,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				UsageMeasured: state.usageMeasured,
 				ResumeUsage:   state.resume.Resume(),
 			}
-			result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
+			result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
 			if agentErr != nil {
 				return result, agentErr
 			}
@@ -823,7 +824,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					UsageMeasured: state.usageMeasured,
 					ResumeUsage:   state.resume.Resume(),
 				}
-				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
+				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
 				if agentErr != nil {
 					return result, agentErr
 				}
@@ -850,7 +851,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					UsageMeasured: state.usageMeasured,
 					ResumeUsage:   state.resume.Resume(),
 				}
-				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
+				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
 				if agentErr != nil {
 					return result, agentErr
 				}
@@ -901,8 +902,12 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					// restored total once under an earlier turn's id.
 					continue
 				}
+				spend.MarkModelReached()
 				last := normalizeBreakdown(p.TokenUsage.Last)
-				run, _ := state.resume.Observe(normalizeBreakdown(p.TokenUsage.Total), &last)
+				run, estimated := state.resume.Observe(normalizeBreakdown(p.TokenUsage.Total), &last)
+				if estimated {
+					spend.MarkEstimated()
+				}
 				snapshot := state.acc.SetRunCumulative(run)
 				params.OnEvent(domain.AgentEvent{
 					Type:      domain.EventTokenUsage,
@@ -918,6 +923,10 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				}
 
 				snapshot := state.acc.Snapshot()
+				if tc.Turn.Status == "completed" {
+					spend.MarkSettled()
+					spend.MarkSessionTotal()
+				}
 
 				var ev agentcore.TurnEvidence
 
@@ -957,7 +966,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					ResumeUsage:   state.resume.Resume(),
 				}
 
-				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
+				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
 				if agentErr != nil {
 					return result, agentErr
 				}
@@ -974,6 +983,9 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
 					toolName := cmp.Or(item.Command, item.Type)
 					inFlight.Begin(item.ID, toolName)
+					spend.MarkModelReached()
+				case "reasoning":
+					spend.MarkModelReached()
 				}
 				agentcore.EmitNotification(params.OnEvent, "")
 
@@ -993,11 +1005,18 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ToolError:      item.Status == "failed" || item.Status == "declined",
 					})
 				}
+				if item.Type == "agentMessage" || item.Type == "reasoning" {
+					spend.MarkModelReached()
+				}
 				if item.Type == "agentMessage" && item.Text != "" {
 					agentcore.EmitNotification(params.OnEvent, redact.Truncate(item.Text, 200))
 				}
 
-			case "item/agentMessage/delta", "item/commandExecution/outputDelta":
+			case "item/agentMessage/delta":
+				spend.MarkModelReached()
+				agentcore.EmitNotification(params.OnEvent, "")
+
+			case "item/commandExecution/outputDelta":
 				agentcore.EmitNotification(params.OnEvent, "")
 
 			case "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
@@ -1027,7 +1046,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						UsageMeasured: state.usageMeasured,
 						ResumeUsage:   state.resume.Resume(),
 					}
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
+					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
 					return result, agentErr
 				}
 
@@ -1058,7 +1077,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ResumeUsage:   state.resume.Resume(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailAnswerToQuestion)
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta)
+					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta, spend)
 					return result, agentErr
 
 				case "item/permissions/requestApproval":
@@ -1073,7 +1092,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ResumeUsage:   state.resume.Resume(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailWiderAccess)
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta)
+					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta, spend)
 					return result, agentErr
 
 				case "item/tool/requestUserInput":
@@ -1088,7 +1107,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ResumeUsage:   state.resume.Resume(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailAnswerToQuestion)
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta)
+					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta, spend)
 					return result, agentErr
 				}
 

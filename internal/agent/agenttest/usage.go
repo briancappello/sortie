@@ -308,9 +308,10 @@ func assertUsageReportingCase(t contractReporter, kind string, tc UsageReporting
 // measurement. Under a figure-reporting arrival a measured turn must
 // report positive input and output tokens and satisfy the usage
 // contract, and an unmeasured turn must flag its spend unaccounted and
-// carry no measurement. Unlike [AssertUsageReportingCase] it does not
-// require a tool result or a second usage event, which a single text
-// turn does not produce.
+// carry no measurement. A measured turn that also flags its spend
+// unaccounted is legal and passes the same figure checks. Unlike
+// [AssertUsageReportingCase] it does not require a tool result or a
+// second usage event, which a single text turn does not produce.
 func AssertLiveUsageCase(t *testing.T, kind string, tc UsageReportingCase) {
 	t.Helper()
 	assertLiveUsageCase(t, kind, tc)

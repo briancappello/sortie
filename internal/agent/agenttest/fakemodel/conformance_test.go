@@ -568,6 +568,11 @@ func TestConformancePropertyContinuation(t *testing.T) {
 			want:   []string{"resumed script entry 3: no turn exchange"},
 		},
 		{
+			name:   "measured first turn carrying the flag",
+			mutate: func(s *conformanceContinuationState) { s.turns[0].result.SpendUnaccounted = true },
+			want:   []string{"origin turn 1: Result.SpendUnaccounted is true"},
+		},
+		{
 			name: "resumed result unmeasured with spend unaccounted",
 			mutate: func(s *conformanceContinuationState) {
 				s.turns[conformanceResumedAt].result.UsageMeasured = false
@@ -825,6 +830,25 @@ func TestConformancePropertyInterruptedTurn(t *testing.T) {
 				s.run.Result.ExitReason = domain.EventTurnFailed
 				s.run.Err = &domain.AgentError{Kind: domain.ErrTurnFailed}
 			}),
+		},
+		{
+			name:   "cancellation before any output carrying the flag",
+			mutate: func(s *conformanceInterruptedState) { s.run.Result.SpendUnaccounted = true },
+			want:   []string{"SpendUnaccounted = true"},
+			also:   []string{"before"},
+		},
+		{
+			name: "cancellation after output flagged",
+			mutate: func(s *conformanceInterruptedState) {
+				s.run.Environment.Scenario = ScenarioCancellationAfterOutput
+				s.run.Result.SpendUnaccounted = true
+			},
+		},
+		{
+			name:   "cancellation after output without the flag",
+			mutate: func(s *conformanceInterruptedState) { s.run.Environment.Scenario = ScenarioCancellationAfterOutput },
+			want:   []string{"SpendUnaccounted = false"},
+			also:   []string{"after"},
 		},
 		{
 			name:   "I-1: the endpoint never held the request",

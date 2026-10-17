@@ -65,10 +65,10 @@ type activeTurn struct {
 	cancelSent    bool
 	deadlineC     <-chan time.Time
 
-	// modelReached records that this turn reached the model. A turn that reached
-	// the model and produced no figure is spend that occurred and was not
-	// measured.
-	modelReached bool
+	// spend is this turn's evidence for the shared spend rule. A turn that
+	// reached the model and produced no figure is spend that occurred and was
+	// not measured.
+	spend agentcore.TurnSpend
 
 	// drainEvidence is the disposition this turn is finalized on once its drain
 	// reports, held while the drain runs. draining distinguishes a turn waiting
@@ -619,7 +619,7 @@ func (p *pumpState) handleResponse(msg *jsonrpc.Message) {
 	evidence := stopReasonEvidence(resp.StopReason)
 	bound, _ := spendLowerBound(resp.Meta)
 	if bound > 0 {
-		turn.modelReached = true
+		turn.spend.MarkModelReached()
 	}
 
 	// A turn winding down toward a forced outcome already has a disposition
@@ -797,7 +797,7 @@ func (p *pumpState) observeModelReached(kind sessionUpdateKind) {
 	}
 	switch kind {
 	case updateAgentMessageChunk, updateAgentThoughtChunk, updateToolCall:
-		p.activeTurn.modelReached = true
+		p.activeTurn.spend.MarkModelReached()
 	}
 }
 
@@ -940,12 +940,15 @@ func (p *pumpState) finalizeTurnWithUsage(ev agentcore.TurnEvidence, observed *u
 	}
 
 	emit := p.publish(turn)
-	result, agentErr := p.state.usage.Finalize(emit, p.state.logger, ev, p.sessionID, 0, recovered)
-
 	// Unmeasured spend and a figure short of its turn are not folded into the
 	// measurement verdict, which asserts a measurement exists, not that the
 	// accounting is complete.
-	result.SpendUnaccounted = turn.modelReached && !accountsForWholeTurn(observed)
+	spend := turn.spend
+	if accountsForWholeTurn(observed) {
+		spend.MarkSettled()
+		spend.MarkSessionTotal()
+	}
+	result, agentErr := p.state.usage.Finalize(emit, p.state.logger, ev, p.sessionID, 0, recovered, spend)
 
 	select {
 	case turn.resultCh <- turnEnd{result: result, err: agentErr}:
@@ -968,7 +971,7 @@ func (p *pumpState) recoverThenFinalize(ev agentcore.TurnEvidence) {
 	if turn == nil {
 		return
 	}
-	if p.reader == nil || !turn.modelReached || turn.draining {
+	if p.reader == nil || !turn.spend.ModelReached() || turn.draining {
 		p.finalizeTurn(ev)
 		return
 	}

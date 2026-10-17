@@ -58,6 +58,8 @@ func (u *TurnEndUsage) Measured() bool {
 // and the trimmed model name, before delegating to [FinalizeTurn] for
 // the turn's terminal event.
 //
+// spend is the turn's spend evidence and is handed to [FinalizeTurn].
+//
 // Finalize panics when emit is nil. It substitutes [slog.Default] when
 // logger is nil. It is not idempotent; callers MUST call it at most once
 // per turn.
@@ -68,6 +70,7 @@ func (u *TurnEndUsage) Finalize(
 	sessionID string,
 	apiDurationMS int64,
 	recovered *RecoveredUsage,
+	spend TurnSpend,
 ) (domain.TurnResult, *domain.AgentError) {
 	if emit == nil {
 		panic("agentcore: TurnEndUsage.Finalize: emit must be non-nil")
@@ -90,5 +93,5 @@ func (u *TurnEndUsage) Finalize(
 		UsageMeasured: u.measured,
 		APIDurationMS: apiDurationMS,
 	}
-	return FinalizeTurn(emit, logger, ev, meta)
+	return FinalizeTurn(emit, logger, ev, meta, spend)
 }

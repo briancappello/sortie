@@ -109,6 +109,22 @@ type turnRuntime struct {
 	// work is the per-turn work-evidence observer for the shared
 	// turn-disposition decision.
 	work *agentcore.WorkObserver
+
+	// spend is the turn's evidence for the shared spend rule, created
+	// with the runtime.
+	spend agentcore.TurnSpend
+}
+
+// spendFor returns the turn's spend evidence given the figure its
+// recovery produced. The export spans the run window, so a figure read
+// after a finished turn settles the whole session total.
+func (r *turnRuntime) spendFor(recovered *agentcore.RecoveredUsage) agentcore.TurnSpend {
+	spend := r.spend
+	if recovered != nil && r.turnFinished {
+		spend.MarkSettled()
+		spend.MarkSessionTotal()
+	}
+	return spend
 }
 
 type waitResult struct {
@@ -277,7 +293,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 		default: // procutil.StageProcessStart, procutil.StageProcessResume
 			if startErr.Cancelled {
 				ev := agentcore.TurnEvidence{Terminal: agentcore.TerminalCancelled, TerminalMessage: "turn cancelled"}
-				return state.usage.Finalize(params.OnEvent, state.logger(), ev, state.currentSessionID(), 0, nil)
+				return state.usage.Finalize(params.OnEvent, state.logger(), ev, state.currentSessionID(), 0, nil, agentcore.TurnSpend{})
 			}
 			return domain.TurnResult{}, &domain.AgentError{
 				Kind:    domain.ErrResponseError,
@@ -379,7 +395,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 				TerminalErrorKind: domain.ErrResponseError,
 				TerminalMessage:   message,
 			}
-			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, nil)
+			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, nil, runtime.spendFor(nil))
 			return result, agentErr, true
 		}
 		if started {
@@ -407,6 +423,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 				return domain.TurnResult{}, nil, false
 			}
 			runtime.work.ObserveAssistantOutput()
+			runtime.spend.MarkModelReached()
 			agentcore.EmitNotification(emit, redact.Truncate(part.Text, 500))
 
 		case "reasoning":
@@ -415,6 +432,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 				return domain.TurnResult{}, nil, false
 			}
 			runtime.work.ObserveAssistantOutput()
+			runtime.spend.MarkModelReached()
 			agentcore.EmitNotification(emit, "")
 
 		case "tool_use":
@@ -424,6 +442,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 				return domain.TurnResult{}, nil, false
 			}
 			runtime.work.ObserveToolActivity()
+			runtime.spend.MarkModelReached()
 			emit(domain.AgentEvent{
 				Type:           domain.EventToolResult,
 				Timestamp:      now,
@@ -439,6 +458,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 				emit(domain.AgentEvent{Type: domain.EventMalformed, Timestamp: now, Message: "invalid step_finish payload"})
 				return domain.TurnResult{}, nil, false
 			}
+			runtime.spend.MarkModelReached()
 			if stepFinishEndsTurn(part.Reason) {
 				runtime.turnFinished = true
 			}
@@ -500,7 +520,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 							Cause:             readErr,
 						}
 					}
-					result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, recovered)
+					result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, recovered, runtime.spendFor(recovered))
 					if agentErr != nil {
 						return result, agentErr
 					}
@@ -553,7 +573,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 			recovered := recoverUsage(ctx, state, runWindow(state))
 			clearActive(state, runtime)
 			ev := agentcore.TurnEvidence{Terminal: agentcore.TerminalCancelled, TerminalMessage: "turn cancelled"}
-			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, recovered)
+			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, recovered, runtime.spendFor(recovered))
 			if agentErr != nil {
 				return result, agentErr
 			}
@@ -583,7 +603,7 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 				TerminalErrorKind: domain.ErrResponseTimeout,
 				TerminalMessage:   "timed out waiting for first opencode json event",
 			}
-			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, recovered)
+			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.currentSessionID(), 0, recovered, runtime.spendFor(recovered))
 			if agentErr != nil {
 				return result, agentErr
 			}
@@ -701,7 +721,7 @@ func (a *OpenCodeAdapter) finalizeExitedTurn(ctx context.Context, state *session
 		procutil.EmitWarnLines(stderrLines, state.logger())
 	}
 
-	result, agentErr := state.usage.Finalize(emit, state.logger(), ev, sessionID, 0, recovered)
+	result, agentErr := state.usage.Finalize(emit, state.logger(), ev, sessionID, 0, recovered, runtime.spendFor(recovered))
 	if agentErr != nil {
 		return result, agentErr
 	}

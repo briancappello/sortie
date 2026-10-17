@@ -184,3 +184,36 @@ func TestResumeBaseline_Observe_CounterReset(t *testing.T) {
 		t.Errorf("Observe(reading after the reset) = %+v, %v, want %+v, false", run, estimated, want)
 	}
 }
+
+func TestResumeBaseline_Observe_RederivedBaselineExactness(t *testing.T) {
+	t.Parallel()
+
+	reading := domain.TokenUsage{InputTokens: 20, OutputTokens: 5, TotalTokens: 25, CacheReadTokens: 300}
+	prior := domain.TokenUsage{InputTokens: 100, OutputTokens: 40, TotalTokens: 140, CacheReadTokens: 900}
+
+	tests := []struct {
+		name          string
+		resume        *domain.TokenUsage
+		own           *domain.TokenUsage
+		wantEstimated bool
+	}{
+		{name: "unknown baseline, own covers the reading", own: &reading, wantEstimated: false},
+		{name: "unknown baseline, no own", wantEstimated: true},
+		{name: "counter reset, own covers the reading", resume: &prior, own: &reading, wantEstimated: false},
+		{name: "counter reset, no own", resume: &prior, wantEstimated: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			b := NewResumeBaseline(tt.resume)
+
+			_, estimated := b.Observe(reading, tt.own)
+
+			if estimated != tt.wantEstimated {
+				t.Errorf("Observe(reading, %v) estimated = %v, want %v", tt.own, estimated, tt.wantEstimated)
+			}
+		})
+	}
+}

@@ -288,6 +288,17 @@ type TurnResult struct {
 	// and any partial figure is still reported in Usage.
 	SpendUnaccounted bool
 
+	// SpendCoverable reports that this turn completed with unsettled spend
+	// that a later session total of the same session would cover: the
+	// turn served model output, no figure was proven to cover it in full,
+	// and its figure rests on no estimated baseline.
+	SpendCoverable bool
+
+	// CoversSession reports that this turn's figure is the runtime's
+	// running session total, holding what every earlier completed turn of
+	// the session spent, read or not.
+	CoversSession bool
+
 	// ResumeUsage is the usage the agent runtime itself holds for the
 	// session at this turn's end, earlier runs on the session included,
 	// which a later run resuming the session receives as
