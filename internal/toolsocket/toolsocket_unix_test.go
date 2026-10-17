@@ -172,8 +172,20 @@ func TestServe_RestartedAtSamePathServesNewConnection(t *testing.T) {
 	if _, err := os.Lstat(p); err != nil {
 		t.Fatalf("stale socket file missing: %v", err)
 	}
-	if _, err := net.Dial("unix", p); err == nil {
-		t.Fatal("Dial succeeded on a stale socket, want refused")
+	// Close returns before the kernel socket is closed: that happens when
+	// the goroutine blocked in Accept drops its reference, which can lag
+	// under load. Wait for the refusal instead of expecting it at once.
+	refused := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		conn, err := net.Dial("unix", p)
+		if err != nil {
+			refused = true
+			break
+		}
+		_ = conn.Close()
+	}
+	if !refused {
+		t.Fatal("Dial still succeeds on a stale socket, want refused")
 	}
 
 	second := newRegistry(t)
