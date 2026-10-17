@@ -108,6 +108,12 @@ type RunningEntry struct {
 	// memory alone and stops working when the entry is removed.
 	SessionToken string
 
+	// BrokerURL and BrokerViewerToken are the HTTP address and viewer
+	// token the run's broker reported. Kept only in memory, and the token
+	// never leaves through the state snapshot.
+	BrokerURL         string
+	BrokerViewerToken string
+
 	// HeldSince is when the current hold began; zero when the run is not
 	// held. HoldReason and Holder describe that hold. Mutated only by the
 	// event loop.
@@ -1129,6 +1135,7 @@ type SnapshotRunningEntry struct {
 	LastAgentEvent      domain.AgentEventType     `json:"last_event"`
 	LastAgentTimestamp  time.Time                 `json:"last_event_at"`
 	LastAgentMessage    string                    `json:"last_message"`
+	BrokerURL           string                    `json:"broker_url,omitempty"`
 	StartedAt           time.Time                 `json:"started_at"`
 	AgentInputTokens    int64                     `json:"input_tokens"`
 	AgentOutputTokens   int64                     `json:"output_tokens"`
@@ -1354,6 +1361,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			LastAgentEvent:      entry.LastAgentEvent,
 			LastAgentTimestamp:  entry.LastAgentTimestamp,
 			LastAgentMessage:    entry.LastAgentMessage,
+			BrokerURL:           entry.BrokerURL,
 			StartedAt:           entry.StartedAt,
 			AgentInputTokens:    entry.AgentInputTokens,
 			AgentOutputTokens:   entry.AgentOutputTokens,

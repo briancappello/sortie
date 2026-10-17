@@ -168,6 +168,12 @@ type Params struct {
 	PullBackFn   PlanControlFunc
 	PlanCancelFn PlanControlFunc
 
+	// BrokerReportFn and BrokerReadFn keep and read the address of a
+	// running issue's broker. Called on POST and GET
+	// /api/v1/{identifier}/broker. When nil, that route answers 503.
+	BrokerReportFn BrokerReportFunc
+	BrokerReadFn   BrokerReadFunc
+
 	// PlanProjects serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
 	// GET /api/v1/plan/capabilities, and GET and PUT
 	// /api/v1/plan/projects/{key}, for the configured project and, when
@@ -206,6 +212,8 @@ type Server struct {
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
 	pullBackFn       PlanControlFunc
+	brokerReportFn   BrokerReportFunc
+	brokerReadFn     BrokerReadFunc
 	planCancelFn     PlanControlFunc
 	planProjects     *plan.Projects
 	terminalStatesFn func() []string
@@ -258,6 +266,8 @@ func New(params Params) *Server {
 		sessionTokenFn:   params.SessionTokenFn,
 		holdFn:           params.HoldFn,
 		pullBackFn:       params.PullBackFn,
+		brokerReportFn:   params.BrokerReportFn,
+		brokerReadFn:     params.BrokerReadFn,
 		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
@@ -290,6 +300,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
 	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
 	mux.HandleFunc("/api/v1/{identifier}/escalate", s.controlRoute(scopeSession, s.handleEscalate))
+	mux.HandleFunc("/api/v1/{identifier}/broker", s.routeBroker)
 
 	if params.MetricsRegistry != nil {
 		mux.Handle("GET /metrics", promhttp.InstrumentMetricHandler(

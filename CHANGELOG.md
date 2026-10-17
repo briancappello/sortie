@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- A broker serving HTTP viewers reports its address and viewer token to Sortie once its listener is up (`POST /api/v1/{identifier}/broker`, with the run's session token), retrying with backoff while the session lives. `/api/v1/state` and the per-issue detail show each run's `broker.http_url`, and `GET /api/v1/{identifier}/broker` returns the address with the token to the control token only.
+
 - Under plan control, a `no-change-needed` run cites its evidence in `.sortie/evidence.json`: a commit, confirmed only on the base branch of the host mirror, or a plan key of another story. The worker checks it on the host, off the event loop. A confirmed claim satisfies dependents (a cited story only while that story is satisfied), and an unverified one is recorded with its reason. The file is cleared before each dispatch.
 
 - Review gates under plan control: a dispatch rule can carry `gate: criteria` and `on_fail` (`escalate` or a rework rule). A rule that matches `sortie-review:criteria` must lead to a criteria rule. Auto-merge merges only a criteria story after a passing criteria run, never a `sortie-review:human` story. A failed check seeds no merge, comments with its findings, and escalates or sends the story back. A criteria story stuck on a forge-required review logs one warning.

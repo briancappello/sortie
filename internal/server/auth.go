@@ -77,7 +77,7 @@ func (s *Server) requireControl(scope controlScope, next http.HandlerFunc) http.
 			return
 		}
 		if scope != scopeSession || r.PathValue("identifier") != identifier {
-			s.rejectControl(w, r, http.StatusForbidden, "forbidden", "a session token may only hold, release, or escalate its own issue")
+			s.rejectControl(w, r, http.StatusForbidden, "forbidden", "a session token may only hold, release, or escalate its own issue, or report its broker")
 			return
 		}
 		next(w, r)

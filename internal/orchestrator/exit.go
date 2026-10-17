@@ -217,6 +217,9 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	}
 	delete(state.Running, workerResult.IssueID)
 	state.SessionTokens.revoke(entry.SessionToken)
+	if entry.BrokerViewerToken != "" {
+		redact.Remove(entry.BrokerViewerToken)
+	}
 	endHoldRecorded(entry, time.Now().UTC(), metrics)
 	if entry.CancelFunc != nil {
 		entry.CancelFunc()
