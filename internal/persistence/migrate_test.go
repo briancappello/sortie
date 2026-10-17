@@ -243,6 +243,10 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"first_after_hop", "INTEGER", true, 0},
 				{"dispatch_id", "TEXT", false, 0},
 				{"agent_blocked", "INTEGER", true, 0},
+				{"resume_input_tokens", "INTEGER", false, 0},
+				{"resume_output_tokens", "INTEGER", false, 0},
+				{"resume_cache_read_tokens", "INTEGER", false, 0},
+				{"resume_cache_write_tokens", "INTEGER", false, 0},
 			},
 		},
 		{

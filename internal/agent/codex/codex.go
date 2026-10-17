@@ -122,13 +122,9 @@ type sessionState struct {
 	// once in StartSession and never reset between turns.
 	acc *agentcore.RunUsage
 
-	// baseline is the thread-cumulative total to subtract from a
-	// matching thread/tokenUsage/updated notification's total to
-	// recover this run's own contribution. Per run; never reset
-	// between turns. Resolved on the first notification whose turnId
-	// matches the run's current turn.
-	baseline    domain.TokenUsage
-	baselineSet bool
+	// resume separates this run's usage from the thread-cumulative total
+	// the app-server reports. Never reset between turns.
+	resume agentcore.ResumeBaseline
 
 	// usageMeasured reports whether at least one
 	// thread/tokenUsage/updated notification carrying a token-usage
@@ -596,6 +592,7 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 	}
 
 	var threadID, model string
+	resumeUsage := &domain.TokenUsage{}
 	if params.ResumeSessionID != "" {
 		resumedModel, resumeErr := resumeThread(ctx, state, params.ResumeSessionID)
 		if resumeErr != nil {
@@ -625,6 +622,7 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 		} else {
 			threadID = params.ResumeSessionID
 			model = resumedModel
+			resumeUsage = params.ResumeUsage
 		}
 	} else {
 		tid, startedModel, startErr := startThread(ctx, state, pt, logger)
@@ -650,6 +648,7 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 
 	state.threadID = threadID
 	state.model = model
+	state.resume = *agentcore.NewResumeBaseline(resumeUsage)
 	drainHandshakeMessages(state, logger)
 
 	return domain.Session{
@@ -746,7 +745,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 			TerminalErrorKind: domain.ErrTurnFailed,
 			TerminalMessage:   fmt.Sprintf("turn/start error: %s", resp.Error.Message),
 		}
-		meta := agentcore.TurnMeta{SessionID: state.threadID, UsageMeasured: state.usageMeasured}
+		meta := agentcore.TurnMeta{SessionID: state.threadID, UsageMeasured: state.usageMeasured, ResumeUsage: state.resume.Resume()}
 		result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
 		if agentErr != nil {
 			return result, agentErr
@@ -794,6 +793,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				SessionID:     state.threadID,
 				Usage:         state.acc.Snapshot(),
 				UsageMeasured: state.usageMeasured,
+				ResumeUsage:   state.resume.Resume(),
 			}
 			result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
 			if agentErr != nil {
@@ -821,6 +821,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					SessionID:     state.threadID,
 					Usage:         state.acc.Snapshot(),
 					UsageMeasured: state.usageMeasured,
+					ResumeUsage:   state.resume.Resume(),
 				}
 				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
 				if agentErr != nil {
@@ -847,6 +848,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					SessionID:     state.threadID,
 					Usage:         state.acc.Snapshot(),
 					UsageMeasured: state.usageMeasured,
+					ResumeUsage:   state.resume.Resume(),
 				}
 				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
 				if agentErr != nil {
@@ -895,14 +897,13 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					turnID = p.TurnID
 				}
 				if p.TurnID != turnID {
-					state.baseline = agentcore.MaxUsage(state.baseline, normalizeBreakdown(p.TokenUsage.Total))
+					// After thread/resume the app-server replays the
+					// restored total once under an earlier turn's id.
 					continue
 				}
-				if !state.baselineSet {
-					state.baseline = agentcore.SubtractUsage(normalizeBreakdown(p.TokenUsage.Total), normalizeBreakdown(p.TokenUsage.Last))
-					state.baselineSet = true
-				}
-				snapshot := state.acc.SetRunCumulative(agentcore.SubtractUsage(normalizeBreakdown(p.TokenUsage.Total), state.baseline))
+				last := normalizeBreakdown(p.TokenUsage.Last)
+				run, _ := state.resume.Observe(normalizeBreakdown(p.TokenUsage.Total), &last)
+				snapshot := state.acc.SetRunCumulative(run)
 				params.OnEvent(domain.AgentEvent{
 					Type:      domain.EventTokenUsage,
 					Timestamp: now,
@@ -953,6 +954,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					SessionID:     state.threadID,
 					Usage:         snapshot,
 					UsageMeasured: state.usageMeasured,
+					ResumeUsage:   state.resume.Resume(),
 				}
 
 				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
@@ -1023,6 +1025,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						SessionID:     state.threadID,
 						Usage:         state.acc.Snapshot(),
 						UsageMeasured: state.usageMeasured,
+						ResumeUsage:   state.resume.Resume(),
 					}
 					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta)
 					return result, agentErr
@@ -1052,6 +1055,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						SessionID:     state.threadID,
 						Usage:         state.acc.Snapshot(),
 						UsageMeasured: state.usageMeasured,
+						ResumeUsage:   state.resume.Resume(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailAnswerToQuestion)
 					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta)
@@ -1066,6 +1070,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						SessionID:     state.threadID,
 						Usage:         state.acc.Snapshot(),
 						UsageMeasured: state.usageMeasured,
+						ResumeUsage:   state.resume.Resume(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailWiderAccess)
 					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta)
@@ -1080,6 +1085,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						SessionID:     state.threadID,
 						Usage:         state.acc.Snapshot(),
 						UsageMeasured: state.usageMeasured,
+						ResumeUsage:   state.resume.Resume(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailAnswerToQuestion)
 					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta)

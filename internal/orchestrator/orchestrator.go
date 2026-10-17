@@ -49,6 +49,7 @@ type OrchestratorStore interface {
 	QueryBudgetExhaustedIssues(ctx context.Context, candidateIDs []string, maxSessions int) (map[string]int, error)
 	QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string) (map[string]persistence.IssueTokenUsage, error)
 	LatestAgentRuns(ctx context.Context, issueIDs []string) (map[string]persistence.RunHistory, error)
+	LatestResumeUsage(ctx context.Context, issueID, sessionID string) (*persistence.ResumeUsage, error)
 	UpsertReactionFingerprint(ctx context.Context, issueID, kind, fingerprint string) error
 	GetReactionFingerprint(ctx context.Context, issueID, kind string) (fingerprint string, dispatched bool, err error)
 	MarkReactionDispatched(ctx context.Context, issueID, kind string) error
@@ -1302,6 +1303,15 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 
 		logger := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
 
+		var resumeUsage *domain.TokenUsage
+		if resumeSessionID != "" {
+			stored, err := o.store.LatestResumeUsage(ctx, issue.ID, resumeSessionID)
+			if err != nil {
+				logger.Warn("resume usage lookup failed", slog.Any("error", err))
+			}
+			resumeUsage = domainResumeUsage(stored)
+		}
+
 		deps := WorkerDeps{
 			TrackerAdapter:         o.trackerAdapter,
 			Router:                 o.router,
@@ -1356,6 +1366,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 				}
 			},
 			ResumeSessionID:         resumeSessionID,
+			ResumeUsage:             resumeUsage,
 			DispatchID:              dispatchIDFromContext(ctx),
 			Logger:                  logger,
 			ToolRegistry:            o.toolRegistry,
@@ -1380,6 +1391,19 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 		}
 
 		RunWorkerAttempt(ctx, issue, attempt, deps)
+	}
+}
+
+func domainResumeUsage(stored *persistence.ResumeUsage) *domain.TokenUsage {
+	if stored == nil {
+		return nil
+	}
+	return &domain.TokenUsage{
+		InputTokens:      stored.InputTokens,
+		OutputTokens:     stored.OutputTokens,
+		TotalTokens:      stored.InputTokens + stored.OutputTokens,
+		CacheReadTokens:  stored.CacheReadTokens,
+		CacheWriteTokens: stored.CacheWriteTokens,
 	}
 }
 

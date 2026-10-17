@@ -126,6 +126,12 @@ type WorkerResult struct {
 	// continuation retries.
 	SessionID string
 
+	// ResumeUsage is the ResumeUsage of the last TurnResult the working
+	// session returned, nil when that turn reported none. When the working
+	// session returned no TurnResult it is WorkerDeps.ResumeUsage. A later
+	// run resuming SessionID starts from it.
+	ResumeUsage *domain.TokenUsage
+
 	// WorkspacePath is the workspace directory for this attempt, empty if
 	// preparation failed.
 	WorkspacePath string
@@ -335,6 +341,11 @@ type WorkerDeps struct {
 	// ResumeSessionID is the previous attempt's session ID, non-empty on
 	// continuation retries so the adapter can resume the conversation.
 	ResumeSessionID string
+
+	// ResumeUsage is the figure the previous run recorded for
+	// ResumeSessionID's session, passed to StartSession unchanged. Nil
+	// when ResumeSessionID is empty or that run recorded none.
+	ResumeUsage *domain.TokenUsage
 
 	// DispatchID fences session identity to this worker attempt.
 	DispatchID string
@@ -696,6 +707,11 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// reported guards against double-reporting from the panic recovery.
 	reported := false
 
+	// Every working TurnResult replaces resumeUsage, nil included: a turn
+	// that ended without a reading must not hand its predecessor's figure
+	// on, because the runtime may have saved calls that figure omits.
+	resumeUsage := deps.ResumeUsage
+
 	var acceptedSessionID string
 
 	// cancelledAtEnding is read right after the call that last ended a run attempt.
@@ -704,6 +720,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	report := func(result WorkerResult) {
 		result.StoppedByTokenCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errTokenCeilingStop)
 		result.SessionID = acceptedSessionID
+		result.ResumeUsage = resumeUsage
 		reported = true
 		deps.OnExit(issue.ID, result)
 	}
@@ -1015,6 +1032,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		WorkspacePath:            wsResult.Path,
 		AgentConfig:              toDomainAgentConfig(cfg, agentKind, remote),
 		ResumeSessionID:          deps.ResumeSessionID,
+		ResumeUsage:              deps.ResumeUsage,
 		SSHHost:                  deps.SSHHost,
 		SSHStrictHostKeyChecking: deps.SSHStrictHostKeyChecking,
 		SSHEnvNames:              sshEnvNames,
@@ -1184,6 +1202,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// through an event; on the last turn no later write would carry it, so
 	// the file would keep denying a measurement that exists.
 	handleTurnResult := func(result domain.TurnResult) {
+		resumeUsage = result.ResumeUsage
 		result.Usage = applyUsageOffset(result.Usage, verificationSpend)
 		if foldTurnResult(result) {
 			if err := publishWorkerState(turnNumber); err != nil {

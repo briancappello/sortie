@@ -650,10 +650,11 @@ func runContinuation(t *testing.T, b Binding) {
 		t.Fatalf("construct %q adapter error = %v", b.Kind, err)
 	}
 
-	_, originEvents := c.drive(t, roleOrigin, "", turns[:controlEntry])
+	_, originEvents := c.drive(t, roleOrigin, "", nil, turns[:controlEntry])
 	originID := turns[continuedEntry].result.SessionID
-	_, controlEvents := c.drive(t, roleControl, "", turns[controlEntry:resumedEntry])
-	resumed, resumedEvents := c.drive(t, roleResumed, originID, turns[resumedEntry:])
+	_, controlEvents := c.drive(t, roleControl, "", nil, turns[controlEntry:resumedEntry])
+	resumedFrom := len(c.server.Exchanges())
+	resumed, resumedEvents := c.drive(t, roleResumed, originID, turns[continuedEntry].result.ResumeUsage, turns[resumedEntry:])
 
 	run := Run{
 		Session:   resumed,
@@ -674,12 +675,22 @@ func runContinuation(t *testing.T, b Binding) {
 			Events:      turns[resumedEntry].events,
 			Result:      turns[resumedEntry].result,
 		})
+		resumedResult := turns[resumedEntry].result
+		if !resumedResult.UsageMeasured {
+			return
+		}
+		if want := expectedUsage(run.Exchanges[resumedFrom:]); resumedResult.Usage != want {
+			t.Errorf("resumed turn Result.Usage = %+v, want %+v, the sum of every answer served to the resumed session", resumedResult.Usage, want)
+		}
+		if turns[continuedEntry].result.ResumeUsage != nil && resumedResult.SpendUnaccounted {
+			t.Errorf("resumed turn Result.SpendUnaccounted = true, want false when the resume usage was handed over")
+		}
 	})
 }
 
 // drive runs turns in order on one session, recording each turn's result and
 // events in turns, and returns the session with every event it delivered.
-func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, turns []continuedTurn) (domain.Session, []domain.AgentEvent) {
+func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, resumeUsage *domain.TokenUsage, turns []continuedTurn) (domain.Session, []domain.AgentEvent) {
 	t.Helper()
 
 	events := &eventCollector{}
@@ -704,6 +715,7 @@ func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, tur
 		AgentConfig:     launch.Config,
 		Settings:        c.binding.Passthrough,
 		ResumeSessionID: resumeID,
+		ResumeUsage:     resumeUsage,
 	})
 	if err != nil {
 		t.Fatalf("%s session: StartSession() error = %v%s", role, err, exchangeLines(c.server.Exchanges()))

@@ -1480,38 +1480,72 @@ func TestRunTurn_SessionStateRecovery_FirstRecord(t *testing.T) {
 	agenttest.AssertUsageContract(t, events)
 }
 
-// TestRunTurn_SessionStateRecovery_BaselineDifference repeats the
-// first-record scenario with both session_shutdown.jsonl records
-// already present, verifying the reported snapshot is the difference
-// between the two records rather than the second record's raw total,
-// and that the model is still recovered from the growth between them.
-func TestRunTurn_SessionStateRecovery_BaselineDifference(t *testing.T) {
+func TestRunTurn_SessionStateRecovery_ResumeHandOver(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token-for-unit-test")
-	copilotHome := t.TempDir()
-	t.Setenv("COPILOT_HOME", copilotHome)
 
 	const sessionID = "aa778ea0-6eab-4ce9-b87e-11d6d33dab4f"
-	writeJournal(t, journalPath(copilotHome, sessionID), loadTestFixture(t, "session_shutdown.jsonl"))
+	records := strings.Split(strings.TrimRight(loadTestFixture(t, "session_shutdown.jsonl"), "\n"), "\n")
+	journal := func(n int) string { return strings.Join(records[:n], "\n") + "\n" }
+	stream := loadTestFixture(t, "tool_use_no_output_tokens.jsonl")
 
-	adapter, session := newTestSession(t, t.TempDir())
-	state := session.Internal.(*sessionState)
-	state.target.Command = fakeCopilotBinaryWithOutput(t, loadTestFixture(t, "tool_use_no_output_tokens.jsonl"), 0)
+	record1 := domain.TokenUsage{InputTokens: 193011, OutputTokens: 596, TotalTokens: 193607, CacheReadTokens: 154053, CacheWriteTokens: 38948}
+	record2 := domain.TokenUsage{InputTokens: 271924, OutputTokens: 696, TotalTokens: 272620, CacheReadTokens: 232332, CacheWriteTokens: 39578}
+	record2LessRecord1 := domain.TokenUsage{InputTokens: 78913, OutputTokens: 100, TotalTokens: 79013, CacheReadTokens: 78279, CacheWriteTokens: 630}
 
-	var events []domain.AgentEvent
-	result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
-		Prompt:  "read main.go",
-		OnEvent: func(e domain.AgentEvent) { events = append(events, e) },
-	})
-	if err != nil {
-		t.Fatalf("RunTurn() error = %v", err)
+	tests := []struct {
+		name                          string
+		resume                        *domain.TokenUsage
+		recordsAtStart, recordsAtTurn int
+		wantUsage                     domain.TokenUsage
+		wantMeasured                  bool
+	}{
+		{"resume usage r1 and r2 appended reports r2 less r1", &record1, 1, 2, record2LessRecord1, true},
+		{"resume usage r2 and nothing appended reports no figure", &record2, 2, 2, domain.TokenUsage{}, false},
+		{"no resume usage reads r1 at start and reports r2 less r1", nil, 1, 2, record2LessRecord1, true},
 	}
 
-	wantUsage := domain.TokenUsage{InputTokens: 78913, OutputTokens: 100, TotalTokens: 79013, CacheReadTokens: 78279, CacheWriteTokens: 630}
-	if result.Usage != wantUsage {
-		t.Errorf("TurnResult.Usage = %+v, want %+v (difference between the two records)", result.Usage, wantUsage)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			copilotHome := t.TempDir()
+			t.Setenv("COPILOT_HOME", copilotHome)
+			path := journalPath(copilotHome, sessionID)
+			writeJournal(t, path, journal(tt.recordsAtStart))
 
-	assertSingleUsageReportBeforeTerminal(t, events, wantUsage, "claude-sonnet-5", 4200)
+			adapter, err := NewCopilotAdapter()
+			if err != nil {
+				t.Fatalf("NewCopilotAdapter: %v", err)
+			}
+			session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+				WorkspacePath:   t.TempDir(),
+				AgentConfig:     domain.AgentConfig{Command: fakeCopilotBinaryWithOutput(t, stream, 0)},
+				ResumeSessionID: sessionID,
+				ResumeUsage:     tt.resume,
+			})
+			if err != nil {
+				t.Fatalf("StartSession: %v", err)
+			}
+			writeJournal(t, path, journal(tt.recordsAtTurn))
+
+			var events []domain.AgentEvent
+			result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
+				Prompt:  "read main.go",
+				OnEvent: func(e domain.AgentEvent) { events = append(events, e) },
+			})
+			if err != nil {
+				t.Fatalf("RunTurn() error = %v", err)
+			}
+
+			if result.Usage != tt.wantUsage || result.UsageMeasured != tt.wantMeasured {
+				t.Errorf("RunTurn() = usage %+v, measured %v, want %+v, %v", result.Usage, result.UsageMeasured, tt.wantUsage, tt.wantMeasured)
+			}
+			if result.ResumeUsage == nil || *result.ResumeUsage != record2 || result.SpendUnaccounted {
+				t.Errorf("RunTurn() = resume usage %+v, spend unaccounted %v, want %+v, false", result.ResumeUsage, result.SpendUnaccounted, record2)
+			}
+			if tt.wantMeasured {
+				assertSingleUsageReportBeforeTerminal(t, events, tt.wantUsage, "claude-sonnet-5", 4200)
+			}
+		})
+	}
 }
 
 // assertSingleUsageReportBeforeTerminal fails t unless events carries
@@ -1727,12 +1761,11 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 		state := &sessionState{
-			target:            agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
-			copilotSessionID:  "no-file-session",
-			runCreatedSession: true,
+			target:           agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
+			copilotSessionID: "no-file-session",
 		}
 
-		got := state.recoverUsage(logger)
+		got, _, _ := state.recoverUsage(logger)
 		if got != nil {
 			t.Errorf("recoverUsage() = %+v, want nil (events file absent)", got)
 		}
@@ -1747,12 +1780,11 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 		state := &sessionState{
-			target:            agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
-			copilotSessionID:  "abc/../def",
-			runCreatedSession: true,
+			target:           agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
+			copilotSessionID: "abc/../def",
 		}
 
-		got := state.recoverUsage(logger)
+		got, _, _ := state.recoverUsage(logger)
 		if got != nil {
 			t.Errorf("recoverUsage() = %+v, want nil (invalid session id)", got)
 		}
@@ -1760,7 +1792,6 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 			t.Errorf("WARN log count = %d, want 1 (path-separator rejection)", warnCount)
 		}
 
-		// A second finalize for the same run must not repeat the Warn.
 		state.recoverUsage(logger)
 		if warnCount := strings.Count(buf.String(), "level=WARN"); warnCount != 1 {
 			t.Errorf("WARN log count after second call = %d, want 1 (not repeated)", warnCount)
@@ -1778,11 +1809,10 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 				RemoteCommand: "copilot",
 				SSHHost:       "dev-host.example.com",
 			},
-			copilotSessionID:  "valid-session-id",
-			runCreatedSession: true,
+			copilotSessionID: "valid-session-id",
 		}
 
-		got := state.recoverUsage(logger)
+		got, _, _ := state.recoverUsage(logger)
 		if got != nil {
 			t.Errorf("recoverUsage() = %+v, want nil (remote launch)", got)
 		}
@@ -1792,38 +1822,24 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 	})
 }
 
-// TestRunTurn_SessionStateRecovery_FirstReadAttempt drives
-// sessionState.recoverUsage directly across two simulated finalizes,
-// the first of which misses its read (the events file does not exist
-// yet), and asserts the two ways session-state recovery resolves the
-// resulting baseline ambiguity: a run that created the session takes a
-// zero baseline on its later successful read, while a run that resumed
-// a session marks recovery unavailable for the rest of the run.
 func TestRunTurn_SessionStateRecovery_FirstReadAttempt(t *testing.T) {
-	t.Run("run created the session takes a zero baseline", func(t *testing.T) {
+	t.Run("zero baseline counts the first record whole after a missed read", func(t *testing.T) {
 		root := t.TempDir()
 		t.Setenv("COPILOT_HOME", root)
 		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 		state := &sessionState{
-			target:            agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
-			copilotSessionID:  "created-session",
-			runCreatedSession: true,
+			target:           agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
+			copilotSessionID: "created-session",
+			resume:           *agentcore.NewResumeBaseline(&domain.TokenUsage{}),
 		}
 
-		// First finalize: the events file does not exist yet, so no read
-		// attempt succeeds.
-		first := state.recoverUsage(logger)
-		if first != nil {
+		if first, _, _ := state.recoverUsage(logger); first != nil {
 			t.Fatalf("first recoverUsage() = %+v, want nil (no journal yet)", first)
 		}
 
-		// Second finalize: the runtime has since written both records.
-		// Because this run created the session, the baseline is zero
-		// rather than the first record's totals, so the run's own
-		// earlier spend is not subtracted a second time.
 		writeJournal(t, journalPath(root, "created-session"), loadTestFixture(t, "session_shutdown.jsonl"))
-		second := state.recoverUsage(logger)
+		second, _, _ := state.recoverUsage(logger)
 		if second == nil {
 			t.Fatal("second recoverUsage() = nil, want a recovered figure")
 		}
@@ -1832,45 +1848,6 @@ func TestRunTurn_SessionStateRecovery_FirstReadAttempt(t *testing.T) {
 		}
 		if second.Model != "claude-sonnet-5" {
 			t.Errorf("second recoverUsage().Model = %q, want %q", second.Model, "claude-sonnet-5")
-		}
-	})
-
-	t.Run("run resumed a session marks recovery unavailable", func(t *testing.T) {
-		root := t.TempDir()
-		t.Setenv("COPILOT_HOME", root)
-		var buf bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-		state := &sessionState{
-			target:            agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
-			copilotSessionID:  "resumed-session",
-			runCreatedSession: false,
-		}
-
-		first := state.recoverUsage(logger)
-		if first != nil {
-			t.Fatalf("first recoverUsage() = %+v, want nil (no journal yet)", first)
-		}
-
-		writeJournal(t, journalPath(root, "resumed-session"), loadTestFixture(t, "session_shutdown.jsonl"))
-		second := state.recoverUsage(logger)
-		if !state.recoveryUnavailable {
-			t.Error("recoveryUnavailable = false, want true")
-		}
-		if second != nil {
-			t.Errorf("second recoverUsage() = %+v, want nil (boundary record unavailable)", second)
-		}
-		if warnCount := strings.Count(buf.String(), "level=WARN"); warnCount != 1 {
-			t.Errorf("WARN log count = %d, want 1", warnCount)
-		}
-
-		// A third finalize must not attempt another read.
-		third := state.recoverUsage(logger)
-		if third != nil {
-			t.Errorf("third recoverUsage() = %+v, want nil", third)
-		}
-		if warnCount := strings.Count(buf.String(), "level=WARN"); warnCount != 1 {
-			t.Errorf("WARN log count after third call = %d, want 1 (no further read attempted)", warnCount)
 		}
 	})
 }

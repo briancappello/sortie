@@ -151,6 +151,9 @@ type stubStore struct {
 	latestRunsErr   error
 	latestRunsCalls [][]string
 
+	resumeUsage    *persistence.ResumeUsage
+	resumeUsageErr error
+
 	dispatchMarked    []string
 	clearedOutcomeIDs []string
 	markDispatchedErr error
@@ -2134,9 +2137,11 @@ func TestMakeWorkerFn(t *testing.T) {
 		tmpl := mustParseTemplate(t, "do {{ .issue.identifier }}")
 
 		var capturedResumeID string
+		var capturedResumeUsage *domain.TokenUsage
 		agent := &mockAgentAdapter{
 			startSessionFn: func(_ context.Context, params domain.StartSessionParams) (domain.Session, error) {
 				capturedResumeID = params.ResumeSessionID
+				capturedResumeUsage = params.ResumeUsage
 				return domain.Session{ID: "new-sess"}, nil
 			},
 		}
@@ -2149,7 +2154,7 @@ func TestMakeWorkerFn(t *testing.T) {
 			TrackerAdapter:  &mockTrackerAdapter{},
 			AgentAdapter:    agent,
 			WorkflowManager: wm,
-			Store:           &stubStore{},
+			Store:           &stubStore{resumeUsage: &persistence.ResumeUsage{InputTokens: 900, OutputTokens: 100, CacheReadTokens: 40, CacheWriteTokens: 5}},
 		})
 
 		issue := workerTestIssue()
@@ -2175,6 +2180,10 @@ func TestMakeWorkerFn(t *testing.T) {
 
 		if capturedResumeID != "resume-sess-42" {
 			t.Errorf("ResumeSessionID = %q, want %q", capturedResumeID, "resume-sess-42")
+		}
+		wantUsage := domain.TokenUsage{InputTokens: 900, OutputTokens: 100, TotalTokens: 1000, CacheReadTokens: 40, CacheWriteTokens: 5}
+		if capturedResumeUsage == nil || *capturedResumeUsage != wantUsage {
+			t.Errorf("StartSessionParams.ResumeUsage = %+v, want %+v", capturedResumeUsage, wantUsage)
 		}
 	})
 
@@ -11248,6 +11257,10 @@ func (s *stubStore) LatestAgentRuns(_ context.Context, issueIDs []string) (map[s
 		}
 	}
 	return runs, nil
+}
+
+func (s *stubStore) LatestResumeUsage(context.Context, string, string) (*persistence.ResumeUsage, error) {
+	return s.resumeUsage, s.resumeUsageErr
 }
 
 func (s *stubStore) ListStageHops(context.Context) ([]persistence.StageHop, error) {

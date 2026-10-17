@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's Codex adapter in `internal/agent/codex`.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-17
 
 ## Where to get the volatile facts
 
@@ -70,7 +70,7 @@ Usage does not ride on the turn's completion payload; it arrives on its own noti
 
 The registered kind declares `incremental` arrival and `per_model` attribution: the app-server sends one `thread/tokenUsage/updated` notification per model API request, each carrying `Model: state.model`.
 
-The totals on that notification are thread-cumulative, spanning every turn of the thread including turns from an earlier run that resumed it. The adapter recovers this run's own contribution by capturing a baseline at the first notification belonging to the current turn and subtracting it thereafter. A notification belonging to a different turn does not emit anything; it raises the baseline instead.
+The totals on that notification are thread-cumulative, spanning every turn of the thread including turns from an earlier run that resumed it. The adapter recovers this run's own contribution through an `agentcore.ResumeBaseline`. The baseline is the resume usage handed over when `thread/resume` succeeds and zero when the adapter starts a thread; when a resumed thread received none, the first notification belonging to the current turn sets it to the total less that notification's `last` usage. A notification belonging to a different turn changes no figure and still counts as a measurement: after `thread/resume` the app-server replays the restored total once under an earlier turn's id. Every turn result carries the baseline's latest reading as its resume figure, because the app-server persists each total as it emits it and restores the last one persisted.
 
 One subtlety to preserve: a payload that carries no usage object at all is distinguishable from one reporting zeroes, because the field is a pointer. The absent case emits nothing and leaves the measurement flag alone, which is what keeps "we do not know" different from "it cost nothing". Flatten that to a value type and the distinction dies silently.
 

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `claude-code` runs of more than one turn, and runs that continue an earlier session, no longer record a multiple of their token use, which overstated cost and reached `agent.max_tokens` early. Each turn now counts once and a continuing run counts only its own turns; runs already recorded keep their figures. ([#1399](https://github.com/sortie-ai/sortie/issues/1399))
+
+- A `claude-code` run that continues a session whose previous run ended mid-turn, or was recorded before this release, now marks its first turn's spend as partial. ([#1399](https://github.com/sortie-ai/sortie/issues/1399))
+
+- A continuing `copilot-cli` run is no longer charged the previous run's last turn when its own first turn ends without the CLI saving usage. ([#1399](https://github.com/sortie-ai/sortie/issues/1399))
+
 ## [1.28.0] - 2026-10-11
 
 ### Added
