@@ -10320,3 +10320,24 @@ func TestHandleWorkerExit_StageHopCancelsPendingReactionsAndRetry(t *testing.T) 
 		t.Errorf("DeleteRetryEntry ids = %v, want %q: the persisted retry row goes with the hop", f.store.deletedRetryIDs, hopExitIssueID)
 	}
 }
+
+// A made hop leaves no retry and no claim, so the next stage starts on a
+// fresh poll dispatch with no session to resume: the criteria stage never
+// shares a session with the stage that implemented the story.
+func TestHandleWorkerExit_StageHopLeavesNoSessionToResume(t *testing.T) {
+	t.Parallel()
+
+	f := newHopExitFixture(t)
+	f.result.SessionID = "implementer-session"
+	f.exit()
+
+	if !slices.Equal(f.tracker.added, []string{hopExitTargetLabel}) {
+		t.Fatalf("AddLabel labels = %q, want the hop", f.tracker.added)
+	}
+	if r, ok := f.state.RetryAttempts[hopExitIssueID]; ok {
+		t.Errorf("retry %+v queued after a hop, want none (it would resume session %q)", r, r.SessionID)
+	}
+	if _, ok := f.state.Claimed[hopExitIssueID]; ok {
+		t.Error("claim kept after a hop, want released for a fresh dispatch")
+	}
+}
