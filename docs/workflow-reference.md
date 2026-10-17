@@ -190,6 +190,10 @@ tracker:
 | `handoff_evidence` | string         | No                        | `observed`      | Future worker attempts             | Policy governing the evidence condition on an otherwise-eligible handoff. `observed` withholds only when absence of work is positively observed and allows an undeterminable verdict; `strict` also withholds an undeterminable verdict; `off` restores the prior four-condition decision and performs no baseline capture, exit-time workspace inspection, or evidence logging. Values outside `observed`, `strict`, and `off` are rejected as a closed set while configuration is parsed, without contacting the tracker, so startup, reload, and `sortie validate` all reject the same value. See [architecture §6.4](architecture/06-configuration-specification.md#64-config-fields-summary-cheat-sheet) for the verdict's derivation. |
 | `no_change_state` | string          | No                        | `handoff_state` | Future worker exits                | Target tracker state for a worker run whose agent declared, through `.sortie/status`, that the requested outcome already held and nothing needed changing. When absent, a declared run targets `handoff_state` instead, so a deployment that does not set this field sees no change in where its issues land. Is the one target-state field permitted to name a terminal state. A declared run on a rule that carries `next` hops like any other successful run, so this target applies to such a run only when the hop is not made. |
 | `in_progress_state` | string        | No                        | _(absent)_      | Future dispatches                  | Target tracker state for dispatch-time transition at the start of each worker attempt. When absent, no dispatch-time transition is performed. Must be in `active_states`. Must not collide with `terminal_states` or `handoff_state`. |
+| `release_state`   | string          | No                        | _(absent)_      | Future syncs and dispatches        | Turns plan control on. The state a plan sync moves a released story to. Must be in `active_states`. See the plan-control rules below. |
+| `backlog_state`   | string          | With `release_state`      | _(absent)_      | Future syncs and pull-backs        | The state a plan story waits in before it is released, and returns to on a pull-back. Must be in neither `active_states` nor `terminal_states`, and must not equal `handoff_state`. |
+| `cancel_state`    | string          | With `release_state`      | _(absent)_      | Future cancels                     | The state a cancelled plan story moves to. Must be in `terminal_states`. |
+| `done_state`      | string          | With `release_state`      | _(absent)_      | Future dispatches                  | The state that satisfies a blocker without a plan key. Must be in `terminal_states`. |
 | `comments`        | map of booleans | No                        | all `false`     | Future dispatches (`on_dispatch`); future worker exits (`on_completion`, `on_failure`) | **Deprecated.** Toggles for the comments Sortie posts at session lifecycle points. Keys: `on_dispatch`, `on_completion`, `on_failure`. Each is a boolean defaulting to `false`; non-boolean values are rejected with a configuration error. A key set to `true` subscribes the `tracker_comment` destination to events: `on_dispatch` to `session.started`, `on_completion` to `session.completed` and `session.stopped`, and `on_failure` to `session.failed`. The keys keep working and draw a deprecation warning that names the replacement: list those events in a `tracker_comment` entry of [`notifications`](#211-notifications-operator-notification-backends), then remove the key. See [Section 3.2](#32-curated-variable-list) for the matching `SORTIE_TRACKER_COMMENTS_*` env overrides, which are deprecated with them. |
 
 **`active_states` / `terminal_states` validation rules:**
@@ -250,6 +254,14 @@ tracker:
 - Both list checks compare against the lists as written, because dispatch and reconciliation gate on those lists. The dispatch preflight reports a collision under check `tracker.in_progress_state`.
 - Transition failure at runtime is non-fatal: the worker logs a warning and continues to workspace preparation.
 - If the issue is already in the target state (case-insensitive), the transition API call is skipped and a debug-level message is logged.
+
+**Plan-control validation rules** (`release_state`, `backlog_state`, `cancel_state`, `done_state`):
+
+- Plan control is on when `release_state` is set. Without it, the other three are accepted and have no effect, and Sortie behaves as it does without plan control.
+- With `release_state` set, `backlog_state`, `cancel_state`, and `done_state` are required, `active_states` and `terminal_states` must both be written, and `reactions.merge_completion` must be configured. Each missing setting is a configuration error that names it.
+- `release_state` must be in `active_states`. `backlog_state` must be in neither list and must not equal `handoff_state`, because a sync releases stories only from `backlog_state`. `cancel_state` and `done_state` must be in `terminal_states`. All comparisons are case-insensitive, against the lists as written.
+- Each supports `$VAR` environment indirection and the `SORTIE_TRACKER_<NAME>` overrides. A value that resolves to empty is a configuration error.
+- A reload that breaks any rule keeps the previous configuration.
 - Requires **write permissions** on the tracker API token (same as `handoff_state`).
 
 **`api_key` environment resolution:**
@@ -1962,6 +1974,10 @@ Each variable maps to exactly one config field. The naming convention is `SORTIE
 | `SORTIE_TRACKER_HANDOFF_STATE`             | `tracker.handoff_state`          | string |                                |
 | `SORTIE_TRACKER_NO_CHANGE_STATE`           | `tracker.no_change_state`        | string |                                |
 | `SORTIE_TRACKER_IN_PROGRESS_STATE`         | `tracker.in_progress_state`      | string |                                |
+| `SORTIE_TRACKER_RELEASE_STATE`             | `tracker.release_state`          | string |                                |
+| `SORTIE_TRACKER_BACKLOG_STATE`             | `tracker.backlog_state`          | string |                                |
+| `SORTIE_TRACKER_CANCEL_STATE`              | `tracker.cancel_state`           | string |                                |
+| `SORTIE_TRACKER_DONE_STATE`                | `tracker.done_state`             | string |                                |
 | `SORTIE_TRACKER_COMMENTS_ON_DISPATCH`      | `tracker.comments.on_dispatch`   | bool   | `true`/`false`/`1`/`0`; deprecated, see [Section 2.11](#211-notifications-operator-notification-backends) |
 | `SORTIE_TRACKER_COMMENTS_ON_COMPLETION`    | `tracker.comments.on_completion` | bool   | `true`/`false`/`1`/`0`; deprecated, see [Section 2.11](#211-notifications-operator-notification-backends) |
 | `SORTIE_TRACKER_COMMENTS_ON_FAILURE`       | `tracker.comments.on_failure`    | bool   | `true`/`false`/`1`/`0`; deprecated, see [Section 2.11](#211-notifications-operator-notification-backends) |
@@ -3848,6 +3864,10 @@ A flat reference of every configuration field, for quick lookup. The "Env Overri
 | `tracker.no_change_state`               | string           | `handoff_state`               | `SORTIE_TRACKER_NO_CHANGE_STATE`         | Must equal `handoff_state` or name a member of `terminal_states`; requires `handoff_state` |
 | `tracker.handoff_evidence`              | string           | `observed`                   | —                                        | `observed`, `strict`, or `off`; closed set                                             |
 | `tracker.in_progress_state`             | string           | _(absent)_                   | `SORTIE_TRACKER_IN_PROGRESS_STATE`       | Must be in active; must not collide with terminal/handoff                              |
+| `tracker.release_state`                 | string           | _(absent)_                   | `SORTIE_TRACKER_RELEASE_STATE`           | Turns plan control on; must be in active                                               |
+| `tracker.backlog_state`                 | string           | _(absent)_                   | `SORTIE_TRACKER_BACKLOG_STATE`           | Required with release_state; in neither list; not handoff                              |
+| `tracker.cancel_state`                  | string           | _(absent)_                   | `SORTIE_TRACKER_CANCEL_STATE`            | Required with release_state; must be terminal                                          |
+| `tracker.done_state`                    | string           | _(absent)_                   | `SORTIE_TRACKER_DONE_STATE`              | Required with release_state; must be terminal                                          |
 | `tracker.api_version`                   | string           | `"3"`                        | —                                        | Jira only; `"3"` (Cloud) or `"2"` (Server/DC); `$VAR` supported; quote the value       |
 | `tracker.comments.on_dispatch`          | bool             | `false`                      | `SORTIE_TRACKER_COMMENTS_ON_DISPATCH`    | Deprecated; subscribes `tracker_comment` to `session.started`                          |
 | `tracker.comments.on_completion`        | bool             | `false`                      | `SORTIE_TRACKER_COMMENTS_ON_COMPLETION`  | Deprecated; subscribes `tracker_comment` to `session.completed` and `session.stopped`  |

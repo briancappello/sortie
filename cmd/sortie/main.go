@@ -937,13 +937,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		tokenRates, _ := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
 
 		planProjects := newPlanProjects(br.trackerAdapter, br.cfg, br.mgr.Config, func() domain.TrackerStates {
-			tracker := br.mgr.Config().Tracker
-			return domain.TrackerStates{
-				Active:     tracker.ActiveStates,
-				Terminal:   tracker.TerminalStates,
-				Handoff:    tracker.HandoffState,
-				InProgress: tracker.InProgressState,
-			}
+			return br.mgr.Config().Tracker.States()
 		})
 		defer planProjects.Close()
 

@@ -58,6 +58,10 @@ var envOverrides = []envOverride{
 	{"SORTIE_TRACKER_HANDOFF_STATE", "tracker", "handoff_state", coerceString},
 	{"SORTIE_TRACKER_NO_CHANGE_STATE", "tracker", "no_change_state", coerceString},
 	{"SORTIE_TRACKER_IN_PROGRESS_STATE", "tracker", "in_progress_state", coerceString},
+	{"SORTIE_TRACKER_RELEASE_STATE", "tracker", "release_state", coerceString},
+	{"SORTIE_TRACKER_BACKLOG_STATE", "tracker", "backlog_state", coerceString},
+	{"SORTIE_TRACKER_CANCEL_STATE", "tracker", "cancel_state", coerceString},
+	{"SORTIE_TRACKER_DONE_STATE", "tracker", "done_state", coerceString},
 
 	// Tracker comments
 	{"SORTIE_TRACKER_COMMENTS_ON_DISPATCH", "tracker", "comments.on_dispatch", coerceEnvBool},

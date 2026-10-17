@@ -41,6 +41,10 @@ func trackerConfigMap(tc config.TrackerConfig) map[string]any {
 		"handoff_evidence":  string(tc.HandoffEvidence.Effective()),
 		"no_change_state":   tc.NoChangeState,
 		"in_progress_state": tc.InProgressState,
+		"release_state":     tc.ReleaseState,
+		"backlog_state":     tc.BacklogState,
+		"cancel_state":      tc.CancelState,
+		"done_state":        tc.DoneState,
 		"api_version":       tc.APIVersion,
 		"comments": map[string]any{
 			"on_dispatch":   tc.Comments.OnDispatch,

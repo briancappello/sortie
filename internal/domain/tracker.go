@@ -19,6 +19,14 @@ type TrackerStates struct {
 
 	// InProgress is tracker.in_progress_state.
 	InProgress string
+
+	// Release, Backlog, Cancel, and Done are the plan-control states:
+	// tracker.release_state, backlog_state, cancel_state, and
+	// done_state. All are empty when plan control is off.
+	Release string
+	Backlog string
+	Cancel  string
+	Done    string
 }
 
 // TrackerAdapter defines the contract that all issue tracker
