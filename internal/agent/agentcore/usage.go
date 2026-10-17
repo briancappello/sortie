@@ -91,9 +91,11 @@ func NewResumeBaseline(resume *domain.TokenUsage) *ResumeBaseline {
 // A reading with every counted component zero has no effect. When the
 // baseline is unknown, or the reading is below the latest one in any
 // counted component, the counter is taken to have started over: the
-// usage so far is kept, the baseline becomes the reading less own, and
-// estimated is true because own may not cover everything the reading
-// added. Otherwise estimated is false.
+// usage so far is kept and the baseline becomes the reading less own.
+// estimated is then true exactly when that baseline is non-zero in a
+// counted component, because own may not cover everything the reading
+// added; a zero baseline loses nothing and is exact. Otherwise estimated
+// is false.
 func (b *ResumeBaseline) Observe(reading domain.TokenUsage, own *domain.TokenUsage) (run domain.TokenUsage, estimated bool) {
 	if isZeroReading(reading) {
 		return b.Run(), false
@@ -105,7 +107,7 @@ func (b *ResumeBaseline) Observe(reading domain.TokenUsage, own *domain.TokenUsa
 			b.baseline = SubtractUsage(reading, *own)
 		}
 		b.known = true
-		estimated = true
+		estimated = !isZeroReading(b.baseline)
 	}
 	b.latest = reading
 	return b.Run(), estimated

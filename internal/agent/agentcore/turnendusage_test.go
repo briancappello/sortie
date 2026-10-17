@@ -28,7 +28,7 @@ func TestTurnEndUsage_FinalizeOrdering(t *testing.T) {
 		Run:   domain.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
 		Model: "  claude-x  ",
 	}
-	result, agentErr := u.Finalize(emit, nil, TurnEvidence{Terminal: TerminalSuccess}, "sess-1", 500, recovered)
+	result, agentErr := u.Finalize(emit, nil, TurnEvidence{Terminal: TerminalSuccess}, "sess-1", 500, recovered, TurnSpend{})
 	if agentErr != nil {
 		t.Fatalf("Finalize() error = %+v, want nil", agentErr)
 	}
@@ -78,7 +78,7 @@ func TestTurnEndUsage_FinalizeNilRecoveredEmitsNoReport(t *testing.T) {
 	emit := func(e domain.AgentEvent) { events = append(events, e) }
 
 	u := NewTurnEndUsage()
-	result, agentErr := u.Finalize(emit, nil, TurnEvidence{Terminal: TerminalSuccess}, "sess-1", 0, nil)
+	result, agentErr := u.Finalize(emit, nil, TurnEvidence{Terminal: TerminalSuccess}, "sess-1", 0, nil, TurnSpend{})
 	if agentErr != nil {
 		t.Fatalf("Finalize() error = %+v, want nil", agentErr)
 	}
@@ -119,7 +119,7 @@ func TestTurnEndUsage_UsageMeasuredLatches(t *testing.T) {
 		t.Error("Measured() on a value from NewTurnEndUsage = true, want false")
 	}
 
-	unmeasured, _ := u.Finalize(emit, nil, ev, "s", 0, nil)
+	unmeasured, _ := u.Finalize(emit, nil, ev, "s", 0, nil, TurnSpend{})
 	if unmeasured.UsageMeasured {
 		t.Error("turn finalized before any recovered figure: UsageMeasured = true, want false")
 	}
@@ -127,7 +127,7 @@ func TestTurnEndUsage_UsageMeasuredLatches(t *testing.T) {
 		t.Errorf("Measured() = %v, want %v (equal to Finalize's UsageMeasured)", u.Measured(), unmeasured.UsageMeasured)
 	}
 
-	measured, _ := u.Finalize(emit, nil, ev, "s", 0, &RecoveredUsage{Run: domain.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}})
+	measured, _ := u.Finalize(emit, nil, ev, "s", 0, &RecoveredUsage{Run: domain.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}, TurnSpend{})
 	if !measured.UsageMeasured {
 		t.Error("turn finalized with the first non-nil recovered figure: UsageMeasured = false, want true")
 	}
@@ -135,7 +135,7 @@ func TestTurnEndUsage_UsageMeasuredLatches(t *testing.T) {
 		t.Errorf("Measured() = %v, want %v (equal to Finalize's UsageMeasured)", u.Measured(), measured.UsageMeasured)
 	}
 
-	laterNil, _ := u.Finalize(emit, nil, ev, "s", 0, nil)
+	laterNil, _ := u.Finalize(emit, nil, ev, "s", 0, nil, TurnSpend{})
 	if !laterNil.UsageMeasured {
 		t.Error("later turn finalized with nil after a measured turn: UsageMeasured = false, want true")
 	}
@@ -165,7 +165,7 @@ func TestTurnEndUsage_SnapshotNonDecreasing(t *testing.T) {
 
 	var prevSnapshot domain.TokenUsage
 	for i, run := range sequence {
-		if _, agentErr := u.Finalize(emit, nil, ev, "s", 0, &RecoveredUsage{Run: run}); agentErr != nil {
+		if _, agentErr := u.Finalize(emit, nil, ev, "s", 0, &RecoveredUsage{Run: run}, TurnSpend{}); agentErr != nil {
 			t.Fatalf("turn %d: Finalize() error = %+v, want nil", i, agentErr)
 		}
 
@@ -212,5 +212,5 @@ func TestTurnEndUsage_FinalizeNilEmitPanics(t *testing.T) {
 	}()
 
 	u := NewTurnEndUsage()
-	_, _ = u.Finalize(nil, nil, TurnEvidence{Terminal: TerminalSuccess}, "s", 0, nil)
+	_, _ = u.Finalize(nil, nil, TurnEvidence{Terminal: TerminalSuccess}, "s", 0, nil, TurnSpend{})
 }

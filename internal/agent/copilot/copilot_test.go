@@ -1538,8 +1538,9 @@ func TestRunTurn_SessionStateRecovery_ResumeHandOver(t *testing.T) {
 			if result.Usage != tt.wantUsage || result.UsageMeasured != tt.wantMeasured {
 				t.Errorf("RunTurn() = usage %+v, measured %v, want %+v, %v", result.Usage, result.UsageMeasured, tt.wantUsage, tt.wantMeasured)
 			}
-			if result.ResumeUsage == nil || *result.ResumeUsage != record2 || result.SpendUnaccounted {
-				t.Errorf("RunTurn() = resume usage %+v, spend unaccounted %v, want %+v, false", result.ResumeUsage, result.SpendUnaccounted, record2)
+			wantUnaccounted := !tt.wantMeasured
+			if result.ResumeUsage == nil || *result.ResumeUsage != record2 || result.SpendUnaccounted != wantUnaccounted {
+				t.Errorf("RunTurn() = resume usage %+v, spend unaccounted %v, want %+v, %v", result.ResumeUsage, result.SpendUnaccounted, record2, wantUnaccounted)
 			}
 			if tt.wantMeasured {
 				assertSingleUsageReportBeforeTerminal(t, events, tt.wantUsage, "claude-sonnet-5", 4200)

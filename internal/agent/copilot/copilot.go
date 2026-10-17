@@ -329,7 +329,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 		BuildArgs: func(turn int, prompt string) []string {
 			return buildArgs(state, turn, prompt, state.passthrough)
 		},
-		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string) (any, error) {
+		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string, spend *agentcore.TurnSpend) (any, error) {
 			now := time.Now().UTC()
 
 			event, parseErr := parseEvent(line)
@@ -339,6 +339,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 			switch event.Type {
 			case "assistant.message_delta":
+				spend.MarkModelReached()
 				// The event type itself names an assistant message, so it
 				// is a work signal even though its payload is unparsed.
 				state.work.ObserveAssistantOutput()
@@ -346,6 +347,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				agentcore.EmitNotification(emit, "")
 
 			case "assistant.message":
+				spend.MarkModelReached()
 				if len(event.Data) > 0 {
 					msgData, dataErr := parseAssistantMessageData(event.Data)
 					if dataErr == nil {
@@ -369,6 +371,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				agentcore.EmitNotification(emit, "")
 
 			case "tool.execution_start":
+				spend.MarkModelReached()
 				if len(event.Data) > 0 {
 					toolData, dataErr := parseToolExecutionData(event.Data)
 					if dataErr == nil {
@@ -478,7 +481,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 		},
 		GetUsage:     func() (domain.TokenUsage, bool) { return state.usage.Snapshot(), state.usage.Measured() },
 		GetSessionID: func() string { return state.copilotSessionID },
-		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			lastResult, _ := lastParsed.(*rawEvent)
 
 			// Capture session ID from result event for subsequent turns.
@@ -488,6 +491,13 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 			}
 
 			recovered, estimated, resume := state.recoverUsage(state.logger())
+			if lastResult != nil && recovered != nil {
+				spend.MarkSettled()
+				spend.MarkSessionTotal()
+			}
+			if estimated {
+				spend.MarkEstimated()
+			}
 
 			ev := agentcore.TurnEvidence{
 				ExitObserved: true,
@@ -527,9 +537,8 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				}
 			}
 
-			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, recovered)
+			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, recovered, *spend)
 			result.ResumeUsage = resume
-			result.SpendUnaccounted = estimated
 			return result, agentErr
 		},
 		// Copilot emits EventSessionStarted before the scan loop using the

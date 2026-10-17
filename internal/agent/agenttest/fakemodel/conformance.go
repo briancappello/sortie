@@ -56,6 +56,11 @@ const (
 	// share one home, one workspace and one adapter: an origin session of two
 	// turns, a fresh control session, and a session resuming the origin.
 	ScenarioContinuation
+
+	// ScenarioCancellationAfterOutput scripts a read call, then one held
+	// answer; the driver cancels the turn's context once the endpoint holds
+	// the request that follows the tool result, after the model served output.
+	ScenarioCancellationAfterOutput
 )
 
 // Binding is one agent kind's fixture for [AssertConformance]: how to reach
@@ -178,7 +183,8 @@ const serverCallStep = 1
 // declares, and, when b.PermissionRefusal is set, a refused call reaches the
 // model as one errored tool result with the notice and without the file's
 // content. A turn interrupted while the endpoint holds its model request ends
-// within a bound, and once the session's stop returns every process the
+// within a bound and reports SpendUnaccounted exactly when the model had served
+// output, and once the session's stop returns every process the
 // session reported is gone. A session resumed by its reported identifier sends
 // the earlier turns' prompts and answers back to the model, and a fresh session
 // in the same home and workspace sends none of them.
@@ -196,6 +202,7 @@ func AssertConformance(t *testing.T, b Binding) {
 		t.Run("permission refusal", func(t *testing.T) { runPermissionRefusal(t, b) })
 	}
 	t.Run("turn cancellation", func(t *testing.T) { runInterruption(t, b, ScenarioCancellation) })
+	t.Run("turn cancellation after output", func(t *testing.T) { runInterruption(t, b, ScenarioCancellationAfterOutput) })
 	t.Run("session stop", func(t *testing.T) { runInterruption(t, b, ScenarioStop) })
 	t.Run("session continuation", func(t *testing.T) { runContinuation(t, b) })
 }
@@ -220,6 +227,24 @@ func requireValidBinding(t *testing.T, b Binding) {
 	}
 }
 
+func afterOrBefore(after bool) string {
+	if after {
+		return "after"
+	}
+	return "before"
+}
+
+func writeScriptedFile(t *testing.T, workspace string) (nonce, file string) {
+	t.Helper()
+
+	nonce = "nonce-" + randomHex(t, 8)
+	file = filepath.Join(workspace, "scripted-"+nonce+".txt")
+	if err := os.WriteFile(file, []byte(nonce+"\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", file, err)
+	}
+	return nonce, file
+}
+
 func runScenario(t *testing.T, b Binding, scenario Scenario) {
 	t.Helper()
 
@@ -231,12 +256,8 @@ func runScenario(t *testing.T, b Binding, scenario Scenario) {
 		reporter = recorded
 	}
 
-	nonce := "nonce-" + randomHex(t, 8)
 	workspace := newWorkspace(t)
-	file := filepath.Join(workspace, "scripted-"+nonce+".txt")
-	if err := os.WriteFile(file, []byte(nonce+"\n"), 0o600); err != nil {
-		t.Fatalf("write %s: %v", file, err)
-	}
+	nonce, file := writeScriptedFile(t, workspace)
 
 	script := []Response{{Call: b.Read(file), Usage: firstTurnUsage}}
 	if scenario == ScenarioTurn {
@@ -463,13 +484,19 @@ func runInterruption(t *testing.T, b Binding, scenario Scenario) {
 	t.Helper()
 
 	workspace := newWorkspace(t)
-	server := Start(t, []Response{{Hold: true}})
+	script, prompt := []Response{{Hold: true}}, "Reply with the word ready."
+	if scenario == ScenarioCancellationAfterOutput {
+		_, file := writeScriptedFile(t, workspace)
+		script = []Response{{Call: b.Read(file), Usage: firstTurnUsage}, {Hold: true}}
+		prompt = "Read the file " + file + " and report its contents."
+	}
+	server := Start(t, script)
 	d := drive{
 		scenario:  scenario,
 		server:    server,
 		workspace: workspace,
 		settings:  b.Passthrough,
-		prompt:    "Reply with the word ready.",
+		prompt:    prompt,
 	}
 	p := prepareSession(t, b, d)
 
@@ -1416,7 +1443,7 @@ func interruptedTurnViolations(run Run, in interruption) []string {
 		var agentErr *domain.AgentError
 		isAgentErr := errors.As(run.Err, &agentErr)
 		switch scenario {
-		case ScenarioCancellation:
+		case ScenarioCancellation, ScenarioCancellationAfterOutput:
 			if run.Result.ExitReason != domain.EventTurnCancelled {
 				v.add("ExitReason = %q, want %q", run.Result.ExitReason, domain.EventTurnCancelled)
 			}
@@ -1430,6 +1457,9 @@ func interruptedTurnViolations(run Run, in interruption) []string {
 			if !isAgentErr {
 				v.add("RunTurn returned error %v, want a *domain.AgentError", run.Err)
 			}
+		}
+		if want := scenario == ScenarioCancellationAfterOutput; run.Result.SpendUnaccounted != want {
+			v.add("Result.SpendUnaccounted = %v, want %v when the interrupt came %s the model served output", run.Result.SpendUnaccounted, want, afterOrBefore(want))
 		}
 	}
 	if scenario == ScenarioStop {
@@ -1521,6 +1551,9 @@ func continuationViolations(turns []continuedTurn, resumed domain.Session, excha
 		}
 	}
 
+	if first := turns[0].result; first.UsageMeasured && first.SpendUnaccounted {
+		v.add("%s turn 1: Result.SpendUnaccounted is true, want false for a completed turn with a measured figure", roleOrigin)
+	}
 	if !turns[resumedEntry].result.UsageMeasured {
 		v.add("%s turn: Result.UsageMeasured is false, want a measured figure", roleResumed)
 	}
