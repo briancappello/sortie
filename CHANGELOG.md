@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A turn that ends before the agent reports its final token use (a stop, a crash, a dropped connection, or a pause for a person's answer), or whose report Sortie could not read with no later turn's report covering it, now marks the run's tokens and cost as partial, and a `codex` run that continues a session recorded before this release marks its first turn partial, as `claude-code` does. ([#1363](https://github.com/sortie-ai/sortie/issues/1363))
 
+- When a person or the forge merges a pull request just before the auto-merge reaction's own merge call, Sortie now sends the `auto_merge.merged` notification, merge comment included, and deletes the head branch when `delete_branch` is `true`, as it does after a merge it made itself. ([#1328](https://github.com/sortie-ai/sortie/issues/1328))
+
+- On Gitea, the `auto_merge.merged` notification, merge comment included, no longer ends with an empty `Merge commit: .` line. ([#1328](https://github.com/sortie-ai/sortie/issues/1328))
+
 ## [1.28.0] - 2026-10-11
 
 ### Added
