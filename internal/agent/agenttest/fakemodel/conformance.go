@@ -682,7 +682,7 @@ func runContinuation(t *testing.T, b Binding) {
 		if want := expectedUsage(run.Exchanges[resumedFrom:]); resumedResult.Usage != want {
 			t.Errorf("resumed turn Result.Usage = %+v, want %+v, the sum of every answer served to the resumed session", resumedResult.Usage, want)
 		}
-		if resumedResult.SpendUnaccounted {
+		if turns[continuedEntry].result.ResumeUsage != nil && resumedResult.SpendUnaccounted {
 			t.Errorf("resumed turn Result.SpendUnaccounted = true, want false when the resume usage was handed over")
 		}
 	})
