@@ -48,7 +48,7 @@ huly:
 
 `examples/WORKFLOW.huly.md` is a complete workflow. It uses the mock agent.
 
-Each configured state name must be a status in the project's workflow, compared without regard to letter case. If a configured state is missing, the constructor fails and the error lists the project's states. The classic Huly workflow has no review status, and a handoff state must not be terminal. Before you set `handoff_state`, add a status such as `In Review` to the project in Huly.
+Each configured state name must be a status in the project's workflow, compared without regard to letter case. That covers `active_states`, `terminal_states`, `handoff_state`, `in_progress_state`, `no_change_state`, and the plan-control states `release_state`, `backlog_state`, `cancel_state`, and `done_state`. If a configured state is missing, the constructor fails and the error lists the project's states. The classic Huly workflow has no review status, and a handoff state must not be terminal. Before you set `handoff_state`, add a status such as `In Review` to the project in Huly.
 
 ## Plan task types
 

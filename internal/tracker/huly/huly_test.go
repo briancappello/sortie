@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -58,6 +59,37 @@ func TestNewAdapterRejectsUnknownState(t *testing.T) {
 		slog.New(slog.DiscardHandler))
 	if trackerKind(err) != domain.ErrTrackerPayload || !strings.Contains(err.Error(), "Review") {
 		t.Fatalf("newAdapter() error = %v, want payload error naming Review", err)
+	}
+}
+
+// Every single-state setting, plan-control states included, must name a
+// state the project has.
+func TestNewAdapterRejectsEachUnknownConfiguredState(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string]string{
+		"handoff_state": "Backlog", "in_progress_state": "In Progress", "no_change_state": "Done",
+		"release_state": "Todo", "backlog_state": "Backlog", "cancel_state": "Canceled", "done_state": "Done",
+	}
+	if len(valid) != len(stateKeys) {
+		t.Fatalf("test covers %d keys, stateKeys has %d", len(valid), len(stateKeys))
+	}
+	active, terminal := []string{"Todo", "In Progress"}, []string{"Done", "Canceled"}
+	if _, err := newAdapter(context.Background(), seedWorkspace(), "HULY", "", "", active,
+		configuredStates(active, terminal, valid), slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("newAdapter() with every state present: %v", err)
+	}
+	for _, key := range stateKeys {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			fields := maps.Clone(valid)
+			fields[key] = "Nowhere " + key
+			_, err := newAdapter(context.Background(), seedWorkspace(), "HULY", "", "", active,
+				configuredStates(active, terminal, fields), slog.New(slog.DiscardHandler))
+			if trackerKind(err) != domain.ErrTrackerPayload || !strings.Contains(err.Error(), "Nowhere "+key) {
+				t.Fatalf("newAdapter() error = %v, want payload error naming %q", err, "Nowhere "+key)
+			}
+		})
 	}
 }
 
