@@ -42,10 +42,75 @@ func TestDecodeRejectsUnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
 	g := newGraph().build()
-	g.SchemaVersion = 2
+	g.SchemaVersion = 3
 	msg := decodeErr(t, encode(t, g))
-	if !strings.Contains(msg, "schema_version 2") || !strings.Contains(msg, "version 1") {
+	if !strings.Contains(msg, "schema_version 3") || !strings.Contains(msg, "versions 1 to 2") {
 		t.Errorf("error %q does not name both versions", msg)
+	}
+}
+
+func TestDecodeReadsVersionsOneAndTwo(t *testing.T) {
+	t.Parallel()
+	for _, v := range []int{1, 2} {
+		g := newGraph().build()
+		g.SchemaVersion = v
+		if _, err := Decode(encode(t, g)); err != nil {
+			t.Errorf("Decode(version %d) error = %v", v, err)
+		}
+	}
+}
+
+func TestDecodeVersion2StoryFields(t *testing.T) {
+	t.Parallel()
+	yes := true
+	story := func(edit func(*Node)) Graph {
+		g := newGraph().epic("billing", ApprovalApproved, "invoice").build()
+		g.SchemaVersion = 2
+		for i := range g.Nodes {
+			if g.Nodes[i].Kind == KindStory {
+				edit(&g.Nodes[i])
+				break
+			}
+		}
+		return g
+	}
+	good := story(func(n *Node) {
+		n.Release, n.Review = &yes, ReviewCriteria
+		n.ApprovedBy, n.ApprovedAt = &Approver{Name: "Ana", ID: "iss|ana"}, "2026-10-16T14:02:00Z"
+	})
+	got, err := Decode(encode(t, good))
+	if err != nil {
+		t.Fatalf("Decode(valid version 2) error = %v", err)
+	}
+	for _, n := range got.Nodes {
+		if n.Kind == KindStory && n.Released() {
+			if n.Review != ReviewCriteria || n.ApprovedBy.Name != "Ana" {
+				t.Errorf("decoded node = %+v, want the version 2 fields", n)
+			}
+		}
+	}
+
+	bad := map[string]func(*Node){
+		"unknown review": func(n *Node) { n.Review = "vibes" },
+		"bad time":       func(n *Node) { n.ApprovedAt = "yesterday" },
+		"nameless":       func(n *Node) { n.ApprovedBy = &Approver{ID: "x"} },
+		"draft released": func(n *Node) { n.Release, n.Approval = &yes, ApprovalDraft },
+	}
+	for name, edit := range bad {
+		if _, err := Decode(encode(t, story(edit))); err == nil {
+			t.Errorf("%s: Decode() = nil, want a problem", name)
+		}
+	}
+	v1 := story(func(n *Node) { n.Review = ReviewHuman })
+	v1.SchemaVersion = 1
+	if msg := decodeErr(t, encode(t, v1)); !strings.Contains(msg, "need schema_version 2") {
+		t.Errorf("version 1 with review: %q, want it to need version 2", msg)
+	}
+	epic := newGraph().epic("billing", ApprovalApproved, "invoice").build()
+	epic.SchemaVersion = 2
+	epic.Nodes[0].Release = &yes
+	if msg := decodeErr(t, encode(t, epic)); !strings.Contains(msg, "stories only") {
+		t.Errorf("released epic: %q, want stories only", msg)
 	}
 }
 

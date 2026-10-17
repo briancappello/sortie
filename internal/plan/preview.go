@@ -18,6 +18,23 @@ import (
 type Tracker struct {
 	Adapter domain.TrackerAdapter
 	Meta    registry.TrackerMeta
+
+	// States returns the workflow's states. Nil means plan control is
+	// off. Plan control is on when it reports a release state.
+	States func() domain.TrackerStates
+}
+
+// planStates returns the release and backlog states when plan control is
+// on, and ok false otherwise.
+func (t Tracker) planStates() (release, backlog string, ok bool) {
+	if t.States == nil {
+		return "", "", false
+	}
+	st := t.States()
+	if st.Release == "" || st.Backlog == "" {
+		return "", "", false
+	}
+	return st.Release, st.Backlog, true
 }
 
 // Has reports whether the adapter declares c and implements it.
@@ -35,6 +52,8 @@ func (t Tracker) Has(c registry.WriteCapability) bool {
 		_, ok = t.Adapter.(domain.IssueParenter)
 	case registry.CapLinkDependency:
 		_, ok = t.Adapter.(domain.DependencyLinker)
+	case registry.CapApprovalFields:
+		_, ok = t.Adapter.(domain.ApprovalWriter)
 	}
 	return ok
 }
@@ -70,7 +89,44 @@ type CreateOp struct {
 	Kind      string `json:"kind"`
 	Title     string `json:"title"`
 	ParentKey string `json:"parent_key,omitempty"`
+	State     string `json:"state,omitempty"`
 }
+
+// ReleaseOp moves a story from the backlog state to the release state.
+// IssueID is empty for a story the same apply creates.
+type ReleaseOp struct {
+	PlanKey    string `json:"plan_key"`
+	IssueID    string `json:"issue_id,omitempty"`
+	Identifier string `json:"identifier,omitempty"`
+	To         string `json:"to"`
+}
+
+// LabelOp keeps a story's one review label: it adds Add and removes each
+// label in Remove. IssueID is empty for a story the same apply creates.
+type LabelOp struct {
+	PlanKey string   `json:"plan_key"`
+	IssueID string   `json:"issue_id,omitempty"`
+	Add     string   `json:"add,omitempty"`
+	Remove  []string `json:"remove"`
+}
+
+// ApprovalOp records a story's approver. IssueID is empty for a story
+// the same apply creates.
+type ApprovalOp struct {
+	PlanKey string `json:"plan_key"`
+	IssueID string `json:"issue_id,omitempty"`
+	By      string `json:"by"`
+	ByID    string `json:"by_id"`
+	At      string `json:"at"`
+}
+
+// ReviewLabelPrefix starts every review label a sync keeps on a story.
+const ReviewLabelPrefix = "sortie-review:"
+
+// UnsupportedApprovalFields is listed in [Preview.Unsupported] when the
+// graph carries approvers that the adapter cannot store. Labels and
+// releases need no capability: every adapter labels and transitions.
+const UnsupportedApprovalFields = "approval_fields_unsupported"
 
 // UpdateOp changes the listed fields ("title", "body", "kind") of an
 // existing issue.
@@ -99,6 +155,9 @@ type Counts struct {
 	RelationsAdded   int `json:"relations_added"`
 	RelationsRemoved int `json:"relations_removed"`
 	Orphans          int `json:"orphans"`
+	Releases         int `json:"releases"`
+	Labels           int `json:"labels"`
+	Approvals        int `json:"approvals"`
 }
 
 // Preview lists the writes that make the tracker match a graph's approved
@@ -113,9 +172,13 @@ type Preview struct {
 	RelationsAdded      []RelationOp               `json:"relations_added"`
 	RelationsRemoved    []RelationOp               `json:"relations_removed"`
 	Orphans             []IssueRef                 `json:"orphans"`
+	Releases            []ReleaseOp                `json:"releases"`
+	Labels              []LabelOp                  `json:"labels"`
+	Approvals           []ApprovalOp               `json:"approvals"`
 	SkippedDrafts       []string                   `json:"skipped_drafts"`
 	UnplannedChanges    []string                   `json:"unplanned_changes"`
 	MissingCapabilities []registry.WriteCapability `json:"missing_capabilities"`
+	Unsupported         []string                   `json:"unsupported"`
 
 	graph    Graph
 	existing map[string]domain.PlanIssue
@@ -123,7 +186,8 @@ type Preview struct {
 
 // Writes is the number of tracker writes an apply of p makes.
 func (p Preview) Writes() int {
-	return len(p.Creates) + len(p.Updates) + len(p.Parents) + len(p.RelationsAdded) + len(p.RelationsRemoved)
+	return len(p.Creates) + len(p.Updates) + len(p.Parents) + len(p.RelationsAdded) + len(p.RelationsRemoved) +
+		len(p.Releases) + len(p.Labels) + len(p.Approvals)
 }
 
 // ComputePreview reads the tracker's plan-keyed issues and compares them
@@ -151,6 +215,10 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 		RelationsAdded:      []RelationOp{},
 		RelationsRemoved:    []RelationOp{},
 		Orphans:             []IssueRef{},
+		Releases:            []ReleaseOp{},
+		Labels:              []LabelOp{},
+		Approvals:           []ApprovalOp{},
+		Unsupported:         []string{},
 		SkippedDrafts:       []string{},
 		UnplannedChanges:    append([]string{}, g.UnplannedChanges...),
 		MissingCapabilities: []registry.WriteCapability{},
@@ -166,27 +234,45 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 		byID[i.ID] = i
 	}
 
-	inGraph := map[string]bool{}
-	approved := map[string]Node{}
-	skipped := map[string]bool{}
-	for _, n := range g.Nodes {
-		inGraph[n.PlanKey] = true
-		switch n.Approval {
-		case ApprovalApproved:
-			approved[n.PlanKey] = n
-		case ApprovalDraft:
-			skipped[n.Change] = true
-		}
-	}
-	for c := range skipped {
-		p.SkippedDrafts = append(p.SkippedDrafts, c)
-	}
-	slices.Sort(p.SkippedDrafts)
-
 	parentOf := map[string]string{}
 	for _, e := range g.Parents {
 		parentOf[e.Child] = e.Parent
 	}
+
+	// Approval is decided node by node: an approved story syncs beside
+	// drafts of its epic, and an epic syncs when it, or any of its
+	// stories, is approved.
+	inGraph := map[string]bool{}
+	approved := map[string]Node{}
+	for _, n := range g.Nodes {
+		inGraph[n.PlanKey] = true
+		if n.Approval == ApprovalApproved {
+			approved[n.PlanKey] = n
+		}
+	}
+	for _, n := range g.Nodes {
+		if n.Kind != KindStory || n.Approval != ApprovalApproved {
+			continue
+		}
+		if pk, ok := parentOf[n.PlanKey]; ok {
+			for _, e := range g.Nodes {
+				if e.PlanKey == pk {
+					approved[pk] = e
+				}
+			}
+		}
+	}
+	for _, n := range g.Nodes {
+		if _, ok := approved[n.PlanKey]; !ok && n.Approval == ApprovalDraft {
+			p.SkippedDrafts = append(p.SkippedDrafts, n.PlanKey)
+		}
+	}
+	slices.Sort(p.SkippedDrafts)
+
+	release, backlog, planControl := t.planStates()
+	planControl = planControl && g.SchemaVersion >= 2
+	approvals := t.Has(registry.CapApprovalFields)
+	approvalsSkipped := false
 
 	// Epics first, then stories, each in graph order: the order an apply
 	// creates them in.
@@ -209,8 +295,18 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 			}
 		}
 		issue, ok := p.existing[n.PlanKey]
+		if planControl && n.Kind == KindStory {
+			if !approvals && n.ApprovedBy != nil {
+				approvalsSkipped = true
+			}
+			p.planOps(n, issue, ok, release, backlog, approvals)
+		}
 		if !ok {
-			p.Creates = append(p.Creates, CreateOp{PlanKey: n.PlanKey, Kind: n.Kind, Title: strings.TrimSpace(n.Title), ParentKey: parentKey})
+			op := CreateOp{PlanKey: n.PlanKey, Kind: n.Kind, Title: strings.TrimSpace(n.Title), ParentKey: parentKey}
+			if planControl {
+				op.State = backlog
+			}
+			p.Creates = append(p.Creates, op)
 			continue
 		}
 		ref := IssueRef{PlanKey: n.PlanKey, IssueID: issue.ID, Identifier: issue.Identifier}
@@ -301,11 +397,56 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 		}
 	}
 
+	if approvalsSkipped {
+		p.Unsupported = append(p.Unsupported, UnsupportedApprovalFields)
+	}
+
 	p.Counts = Counts{
 		Creates: len(p.Creates), Updates: len(p.Updates), Parents: len(p.Parents),
 		RelationsAdded: len(p.RelationsAdded), RelationsRemoved: len(p.RelationsRemoved), Orphans: len(p.Orphans),
+		Releases: len(p.Releases), Labels: len(p.Labels), Approvals: len(p.Approvals),
 	}
 	return p
+}
+
+// planOps adds the plan-control operations of one approved story: its
+// release, its review label, and its approver. exists reports whether the
+// story's issue exists, as issue.
+func (p *Preview) planOps(n Node, issue domain.PlanIssue, exists bool, release, backlog string, approvals bool) {
+	id := ""
+	if exists {
+		id = issue.ID
+	}
+	if n.Released() && (!exists || strings.EqualFold(issue.State, backlog)) {
+		p.Releases = append(p.Releases, ReleaseOp{PlanKey: n.PlanKey, IssueID: id, Identifier: issue.Identifier, To: release})
+	}
+	if n.Review != "" {
+		want := ReviewLabelPrefix + n.Review
+		op := LabelOp{PlanKey: n.PlanKey, IssueID: id, Remove: []string{}}
+		has := false
+		for _, l := range issue.Labels {
+			if !strings.HasPrefix(strings.ToLower(l), ReviewLabelPrefix) {
+				continue
+			}
+			if strings.EqualFold(l, want) {
+				has = true
+			} else {
+				op.Remove = append(op.Remove, l)
+			}
+		}
+		if !has {
+			op.Add = want
+		}
+		if op.Add != "" || len(op.Remove) > 0 {
+			p.Labels = append(p.Labels, op)
+		}
+	}
+	if approvals && n.ApprovedBy != nil {
+		want := domain.PlanApproval{By: n.ApprovedBy.Name, ByID: n.ApprovedBy.ID, At: n.ApprovedAt}
+		if issue.Approval == nil || *issue.Approval != want {
+			p.Approvals = append(p.Approvals, ApprovalOp{PlanKey: n.PlanKey, IssueID: id, By: want.By, ByID: want.ByID, At: want.At})
+		}
+	}
 }
 
 func sortRelations(rs []RelationOp) {
@@ -323,13 +464,26 @@ func BodyDigest(body string) string {
 
 // TrackerDigest identifies the plan-keyed tracker state a preview was
 // computed from: each issue's id, plan key, title, body digest, kind,
-// parent, and blockers.
+// parent, blockers, review labels, and approver. It leaves out state, so
+// an apply checks each release against the issue's state again.
 func TrackerDigest(issues []domain.PlanIssue) string {
 	lines := make([]string, 0, len(issues))
 	for _, i := range issues {
 		blockers := slices.Sorted(slices.Values(i.BlockedBy))
-		lines = append(lines, fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
-			i.ID, i.PlanKey, i.Title, i.BodyDigest, i.Kind, i.ParentID, strings.Join(blockers, ",")))
+		var review []string
+		for _, l := range i.Labels {
+			if strings.HasPrefix(strings.ToLower(l), ReviewLabelPrefix) {
+				review = append(review, strings.ToLower(l))
+			}
+		}
+		slices.Sort(review)
+		approval := ""
+		if i.Approval != nil {
+			approval = i.Approval.By + "\x01" + i.Approval.ByID + "\x01" + i.Approval.At
+		}
+		lines = append(lines, fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
+			i.ID, i.PlanKey, i.Title, i.BodyDigest, i.Kind, i.ParentID, strings.Join(blockers, ","),
+			strings.Join(review, ","), approval))
 	}
 	slices.Sort(lines)
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))

@@ -29,10 +29,11 @@ func (*keyedAdapter) CreateIssue(context.Context, domain.NewIssue) (domain.Creat
 // fullAdapter implements every write capability.
 type fullAdapter struct{ keyedAdapter }
 
-func (*fullAdapter) UpdateIssue(context.Context, string, domain.IssueFields) error { return nil }
-func (*fullAdapter) SetParent(context.Context, string, string) error               { return nil }
-func (*fullAdapter) AddDependency(context.Context, string, string) error           { return nil }
-func (*fullAdapter) RemoveDependency(context.Context, string, string) error        { return nil }
+func (*fullAdapter) UpdateIssue(context.Context, string, domain.IssueFields) error  { return nil }
+func (*fullAdapter) SetParent(context.Context, string, string) error                { return nil }
+func (*fullAdapter) AddDependency(context.Context, string, string) error            { return nil }
+func (*fullAdapter) RemoveDependency(context.Context, string, string) error         { return nil }
+func (*fullAdapter) SetApproval(context.Context, string, domain.PlanApproval) error { return nil }
 
 // creatorWithoutFinder creates issues but cannot find them by plan key.
 type creatorWithoutFinder struct{ domain.TrackerAdapter }

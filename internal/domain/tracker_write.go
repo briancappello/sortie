@@ -40,6 +40,11 @@ type NewIssue struct {
 	// ParentID is the tracker-internal ID of the parent issue, empty
 	// for an issue without a parent.
 	ParentID string
+
+	// State is the state name the issue starts in. Empty means the
+	// tracker's own default for a new issue. An adapter returns a
+	// payload error for a state the issue's type cannot hold.
+	State string
 }
 
 // CreatedIssue identifies an issue that [IssueCreator.CreateIssue]
@@ -136,6 +141,33 @@ type PlanIssue struct {
 	// BlockedBy lists the tracker-internal IDs of the issues that block
 	// this one. Non-nil.
 	BlockedBy []string
+
+	// Labels lists the issue's labels as the tracker names them. Nil
+	// when the adapter does not read them for plan issues.
+	Labels []string
+
+	// Approval is the approver the issue records, when the adapter
+	// implements [ApprovalWriter]. Nil when none is recorded.
+	Approval *PlanApproval
+}
+
+// PlanApproval records who approved a plan story, and when.
+type PlanApproval struct {
+	// By is the approver's display name.
+	By string
+	// ByID is the approver's stable identity, for example
+	// "<issuer>|<subject>".
+	ByID string
+	// At is the approval time in RFC 3339.
+	At string
+}
+
+// ApprovalWriter is the optional capability to record an issue's
+// approver and approval time in fields of their own.
+type ApprovalWriter interface {
+	// SetApproval records a on the issue, replacing any approval it
+	// records. It returns a [*TrackerError] on failure.
+	SetApproval(ctx context.Context, issueID string, a PlanApproval) error
 }
 
 // PlanKeyFinder is the capability to find issues by plan key. An

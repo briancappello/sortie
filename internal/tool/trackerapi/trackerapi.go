@@ -58,6 +58,9 @@ func implements(adapter domain.TrackerAdapter, c registry.WriteCapability) bool 
 		_, ok = adapter.(domain.IssueUpdater)
 	case registry.CapSetParent:
 		_, ok = adapter.(domain.IssueParenter)
+	case registry.CapApprovalFields:
+		// Never offered: an agent must not record who approved a story.
+		return false
 	case registry.CapLinkDependency:
 		_, ok = adapter.(domain.DependencyLinker)
 	}

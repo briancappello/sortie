@@ -2943,12 +2943,21 @@ The orchestrator forwards the entire sub-object to the matching adapter without 
 `sortie plan sync --graph FILE [--dry-run] [--format text|json] [workflow-path]` makes the workflow's tracker match a validated plan graph, the JSON document the plan validator writes (`planlib graph`). It uses the workflow's tracker configuration and needs no running orchestrator.
 
 - One epic is created or updated per planned change, and one story per deliverable, parented to its epic. The graph's blocking edges become the tracker's blocking relations.
-- Only approved nodes are synced; the output names changes skipped as drafts.
+- Approval is decided node by node. An approved story is synced even when other stories of its epic are drafts, an epic is synced when it or any of its stories is approved, and a relation is synced only when both its nodes are. The output names every node skipped as a draft.
 - Issues are matched by their stored plan key, so a second run with the same graph writes nothing, and a changed title updates the existing issue.
-- Nothing is deleted, and an issue's status, assignee, and labels are never changed. An issue whose deliverable left the graph is reported as orphaned, and the relations among plan-keyed issues that the graph no longer holds are removed.
+- Nothing is deleted, and an issue's assignee is never changed. Its status changes only to release a story, and its labels only to keep its review label, both under plan control (below). An issue whose deliverable left the graph is reported as orphaned, and the relations among plan-keyed issues that the graph no longer holds are removed.
 - `--dry-run` prints the preview and writes nothing. Without it, the command previews and applies in one step, in dependency order, and stops at the first failed write, reporting what it wrote; a later run completes the rest.
 - A graph with an unsupported `schema_version`, a malformed shape, or an edge to a missing node is rejected before the tracker is contacted. A tracker that lacks a capability the writes need, such as linking dependencies, fails with `tracker_unsupported_operation` before the first write.
 - The exit code is `0` on success and `1` on any refusal or failure.
+
+**Plan graph version 2 and plan control.** Sortie reads plan graph versions 1 and 2. Version 2 adds four optional story fields: `release`, `review` (`human` or `criteria`), `approved_by` (`{name, id}`), and `approved_at` (RFC 3339). They are refused in a version 1 graph and on epics, and only an approved story may carry `release: true`. The published schema is `internal/plan/testdata/plan-graph.schema.json`. With plan control on (`tracker.release_state` set) and a version 2 graph:
+
+- New issues start in `tracker.backlog_state`.
+- A story with `release: true` moves from `backlog_state` to `release_state`, last in the apply, after its relations exist. A story in any other state is never moved, and a story that left `backlog_state` after the preview is reported under `release_skipped`, never forced.
+- A story with `review` keeps exactly one label `sortie-review:human` or `sortie-review:criteria`. Other labels are left alone.
+- `approved_by` and `approved_at` are written to the tracker when its adapter declares `approval_fields` (Huly does). Otherwise the preview lists `approval_fields_unsupported` under `unsupported`, and the rest of the sync still applies.
+
+A version 1 graph, or plan control off, releases nothing, writes no labels or approvers, and creates issues where the tracker puts new ones.
 
 The same sync is served over HTTP by `POST /api/v1/plan/sync`. Over HTTP, the plan routes also serve other projects of the tracker's workspace through `?project=<key>`, when the tracker supports it; Sortie plans and syncs those projects but dispatches agents only for `tracker.project` (see [architecture §13.7.2](architecture/18-logging-status-and-observability.md#1372-json-rest-api-apiv1)). Which trackers support it is listed in [architecture §11.7](architecture/11-issue-tracker-integration-contract.md#117-optional-write-capabilities).
 

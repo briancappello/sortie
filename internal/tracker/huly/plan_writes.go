@@ -54,6 +54,18 @@ func (a *HulyAdapter) createIssue(ctx context.Context, in domain.NewIssue) (doma
 	if err != nil {
 		return domain.CreatedIssue{}, err
 	}
+	status := a.initialStatus(taskType)
+	if in.State != "" {
+		named, ok := a.statusNamed(in.State, taskType)
+		if !ok {
+			return domain.CreatedIssue{}, &domain.TrackerError{
+				Kind:    domain.ErrTrackerPayload,
+				Message: fmt.Sprintf("huly: task type %s has no status %q", taskType.Name, in.State),
+			}
+		}
+		status = named
+	}
+
 	if err := a.ensurePlanAttributes(ctx); err != nil {
 		return domain.CreatedIssue{}, err
 	}
@@ -105,7 +117,7 @@ func (a *HulyAdapter) createIssue(ctx context.Context, in domain.NewIssue) (doma
 		"component":        nil,
 		"milestone":        nil,
 		"number":           number,
-		"status":           a.initialStatus(taskType),
+		"status":           status,
 		"priority":         0,
 		"rank":             rank,
 		"comments":         0,
@@ -165,6 +177,34 @@ func parentChain(parent hulyIssue) []map[string]any {
 		})
 	}
 	return chain
+}
+
+// statusNamed returns the id of the status called name that the task type
+// allows, compared without regard to letter case.
+func (a *HulyAdapter) statusNamed(name string, t taskTypeRef) (string, bool) {
+	for _, id := range a.projectStatuses[strings.ToLower(strings.TrimSpace(name))] {
+		if slices.Contains(t.Statuses, id) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// SetApproval records the story's approver and approval time in the
+// read-only approval attributes.
+func (a *HulyAdapter) SetApproval(ctx context.Context, issueID string, ap domain.PlanApproval) error {
+	return trackermetrics.Track(a.recorder(), "set_approval", func() error {
+		if err := a.ensurePlanAttributes(ctx); err != nil {
+			return err
+		}
+		issue, err := a.projectIssue(ctx, issueID)
+		if err != nil {
+			return err
+		}
+		return a.rpc.Tx(ctx, a.updateTx(classIssue, issue.Space, issue.ID, map[string]any{
+			attrApprovedBy: ap.By, attrApprovedByID: ap.ByID, attrApprovedAt: ap.At,
+		}))
+	})
 }
 
 // initialStatus is the project's default issue status when the task type
