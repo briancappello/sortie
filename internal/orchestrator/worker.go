@@ -329,6 +329,10 @@ type WorkerDeps struct {
 	// DispatchID fences session identity to this worker attempt.
 	DispatchID string
 
+	// SessionAPIURL is the base URL of the HTTP server, passed to the
+	// agent process as SORTIE_API_URL. Empty when the server is off.
+	SessionAPIURL string
+
 	// ToolRegistry holds the tools available to agent sessions. May be nil.
 	// Read-only after construction.
 	ToolRegistry *domain.ToolRegistry
@@ -503,7 +507,8 @@ func effectiveTurnTimeoutMS(turnTimeoutMS int) int {
 }
 
 // runBoundedTurn calls adapter.RunTurn under a deadline derived from
-// turnTimeoutMS. A parent ctx already done takes priority over the deadline,
+// turnTimeoutMS, kept by the run's turn clock so time the run spends held
+// extends it and a held run never reaches it. A parent ctx already done takes priority over the deadline,
 // so stall detection, reconciliation, and shutdown keep reporting their own
 // cancellation; only an outcome the adapter reports as cancelled, from a
 // turn context that expired while ctx stayed live, is reported as
@@ -525,8 +530,12 @@ func runBoundedTurn(
 		logger.LogAttrs(ctx, slog.LevelWarn, "non-positive turn timeout, applying default", attrs...)
 	}
 
-	turnCtx, cancel := context.WithTimeout(ctx, time.Duration(effectiveMS)*time.Millisecond)
-	defer cancel()
+	clock := sessionIdentityFrom(ctx).TurnClock
+	if clock == nil {
+		clock = newTurnClock()
+	}
+	turnCtx, endTurn := newTurnContext(ctx, clock, time.Duration(effectiveMS)*time.Millisecond)
+	defer endTurn()
 
 	result, err := adapter.RunTurn(turnCtx, session, params)
 
@@ -998,6 +1007,15 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		sshEnvNames = deps.SSHEnvNamesFunc(agentKind)
 	}
 
+	sessionEnv := sessionEnvParams{
+		Issue:         issue,
+		DispatchID:    deps.DispatchID,
+		Attempt:       attempt,
+		Identity:      sessionIdentityFrom(ctx),
+		WorkspacePath: wsResult.Path,
+		APIURL:        deps.SessionAPIURL,
+		Purpose:       sessionPurposeWork,
+	}
 	params := domain.StartSessionParams{
 		WorkspacePath:            wsResult.Path,
 		AgentConfig:              toDomainAgentConfig(cfg, agentKind, remote),
@@ -1007,7 +1025,11 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		SSHEnvNames:              sshEnvNames,
 		MCPConfigPath:            mcpConfigPath,
 		Settings:                 deps.AgentSettings.Passthrough,
+		SessionEnv:               buildSessionEnv(sessionEnv),
 	}
+	verificationParams := params
+	sessionEnv.Purpose = sessionPurposeCredentialCheck
+	verificationParams.SessionEnv = buildSessionEnv(sessionEnv)
 
 	deps.OnEvent(issue.ID, domain.AgentEvent{
 		Type:      domain.EventNotification,
@@ -1045,7 +1067,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	verificationStarted := time.Now()
 	verificationResult, verificationErr := agentcore.VerifyCredential(ctx, deps.AgentAdapter, agentcore.CredentialVerification{
-		Session:   params,
+		Session:   verificationParams,
 		Issue:     issue,
 		TurnBound: time.Duration(effectiveTurnTimeoutMS(cfg.Agent.TurnTimeoutMS)) * time.Millisecond,
 		StopBound: stopSessionDeadline(cfg),
@@ -1401,7 +1423,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				return
 			}
 
-			if stateStr, ok := refreshed[issue.ID]; ok {
+			// An empty state may be a label edit in flight; reconcile alone
+			// stops a run whose issue lost its state label.
+			if stateStr, ok := refreshed[issue.ID]; ok && stateStr != "" {
 				issue.State = stateStr
 				observedIssueState = stateStr
 			}

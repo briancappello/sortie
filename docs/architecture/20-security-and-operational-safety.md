@@ -75,4 +75,10 @@ Dispatching a run to a remote host bounds this differently. Only the variables t
 
 The sandbox does not help in either case. It governs filesystem and network reach, not what a process reads from the environment it was started with.
 
+Two credentials of Sortie's own HTTP control surface (§13.7) are bounded on purpose. The operator's `server.control_token` never reaches an agent: every variable of the orchestrator's environment holding its value is removed at startup. Each work session instead receives `SORTIE_SESSION_TOKEN`, a token that authorizes only the per-issue control routes of its own issue and stops working when its run ends. A local agent can read that token, as it can read anything its wrapper holds, so the worst a leaked session token does is act on its own run, in ways the run's limits still bound and the run's state shows.
+
+### 15.7 Control API Exposure
+
+The state-changing HTTP endpoints accept requests without a token only while no control token is set, and Sortie then refuses any bind address that is not a loopback address. A deployment that exposes the server, a container bound to `0.0.0.0` among them, sets `server.control_token`. Read-only endpoints keep no authentication: put the server behind a network boundary or an authenticating proxy when the dashboard, the runtime snapshot, or the metrics must not be readable.
+
 Which runtimes read workspace configuration, which files they key on, and how any of this differs between their releases are adapter concerns and belong in the adapter notes.

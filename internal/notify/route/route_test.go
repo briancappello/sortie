@@ -308,6 +308,28 @@ func TestRouter_Route_Targets(t *testing.T) {
 			event: domain.EventBudgetHeld,
 		},
 		{
+			name:    "no explicit entry never posts session.escalated",
+			tracker: true,
+			in:      route.Inputs{Comments: config.TrackerCommentsConfig{OnDispatch: true, OnCompletion: true, OnFailure: true}},
+			event:   domain.EventSessionEscalated,
+		},
+		{
+			name: "only the entries listing session.escalated receive it",
+			in: route.Inputs{Entries: []config.NotificationBackend{
+				entry("slack", domain.EventSessionFailed),
+				entry("webhook", domain.EventSessionEscalated),
+			}},
+			event: domain.EventSessionEscalated,
+			want:  []string{"notifications[1]"},
+		},
+		{
+			name:    "a tracker comment entry listing session.escalated receives it",
+			tracker: true,
+			in:      route.Inputs{Entries: []config.NotificationBackend{entry(domain.TrackerCommentKind, domain.EventSessionEscalated)}},
+			event:   domain.EventSessionEscalated,
+			want:    []string{"tracker_comment"},
+		},
+		{
 			name:    "tracker comment comes first and entries follow by index",
 			tracker: true,
 			in: route.Inputs{Entries: []config.NotificationBackend{

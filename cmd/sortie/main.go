@@ -51,6 +51,7 @@ import (
 	_ "github.com/sortie-ai/sortie/internal/scm/github"
 	_ "github.com/sortie-ai/sortie/internal/scm/gitlab"
 	_ "github.com/sortie-ai/sortie/internal/tracker/file"
+	_ "github.com/sortie-ai/sortie/internal/tracker/huly"
 	_ "github.com/sortie-ai/sortie/internal/tracker/jira"
 	_ "github.com/sortie-ai/sortie/internal/tracker/linear"
 )
@@ -454,7 +455,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 
 	toolRegistry := domain.NewToolRegistry()
 	if br.cfg.Tracker.Project != "" {
-		toolRegistry.Register(trackerapi.New(br.trackerAdapter, br.cfg.Tracker.Project))
+		toolRegistry.Register(trackerapi.New(br.trackerAdapter, br.cfg.Tracker.Project,
+			trackerapi.WithWriteCapabilities(trackerWrites(br.cfg.Tracker.Kind))))
 	}
 
 	var ciProvider domain.CIStatusProvider
@@ -682,9 +684,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		}
 
 		if mergeCompletionActive {
-			trackerMeta, _ := registry.Trackers.Meta(br.cfg.Tracker.Kind)
 			var mcErr error
-			mergeCompletionConfig, mcErr = orchestrator.BuildMergeCompletionReactionConfig(mergeCompletionRC, br.cfg.Tracker, trackerMeta)
+			mergeCompletionConfig, mcErr = orchestrator.BuildMergeCompletionReactionConfig(mergeCompletionRC, br.cfg.Tracker)
 			if mcErr != nil {
 				br.logger.Error("invalid merge_completion reaction config", slog.Any("error", mcErr))
 				return 1
@@ -823,8 +824,14 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return sessionTools.Registry, nil
 	}
 
+	var sessionAPIURL string
+	if serverEnabled {
+		sessionAPIURL = serverBaseURL(ln.Addr())
+	}
+
 	o := orchestrator.NewOrchestrator(orchestrator.OrchestratorParams{
 		State:                             state,
+		SessionAPIURL:                     sessionAPIURL,
 		Logger:                            br.logger,
 		TrackerAdapter:                    br.trackerAdapter,
 		Router:                            route.NewRouter(br.trackerAdapter, registry.Notifiers.Get),
@@ -863,6 +870,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		rawTokenRates, tokenRatesPresent := br.cfg.ExtensionValue("token_rates")
 		tokenRates, _ := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
 
+		planProjects := newPlanProjects(br.trackerAdapter, br.cfg, br.mgr.Config, func() domain.TrackerStates {
+			tracker := br.mgr.Config().Tracker
+			return domain.TrackerStates{
+				Active:     tracker.ActiveStates,
+				Terminal:   tracker.TerminalStates,
+				Handoff:    tracker.HandoffState,
+				InProgress: tracker.InProgressState,
+			}
+		})
+		defer planProjects.Close()
+
 		addr := net.JoinHostPort(br.serverHost, strconv.Itoa(br.serverPort))
 		srv = server.New(server.Params{
 			SnapshotFn:       o.SnapshotFunc(),
@@ -877,6 +895,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			PreflightFn:      o.PreflightOK,
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
 			TokenRates:       tokenRates,
+			ControlToken:     br.controlToken,
+			SessionTokenFn:   o.SessionTokenFunc(),
+			HoldFn:           server.HoldFunc(o.HoldFunc()),
+			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
+			EscalateFn:       server.EscalateFunc(o.EscalateFunc()),
+			PlanProjects:     planProjects,
+			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
 				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
 				if err != nil {

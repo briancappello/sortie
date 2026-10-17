@@ -2,7 +2,7 @@
 
 Notes for a developer changing Sortie's Linear tracker adapter: what GraphQL costs us that REST does not, where Linear's model and ours disagree, and the traps that are invisible until they bite.
 
-Last updated: 2026-08-23
+Last updated: 2026-10-10
 
 ## GraphQL through a REST-shaped toolkit
 
@@ -34,7 +34,7 @@ That is fatal for exactly the operations that need batching, since state reconci
 
 ## Team key, not project
 
-`tracker.project` holds a Linear team key, not a Linear project. Three reasons, and they all still hold: workflow states are team-scoped, so the state model this adapter is built around is only well defined relative to one team; the team key is the visible prefix of every issue identifier, which makes it the least surprising thing for an operator to configure; and Linear projects are cross-team containers that own neither states nor identifiers, so filtering by one would still need a team for state resolution.
+`tracker.project` holds a Linear team key, not a Linear project, for these reasons: workflow states are team-scoped, so the state model this adapter is built around is only well defined relative to one team; the team key is the visible prefix of every issue identifier, which makes it the least surprising thing for an operator to configure; and Linear projects are cross-team containers that own neither states nor identifiers, so filtering by one would still need a team for state resolution.
 
 Reads filter by team key directly, so no team UUID lookup is needed. Only the label-create path needs the UUID, and it resolves one per call.
 
@@ -72,7 +72,13 @@ Label creation is also gated by a team-level permission setting that decides whe
 
 Removal takes label ids from the issue's own labels and never from a name lookup. Linear can hold a team label and a workspace label of one name, a name lookup returns one of them, and the issue may carry the other, so the issue's labels are read first and every one that names the requested label is removed in a single `removedLabelIds` mutation. Both label mutations select the issue's labels in their payload, capped at 50 with a next-page flag; a payload that reports another page cannot confirm anything, so the adapter reads the issue's labels instead.
 
-Linear's handling of an add whose label shares a single-select group with another label on the issue is undocumented: it may replace the sibling, reject the mutation as invalid input, report `success: false`, or accept it and change nothing, and the error classifier cannot tell a group conflict from any other rejection. A label sits in a single-select group when its parent group's `groupType` is not `multiSelect`; a group without a type behaves as single-select, and a label the adapter created has no parent. The plain add runs first, and for a grouped label every outcome except the label on the issue leads to a read of the issue's labels, the removal of the labels that share the target's parent, and a second add. A Linear that replaces the sibling itself costs one mutation. The gap between the removal and the second add is accepted: a request that fails there leaves the issue without the group's labels and without the new one. No input combines `addedLabelIds` with `removedLabelIds`, and removing an id the issue lacks is unverified, so the removal is settled by the confirming read.
+Linear does not document what happens when an add targets a label that shares a single-select group with a label already on the issue. It may replace the sibling, reject the mutation as invalid input, report `success: false`, or accept it and change nothing. The error classifier cannot tell a group conflict from any other rejection.
+
+A label is in a single-select group when its parent group's `groupType` is not `multiSelect`; a group without a type behaves as single-select. A label the adapter created has no parent.
+
+The plain add runs first. For a grouped label, any outcome other than the label being on the issue leads to a read of the issue's labels, removal of the labels that share the target's parent, and a second add. If Linear replaces the sibling itself, that costs one mutation. The gap between the removal and the second add is accepted: a request that fails there leaves the issue with neither the old group labels nor the new one.
+
+No input combines `addedLabelIds` with `removedLabelIds`, and removing an id the issue lacks is unverified, so the removal is settled by the confirming read.
 
 ## Pagination
 
@@ -122,7 +128,7 @@ The endpoint defaults to Linear's single hosted GraphQL URL; there is no self-ho
 
 `tracker.query_filter` is a JSON object merged into the fetch filter as extra sibling fields, which Linear ANDs with the adapter's own constraints. The top-level team and state keys are rejected so an operator cannot widen the team or state scope out from under the state model, the fragment travels in the variables object rather than the query text, and the filter map is rebuilt per call so concurrent fetches never share it.
 
-Configured state names are validated online, by the preflight, not offline. The offline validator only checks shapes it can decide without a network call: endpoint form, a team key that looks like a team key rather than an owner/repo path, and state list elements. Empty or padded state names are errors here rather than warnings, because construction rejects them.
+Configured state names are validated online, by the preflight, not offline. The offline validator only checks shapes it can decide without a network call: endpoint form, a team key that looks like a team key rather than an owner/repo path, and state list elements. Padded state names are errors here rather than warnings, because construction rejects them. An empty state name fails the workflow load on every tracker, so it never reaches this validator.
 
 Writes are ordinary data changes, so they emit whatever webhooks and automations the operator has configured in their workspace. Sortie polls and consumes no webhooks itself, so this is an operator-awareness note rather than a dependency.
 

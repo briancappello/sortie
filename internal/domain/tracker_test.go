@@ -16,6 +16,8 @@ func (m *mockTrackerAdapter) FetchCandidateIssues(_ context.Context) ([]Issue, e
 	return nil, nil
 }
 
+func (m *mockTrackerAdapter) SetTrackerStates(func() TrackerStates) {}
+
 func (m *mockTrackerAdapter) FetchIssueByID(_ context.Context, _ string) (Issue, error) {
 	return Issue{}, nil
 }
@@ -69,6 +71,7 @@ func TestTrackerErrorKind_Values(t *testing.T) {
 		{ErrTrackerNotFound, "tracker_not_found"},
 		{ErrTrackerPayload, "tracker_payload_error"},
 		{ErrTrackerMissingCursor, "tracker_missing_end_cursor"},
+		{ErrTrackerUnsupportedOperation, "tracker_unsupported_operation"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
@@ -78,8 +81,8 @@ func TestTrackerErrorKind_Values(t *testing.T) {
 			}
 		})
 	}
-	if len(tests) != 9 {
-		t.Errorf("expected 9 tracker error kinds, got %d", len(tests))
+	if len(tests) != 10 {
+		t.Errorf("expected 10 tracker error kinds, got %d", len(tests))
 	}
 }
 
@@ -182,10 +185,11 @@ func TestTrackerErrorKind_RetryClassification(t *testing.T) {
 		{"tracker_not_found", ErrTrackerNotFound, false, BackoffNone},
 		{"tracker_payload_error", ErrTrackerPayload, false, BackoffNone},
 		{"tracker_missing_end_cursor", ErrTrackerMissingCursor, true, BackoffExponential},
+		{"tracker_unsupported_operation", ErrTrackerUnsupportedOperation, false, BackoffNone},
 	}
 
-	if len(tests) != 9 {
-		t.Errorf("expected 9 tracker error kinds, got %d", len(tests))
+	if len(tests) != 10 {
+		t.Errorf("expected 10 tracker error kinds, got %d", len(tests))
 	}
 
 	for _, tt := range tests {

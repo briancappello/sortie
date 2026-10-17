@@ -88,6 +88,10 @@ type dashboardRunningEntry struct {
 	ConfiguredModelRow  string
 	ConfiguredEffortRow string
 
+	// HeldRow describes the hold in effect, empty when the run is not
+	// held; the template marks the run held exactly when it is set.
+	HeldRow string
+
 	// UsageReportingRow, ModelRow, APIRequestsRow, TokensRow, and
 	// EstCostRow are pre-formatted usage-disposition panel rows the
 	// template prints verbatim.
@@ -102,6 +106,22 @@ const dashPlaceholder = "—"
 
 // runtimeDefaultLabel stands for a setting the attempt left unset.
 const runtimeDefaultLabel = "runtime default"
+
+// heldRow describes a running entry's hold for the dashboard, or returns
+// the empty string when the run is not held.
+func heldRow(e orchestrator.SnapshotRunningEntry, now time.Time) string {
+	if !e.Held {
+		return ""
+	}
+	row := "for " + FormatDuration(max(now.Sub(e.HeldSince), 0))
+	if e.Holder != "" {
+		row += " by " + e.Holder
+	}
+	if e.HoldReason != "" {
+		row += ": " + e.HoldReason
+	}
+	return row
+}
 
 // configuredSettingRow renders a configured model or effort row.
 func configuredSettingRow(value string) string {
@@ -508,6 +528,7 @@ func buildDashboardData(
 			UsageMeasured:    e.UsageMeasured,
 
 			RuleRow:             ruleRow(e.RuleName),
+			HeldRow:             heldRow(e, snap.GeneratedAt),
 			ConfiguredModelRow:  configuredSettingRow(e.ConfiguredModel),
 			ConfiguredEffortRow: configuredSettingRow(e.ConfiguredEffort),
 			UsageReportingRow:   usageReportingRow(e.UsageArrival, e.UsageAttribution),

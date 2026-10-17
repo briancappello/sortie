@@ -41,6 +41,8 @@ data:
 
     server:
       port: 7678
+      # Required because the container binds to 0.0.0.0.
+      control_token: $SORTIE_CONTROL_TOKEN
     ---
 
     You are a senior engineer working on {{ .issue.identifier }}: {{ .issue.title }}

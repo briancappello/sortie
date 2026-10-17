@@ -133,6 +133,7 @@ func sessionToolParamsFromEnv(getenv func(string) string, cfg config.ServiceConf
 	return SessionToolParams{
 		TrackerAdapter:        trackerAdapter,
 		Project:               cfg.Tracker.Project,
+		TrackerWrites:         trackerWrites(cfg.Tracker.Kind),
 		WorkspacePath:         getenv("SORTIE_WORKSPACE"),
 		DBPath:                getenv("SORTIE_DB_PATH"),
 		IssueID:               getenv("SORTIE_ISSUE_ID"),

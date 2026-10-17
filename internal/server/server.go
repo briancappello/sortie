@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/plan"
 )
 
 // SnapshotFunc returns a point-in-time capture of the orchestrator's
@@ -140,6 +141,37 @@ type Params struct {
 	// rates for cost estimation on the dashboard. When nil or empty,
 	// the dashboard shows raw token counts without cost estimates.
 	TokenRates TokenRates
+
+	// ControlToken is the bearer token every state-changing endpoint
+	// requires. When empty, those endpoints accept a request that
+	// presents no token; startup permits that only on a loopback bind.
+	ControlToken string
+
+	// SessionTokenFn resolves a session token to the issue its running
+	// session serves. When nil, no session token is accepted.
+	SessionTokenFn SessionTokenFunc
+
+	// HoldFn and ReleaseFn hold and release a running issue. Called on
+	// POST /api/v1/{identifier}/hold and /release. When nil, those
+	// routes answer 503.
+	HoldFn    HoldFunc
+	ReleaseFn ReleaseFunc
+
+	// EscalateFn escalates a running issue to people. Called on
+	// POST /api/v1/{identifier}/escalate. When nil, that route answers
+	// 503.
+	EscalateFn EscalateFunc
+
+	// PlanProjects serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
+	// GET /api/v1/plan/capabilities, and GET and PUT
+	// /api/v1/plan/projects/{key}, for the configured project and, when
+	// the tracker supports it, other projects of its workspace. When nil,
+	// those routes answer 503.
+	PlanProjects *plan.Projects
+
+	// TerminalStatesFn returns the workflow's current terminal states,
+	// which mark plan graph nodes terminal. When nil, no node is.
+	TerminalStatesFn func() []string
 }
 
 // Server is the embedded HTTP server for JSON API, dashboard, and
@@ -162,6 +194,13 @@ type Server struct {
 	workflowLoadedFn func() bool
 	runHistoryFn     RunHistoryFunc
 	tokenRates       TokenRates
+	controlToken     string
+	sessionTokenFn   SessionTokenFunc
+	holdFn           HoldFunc
+	releaseFn        ReleaseFunc
+	escalateFn       EscalateFunc
+	planProjects     *plan.Projects
+	terminalStatesFn func() []string
 }
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -207,6 +246,13 @@ func New(params Params) *Server {
 		workflowLoadedFn: params.WorkflowLoadedFn,
 		runHistoryFn:     params.RunHistoryFn,
 		tokenRates:       params.TokenRates,
+		controlToken:     params.ControlToken,
+		sessionTokenFn:   params.SessionTokenFn,
+		holdFn:           params.HoldFn,
+		releaseFn:        params.ReleaseFn,
+		escalateFn:       params.EscalateFn,
+		planProjects:     params.PlanProjects,
+		terminalStatesFn: params.TerminalStatesFn,
 	}
 
 	// Method-specific pattern so non-GET methods receive the default
@@ -223,8 +269,15 @@ func New(params Params) *Server {
 	// 405 responses use JSON error envelopes instead of the default
 	// plain-text body from Go's ServeMux.
 	mux.HandleFunc("/api/v1/state", s.routeState)
-	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
+	mux.HandleFunc("/api/v1/plan/sync", s.controlRoute(scopeOperator, s.handlePlanSync))
+	mux.HandleFunc("/api/v1/plan/graph", s.controlGet(s.handlePlanGraph))
+	mux.HandleFunc("/api/v1/plan/capabilities", s.controlGet(s.handlePlanCapabilities))
+	mux.HandleFunc("/api/v1/plan/projects/{key}", s.routePlanProject)
+	mux.HandleFunc("/api/v1/refresh", s.controlRoute(scopeOperator, s.handleRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
+	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
+	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
+	mux.HandleFunc("/api/v1/{identifier}/escalate", s.controlRoute(scopeSession, s.handleEscalate))
 
 	if params.MetricsRegistry != nil {
 		mux.Handle("GET /metrics", promhttp.InstrumentMetricHandler(

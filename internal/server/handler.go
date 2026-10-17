@@ -69,6 +69,27 @@ type runningEntryResponse struct {
 	UsageAttribution    string `json:"usage_attribution"`
 	TokensPending       bool   `json:"tokens_pending"`
 	APIRequestsMeasured bool   `json:"api_requests_measured"`
+
+	holdFields
+}
+
+// holdFields is a running run's hold as the API reports it. HeldSince is
+// null, and HoldReason and Holder are empty, while the run is not held.
+// HeldTotalMS counts every hold of the run so far, an open one included.
+type holdFields struct {
+	Held        bool       `json:"held"`
+	HoldReason  string     `json:"hold_reason"`
+	Holder      string     `json:"holder"`
+	HeldSince   *time.Time `json:"held_since"`
+	HeldTotalMS int64      `json:"held_total_ms"`
+}
+
+func newHoldFields(held bool, reason, holder string, since time.Time, total time.Duration) holdFields {
+	f := holdFields{Held: held, HoldReason: reason, Holder: holder, HeldTotalMS: total.Milliseconds()}
+	if held {
+		f.HeldSince = new(since.UTC())
+	}
+	return f
 }
 
 // tokenInfo carries a running row's five token figures. The members
@@ -170,6 +191,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 		UsageAttribution:    string(e.UsageAttribution),
 		TokensPending:       e.TokensPending,
 		APIRequestsMeasured: e.APIRequestsMeasured,
+		holdFields:          newHoldFields(e.Held, e.HoldReason, e.Holder, e.HeldSince, e.HeldTotal),
 	}
 
 	// A figure no measurement produced is null in the place it already
@@ -301,14 +323,6 @@ func (s *Server) routeState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.handleState(w, r)
-}
-
-func (s *Server) routeRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.methodNotAllowed(w, r, http.MethodPost)
-		return
-	}
-	s.handleRefresh(w, r)
 }
 
 func (s *Server) routeIssueDetail(w http.ResponseWriter, r *http.Request) {

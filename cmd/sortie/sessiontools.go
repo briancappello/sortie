@@ -7,6 +7,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/tool/budget"
 	"github.com/sortie-ai/sortie/internal/tool/history"
 	"github.com/sortie-ai/sortie/internal/tool/notify"
@@ -24,6 +25,10 @@ type SessionToolParams struct {
 
 	// Project is the tracker project. Empty disables tracker_api.
 	Project string
+
+	// TrackerWrites lists the write capabilities the tracker kind
+	// declares; tracker_api offers their planning operations.
+	TrackerWrites []registry.WriteCapability
 
 	// WorkspacePath gates sortie_status. Empty disables it.
 	WorkspacePath string
@@ -97,7 +102,7 @@ func BuildSessionToolRegistry(ctx context.Context, logger *slog.Logger, params S
 	var store *persistence.Store
 
 	if params.TrackerAdapter != nil && params.Project != "" {
-		reg.Register(trackerapi.New(params.TrackerAdapter, params.Project))
+		reg.Register(trackerapi.New(params.TrackerAdapter, params.Project, trackerapi.WithWriteCapabilities(params.TrackerWrites)))
 	}
 
 	if params.WorkspacePath != "" {

@@ -34,7 +34,8 @@ const (
 // be constructed is rejected and the previous configuration stays in
 // force.
 var workflowValidate workflow.ValidateFunc = func(cfg config.ServiceConfig) error {
-	if err := orchestrator.ValidateConfigForPromotion(cfg); err != nil {
+	trackerMeta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
+	if err := orchestrator.ValidateConfigForPromotion(cfg, trackerMeta); err != nil {
 		return err
 	}
 	return route.CheckDestinations(cfg.Notifications.Backends, registry.Notifiers.Get)
@@ -73,6 +74,7 @@ type bootResult struct {
 	blockerResolver orchestrator.BlockerResolver
 	serverPort      int
 	serverHost      string
+	controlToken    string
 	serverEnabled   bool
 	portIsImplicit  bool
 	dryRun          bool
@@ -96,6 +98,9 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 	}
 	if len(p.args) > 0 && p.args[0] == "stats" {
 		return bootResult{}, runStats(ctx, p.args[1:], p.stdout, p.stderr)
+	}
+	if len(p.args) > 0 && p.args[0] == "plan" {
+		return bootResult{}, runPlan(ctx, p.args[1:], p.stdout, p.stderr)
 	}
 	if len(p.args) > 0 && p.args[0] == "mcp-server" {
 		return bootResult{}, runMCPServer(ctx, p.args[1:], p.stdout, p.stderr)
@@ -254,6 +259,18 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		logger.Error("server host configuration error", slog.Any("error", hostErr))
 		return bootResult{}, 1
 	}
+	controlToken, tokenErr := resolveControlToken(cfg.ExtensionSection("server"))
+	if tokenErr == nil {
+		tokenErr = checkControlBinding(serverHost, controlToken)
+	}
+	if tokenErr != nil {
+		logger.Error("server control token configuration error", slog.Any("error", tokenErr))
+		return bootResult{}, 1
+	}
+	redact.Add(controlTokenSetting, controlToken)
+	if removed := unsetControlTokenEnv(controlToken); len(removed) > 0 {
+		logger.Info("control token removed from the environment agents inherit", slog.Any("names", removed))
+	}
 
 	trackerCtor, err := registry.Trackers.Get(cfg.Tracker.Kind)
 	if err != nil {
@@ -268,6 +285,15 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		logger.Error("failed to construct tracker adapter", slog.Any("error", err))
 		return bootResult{}, 1
 	}
+	trackerAdapter.SetTrackerStates(func() domain.TrackerStates {
+		tracker := mgr.Config().Tracker
+		return domain.TrackerStates{
+			Active:     tracker.ActiveStates,
+			Terminal:   tracker.TerminalStates,
+			Handoff:    tracker.HandoffState,
+			InProgress: tracker.InProgressState,
+		}
+	})
 
 	trackerMeta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
 	resolver := blockers.NewResolver(trackerAdapter, trackerMeta.BlockerSource, logger)
@@ -294,6 +320,7 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		blockerResolver: blockerResolver,
 		serverPort:      serverPort,
 		serverHost:      serverHost,
+		controlToken:    controlToken,
 		serverEnabled:   serverEnabled,
 		portIsImplicit:  !portFlagSet && !hasServerPortExtension(cfg.ExtensionSection("server")),
 		dryRun:          *dryRun,

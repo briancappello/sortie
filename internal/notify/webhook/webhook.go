@@ -88,6 +88,17 @@ type wirePayload struct {
 	// Stage is set only for a stage event, so every other payload keeps
 	// its field set.
 	Stage *wireStage `json:"stage,omitempty"`
+
+	// Escalation is set only for a session.escalated event.
+	Escalation *wireEscalation `json:"escalation,omitempty"`
+}
+
+// wireEscalation is what a session.escalated event reports besides its
+// text, which is AgentText.
+type wireEscalation struct {
+	Kind string `json:"kind"`
+	Rule string `json:"rule"`
+	URL  string `json:"url,omitempty"`
 }
 
 // wireStage is the hop decision a stage event reports.
@@ -130,6 +141,10 @@ func (n *notifier) Send(ctx context.Context, notification domain.Notification) e
 			HopCount:   stage.HopCount,
 			Reason:     stage.Reason,
 		}
+	}
+
+	if esc := notification.Envelope.Escalation; esc != (domain.SessionEscalation{}) {
+		payload.Escalation = &wireEscalation{Kind: esc.Kind, Rule: esc.Rule, URL: esc.URL}
 	}
 
 	encoded, err := json.Marshal(payload)

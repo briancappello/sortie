@@ -72,9 +72,9 @@ Fields:
 - `project` (string)
   - Project identifier. Interpretation is adapter-defined (project key for Jira, `owner/repo` for GitHub, team key for Linear). Required for dispatch when the tracker adapter requires project scoping.
 - `active_states` (list of strings)
-  - Default values are adapter-defined; must be configured explicitly when the adapter's defaults differ from deployment expectations.
+  - No default on any tracker; the workflow's list is the only source of active states. An empty list dispatches no issue and draws a preflight warning. A blank entry (empty or only white space) is a configuration error.
 - `terminal_states` (list of strings)
-  - Default values are adapter-defined; must be configured explicitly when the adapter's defaults differ from deployment expectations.
+  - No default on any tracker. A tracker that derives issue state from labels requires a non-empty list, because a closed issue reads as the first entry; an empty list is a configuration error there. A blank entry (empty or only white space) is a configuration error on every tracker.
 - `query_filter` (string, optional)
   - Adapter-defined query fragment that narrows the base candidate and terminal-state queries.
   - The orchestrator passes this value to the tracker adapter without interpretation.
@@ -98,7 +98,7 @@ Fields:
   - Empty values, including `$VAR` references that resolve to empty, are treated as configuration errors.
   - Requires `handoff_state` to be non-empty: a declared run performs no transition where no handoff path applies.
   - A declared run of a rule that carries `next` hops like any other successful run and selects this state only when the hop is not made.
-  - Must equal `handoff_state` (case-insensitive) or name a member of `terminal_states` exactly as written in front matter (case-insensitive); no other value is permitted, and no tracker adapter's default terminal-state list is consulted.
+  - Must equal `handoff_state` (case-insensitive) or name a member of `terminal_states` exactly as written in front matter (case-insensitive); no other value is permitted, and the list is read as written.
   - Changes take effect for future worker exits, not in-flight sessions.
 - `in_progress_state` (string, optional)
   - Target tracker state for dispatch-time transitions. When configured, the worker calls `TransitionIssue` as the first step of each attempt, before workspace preparation.
@@ -399,11 +399,11 @@ Extra fields:
 
 Merge-completion detection. When configured, the orchestrator observes the merge state of Sortie-managed PRs independently of who performs the merge and transitions the linked issue to a single configured terminal state exactly once. See Section 11G for the full contract. (Runtime kind value: `merge-completion`.)
 
-The kind constrains two `tracker` fields, both checked when its configuration is constructed: `handoff_state` MUST be non-empty, and `terminal_states` MUST be written non-empty in front matter rather than left to the tracker adapter's default list.
+The kind constrains two `tracker` fields, both checked when its configuration is constructed: `handoff_state` MUST be non-empty, and `terminal_states` MUST be written non-empty in front matter.
 
 Extra fields:
 
-- `target_state` (string, via Extra): the single tracker terminal state the linked issue moves to once its pull request merges. Required, no default. MUST NOT equal `tracker.handoff_state`; MUST NOT be a member of `tracker.active_states`, falling back to the tracker adapter's default active-state list when that field is empty; MUST be a member of `tracker.terminal_states` exactly as written in configuration, with no fallback to the adapter's default terminal-state list. All three comparisons are case-insensitive.
+- `target_state` (string, via Extra): the single tracker terminal state the linked issue moves to once its pull request merges. Required, no default. MUST NOT equal `tracker.handoff_state`; MUST NOT be a member of `tracker.active_states`; MUST be a member of `tracker.terminal_states`. Both lists are read exactly as written in configuration. All three comparisons are case-insensitive.
 - `poll_interval_ms` (integer, via Extra): polling interval for the merge-observation state machine. Default: `60000` (1 minute). Minimum: `30000`.
 
 The kind carries no `watch_window_ms`: a pull request may remain unmerged for any length of time without starting a failure clock.
@@ -459,7 +459,7 @@ A stage label is taken literally: it has no glob characters and no `$VAR` resolu
 
 Stage labels compare case-insensitively against the label set the tracker adapter reports, which is lowercase. Selection, the duplicate check, and the collision check below all use this one comparison.
 
-A stage label MUST NOT equal, under that comparison, a state name the workflow configures (an active or terminal state, where an empty list takes the tracker adapter's own fallback list, and the handoff, in-progress, and no-change states) or a label the orchestrator applies to issues (a reaction's escalation label or the parking label). The check reads configuration and adapter metadata only and makes no tracker call. A reaction block for `ci_failure` that names no provider is disabled and its escalation label is not compared.
+A stage label MUST NOT equal, under that comparison, a state name the workflow configures (an active or terminal state, compared as written in front matter, and the handoff, in-progress, and no-change states) or a label the orchestrator applies to issues (a reaction's escalation label or the parking label). The check reads configuration only and makes no tracker call. A reaction block for `ci_failure` that names no provider is disabled and its escalation label is not compared.
 
 An issue that carries the stage labels of several rules is selected by the three-step precedence of the resolution semantics below, and the dispatch logs one warning naming every stage label it found.
 
@@ -628,6 +628,7 @@ Per-entry fields:
 | `budget.held` | An issue was held out of dispatch by `agent.max_sessions` or `agent.max_tokens` |
 | `stage.advanced` | A stage hop was made: the issue moved to the next stage, whether or not every old stage label was removed |
 | `stage.not_advanced` | A stage hop was due and not made, because the next stage's label could not be added or the hop ceiling was reached; the event carries the reason |
+| `session.escalated` | A caller acting for a running session asked Sortie to call people about it (Section 13.7); at most one per issue per 60 seconds |
 | `agent.message` | The agent called `notify_operator` |
 
 **The `tracker_comment` destination.** The destination posts an event's body as a comment on the event's issue through the tracker adapter, and renders nothing else of the event except the agent's reason on a `session.stopped` event, which it posts after the body as one literal block (Section 10.4.7, Section 21.1). It is available only when `tracker.kind` is configured. At most one entry has this kind. The destination receives the union of three sets: the `events` of its explicit entry, the subscriptions synthesized from `tracker.comments` and from `escalation: comment` (Section 5.3.1, Section 5.3.8), and, while no explicit entry exists, implicit subscriptions to `auto_merge.merged` and `budget.held`. The union is monotone: writing the new form never withdraws a comment an old key enabled, and one event is delivered at most once to a destination however many subscriptions select it. An operator who keeps `tracker.comments.on_completion: true` and also lists `session.completed` on a `tracker_comment` entry gets one comment per completion.

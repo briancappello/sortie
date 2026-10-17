@@ -40,6 +40,13 @@ type spyMetrics struct {
 	budgetExhaustions     []string
 	runsStoppedByBudget   []string
 	budgetExhaustedIssues []budgetExhaustedIssuesCall
+	heldRuns              []int
+	holdSeconds           []holdSecondsCall
+}
+
+type holdSecondsCall struct {
+	rule    string
+	seconds float64
 }
 
 type budgetExhaustedIssuesCall struct {
@@ -226,6 +233,18 @@ func (s *spyMetrics) IncMergeConflictChecks(_ string) {}
 func (s *spyMetrics) IncMergeConflictEscalations(_ string) {}
 
 func (s *spyMetrics) IncDispatchRuleMatch(_ string, _ string) {}
+
+func (s *spyMetrics) SetHeldRuns(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heldRuns = append(s.heldRuns, n)
+}
+
+func (s *spyMetrics) AddHoldSeconds(rule string, seconds float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.holdSeconds = append(s.holdSeconds, holdSecondsCall{rule: rule, seconds: seconds})
+}
 
 func (s *spyMetrics) IncCandidateHolds(reason string) {
 	s.mu.Lock()

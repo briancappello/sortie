@@ -46,6 +46,11 @@ const (
 	// ErrTrackerMissingCursor indicates a pagination integrity error
 	// where the expected end cursor is absent.
 	ErrTrackerMissingCursor TrackerErrorKind = "tracker_missing_end_cursor"
+
+	// ErrTrackerUnsupportedOperation indicates a call to an optional
+	// write capability the configured adapter does not declare. No
+	// request reaches the tracker. Non-retryable.
+	ErrTrackerUnsupportedOperation TrackerErrorKind = "tracker_unsupported_operation"
 )
 
 // TrackerError is a structured error returned by [TrackerAdapter]
@@ -231,6 +236,8 @@ func (k TrackerErrorKind) RetryClassification() RetryClassification {
 	case ErrTrackerNotFound:
 		return RetryClassification{Backoff: BackoffNone}
 	case ErrTrackerPayload:
+		return RetryClassification{Backoff: BackoffNone}
+	case ErrTrackerUnsupportedOperation:
 		return RetryClassification{Backoff: BackoffNone}
 	case ErrTrackerTransport, ErrTrackerAPI, ErrTrackerMissingCursor:
 		return RetryClassification{Retryable: true, Backoff: BackoffExponential}
