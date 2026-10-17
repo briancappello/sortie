@@ -57,3 +57,33 @@ func TestManager_ReloadKeepsPlanControlOnInvalidEdit(t *testing.T) {
 		t.Errorf("LastLoadError() = %v, want it to name tracker.cancel_state", err)
 	}
 }
+
+// A reload that adds a criteria rule without a criteria check keeps the
+// previous configuration.
+func TestManager_ReloadRefusesACriteriaChainWithoutTheGate(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	base := strings.Replace(planControlWorkflow, "%d", "5000", 1)
+	mustWriteFile(t, path, []byte(base))
+	mgr, err := NewManager(path, testLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	broken := strings.Replace(base, "polling:\n  interval_ms: 5000\n", `polling:
+  interval_ms: 7000
+dispatch:
+  rules:
+    - name: implement
+      match:
+        labels: [sortie-review:criteria]
+      agent: mock
+`, 1)
+	mustWriteFile(t, path, []byte(broken))
+	if err := mgr.Reload(); err == nil || !strings.Contains(err.Error(), "gate: criteria") {
+		t.Fatalf("Reload() = %v, want the missing criteria gate", err)
+	}
+	if got := mgr.Config().Polling.IntervalMS; got != 5000 {
+		t.Errorf("Polling.IntervalMS = %d, want 5000 (previous config kept)", got)
+	}
+}

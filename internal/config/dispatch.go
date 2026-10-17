@@ -88,6 +88,14 @@ type DispatchRule struct {
 	// Settings is the rule's settings block with $VAR references
 	// resolved. A nil value removes the inherited key. Read-only.
 	Settings map[string]any
+
+	// Gate is GateCriteria for a rule whose session checks a plan story's
+	// acceptance criteria, empty otherwise.
+	Gate string
+
+	// OnFail names the rule a failed criteria check hops back to, or is
+	// OnFailEscalate. Set only on a criteria rule.
+	OnFail string
 }
 
 // DispatchMatch enumerates the per-key predicates a rule applies to
@@ -170,7 +178,22 @@ var ruleKeyAllowed = map[string]bool{
 	"match":    true,
 	"agent":    true,
 	"template": true,
+	"gate":     true,
+	"on_fail":  true,
 }
+
+// GateCriteria marks a rule whose session checks a plan story's acceptance
+// criteria. Under plan control only a run of such a rule lets auto-merge
+// merge a story labelled with the criteria review gate.
+const GateCriteria = "criteria"
+
+// OnFailEscalate is the default on_fail of a criteria rule: a failed check
+// escalates to people instead of hopping to another rule.
+const OnFailEscalate = "escalate"
+
+// ReviewCriteriaLabel is the label plan sync keeps on a story whose review
+// gate is criteria.
+const ReviewCriteriaLabel = "sortie-review:criteria"
 
 // StageLabelsEqual reports whether two stage labels name the same label.
 // Selection, duplicate detection, and the collision check against tracker
@@ -293,6 +316,28 @@ func (d DispatchConfig) ruleNames(indices []int) []string {
 		names[i] = d.Rules[index].Name
 	}
 	return names
+}
+
+// ValidatePlanReviewGates reports a *ConfigError, under plan control, for
+// the first rule that matches the criteria review label but whose chain
+// does not end in a criteria rule: such a story could never pass its gate.
+func ValidatePlanReviewGates(dispatch DispatchConfig, planControl bool) error {
+	if !planControl {
+		return nil
+	}
+	for i, rule := range dispatch.Rules {
+		if !slices.ContainsFunc(rule.Match.Labels, func(l string) bool { return strings.EqualFold(l, ReviewCriteriaLabel) }) {
+			continue
+		}
+		walk := dispatch.walkNext(i)
+		if dispatch.Rules[walk[len(walk)-1]].Gate != GateCriteria {
+			return &ConfigError{
+				Field:   fmt.Sprintf("dispatch.rules[%d]", i),
+				Message: fmt.Sprintf("rule %q matches %s, but its chain %v ends in no gate: criteria rule", rule.Name, ReviewCriteriaLabel, dispatch.ruleNames(walk)),
+			}
+		}
+	}
+	return nil
 }
 
 // ValidateNextRequiresHandoff reports a *ConfigError for the first rule, in
@@ -537,6 +582,11 @@ func parseDispatchRule(index int, elem any, agentKindProbe func(kind string) boo
 		}
 	}
 
+	gate, onFail, err := parseGate(ruleMap, ruleField, name)
+	if err != nil {
+		return DispatchRule{}, nil, err
+	}
+
 	match, err := parseDispatchMatch(ruleMap["match"], ruleField+".match")
 	if err != nil {
 		return DispatchRule{}, nil, err
@@ -554,7 +604,40 @@ func parseDispatchRule(index int, elem any, agentKindProbe func(kind string) boo
 		Match:      match,
 		Selection:  selection,
 		IsCatchAll: stage == "" && isEmptyMatch(match),
+		Gate:       gate,
+		OnFail:     onFail,
 	}, blockKeys, nil
+}
+
+// parseGate reads a rule's optional gate and on_fail keys. gate may only be
+// "criteria", needs a named rule, and cannot carry next, because a criteria
+// check is the last stage of its chain. on_fail needs gate and defaults to
+// OnFailEscalate.
+func parseGate(ruleMap map[string]any, ruleField, name string) (gate, onFail string, err error) {
+	gate, fault := typeutil.StringField(ruleMap, "gate")
+	if fault != nil {
+		return "", "", &ConfigError{Field: ruleField + ".gate", Message: fault.Reason()}
+	}
+	onFail, fault = typeutil.StringField(ruleMap, "on_fail")
+	if fault != nil {
+		return "", "", &ConfigError{Field: ruleField + ".on_fail", Message: fault.Reason()}
+	}
+	switch {
+	case gate == "" && onFail != "":
+		return "", "", &ConfigError{Field: ruleField + ".on_fail", Message: "on_fail needs gate: criteria"}
+	case gate == "":
+		return "", "", nil
+	case gate != GateCriteria:
+		return "", "", &ConfigError{Field: ruleField + ".gate", Message: fmt.Sprintf("gate %q is not criteria", gate)}
+	case name == "":
+		return "", "", &ConfigError{Field: ruleField, Message: "a rule that carries gate must have a name"}
+	case ruleMap["next"] != nil:
+		return "", "", &ConfigError{Field: ruleField + ".next", Message: "a criteria rule is the last stage of its chain and cannot carry next"}
+	}
+	if onFail == "" {
+		onFail = OnFailEscalate
+	}
+	return gate, onFail, nil
 }
 
 // parseStageLabel reads a rule's optional stage key. present reports
@@ -1127,6 +1210,21 @@ func validateCatchAllPosition(rules []DispatchRule) error {
 // path starting there, so the message does not depend on where a walk enters.
 func validateNextLinks(rules []DispatchRule) error {
 	dispatch := DispatchConfig{Rules: rules}
+	for i, rule := range rules {
+		if rule.OnFail == "" || rule.OnFail == OnFailEscalate {
+			continue
+		}
+		field := fmt.Sprintf("dispatch.rules[%d].on_fail", i)
+		target := dispatch.ruleIndex(rule.OnFail)
+		switch {
+		case target < 0:
+			return &ConfigError{Field: field, Message: fmt.Sprintf("on_fail %q names no dispatch rule", rule.OnFail)}
+		case target == i:
+			return &ConfigError{Field: field, Message: "on_fail names the rule that carries it"}
+		case rules[target].Stage == "":
+			return &ConfigError{Field: field, Message: fmt.Sprintf("on_fail %q names a rule without a stage label; it must carry stage", rule.OnFail)}
+		}
+	}
 	for i, rule := range rules {
 		if rule.Next == "" {
 			continue

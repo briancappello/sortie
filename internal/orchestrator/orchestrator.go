@@ -578,6 +578,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			TrackerAdapter:                    o.trackerAdapter,
 			HandoffState:                      cfg.Tracker.HandoffState,
 			NoChangeState:                     cfg.Tracker.NoChangeState,
+			PlanReleaseState:                  cfg.Tracker.ReleaseState,
 			Dispatch:                          cfg.Dispatch,
 			ActiveStates:                      cfg.Tracker.ActiveStates,
 			TerminalStates:                    cfg.Tracker.TerminalStates,
@@ -782,6 +783,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	// Reconcile unconditionally so in-flight workers are monitored even when
 	// dispatch is skipped.
 	ReconcileRunningIssues(o.state, ReconcileParams{
+		ReviewGate:                        planReviewGate(cfg, o.trackerAdapter),
 		TrackerAdapter:                    o.trackerAdapter,
 		Router:                            o.router,
 		ActiveStates:                      cfg.Tracker.ActiveStates,
@@ -1681,6 +1683,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				TrackerAdapter:                    o.trackerAdapter,
 				HandoffState:                      cfg.Tracker.HandoffState,
 				NoChangeState:                     cfg.Tracker.NoChangeState,
+				PlanReleaseState:                  cfg.Tracker.ReleaseState,
 				Dispatch:                          cfg.Dispatch,
 				ActiveStates:                      cfg.Tracker.ActiveStates,
 				TerminalStates:                    cfg.Tracker.TerminalStates,

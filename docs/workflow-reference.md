@@ -1146,6 +1146,8 @@ Each rule in `dispatch.rules` is a map with the following keys. A rule must carr
 | `name` | string | With a settings block, `stage`, or `next` | _(absent)_ | Operator-supplied identifier used in logs, in run history, and to find the rule again after a reload. Must match `^[a-z][a-z0-9_-]*$` when present, and must not be `default`, the name run history and statistics give the `dispatch.default` selection, when the rule carries a settings block. Names are unique. |
 | `stage` | string | No | _(absent)_ | Label that selects this rule. An issue that carries the label runs on the rule wherever it sits in the list. Compared case-insensitively against the adapter-normalized label set; no glob characters and no `$VAR` resolution. A rule with `stage` cannot carry `match` and must have a `name`. See [Stage labels](#stage-labels). |
 | `next` | string | No | _(absent)_ | Name of the rule a successful run advances the issue to. The named rule must exist, must differ from this rule, and must carry `stage`. The rule that carries `next` must have a `name` and may be any rule, with or without `stage`. See [Stage chains](#stage-chains). |
+| `gate` | string | No | _(absent)_ | `criteria` marks a rule whose session checks a plan story's acceptance criteria. Needs `name`, and cannot carry `next`, because the check is the last stage of its chain. See [Review gates](#review-gates). |
+| `on_fail` | string | No | `escalate` with `gate` | What a failed criteria check does: `escalate`, or the name of a rule with `stage` to send the story back to. Needs `gate`. |
 | `match` | map | No | _(absent)_ | Predicate block. On a rule without `stage`, an absent or empty block matches every issue (catch-all). |
 | `agent` | string | No | _(fallback)_ | Agent adapter kind for matching issues. Falls through to `dispatch.default.agent`, then to `agent.kind`. |
 | `template` | string | No | _(fallback)_ | Prompt template path (relative to `WORKFLOW.md` directory). Falls through to `dispatch.default.template`, then to the Markdown body. |
@@ -1275,6 +1277,16 @@ Each reset logs `stage hop count reset` with the `trigger`. Moving a stage label
 **The `stage` object.** Every prompt render carries `stage` with `stage.current`, `stage.previous`, and `stage.previous_outcome`, so a template can tell what the earlier stage was and read what it left in the workspace. See [Section 5.2](#52-template-input-variables).
 
 **Validation.** `sortie validate`, startup, reload, and the check before each tick reject a `next` that is not a rule name, names no rule, names its own rule, names a rule without `stage`, or forms a cycle; a `next` on a rule without a `name`; `next` without `tracker.handoff_state`; and a `dispatch.max_consecutive_hops` that is not an integer, is not positive, or is below the longest chain's hops. When `agent.max_sessions` is above `0` and below the number of runs the longest chain needs, an advisory warns that an issue on the chain exhausts its session budget before the chain ends. The checks are listed in [Section 8](#8-dispatch-preflight-validation) and the errors in [Section 9.2](#92-configuration-errors).
+
+#### Review gates
+
+Under plan control, plan sync keeps one review label on each story: `sortie-review:human` or `sortie-review:criteria`. Dispatch rules route on it with `match.labels`.
+
+- **`sortie-review:human`.** A person reviews and merges the pull request in the forge. Sortie's auto-merge never merges such a story.
+- **`sortie-review:criteria`.** The story's chain must end in a rule with `gate: criteria`. Startup and reload refuse a workflow in which a rule that matches `sortie-review:criteria` leads to no such rule. A stage hop starts a fresh run and a new agent session, so the check never shares a session with the run that implemented the story. The self-review of an implementing run never counts.
+  - A check passes when its run exits normally. Only then may auto-merge merge the pull request: under plan control it merges only a story that carries `sortie-review:criteria`, after a run of a `gate: criteria` rule.
+  - A check fails when its run ends `blocked` or `needs-human-review`. Sortie then seeds no reaction for the pull request, and comments on the story with the check's last message. With `on_fail: <rule>` it adds that rule's stage label, removes the check's, and moves the story back to `tracker.release_state`, so the next poll dispatches the rework stage. With `on_fail: escalate` it routes `session.escalated` with kind `criteria_failed`.
+- Auto-merge still needs the forge's own approval. A repository whose branch protection requires an approving review cannot auto-merge criteria stories. Sortie warns once per story when such a story waits on `REVIEW_REQUIRED`, and those repositories should use `review: human`.
 
 #### Matching semantics
 

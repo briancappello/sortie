@@ -849,6 +849,10 @@ type State struct {
 	// them before the tracker confirms the move.
 	DispatchBlocks map[string]DispatchBlock
 
+	// CriteriaReviewWarned holds the plan stories already warned that the
+	// forge requires a review their criteria gate cannot give.
+	CriteriaReviewWarned map[string]struct{}
+
 	// WorkerWg tracks in-flight worker goroutines spawned by
 	// [DispatchIssue]. Callers dispatching outside the Run() loop can
 	// Wait() before cleanup.
@@ -1093,6 +1097,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		AutoMergeAuthLogged:       make(map[string]struct{}),
 		TokenBudgetIncomplete:     make(map[string]struct{}),
 		DispatchBlocks:            make(map[string]DispatchBlock),
+		CriteriaReviewWarned:      make(map[string]struct{}),
 	}
 }
 

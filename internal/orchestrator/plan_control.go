@@ -8,8 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
+	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
 // dispatchBlockTTL bounds how long a dispatch block waits for the tracker
@@ -203,4 +206,134 @@ func applyCancel(ctx context.Context, state *State, t planTarget, p planControlP
 	}
 	log.Info("plan story cancelled", slog.String("state", p.Cancel))
 	return ControlReply{Outcome: ControlDone}
+}
+
+// ReviewGateFunc decides whether auto-merge may merge a pending entry's
+// pull request. It reports why not, or an error when it could not tell.
+type ReviewGateFunc func(ctx context.Context, pending *PendingReaction) (allowed bool, reason string, err error)
+
+// planReviewGate returns the auto-merge gate of plan control, or nil when
+// plan control is off. Under plan control Sortie merges only a story that
+// carries the criteria review label, and only after a run of a criteria
+// rule: a human story is merged by a person in the forge.
+func planReviewGate(cfg config.ServiceConfig, tracker domain.TrackerAdapter) ReviewGateFunc {
+	if !cfg.Tracker.PlanControl() {
+		return nil
+	}
+	dispatch := cfg.Dispatch
+	return func(ctx context.Context, pending *PendingReaction) (bool, string, error) {
+		rule, ok := dispatch.RuleByName(pending.RuleName)
+		if !ok || rule.Gate != config.GateCriteria {
+			return false, "the run that opened the pull request was not a criteria check", nil
+		}
+		issue, err := tracker.FetchIssueByID(ctx, pending.IssueID)
+		if err != nil {
+			return false, "", err
+		}
+		for _, l := range issue.Labels {
+			if strings.EqualFold(l, config.ReviewCriteriaLabel) {
+				return true, "", nil
+			}
+		}
+		return false, "the story does not carry " + config.ReviewCriteriaLabel, nil
+	}
+}
+
+// criteriaCheckFailed reports whether the run was a criteria check, under
+// plan control, that ended blocked or asking for human review: a refusal.
+func criteriaCheckFailed(params HandleWorkerExitParams, entry *RunningEntry, result WorkerResult) bool {
+	if params.PlanReleaseState == "" || entry == nil || !result.SoftStop {
+		return false
+	}
+	if result.SoftStopReason != string(workspace.StatusBlocked) && result.SoftStopReason != string(workspace.StatusNeedsHumanReview) {
+		return false
+	}
+	rule, ok := params.Dispatch.RuleByName(entry.RuleName)
+	return ok && rule.Gate == config.GateCriteria
+}
+
+// maxCriteriaSummary bounds the agent text a failed check posts.
+const maxCriteriaSummary = 4000
+
+// handleCriteriaFailure reports a failed criteria check on the story and
+// either sends it back to its rework stage (on_fail names a rule) or
+// escalates it to people. The pull request is not merged: the exit seeds
+// no reaction for it.
+func handleCriteriaFailure(ctx context.Context, state *State, params HandleWorkerExitParams, entry *RunningEntry, result WorkerResult, log *slog.Logger) {
+	rule, _ := params.Dispatch.RuleByName(entry.RuleName)
+	summary := strings.TrimSpace(redact.Mask(entry.LastAgentMessage))
+	if len(summary) > maxCriteriaSummary {
+		summary = summary[:maxCriteriaSummary] + "…"
+	}
+	if summary == "" {
+		summary = "(the check left no summary)"
+	}
+	comment := fmt.Sprintf("The acceptance-criteria check (rule %s) did not pass, so the pull request is not merged.\n\n%s", rule.Name, summary)
+	if params.TrackerAdapter != nil {
+		if err := params.TrackerAdapter.CommentIssue(ctx, result.IssueID, comment); err != nil {
+			log.Warn("criteria failure comment failed", slog.Any("error", err))
+		}
+	}
+
+	if rule.OnFail != "" && rule.OnFail != config.OnFailEscalate {
+		target, ok := params.Dispatch.RuleByName(rule.OnFail)
+		if ok && params.TrackerAdapter != nil {
+			if err := params.TrackerAdapter.AddLabel(ctx, result.IssueID, target.Stage); err != nil {
+				log.Warn("criteria failure could not add the rework stage label", slog.String("label", target.Stage), slog.Any("error", err))
+			} else {
+				if rule.Stage != "" {
+					_ = params.TrackerAdapter.RemoveLabel(ctx, result.IssueID, rule.Stage)
+				}
+				if err := params.TrackerAdapter.TransitionIssue(ctx, result.IssueID, params.PlanReleaseState); err != nil {
+					log.Warn("criteria failure could not return the story to the release state", slog.Any("error", err))
+				}
+				log.Info("criteria check failed, story sent back for rework", slog.String("on_fail", target.Name))
+				return
+			}
+		}
+	}
+
+	n := sessionEvent{
+		IssueID:    result.IssueID,
+		Identifier: entry.Identifier,
+		DisplayID:  entry.Issue.DisplayID,
+		DispatchID: entry.DispatchID,
+		SessionID:  entry.SessionID,
+		Attempt:    entry.RetryAttempt,
+		Agent:      entry.AgentKind,
+		AgentText:  summary,
+	}.notification(domain.EventSessionEscalated, "", fmt.Sprintf("The acceptance-criteria check of %s (rule %s) did not pass.", entry.Identifier, rule.Name))
+	n.Envelope.Escalation = domain.SessionEscalation{Kind: "criteria_failed", Rule: rule.Name}
+	if params.Router == nil {
+		log.Info("criteria check failed, escalation had no router")
+		return
+	}
+	delivery := params.Router.Route(n)
+	if delivery.Empty() {
+		log.Info("criteria check failed, escalation had no destination")
+		return
+	}
+	log.Info("criteria check failed, escalated")
+	deliverDetached(ctx, &state.TrackerOpsWg, delivery, log, func(received bool, err error) {
+		if received && err != nil {
+			log.Warn("criteria failure escalation failed", slog.Any("error", err))
+		}
+	})
+}
+
+// warnCriteriaNeedsReview warns once per story when a criteria story that
+// passed its check waits for a review the forge requires: branch protection
+// that requires an approving review keeps auto-merge from ever merging it,
+// and such repositories should use review: human.
+func warnCriteriaNeedsReview(state *State, params ReconcileParams, pending *PendingReaction, decision domain.ReviewDecision, prNumber int, log *slog.Logger) {
+	if params.ReviewGate == nil || decision != domain.ReviewDecisionReviewRequired {
+		return
+	}
+	if _, logged := state.CriteriaReviewWarned[pending.IssueID]; logged {
+		return
+	}
+	state.CriteriaReviewWarned[pending.IssueID] = struct{}{}
+	log.Warn("criteria story waits for a review the forge requires: branch protection requires an approving review, so auto-merge cannot merge it; use review: human for this repository",
+		slog.Int("pr_number", prNumber),
+	)
 }
