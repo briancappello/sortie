@@ -420,13 +420,16 @@ func postAutoMergeSuccess(state *State, params ReconcileParams, pending *Pending
 	}
 }
 
-// buildAutoMergeComment returns the fixed three-line tracker comment
-// template used on a successful auto-merge.
+// buildAutoMergeComment returns the tracker comment template used on a
+// successful auto-merge. The merge-commit line appears only when the
+// merge result carries a commit identifier.
 func buildAutoMergeComment(autoMergeData *AutoMergeReactionData, mergeResult domain.MergeResult, strategy domain.MergeStrategy) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Sortie auto-merged PR #%d (%s/%s).\n", autoMergeData.PRNumber, autoMergeData.Owner, autoMergeData.Repo)
-	fmt.Fprintf(&b, "Strategy: %s.\n", string(strategy))
-	fmt.Fprintf(&b, "Merge commit: %s.", mergeResult.SHA)
+	fmt.Fprintf(&b, "Strategy: %s.", string(strategy))
+	if mergeResult.SHA != "" {
+		fmt.Fprintf(&b, "\nMerge commit: %s.", mergeResult.SHA)
+	}
 	return b.String()
 }
 
@@ -462,12 +465,7 @@ func handleMergeError(state *State, params ReconcileParams, key string, pending 
 					slog.Any("error", markErr),
 				)
 			}
-			delete(state.PendingReactions, key)
-			if delErr := params.Store.DeleteReactionFingerprint(ctx, pending.IssueID, ReactionKindAutoMerge); delErr != nil {
-				log.Warn("auto_merge fingerprint delete failed on duplicate merge",
-					slog.Any("error", delErr),
-				)
-			}
+			postAutoMergeSuccess(state, params, pending, autoMergeData, domain.MergeResult{}, log, ctx)
 			return
 		}
 		pending.PendingRetryAt = now.Add(pollInterval)

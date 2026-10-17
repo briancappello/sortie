@@ -82,12 +82,12 @@ func (m *mockSCMAdapter) RemoveLabel(_ context.Context, _ int, _, _, _ string) e
 // reviewReconcileStore is a self-contained ReconcileStore for review tests.
 type reviewReconcileStore struct {
 	reactionActivityLog
-	noopOutcomeRecorder
 	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	savedEntries    []persistence.RetryEntry
 	deletedIssueIDs []string
+	outcomes        []persistence.IssueOutcome
 
 	saveRetryEntryErr   error
 	deleteRetryEntryErr error
@@ -115,6 +115,11 @@ func (s *reviewReconcileStore) SaveRetryEntry(_ context.Context, entry persisten
 func (s *reviewReconcileStore) DeleteRetryEntry(_ context.Context, issueID string) error {
 	s.deletedIssueIDs = append(s.deletedIssueIDs, issueID)
 	return s.deleteRetryEntryErr
+}
+
+func (s *reviewReconcileStore) RecordIssueOutcome(_ context.Context, outcome persistence.IssueOutcome) error {
+	s.outcomes = append(s.outcomes, outcome)
+	return nil
 }
 
 func (s *reviewReconcileStore) AppendRunHistory(_ context.Context, run persistence.RunHistory) (persistence.RunHistory, error) {

@@ -1568,7 +1568,7 @@ The catalog is closed. Validation accepts exactly these names and rejects any ot
 | `session.stopped` | A worker exits on a soft stop: `blocked`, `needs-human-review`, or `no-change-needed`. It carries the agent's reason when the agent wrote one ([The agent's reason on a stop](#the-agents-reason-on-a-stop)). | `warning`; `info` for `no-change-needed` |
 | `session.failed` | A worker exits with an error, or its handoff is withheld by the handoff-evidence policy. | `warning` |
 | `escalation.ci_failure`, `escalation.review_comments`, `escalation.bot_review`, `escalation.merge_conflicts`, `escalation.auto_merge`, `escalation.merge_completion` | The matching reaction ([Section 2.9](#29-reactions--reaction-based-feedback-loops)) hands its subject to a person, under any `escalation` value. | `warning` |
-| `auto_merge.merged` | The auto-merge reaction merges a pull request. | `info` |
+| `auto_merge.merged` | The auto-merge reaction merges a pull request, or its merge call finds the pull request already merged. | `info` |
 | `budget.held` | An issue is held out of dispatch by `agent.max_sessions` or `agent.max_tokens`. | `warning` |
 | `stage.advanced` | A stage hop is made: the issue moves to the next stage, even when removing an old stage label failed ([Stage chains](#stage-chains)). | `info` |
 | `stage.not_advanced` | A stage hop is due and not made, because the label add failed or the hop ceiling is reached. The event carries the reason, `failed` or `ceiling`. | `warning` |

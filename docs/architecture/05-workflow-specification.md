@@ -624,7 +624,7 @@ Per-entry fields:
 | `session.stopped` | A worker exited on a soft stop: `blocked`, `needs-human-review`, or `no-change-needed`; it carries the agent's reason when the agent wrote one (Section 21.1) |
 | `session.failed` | A worker exited with an error, or its handoff was withheld by the evidence verdict |
 | `escalation.ci_failure`, `escalation.review_comments`, `escalation.bot_review`, `escalation.merge_conflicts`, `escalation.auto_merge`, `escalation.merge_completion` | The matching reaction (Section 5.3.8) handed its subject to a person, under any `escalation` value |
-| `auto_merge.merged` | The auto-merge reaction merged a pull request |
+| `auto_merge.merged` | The auto-merge reaction merged a pull request, or its merge call found the pull request already merged |
 | `budget.held` | An issue was held out of dispatch by `agent.max_sessions` or `agent.max_tokens` |
 | `stage.advanced` | A stage hop was made: the issue moved to the next stage, whether or not every old stage label was removed |
 | `stage.not_advanced` | A stage hop was due and not made, because the next stage's label could not be added or the hop ceiling was reached; the event carries the reason |
