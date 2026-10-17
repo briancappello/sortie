@@ -844,6 +844,11 @@ type State struct {
 	// with a [PlanJudge] primed for that tick's candidates.
 	BlockerJudge BlockerJudge
 
+	// DispatchBlocks holds issues that a plan pull-back or cancel moved
+	// out of the active states, so a stale candidate read cannot dispatch
+	// them before the tracker confirms the move.
+	DispatchBlocks map[string]DispatchBlock
+
 	// WorkerWg tracks in-flight worker goroutines spawned by
 	// [DispatchIssue]. Callers dispatching outside the Run() loop can
 	// Wait() before cleanup.
@@ -1087,6 +1092,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		PendingReactions:          make(map[string]*PendingReaction),
 		AutoMergeAuthLogged:       make(map[string]struct{}),
 		TokenBudgetIncomplete:     make(map[string]struct{}),
+		DispatchBlocks:            make(map[string]DispatchBlock),
 	}
 }
 

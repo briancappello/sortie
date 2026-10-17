@@ -131,6 +131,12 @@ func ShouldDispatch(issue domain.Issue, state *State, activeStates, terminalStat
 		return false
 	}
 
+	// Issues a plan pull-back or cancel moved out are held until the
+	// tracker confirms it.
+	if _, blocked := state.DispatchBlocks[issue.ID]; blocked {
+		return false
+	}
+
 	// Any unsatisfied blocker blocks dispatch.
 	if isBlockedFor(judgeOf(state), issue, terminalSet) {
 		return false
@@ -181,6 +187,12 @@ func ShouldDispatchWithSets(issue domain.Issue, state *State, activeSet, termina
 	// Parked issues are held out of dispatch until the release rule lifts
 	// the park, whatever the parking reason.
 	if _, parked := state.Parked[issue.ID]; parked {
+		return false
+	}
+
+	// Issues a plan pull-back or cancel moved out are held until the
+	// tracker confirms it.
+	if _, blocked := state.DispatchBlocks[issue.ID]; blocked {
 		return false
 	}
 
@@ -322,6 +334,9 @@ func passesEligibilityGates(issue domain.Issue, state *State, activeSet, termina
 		return false
 	}
 	if _, parked := state.Parked[issue.ID]; parked {
+		return false
+	}
+	if _, blocked := state.DispatchBlocks[issue.ID]; blocked {
 		return false
 	}
 

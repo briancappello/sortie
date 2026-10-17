@@ -872,6 +872,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	}
 
 	sorted := SortForDispatch(issues)
+	clearDispatchBlocks(o.state, sorted, time.Now(), o.logger)
 
 	o.rebuildBudgetExhausted(ctx, cfg, sorted)
 	o.refreshParkedIssues(ctx, sorted)
@@ -1872,6 +1873,18 @@ func (o *Orchestrator) handleControl(ctx context.Context, req controlRequest) Co
 			Ctx:    ctx,
 			Logger: o.logger,
 		})
+	case controlPullBack, controlCancel:
+		cfg := o.workflowManager.Config()
+		p := planControlParams{
+			Release: cfg.Tracker.ReleaseState, Backlog: cfg.Tracker.BacklogState, Cancel: cfg.Tracker.CancelState,
+			Terminal: cfg.Tracker.TerminalStates, Tracker: o.trackerAdapter, Store: o.store,
+			Metrics: o.metrics, Now: now, Log: o.logger,
+		}
+		if req.Kind == controlPullBack {
+			reply = applyPullBack(ctx, o.state, req.Plan, p)
+		} else {
+			reply = applyCancel(ctx, o.state, req.Plan, p)
+		}
 	default:
 		reply = ControlReply{Outcome: ControlInvalid, Message: "unknown control request"}
 	}

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `POST /api/v1/plan/pull-back` and `POST /api/v1/plan/cancel` take a plan key. Pull-back moves a released story back to `backlog_state` only while no worker holds it, deciding on the event loop so it cannot race dispatch. Cancel stops a running worker and moves the story to `cancel_state` with no retry. Both hold the story out of dispatch until the tracker confirms the move. Both need the control token.
+
 - Under plan control, a blocker with a plan key lets its dependents start only after Sortie recorded its pull request's merge, or a confirmed no-change claim. A tracker state alone, a cancelled blocker, or an unreadable one never counts, and a blocker without a plan key counts only in `done_state`. Each latched merge is now recorded in the new `plan_satisfaction` table, filled at upgrade from earlier merges. Blocker holds log `blocker_reason`. Dispatch, retries, and `--dry-run` share the rule.
 
 - Plan control settings: `tracker.release_state` turns plan control on, and then requires `tracker.backlog_state`, `tracker.cancel_state`, `tracker.done_state`, both state lists written, and `reactions.merge_completion`. Release must be active, backlog must be in neither list and differ from `handoff_state`, and cancel and done must be terminal. Each setting has a `SORTIE_TRACKER_<NAME>` override. Without `release_state` nothing changes.

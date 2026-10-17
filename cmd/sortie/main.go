@@ -960,6 +960,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			HoldFn:           server.HoldFunc(o.HoldFunc()),
 			ReleaseFn:        server.ReleaseFunc(o.ReleaseFunc()),
 			EscalateFn:       server.EscalateFunc(o.EscalateFunc()),
+			PullBackFn:       server.PlanControlFunc(o.PullBackFunc()),
+			PlanCancelFn:     server.PlanControlFunc(o.PlanCancelFunc()),
 			PlanProjects:     planProjects,
 			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
 			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {

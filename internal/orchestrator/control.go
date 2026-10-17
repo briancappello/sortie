@@ -68,6 +68,8 @@ const (
 	controlHold controlKind = iota
 	controlRelease
 	controlEscalate
+	controlPullBack
+	controlCancel
 )
 
 // controlRequest asks the event loop to change one issue's run.
@@ -77,6 +79,7 @@ type controlRequest struct {
 	Reason     string
 	Holder     string
 	Escalation EscalationRequest
+	Plan       planTarget
 	ReplyCh    chan ControlReply
 }
 

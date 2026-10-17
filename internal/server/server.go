@@ -162,6 +162,12 @@ type Params struct {
 	// 503.
 	EscalateFn EscalateFunc
 
+	// PullBackFn and PlanCancelFn pull back and cancel a plan story by
+	// plan key. Called on POST /api/v1/plan/pull-back and
+	// /api/v1/plan/cancel. When nil, those routes answer 503.
+	PullBackFn   PlanControlFunc
+	PlanCancelFn PlanControlFunc
+
 	// PlanProjects serves POST /api/v1/plan/sync, GET /api/v1/plan/graph,
 	// GET /api/v1/plan/capabilities, and GET and PUT
 	// /api/v1/plan/projects/{key}, for the configured project and, when
@@ -199,6 +205,8 @@ type Server struct {
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
+	pullBackFn       PlanControlFunc
+	planCancelFn     PlanControlFunc
 	planProjects     *plan.Projects
 	terminalStatesFn func() []string
 }
@@ -249,6 +257,8 @@ func New(params Params) *Server {
 		controlToken:     params.ControlToken,
 		sessionTokenFn:   params.SessionTokenFn,
 		holdFn:           params.HoldFn,
+		pullBackFn:       params.PullBackFn,
+		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
 		planProjects:     params.PlanProjects,
@@ -273,6 +283,8 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/plan/graph", s.controlGet(s.handlePlanGraph))
 	mux.HandleFunc("/api/v1/plan/capabilities", s.controlGet(s.handlePlanCapabilities))
 	mux.HandleFunc("/api/v1/plan/projects/{key}", s.routePlanProject)
+	mux.HandleFunc("/api/v1/plan/pull-back", s.controlRoute(scopeOperator, s.planControlHandler(func() PlanControlFunc { return s.pullBackFn })))
+	mux.HandleFunc("/api/v1/plan/cancel", s.controlRoute(scopeOperator, s.planControlHandler(func() PlanControlFunc { return s.planCancelFn })))
 	mux.HandleFunc("/api/v1/refresh", s.controlRoute(scopeOperator, s.handleRefresh))
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
