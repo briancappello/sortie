@@ -231,7 +231,10 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	// usage event a full agentEventCh dropped cannot leave the recorded
 	// total below what the worker spent. The monotone-delta rule applies a
 	// zero delta when Usage is already fully accounted for.
-	applyUsageDelta(state, entry, workerResult.Usage, metrics)
+	if workerResult.ModelName != "" && workerResult.ModelName != entry.ModelName {
+		metrics.PrepareModel(workerResult.ModelName)
+	}
+	applyUsageDelta(state, entry, workerResult.Usage, workerResult.ModelName, metrics)
 
 	// Reconcile model name and request count the same way: the worker's
 	// mirror folded every event the entry applied, plus any a full
@@ -305,9 +308,10 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	if workerResult.SoftStop {
 		exitType = exitTypeSoftStop
 	}
-	metrics.IncWorkerExits(exitType)
+	model := metricModel("", entry)
+	metrics.IncWorkerExits(exitType, model)
 	metrics.ObserveWorkerDuration(exitType, elapsed)
-	metrics.AddAgentRuntime(elapsed)
+	metrics.AddAgentRuntime(model, elapsed)
 
 	// Resolve the normal-exit disposition far enough to know whether the
 	// evidence policy changes this run's persisted status. Evidence is

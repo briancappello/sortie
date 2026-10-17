@@ -1221,12 +1221,12 @@ func TestApplyUsageDelta_RepeatedCumulative_AppliesZeroDelta(t *testing.T) {
 	usage := domain.TokenUsage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CacheReadTokens: 10}
 	metrics := &domain.NoopMetrics{}
 
-	first := applyUsageDelta(state, entry, usage, metrics)
+	first := applyUsageDelta(state, entry, usage, "", metrics)
 	if first != usage {
 		t.Fatalf("first applyUsageDelta() = %+v, want %+v (full value against zero baseline)", first, usage)
 	}
 
-	second := applyUsageDelta(state, entry, usage, metrics)
+	second := applyUsageDelta(state, entry, usage, "", metrics)
 	if second != (domain.TokenUsage{}) {
 		t.Errorf("second applyUsageDelta() with identical cumulative value = %+v, want zero delta", second)
 	}
@@ -1337,7 +1337,7 @@ func TestTokenUsageComponentsSurviveEveryFold(t *testing.T) {
 	t.Run("applyUsageDelta", func(t *testing.T) {
 		t.Parallel()
 		state, entry := newStateWithEntry("MT-REFLECT-DELTA")
-		got := applyUsageDelta(state, entry, marker, &domain.NoopMetrics{})
+		got := applyUsageDelta(state, entry, marker, "", &domain.NoopMetrics{})
 		assertComponentsSurvive(t, "applyUsageDelta return value", fields, marker, got)
 
 		entryUsage := domain.TokenUsage{

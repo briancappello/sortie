@@ -169,6 +169,28 @@ func TestRunHistoryConfiguredSettingsColumns_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestListReportedModels(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	for i, model := range []string{"model-a", "model-a", "", "model-b"} {
+		run := newTestRun(i + 1)
+		run.ReportedModel = model
+		appendOrFatal(t, s, run)
+	}
+
+	got, err := s.ListReportedModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListReportedModels: %v", err)
+	}
+
+	slices.Sort(got)
+	if want := []string{"model-a", "model-b"}; !slices.Equal(got, want) {
+		t.Errorf("ListReportedModels() = %q, want %q", got, want)
+	}
+}
+
 func TestRecordRunStageResult(t *testing.T) {
 	t.Parallel()
 

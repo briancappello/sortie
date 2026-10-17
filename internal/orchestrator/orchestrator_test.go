@@ -256,6 +256,8 @@ func (s *stubStore) DeleteRetryEntry(_ context.Context, issueID string) error {
 
 func (s *stubStore) Ping(_ context.Context) error { return nil }
 
+func (s *stubStore) ListReportedModels(context.Context) ([]string, error) { return nil, nil }
+
 func (s *stubStore) CountRunHistoryByIssue(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }

@@ -46,6 +46,7 @@ type OrchestratorStore interface {
 	QueryConsecutiveHandoffAbsenceCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
 	ResetHandoffAbsenceSequence(ctx context.Context, issueID string) error
 	TokenUsageByIssue(ctx context.Context, issueID string) (persistence.IssueTokenUsage, error)
+	ListReportedModels(ctx context.Context) ([]string, error)
 	QueryBudgetExhaustedIssues(ctx context.Context, candidateIDs []string, maxSessions int) (map[string]int, error)
 	QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string) (map[string]persistence.IssueTokenUsage, error)
 	LatestAgentRuns(ctx context.Context, issueIDs []string) (map[string]persistence.RunHistory, error)
@@ -690,6 +691,8 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	o.state.RuleAgents = o.ruleAgents(startCfg)
 	o.state.HopCeiling = startCfg.Dispatch.HopCeiling()
 	o.state.StallTimeoutMS = startCfg.Agent.StallTimeoutMS
+	o.prepareConfiguredModels(startCfg)
+	o.prepareReportedModels(ctx)
 	o.activateReconstructedRetries()
 
 	tickTimer := time.NewTimer(0)
@@ -943,6 +946,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.MaxSessions = cfg.Agent.MaxSessions
 	o.state.StageChains = cfg.Dispatch.Chains()
 	o.state.RuleAgents = o.ruleAgents(cfg)
+	o.prepareConfiguredModels(cfg)
 	o.state.HopCeiling = cfg.Dispatch.HopCeiling()
 	o.state.ReactionMaxAttempts = o.reactionMaxAttempts(cfg)
 	o.state.ReactionWatchWindows = o.reactionWatchWindows(cfg)
@@ -2061,6 +2065,50 @@ func (o *Orchestrator) ruleAgents(cfg config.ServiceConfig) map[string]RuleAgent
 		agents[rule.Name] = o.ruleAgentOf(cfg, rule)
 	}
 	return agents
+}
+
+// configuredModels returns the distinct models of the settings blocks cfg
+// can resolve, "" included when a block configures none.
+func configuredModels(cfg config.ServiceConfig) []string {
+	var models []string
+	add := func(selection config.SettingsSelection) {
+		model := config.ResolveAgentSettings(cfg, selection, "").Model
+		if !slices.Contains(models, model) {
+			models = append(models, model)
+		}
+	}
+	for _, ref := range orderedUniqueAgentKinds(cfg) {
+		add(config.SettingsSelection{Kind: ref.Kind})
+	}
+	for _, rule := range cfg.Dispatch.Rules {
+		if rule.SettingsKind != "" {
+			add(config.SettingsSelection{Kind: rule.SettingsKind, RuleName: rule.Name})
+		}
+	}
+	return models
+}
+
+// prepareConfiguredModels exports zero series for every model cfg
+// configures, so rate() and increase() count each model's first sample.
+func (o *Orchestrator) prepareConfiguredModels(cfg config.ServiceConfig) {
+	for _, model := range configuredModels(cfg) {
+		o.metrics.PrepareModel(model)
+	}
+}
+
+// prepareReportedModels exports zero series for every model earlier runs
+// reported. A history read failure is not fatal: the configured models
+// are prepared regardless, and a model first reported later is prepared
+// when its event arrives.
+func (o *Orchestrator) prepareReportedModels(ctx context.Context) {
+	models, err := o.store.ListReportedModels(ctx)
+	if err != nil {
+		o.logger.Warn("list reported models failed", slog.Any("error", err))
+		return
+	}
+	for _, model := range models {
+		o.metrics.PrepareModel(model)
+	}
 }
 
 // drainRunningWorkers cancels all running worker contexts and waits for

@@ -27,13 +27,15 @@ type Metrics interface {
 	SetActiveSessionsElapsed(seconds float64)
 
 	// AddTokens increments the cumulative token counter by count.
-	// tokenType is "input", "output", "cache_read", or "cache_write"
-	// (sortie_tokens_total{type} counter).
-	AddTokens(tokenType string, count int64)
+	// tokenType is "input", "output", "cache_read", or "cache_write";
+	// model names the run's model, and an empty model reports as
+	// "<none>" (sortie_tokens_total{type,model} counter).
+	AddTokens(tokenType string, model string, count int64)
 
-	// AddAgentRuntime increments the cumulative agent runtime counter
-	// (sortie_agent_runtime_seconds_total counter).
-	AddAgentRuntime(seconds float64)
+	// AddAgentRuntime increments the cumulative agent runtime counter.
+	// model names the run's model, and an empty model reports as
+	// "<none>" (sortie_agent_runtime_seconds_total{model} counter).
+	AddAgentRuntime(model string, seconds float64)
 
 	// IncDispatches increments the dispatch attempt counter.
 	// outcome is "success" or "error"
@@ -41,9 +43,10 @@ type Metrics interface {
 	IncDispatches(outcome string)
 
 	// IncWorkerExits increments the worker exit counter.
-	// exitType is "normal", "error", "cancelled", or "soft_stop"
-	// (sortie_worker_exits_total{exit_type} counter).
-	IncWorkerExits(exitType string)
+	// exitType is "normal", "error", "cancelled", or "soft_stop";
+	// model names the run's model, and an empty model reports as
+	// "<none>" (sortie_worker_exits_total{exit_type,model} counter).
+	IncWorkerExits(exitType string, model string)
 
 	// IncRetries increments the retry scheduling counter.
 	// trigger is "error", "continuation", "timer", "stall", or
@@ -213,6 +216,14 @@ type Metrics interface {
 	// zero rather than keeping its last value
 	// (sortie_budget_exhausted_issues{reason} gauge).
 	SetBudgetExhaustedIssues(reason string, count int)
+
+	// PrepareModel exports a zero-valued series under model for every
+	// type of sortie_tokens_total, every exit_type of
+	// sortie_worker_exits_total, and sortie_agent_runtime_seconds_total,
+	// so rate() and increase() count the first sample recorded under
+	// model. A series that already exists keeps its value, and an empty
+	// model prepares "<none>".
+	PrepareModel(model string)
 }
 
 // NoopMetrics is a [Metrics] implementation where every method is a no-op.
@@ -227,10 +238,10 @@ func (*NoopMetrics) SetRunningSessions(int)                                {}
 func (*NoopMetrics) SetRetryingSessions(int)                               {}
 func (*NoopMetrics) SetAvailableSlots(int)                                 {}
 func (*NoopMetrics) SetActiveSessionsElapsed(float64)                      {}
-func (*NoopMetrics) AddTokens(string, int64)                               {}
-func (*NoopMetrics) AddAgentRuntime(float64)                               {}
+func (*NoopMetrics) AddTokens(string, string, int64)                       {}
+func (*NoopMetrics) AddAgentRuntime(string, float64)                       {}
 func (*NoopMetrics) IncDispatches(string)                                  {}
-func (*NoopMetrics) IncWorkerExits(string)                                 {}
+func (*NoopMetrics) IncWorkerExits(string, string)                         {}
 func (*NoopMetrics) IncRetries(string)                                     {}
 func (*NoopMetrics) IncReconciliationActions(string)                       {}
 func (*NoopMetrics) IncPollCycles(string)                                  {}
@@ -261,6 +272,7 @@ func (*NoopMetrics) IncCandidateHolds(string)                              {}
 func (*NoopMetrics) IncBudgetExhaustions(string)                           {}
 func (*NoopMetrics) IncRunsStoppedByBudget(string)                         {}
 func (*NoopMetrics) SetBudgetExhaustedIssues(string, int)                  {}
+func (*NoopMetrics) PrepareModel(string)                                   {}
 
 // MetricsSetter is implemented by adapters that accept a [Metrics]
 // recorder for self-instrumentation.
