@@ -53,6 +53,6 @@ Zero series are prepared at start-up for the configured models, for `<none>` and
 
 ### Negative
 
-- A model that falls out of use keeps exporting a flat zero series until the process restarts and run history no longer names it.
+- A model that falls out of use keeps exporting its series: flat at its last value until the process restarts, then flat at zero, because run history still names it.
 - Start-up reads every model in run history once, at a cost that grows with history.
 - Dashboards and alerts that matched these counters without a `model` label must aggregate across it.

@@ -736,7 +736,7 @@
                 }
             ],
             "title": "Agent Runtime",
-            "description": "Rate of cumulative agent runtime accumulation per model (seconds/second). The sum across models represents effective agent concurrency.",
+            "description": "Rate at which completed sessions add agent runtime, per model (seconds/second). A session adds its runtime when it ends, so a session still running is not shown.",
             "type": "timeseries"
         },
         {
