@@ -1193,3 +1193,28 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 	}
 	return usage, nil
 }
+
+// ListReportedModels returns each distinct non-empty reported_model in
+// run_history, in no defined order. It scans the whole table, so its cost
+// grows with history. Returns an empty slice (not nil) when none exist.
+func (s *Store) ListReportedModels(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT reported_model FROM run_history WHERE reported_model != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("list reported models: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+
+	models := []string{}
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, fmt.Errorf("scan reported model: %w", err)
+		}
+		models = append(models, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list reported models: %w", err)
+	}
+	return models, nil
+}

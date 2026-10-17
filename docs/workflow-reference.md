@@ -3735,7 +3735,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `by_adapter`     | array of groups   | One group per agent kind. `<none>` names the runs that carry no agent kind, a recorded CI result included. |
 | `by_rule`        | array of groups   | One group per dispatch rule name, as in the `rule_name` of a run row. `<none>` names the runs that ran on the workflow-wide fallback. |
 | `by_template`    | array of groups   | One group per prompt template the rule selected, named as the run recorded it, which can be a host path. `<none>` names the runs that recorded none. |
-| `by_model`       | array of groups   | One group per configured model, `<none>` for the runs that configured none. |
+| `by_model`       | array of groups   | One group per model a run ran on: the model its runtime reported, else its configured model; `<none>` for the runs with neither. |
 | `by_chain`       | array of chain groups | One entry per stage chain in which a hop was due or made. It is a listing, not a partition: runs outside a chain, and chains without a hop, are absent. |
 | `chain_funnels`  | array of funnels  | One funnel per stage chain definition, below. It is not a breakdown: its entries are stages, not groups of runs. |
 | `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
@@ -4139,10 +4139,10 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_sessions_retrying`                      | Gauge     | —                           | Number of issues in the retry queue.                           |
 | `sortie_slots_available`                        | Gauge     | —                           | Remaining dispatch capacity under current concurrency limits.  |
 | `sortie_active_sessions_elapsed_seconds`        | Gauge     | —                           | Cumulative wall-clock elapsed time across running sessions.    |
-| `sortie_tokens_total`                           | Counter   | `type`                      | Tokens consumed, by type (`input`, `output`, `cache_read`, `cache_write`). `cache_read` and `cache_write` are subsets of `input`, so summing across every `type` double-counts them. |
-| `sortie_agent_runtime_seconds_total`            | Counter   | —                           | Cumulative agent-session wall-clock time for completed sessions. |
+| `sortie_tokens_total`                           | Counter   | `type`, `model`             | Tokens consumed, by type (`input`, `output`, `cache_read`, `cache_write`) and by model. `cache_read` and `cache_write` are subsets of `input`, so summing across every `type` double-counts them. |
+| `sortie_agent_runtime_seconds_total`            | Counter   | `model`                     | Cumulative agent-session wall-clock time for completed sessions, by model. Every model a settings block configures (`<none>` when a block configures none) and every model an earlier run reported report `0` from start-up; a model none of these name gets its series when a run first reports it, so a query filtered to such a model returns no data before then and an alert on it uses `or vector(0)`. |
 | `sortie_dispatches_total`                       | Counter   | `outcome`                   | Dispatch attempts (`success`, `error`).                        |
-| `sortie_worker_exits_total`                     | Counter   | `exit_type`                 | Worker exits (`normal`, `error`, `cancelled`, `soft_stop`).    |
+| `sortie_worker_exits_total`                     | Counter   | `exit_type`, `model`        | Worker exits (`normal`, `error`, `cancelled`, `soft_stop`), by model. |
 | `sortie_retries_total`                          | Counter   | `trigger`                   | Retry schedule events (`error`, `continuation`, `timer`, `stall`, `ci_fix`). A review, bot review, merge conflict, or label command continuation records no trigger. |
 | `sortie_reconciliation_actions_total`           | Counter   | `action`                    | Reconciliation outcomes (`stop`, `cleanup`, `keep`, `sweep_cleanup`, `sweep_expired`). |
 | `sortie_poll_cycles_total`                      | Counter   | `result`                    | Poll tick completions (`success`, `error`, `skipped`).         |
@@ -4156,6 +4156,10 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_ssh_host_usage`                         | Gauge     | `host`                      | Current session count per SSH host.                            |
 | `sortie_budget_exhaustions_total`               | Counter   | `reason`                    | Issue entries into the per-issue budget-exhausted set (`token_budget`, `session_budget`). |
 | `sortie_budget_exhausted_issues`                | Gauge     | `reason`                    | Issues currently held out of dispatch by a per-issue budget ceiling.                     |
+
+The `model` label is the model the agent reported, otherwise the configured `model`, otherwise `<none>`, the placeholder `sortie stats` uses for the same case. Token samples count as usage arrives, so usage recorded before a run's first model report counts under the configured model or `<none>` and is not moved when the model arrives, a run whose runtime switches model splits its tokens between the models, and usage an agent folds into one figure without a model of its own counts under the run's model. Runtime and exit samples are recorded when the session ends, so they carry the model `sortie stats` groups the run under.
+
+On a default Prometheus, `rate()` and `increase()` miss the first sample of a model Sortie has never run before. Enabling the Prometheus feature flag `--enable-feature=created-timestamp-zero-ingestion`, still experimental in Prometheus, closes that gap with no Sortie setting: `/metrics` sends each series' creation time in the protobuf format the flag makes Prometheus request, so a scrape job that sets `scrape_protocols` keeps `PrometheusProto` in the list. A configured model name that the agent reports under a different, resolved name keeps its series at its true total, usually a flat `0`, beside the series of the reported name. This is expected, as is a flat series for a model only earlier runs used.
 
 Example scrape:
 

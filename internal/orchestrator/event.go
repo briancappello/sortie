@@ -142,9 +142,16 @@ func HandleAgentEvent(state *State, issueID string, event domain.AgentEvent, log
 	// RequestsByModel stay bound to token_usage events, mirroring the
 	// existing treatment of APIDurationMS.
 	var usageDelta domain.TokenUsage
+
+	// Prepared outside the usage gate: a kind whose figures the gate
+	// refuses still records runtime and exit samples under this model.
+	carrier := tokenUsageModel(event)
+	if carrier != "" && carrier != entry.ModelName {
+		metrics.PrepareModel(carrier)
+	}
 	if admitsUsageFigures(entry.UsageArrival) {
 		if hasUsage(event.Usage) {
-			usageDelta = applyUsageDelta(state, entry, event.Usage, metrics)
+			usageDelta = applyUsageDelta(state, entry, event.Usage, carrier, metrics)
 		}
 
 		// A token_usage event, even one carrying an all-zero payload, or
@@ -271,6 +278,14 @@ func tokenUsageModel(event domain.AgentEvent) string {
 	return event.Model
 }
 
+// metricModel returns the model value for a metric sample: the first
+// non-empty of the carrier's model, the run's reported model, and its
+// configured model, or "" when none is set. It writes nothing, so an
+// empty carrier model never displaces a known reported model.
+func metricModel(carrierModel string, entry *RunningEntry) string {
+	return coalesce(carrierModel, entry.ModelName, entry.ConfiguredModel)
+}
+
 // usageDeltaAndWatermark computes usage's componentwise delta against
 // watermark, clamped to zero, and the componentwise-maximum watermark
 // raised by usage, over every domain.TokenUsage field. applyUsageDelta
@@ -300,6 +315,9 @@ func usageDeltaAndWatermark(usage, watermark domain.TokenUsage) (delta, raisedWa
 // deltas to entry and state.AgentTotals, raises the watermarks to the
 // componentwise maximum of their prior value and usage, emits the
 // non-zero deltas through metrics, and returns the applied delta.
+// carrierModel is the model named by the record that brought usage, or
+// "" when it names none; each delta reaches metrics.AddTokens exactly
+// once, under metricModel(carrierModel, entry).
 //
 // applyUsageDelta is the only function that mutates
 // entry.AgentInputTokens, entry.AgentOutputTokens,
@@ -310,7 +328,7 @@ func usageDeltaAndWatermark(usage, watermark domain.TokenUsage) (delta, raisedWa
 // event loop goroutine; the worker's own local mirror of these
 // counters applies the identical rule independently on the worker
 // goroutine and never calls this function.
-func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage, metrics domain.Metrics) domain.TokenUsage {
+func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage, carrierModel string, metrics domain.Metrics) domain.TokenUsage {
 	watermark := domain.TokenUsage{
 		InputTokens:      entry.LastReportedInputTokens,
 		OutputTokens:     entry.LastReportedOutputTokens,
@@ -338,17 +356,18 @@ func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage,
 	state.AgentTotals.CacheReadTokens += delta.CacheReadTokens
 	state.AgentTotals.CacheWriteTokens += delta.CacheWriteTokens
 
+	model := metricModel(carrierModel, entry)
 	if delta.InputTokens > 0 {
-		metrics.AddTokens("input", delta.InputTokens)
+		metrics.AddTokens("input", model, delta.InputTokens)
 	}
 	if delta.OutputTokens > 0 {
-		metrics.AddTokens("output", delta.OutputTokens)
+		metrics.AddTokens("output", model, delta.OutputTokens)
 	}
 	if delta.CacheReadTokens > 0 {
-		metrics.AddTokens("cache_read", delta.CacheReadTokens)
+		metrics.AddTokens("cache_read", model, delta.CacheReadTokens)
 	}
 	if delta.CacheWriteTokens > 0 {
-		metrics.AddTokens("cache_write", delta.CacheWriteTokens)
+		metrics.AddTokens("cache_write", model, delta.CacheWriteTokens)
 	}
 
 	return delta

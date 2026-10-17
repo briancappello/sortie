@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- `sortie_tokens_total`, `sortie_agent_runtime_seconds_total`, and `sortie_worker_exits_total` now carry a `model` label, so a dashboard can show token use, agent runtime, and run outcomes per model: the model the agent reported, else the configured `model`, else `<none>`. A query that sums one of these metrics returns what it did before, but a panel or alert on raw series now gets one series per model, and the example Grafana dashboard's Agent Runtime panel plots one line per model. After each restart these metrics report `0` for every configured model and every model an earlier run reported; a query filtered to any other model returns no data until a run reports that model, so an alert on it needs `or vector(0)`. On a default Prometheus, `rate()` and `increase()` miss the first sample of a model sortie has never run before; Prometheus's experimental `created-timestamp-zero-ingestion` feature flag counts it. ([#1343](https://github.com/sortie-ai/sortie/issues/1343))
+
 ### Fixed
 
 - `claude-code` runs of more than one turn, and runs that continue an earlier session, no longer record a multiple of their token use, which overstated cost and reached `agent.max_tokens` early. Each turn now counts once and a continuing run counts only its own turns; runs already recorded keep their figures. ([#1399](https://github.com/sortie-ai/sortie/issues/1399))
