@@ -13,6 +13,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -243,7 +244,7 @@ func parseRunsQuery(values url.Values) (RunHistoryQuery, error) {
 // toRunResponse converts a run to its wire format, masking the free-text
 // members at serve time so a value registered as a secret after the run is
 // masked too. chains are the dispatch chains of the configuration in effect.
-func toRunResponse(e RunHistoryEntry, rates TokenRates, chains [][]string) runResponse {
+func toRunResponse(e RunHistoryEntry, rates pricing.TokenRates, chains [][]string) runResponse {
 	resp := runResponse{
 		RunID:                e.ID,
 		IssueID:              e.IssueID,
@@ -331,7 +332,7 @@ func toSelfReviewResponse(metadata *string) *selfReviewResponse {
 	}
 }
 
-func toRunResponses(rows []RunHistoryEntry, rates TokenRates, chains [][]string) []runResponse {
+func toRunResponses(rows []RunHistoryEntry, rates pricing.TokenRates, chains [][]string) []runResponse {
 	runs := make([]runResponse, len(rows))
 	for i, row := range rows {
 		runs[i] = toRunResponse(row, rates, chains)
@@ -408,7 +409,7 @@ func distinctIssueIDs(rows []RunHistoryEntry) []string {
 // historyTotalsOf converts an issue's totals to their wire format. A token
 // sum that is zero while the spend is incomplete serves null, because the
 // zero would stand in for spend Sortie does not know.
-func historyTotalsOf(t IssueRunTotals, rates TokenRates) historyTotalsResponse {
+func historyTotalsOf(t IssueRunTotals, rates pricing.TokenRates) historyTotalsResponse {
 	complete := t.Usage.UnmeasuredSessions == 0 && t.Usage.UnaccountedTurns == 0
 	known := func(sum int64) *int64 {
 		if sum == 0 && !complete {

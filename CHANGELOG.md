@@ -36,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The dashboard's budget panel no longer says tokens were not reported for an issue that `agent.max_sessions` holds while `agent.max_tokens` is `0`. ([#1381](https://github.com/sortie-ai/sortie/issues/1381))
 
+- `sortie validate` reports `agent.kind.no_cost_estimate` only for a `token_rates` entry that sets both `input_per_mtok` and `output_per_mtok`, and no longer for an entry missing either rate, which prices nothing. ([#1408](https://github.com/sortie-ai/sortie/issues/1408))
+
 ## [1.28.0] - 2026-10-11
 
 ### Added

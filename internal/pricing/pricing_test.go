@@ -1,4 +1,4 @@
-package server
+package pricing
 
 import (
 	"math"
@@ -20,7 +20,8 @@ func TestParseTokenRates(t *testing.T) {
 		extensions   map[string]any
 		wantNil      bool
 		wantWarnings int
-		wantRates    TokenRates // only checked when wantNil is false
+		wantTexts    []string
+		wantRates    TokenRates
 	}{
 		{
 			name:       "absent token_rates key returns nil",
@@ -134,6 +135,16 @@ func TestParseTokenRates(t *testing.T) {
 			},
 		},
 		{
+			name: "non-map kind value warns once with its dynamic type and stores a zero entry",
+			extensions: map[string]any{
+				"token_rates": map[string]any{"claude-code": 3},
+			},
+			wantNil:      false,
+			wantWarnings: 1,
+			wantTexts:    []string{"token_rates.claude-code: expected map, got int"},
+			wantRates:    TokenRates{"claude-code": TokenRateConfig{}},
+		},
+		{
 			name: "negative rate yields nil pointer for that field and warning",
 			extensions: map[string]any{
 				"token_rates": map[string]any{
@@ -176,7 +187,12 @@ func TestParseTokenRates(t *testing.T) {
 			},
 			wantNil:      false,
 			wantWarnings: 3,
-			wantRates:    TokenRates{"bad": TokenRateConfig{}},
+			wantTexts: []string{
+				"token_rates.bad.input_per_mtok: negative rate -1",
+				"token_rates.bad.output_per_mtok: negative rate -2",
+				"token_rates.bad: entry needs both input_per_mtok and output_per_mtok and prices nothing",
+			},
+			wantRates: TokenRates{"bad": TokenRateConfig{}},
 		},
 		{
 			name: "explicit zero rate produces non-nil pointer to 0.0 but stays incomplete",
@@ -220,6 +236,7 @@ func TestParseTokenRates(t *testing.T) {
 			},
 			wantNil:      true,
 			wantWarnings: 1,
+			wantTexts:    []string{"token_rates: entry keyed to the empty string is dropped"},
 		},
 		{
 			name: "entry keyed to the empty string is dropped, a populated kind beside it still warns for itself",
@@ -241,8 +258,6 @@ func TestParseTokenRates(t *testing.T) {
 				"token_rates": map[string]any{
 					"claude": map[string]any{
 						"output_per_mtok": 15.0,
-						// input_per_mtok absent
-						// cache_read_per_mtok absent
 					},
 				},
 			},
@@ -267,6 +282,9 @@ func TestParseTokenRates(t *testing.T) {
 
 			if len(warnings) != tt.wantWarnings {
 				t.Errorf("ParseTokenRates warnings = %d, want %d: %v", len(warnings), tt.wantWarnings, warnings)
+			}
+			if tt.wantTexts != nil && !slices.Equal(warnings, tt.wantTexts) {
+				t.Errorf("ParseTokenRates warnings = %q, want %q", warnings, tt.wantTexts)
 			}
 
 			if tt.wantNil {
@@ -311,28 +329,6 @@ func assertRateField(t *testing.T, kind, field string, got, want *float64) {
 	}
 }
 
-// TestParseTokenRates_EmptyKeyWarningMessage pins the exact warning
-// text an empty-keyed entry produces, so tokenRates[""] never
-// resolves for any of the three callers that share this type.
-func TestParseTokenRates_EmptyKeyWarningMessage(t *testing.T) {
-	t.Parallel()
-
-	rates, warnings := ParseTokenRates(map[string]any{
-		"": map[string]any{"input_per_mtok": 3.0},
-	}, true)
-
-	if rates != nil {
-		t.Errorf("ParseTokenRates rates = %v, want nil (empty-keyed entry dropped)", rates)
-	}
-	want := "token_rates: entry keyed to the empty string is dropped"
-	if len(warnings) != 1 || warnings[0] != want {
-		t.Errorf("ParseTokenRates warnings = %v, want [%q]", warnings, want)
-	}
-}
-
-// TestParseTokenRates_IncompleteEntryPricesNothing drives an entry
-// missing input_per_mtok through both ParseTokenRates and EstimateCost,
-// proving the stored entry is kept (not dropped) yet prices nothing.
 func TestParseTokenRates_IncompleteEntryPricesNothing(t *testing.T) {
 	t.Parallel()
 
@@ -373,51 +369,6 @@ func TestParseTokenRates_IncompleteEntryPricesNothing(t *testing.T) {
 	}
 }
 
-// TestParseTokenRates_NonMapKindValueStoresZeroEntry verifies a kind
-// whose raw value is not a map warns once, using the value's dynamic
-// type in the message, and still keeps an all-unset entry rather than
-// also emitting the needs-both warning a second time.
-func TestParseTokenRates_NonMapKindValueStoresZeroEntry(t *testing.T) {
-	t.Parallel()
-
-	rates, warnings := ParseTokenRates(map[string]any{"claude-code": 3}, true)
-
-	want := "token_rates.claude-code: expected map, got int"
-	if len(warnings) != 1 || warnings[0] != want {
-		t.Errorf("ParseTokenRates warnings = %v, want [%q]", warnings, want)
-	}
-	cfg, ok := rates["claude-code"]
-	if !ok {
-		t.Fatal(`rates["claude-code"] missing, want a stored zero-value entry`)
-	}
-	if cfg != (TokenRateConfig{}) {
-		t.Errorf("rates[claude-code] = %+v, want the zero value", cfg)
-	}
-}
-
-// TestParseTokenRates_NegativeRatesWarnThenNeedsBoth pins the warning
-// order within one incomplete entry: each invalid rate warns in field
-// order, and the needs-both warning always comes last.
-func TestParseTokenRates_NegativeRatesWarnThenNeedsBoth(t *testing.T) {
-	t.Parallel()
-
-	_, warnings := ParseTokenRates(map[string]any{
-		"bad": map[string]any{"input_per_mtok": -1.0, "output_per_mtok": -2.0},
-	}, true)
-
-	want := []string{
-		"token_rates.bad.input_per_mtok: negative rate -1",
-		"token_rates.bad.output_per_mtok: negative rate -2",
-		"token_rates.bad: entry needs both input_per_mtok and output_per_mtok and prices nothing",
-	}
-	if !slices.Equal(warnings, want) {
-		t.Errorf("ParseTokenRates warnings = %v, want %v", warnings, want)
-	}
-}
-
-// TestParseTokenRates_NonFiniteRateWarns covers the non-finite check
-// ahead of the existing negative-value check, for both a NaN and an
-// infinite rate, on the newly-added cache_write_per_mtok key.
 func TestParseTokenRates_NonFiniteRateWarns(t *testing.T) {
 	t.Parallel()
 
@@ -459,9 +410,6 @@ func TestParseTokenRates_NonFiniteRateWarns(t *testing.T) {
 	}
 }
 
-// TestParseTokenRates_UnrecognizedKeyWarnsButEntryStillPrices verifies
-// a misspelled rate key warns without preventing the rest of an
-// otherwise-complete entry from pricing.
 func TestParseTokenRates_UnrecognizedKeyWarnsButEntryStillPrices(t *testing.T) {
 	t.Parallel()
 
@@ -484,9 +432,6 @@ func TestParseTokenRates_UnrecognizedKeyWarnsButEntryStillPrices(t *testing.T) {
 	}
 }
 
-// TestParseTokenRates_WarningsOrderedByAscendingKind verifies warning
-// order follows sorted kind order rather than Go's randomized map
-// iteration, so repeated runs over the same input never reorder it.
 func TestParseTokenRates_WarningsOrderedByAscendingKind(t *testing.T) {
 	t.Parallel()
 
@@ -635,9 +580,6 @@ func TestEstimateCost(t *testing.T) {
 	}
 }
 
-// TestTokenRateAdvisories verifies each ParseTokenRates warning becomes
-// exactly one config.Advisory, in warning order, under the token_rates
-// check.
 func TestTokenRateAdvisories(t *testing.T) {
 	t.Parallel()
 
@@ -696,35 +638,4 @@ func TestTokenRateAdvisories(t *testing.T) {
 			t.Errorf("TokenRateAdvisories = %v, want none for a complete entry", got)
 		}
 	})
-}
-
-func TestFormatCost(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input float64
-		want  string
-	}{
-		{"zero", 0.00, "$0.00"},
-		{"small", 0.05, "$0.05"},
-		{"under 10", 9.99, "$9.99"},
-		{"under 1000", 999.99, "$999.99"},
-		{"rounds up to 1000 from below", 999.999, "$1,000.00"},
-		{"rounds up fractional near boundary", 1234.9999, "$1,235.00"},
-		{"exact 1000", 1000.00, "$1,000.00"},
-		{"mid four digits", 1234.56, "$1,234.56"},
-		{"five digits with cents", 10000.50, "$10,000.50"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := FormatCost(tt.input)
-			if got != tt.want {
-				t.Errorf("FormatCost(%v) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
 }

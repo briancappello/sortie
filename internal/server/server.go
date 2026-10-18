@@ -16,6 +16,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server/ui"
 )
 
@@ -347,7 +348,7 @@ type Params struct {
 	// TokenRates maps agent adapter kind strings to per-token USD
 	// rates for cost estimation in the JSON API. When nil or empty,
 	// the API reports raw token counts without cost estimates.
-	TokenRates TokenRates
+	TokenRates pricing.TokenRates
 
 	// Stats computes the run statistics report. Called on each
 	// GET /api/v1/stats; nil answers 503.
@@ -378,7 +379,7 @@ type Server struct {
 	runHistory       RunHistoryReader
 	runEventsFn      RunEventsFunc
 	runEventsAfterFn RunEventsAfterFunc
-	tokenRates       TokenRates
+	tokenRates       pricing.TokenRates
 	stats            StatsFunc
 
 	changes *changeFeed

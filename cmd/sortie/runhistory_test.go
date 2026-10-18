@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server"
 )
 
@@ -26,7 +27,7 @@ type runsHarness struct {
 	url   string
 }
 
-var claudeRates = server.TokenRateConfig{InputPerMtok: new(3.0), OutputPerMtok: new(15.0), CacheReadPerMtok: new(0.3), CacheWritePerMtok: new(3.75)}
+var claudeRates = pricing.TokenRateConfig{InputPerMtok: new(3.0), OutputPerMtok: new(15.0), CacheReadPerMtok: new(0.3), CacheWritePerMtok: new(3.75)}
 
 func newRunsHarness(t *testing.T, snap orchestrator.RuntimeSnapshotResult) *runsHarness {
 	t.Helper()
@@ -41,7 +42,7 @@ func newRunsHarness(t *testing.T, snap orchestrator.RuntimeSnapshotResult) *runs
 	srv := server.New(server.Params{
 		SnapshotFn: func() (orchestrator.RuntimeSnapshotResult, error) { return snap, nil },
 		RefreshFn:  func() bool { return true },
-		TokenRates: server.TokenRates{"claude-code": claudeRates},
+		TokenRates: pricing.TokenRates{"claude-code": claudeRates},
 		RunHistory: runHistoryReader{store: store},
 	})
 	ts := httptest.NewServer(srv.Mux())
@@ -275,7 +276,7 @@ func TestRunHistoryServesIssueOutcome(t *testing.T) {
 func TestRunHistoryServesCostAndOrigin(t *testing.T) {
 	t.Parallel()
 
-	cost := server.EstimateCost(domain.TokenUsage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 200, CacheWriteTokens: 100}, &claudeRates)
+	cost := pricing.EstimateCost(domain.TokenUsage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 200, CacheWriteTokens: 100}, &claudeRates)
 	tokens := func(input, output, total, cacheRead, cacheWrite any) map[string]any {
 		return map[string]any{"input_tokens": input, "output_tokens": output, "total_tokens": total, "cache_read_tokens": cacheRead, "cache_write_tokens": cacheWrite}
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -50,7 +51,7 @@ func TestUsageDeclaration_NoneArrivalDiscardedEndToEnd(t *testing.T) {
 	snap := orchestrator.RuntimeSnapshot(state, now)
 
 	fptr := func(v float64) *float64 { return &v }
-	rates := TokenRates{
+	rates := pricing.TokenRates{
 		"kind-none": {InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 		"kind-inc":  {InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -612,7 +613,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 
 // toServedRunningEntry converts a running row for both endpoints, adding
 // the issue-level figures that depend on the snapshot's limits and on rates.
-func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator.RuntimeSnapshotResult, rates TokenRates) runningEntryResponse {
+func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator.RuntimeSnapshotResult, rates pricing.TokenRates) runningEntryResponse {
 	resp := toRunningEntryResponse(e, snap.GeneratedAt)
 
 	var completed int64
@@ -945,7 +946,7 @@ func heldUsedTokens(e orchestrator.SnapshotBudgetEntry) *int64 {
 	return e.UsedTokens
 }
 
-func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates TokenRates, words sentence.Context, health *orchestrator.SnapshotHealth) stateResponse {
+func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates pricing.TokenRates, words sentence.Context, health *orchestrator.SnapshotHealth) stateResponse {
 	running := make([]runningEntryResponse, 0, len(snap.Running))
 	for _, e := range snap.Running {
 		row := toServedRunningEntry(e, snap, tokenRates)
@@ -1296,7 +1297,7 @@ func historyOnlyDetail(issueID string, newest RunHistoryEntry) *issueDetailRespo
 
 // issueHistoryOf builds the history member from an issue's newest runs, read
 // one past issueHistoryPageSize so a longer history names its continuation.
-func issueHistoryOf(page []RunHistoryEntry, totals IssueRunTotals, rates TokenRates, chains [][]string) *issueHistoryResponse {
+func issueHistoryOf(page []RunHistoryEntry, totals IssueRunTotals, rates pricing.TokenRates, chains [][]string) *issueHistoryResponse {
 	rows, next := cutPage(page, issueHistoryPageSize)
 	return &issueHistoryResponse{
 		Runs:       toRunResponses(rows, rates, chains),
@@ -1596,7 +1597,7 @@ func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request, allowe
 // entry holds it. An entry belongs to the issue when its identifier equals
 // identifier, or when issueID is non-empty and the entry carries it, which
 // finds an issue the tracker has since renamed.
-func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, rates TokenRates, words sentence.Context) *issueDetailResponse {
+func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, rates pricing.TokenRates, words sentence.Context) *issueDetailResponse {
 	matches := func(gotIdentifier, gotIssueID string) bool {
 		return gotIdentifier == identifier || (issueID != "" && gotIssueID == issueID)
 	}
