@@ -743,7 +743,8 @@ on_worker_exit(issue_id, reason, worker_result, state):
   // status, distinct from a stall, terminal-state, or shutdown cancel.
   if reason == cancelled AND worker_result.stopped_by_token_ceiling AND running_entry.token_ceiling_stop_request is not null:
     status = "budget_stopped"
-    run_error = token_ceiling_stop_error(running_entry.issue_tokens_completed + running_entry.agent_total_tokens, running_entry.token_ceiling_stop_request.budget_tokens)
+    // uncached_tokens: the entry's total tokens less its cache-read tokens, floored at zero
+    run_error = token_ceiling_stop_error(running_entry.issue_tokens_completed + uncached_tokens(running_entry), running_entry.token_ceiling_stop_request.budget_tokens)
     report_token_ceiling_stop(log, metrics, running_entry.token_ceiling_stop_request)
 
   handoff_path = false

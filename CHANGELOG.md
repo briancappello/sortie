@@ -12,6 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A pull request reaction whose branch is missing from the workflow prompt now gets Sortie's built-in instructions on every turn of the run, a branch you write still takes precedence, and a continuation switch outside the branch now gets Sortie's continuation text. The example workflows now keep each reaction's instructions apart from the work prompt. ([#1357](https://github.com/sortie-ai/sortie/issues/1357))
 
+- `agent.max_tokens` no longer counts prompt cache reads, on every agent kind, so the limit follows the work an issue did rather than how long its agent's conversation has grown. With the same setting, issues are held and runs stopped much later than before (on one reported history, at about 37 times the spend), and an issue already held at the limit runs again once its count without cache reads is below it. `agent.token_warning_percent`, the dashboard's budget meter and messages, the JSON API, and the agent's `cost_budget` tool use the same count, and the dashboard labels it tokens again instead of tokens and cache reads. Sortie has no money limit per issue; on Claude Code, `claude-code.max_budget_usd` caps the money each turn spends. ([#1381](https://github.com/sortie-ai/sortie/issues/1381))
+
+### Removed
+
+- Running entries in the JSON API no longer carry `issue_uncached_tokens`; `used_tokens` now reports the same figure. ([#1381](https://github.com/sortie-ai/sortie/issues/1381))
+
 ### Fixed
 
 - `claude-code` runs of more than one turn, and runs that continue an earlier session, no longer record a multiple of their token use, which overstated cost and reached `agent.max_tokens` early. Each turn now counts once and a continuing run counts only its own turns; runs already recorded keep their figures. ([#1399](https://github.com/sortie-ai/sortie/issues/1399))
@@ -27,6 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - On Gitea, the `auto_merge.merged` notification, merge comment included, no longer ends with an empty `Merge commit: .` line. ([#1328](https://github.com/sortie-ai/sortie/issues/1328))
 
 - Sortie no longer warns that a workflow is missing a `label_review` or `label_fix` branch, a warning that was wrong for prompts that test those keys with `{{ if .label_review }}` or `{{ if .label_fix }}`. ([#1357](https://github.com/sortie-ai/sortie/issues/1357))
+
+- The dashboard's budget panel no longer says tokens were not reported for an issue that `agent.max_sessions` holds while `agent.max_tokens` is `0`. ([#1381](https://github.com/sortie-ai/sortie/issues/1381))
 
 ## [1.28.0] - 2026-10-11
 

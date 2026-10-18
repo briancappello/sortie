@@ -217,7 +217,7 @@ Fields:
   - Reaching the ceiling also posts one comment on the issue naming the session budget and `agent.max_sessions` as the setting that raises it.
 - `max_tokens` (integer)
   - Default: `0` (unlimited; no token budget enforced).
-  - Cumulative per-issue token ceiling. The orchestrator sums `total_tokens` across the issue's completed `run_history` entries, adds the running session's own reported spend, and stops re-dispatching once the sum reaches `max_tokens`.
+  - Cumulative per-issue token ceiling, counted in uncached tokens: a run's `total_tokens` less its `cache_read_tokens`, floored at zero, with cache writes counted (Section 13.5). Prompt-cache reads never count toward the ceiling. The orchestrator sums the uncached tokens of the issue's completed `run_history` entries, adds the running session's own uncached tokens, and stops re-dispatching once the sum reaches `max_tokens`.
   - Reaching the ceiling also stops a run already in flight, on the event loop, as soon as a usage figure carries the sum to the ceiling, not only at the next dispatch decision.
   - When the sum reaches `max_tokens`, a warning is logged, on the same two dispatch lanes and for the same reason `max_sessions` states above. A failed token query fails open, but not the same way on both lanes: the retry handler's check is skipped and dispatch proceeds for that issue, while the rebuild folds the prior set's entries for the failing axis forward unchanged and keeps the other axis fresh.
   - A run whose coding agent reported no token usage is recorded unmeasured and contributes nothing to the sum. A sum below `max_tokens` that includes at least one unmeasured run allows the dispatch and logs a warning naming the issue, the sum, the ceiling, and the unmeasured count.
