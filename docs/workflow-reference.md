@@ -4313,7 +4313,7 @@ Sortie estimates the cost in USD of every measured run, per model, and shows it 
 
 **An estimate, not a bill.** The four rates per model do not express long-context price tiers, the separate price of one-hour cache writes, batch, flex, and priority service tiers, data-residency surcharges, negotiated discounts, subscription plans, or fees for tools such as web search, so the figure can differ from what the provider charges. Sortie never uses a cost figure an agent runtime reports on its own.
 
-When no rate source is available (the embedded table disabled, no downloaded table, no operator table, and no `token_rates`), the dashboard shows no cost, its session view states a session's cost as unpriced, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
+When no rate source is available (the embedded table disabled, no downloaded table, no operator table, and no `token_rates`), the dashboard shows no cost, its session view states a session's cost as unpriced, every measured running row of the JSON API carries `cost_status` `unpriced`, and every finished run that spent tokens is recorded `unpriced`, so `sortie stats` and `GET /api/v1/stats` report no cost for it. A finished run that spent nothing is still recorded at `0` and `estimated`.
 
 The `config.token_rates` member of `GET /api/v1/state` serves the `token_rates` in force: an entry per key as written, each rate `null` when not set, and `complete`, `true` exactly when the entry prices on its own (both `input_per_mtok` and `output_per_mtok` for a kind entry, all four rates for a model entry). It is `null` when `token_rates` is absent or empty, which does not mean that nothing is priced.
 
@@ -5348,7 +5348,7 @@ These offline checks never contact Linear and never log the API key value. State
 | `notifications.tracker_comment.implicit_auto_merge`         | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `reactions.auto_merge` names a provider. |
 | `notifications.tracker_comment.implicit_budget_hold`        | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `agent.max_sessions` or `agent.max_tokens` is above `0`. |
 | `notifications[<i>].events.missing`                         | A `notifications` entry other than `tracker_comment` omits `events`. |
-| `token_rates`                                               | `token_rates` or one of its entries is not a map, an entry has an empty key, a rate is not a finite, non-negative number, an entry names a key Sortie does not recognize, or a kind entry lacks `input_per_mtok` or `output_per_mtok`. |
+| `token_rates`                                               | `token_rates` or one of its entries is not a map, an entry has an empty key, a rate is not a finite, non-negative number, an entry holds a key other than its four `*_per_mtok` rates, or a kind entry lacks `input_per_mtok` or `output_per_mtok`. |
 | `token_rates.per_kind`                                      | A `token_rates` entry is keyed by an agent kind. It prices every model of that kind alike, so it turns off per-model pricing for the kind. |
 
 ---

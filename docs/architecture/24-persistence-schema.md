@@ -124,7 +124,7 @@ The recorded cost is written once, in the same write as the row, priced under th
 | `estimated_cost_usd` | REAL | The model's share of the run's cost; `NULL` when no rate prices any class the model spent |
 | `cost_status` | TEXT | `estimated`, `partial` when a class the model spent has no rate, or `unpriced` |
 | `price_source` | TEXT | The layer that priced the share: `operator`, `fetched`, or `embedded` (Section 13.5); empty when `cost_status` is `unpriced` |
-| `price_table_version` | TEXT | The version of the rates that priced the share: the pinned upstream revision of the embedded table, or a content digest of the fetched table, the operator's table, or the operator's `token_rates`; empty when `price_source` is |
+| `price_table_version` | TEXT | The version of the rates that priced the share: the pinned upstream revision of the embedded table, or a content digest of the fetched table, the operator's table, or the operator's `token_rates`; empty when `price_source` is empty |
 
 A measured run writes one row per model it spent tokens on, in the same transaction as its `run_history` row, and the rows sum to the run's token columns class by class; an unmeasured run writes none. The per-model counts follow the same resume baseline as the run's totals, so a resumed session's earlier spend is not counted again. `run_history.reported_model` keeps its meaning, the model the last token-usage event named, and is not derived from these rows.
 
