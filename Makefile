@@ -15,6 +15,10 @@ build: ## Compile the sortie binary into the repo root
 clean: ## Remove the binary and all coverage files
 	$(RM) $(BIN) $(COVERAGE_OUT) $(COVERAGE_HTML)
 
+.PHONY: price-table
+price-table: ## Refresh the embedded model price table from upstream LiteLLM
+	$(GO) run ./tools/pricetable
+
 ##@ Testing
 
 .PHONY: test
