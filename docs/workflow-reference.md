@@ -1770,6 +1770,7 @@ Each variable maps to exactly one config field. The naming convention is `SORTIE
 | Environment variable | Config field | Type   | Notes                                 |
 | -------------------- | ------------ | ------ | ------------------------------------- |
 | `SORTIE_DB_PATH`     | `db_path`    | string | `~` expansion applies; `$VAR` skipped |
+| `SORTIE_PRICE_TABLE_FETCH` | `price_table.fetch` | bool | On by default; `false` turns off the download of the shared price table; `price_table.replace_url` is not affected |
 
 #### Control variable
 
@@ -1859,7 +1860,7 @@ For path fields (`workspace.root`, `db_path`), tilde (`~`) expansion still appli
 | `reactions.*` (including `reactions.label_commands`) | No override variables exist; reaction configuration comes from WORKFLOW.md |
 | `dispatch.*`                           | No override variables exist; rule definitions and template paths come from WORKFLOW.md |
 | `self_review.*`                        | Verification commands are security-sensitive privileged configuration that must come from the version-controlled WORKFLOW.md |
-| Extensions (`server`, `worker`, etc.)  | Extension-defined; would couple core env parsing to extensions  |
+| Extensions (`server`, `worker`, `token_rates`, the rest of `price_table`, etc.) | Extension-defined; would couple core env parsing to extensions. `price_table.fetch` is the one extension field with an override, `SORTIE_PRICE_TABLE_FETCH` |
 | `logging.level` (via extensions)       | Resolved from `--log-level` flag; not part of typed config layer |
 
 ### 3.7 Dynamic reload
@@ -1904,7 +1905,7 @@ Sortie starts an HTTP server by default on `127.0.0.1:7678` for runtime observab
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
-| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, priced at the `token_rates` the process started with. |
+| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, with the cost recorded with each run. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, lists what Sortie does next for it as condition and sentence pairs, and lists the latest 50 agent events of its running or latest run as `recent_events`. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
@@ -2564,10 +2565,10 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `used_tokens`             | integer or `null` | `issue_tokens_completed` plus this session's `uncached_tokens`, each counted as `0` when `null`: the figure the token ceiling compares with `agent.max_tokens`, which leaves out cache reads and advances with each usage figure of the session. `null` when that sum is `0` and `used_tokens_complete` is `false`, so unknown spend never reads as zero. |
 | `used_tokens_complete`    | boolean           | True exactly when `used_tokens` is the issue's whole spend: the completed sessions were read, none is unmeasured, none recorded an unaccounted turn, this session is measured, and it has recorded no unaccounted turn. When `false`, `used_tokens` is a lower bound. It ignores `tokens_pending`, which keeps telling a consumer that the figure excludes a turn in flight. |
 | `budget_tokens`           | integer or `null` | `agent.max_tokens` as of the latest poll tick. `null` means no token ceiling (`agent.max_tokens` is `0`), never `0`. The token headroom is `budget_tokens` minus `used_tokens`; there is no value when either is `null`, and it turns negative when a run overshoots, because the ceiling stops a run at the first usage figure at or past it. |
-| `estimated_cost_usd`      | number or `null` | The estimated USD cost of this session, from `tokens` and the `token_rates` entry of `agent_kind`. Unrounded. Non-`null` exactly when `cost_status` is `estimated`. |
-| `cost_status`             | string            | `estimated`, which a zero rate also gives; `unpriced` when the session is measured and `token_rates` holds no entry with both `input_per_mtok` and `output_per_mtok` for `agent_kind`, an absent `token_rates` included; `unmeasured` when `tokens_measured` is `false`. |
-| `issue_estimated_cost_usd` | number or `null` | The estimated USD cost of the whole issue: the sum of the estimates of its priced parts, completed sessions and this session alike, at the rates the process started with. Non-`null` exactly when `issue_cost_status` is `estimated` or `partial`. |
-| `issue_cost_status`       | string            | `estimated` when the estimate covers the issue's whole spend; `partial` when it is a lower bound, because a part that spent tokens is left out; `unpriced` when no priced part spent tokens and a part that did has no rate; `unmeasured` when `used_tokens` is `null`, and when no part is priced or unpriced. A session measured at zero tokens leaves nothing out, so a missing rate for its kind does not make a complete, otherwise priced issue `partial`. |
+| `estimated_cost_usd`      | number or `null` | The live estimated USD cost of this session, from its tokens per model under the rates in force ([Section 4.4](#44-token_rates--cost-estimation)). Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
+| `cost_status`             | string            | `estimated`, which a zero rate also gives; `partial` when the estimate is a lower bound because a model or a token class the session spent has no rate beside priced spend; `unpriced` when the session is measured and no rate prices any of its spend, which is every measured session when no rate source is available; `unmeasured` when `tokens_measured` is `false`. |
+| `issue_estimated_cost_usd` | number or `null` | The estimated USD cost of the whole issue: the sum of the estimates of its priced parts: the cost recorded with each completed session's run, and this session's live estimate under the rates in force. Non-`null` exactly when `issue_cost_status` is `estimated` or `partial`. |
+| `issue_cost_status`       | string            | `estimated` when the estimate covers the issue's whole spend; `partial` when it is a lower bound, because a part that spent tokens is left out; `unpriced` when no priced part spent tokens and a part that did has no rate; `unmeasured` when `used_tokens` is `null`, and when no part is priced or unpriced. A session measured at zero tokens leaves nothing out, so a missing rate for its model does not make a complete, otherwise priced issue `partial`. |
 
 A limit key (`budget_tokens`, `budget_sessions`) is always present: `null` means no limit is configured. A usage key (`used_tokens`, `issue_tokens_completed`, `used_sessions`, `unmeasured_sessions`) set to `null` means unknown. `used_tokens` is `null` only when `issue_cost_status` is `unmeasured`, and `issue_cost_status` is `estimated` only when `used_tokens_complete` is `true`. While `token_rates` holds an entry for any agent kind, the top-level `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated`, and `cost_unpriced_running` counts the rows whose `cost_status` is `unpriced`.
 
@@ -2899,11 +2900,11 @@ A sentence says in plain English what the issue is doing, what it waits on, or h
 
 A session whose `usage_arrival` is `none` contributes nothing to the token totals, even when its runtime reports a figure.
 
-`cost_unpriced_running` is a top-level field, present, zero included, whenever `token_rates` holds an entry for any agent kind, complete or not, and omitted otherwise. It counts the running, measured sessions that `active_estimated_cost_usd` leaves out because their agent kind has no rate, or an incomplete one. `active_estimated_cost_usd` sums the estimated USD cost of the running, measured sessions that have one, and is omitted when none of them prices.
+`cost_unpriced_running` is a top-level field, present, zero included, whenever a rate source is available (any `token_rates` entry, an operator price table, a downloaded table, or the embedded table), and omitted otherwise, so its presence alone tells a client whether Sortie can price at all. It counts the running, measured sessions that `active_estimated_cost_usd` leaves out because no rate prices any of their spend. `active_estimated_cost_usd` sums the live estimates of the running, measured sessions that price, in full or in part, and is omitted when none of them prices.
 
 **Workflow shape (`config`):**
 
-`config` describes the workflow in effect, so a client draws the rules, stages, and reactions the workflow has and assumes none it lacks. It reports the configuration promoted at the last successful load, kept when a reload fails. A setting whose change needs a restart reports what the process applies: every reaction except `ci_failure` is the one built at startup, and `token_rates` are the rates the process started with. So `config` names no reaction a reload added and keeps naming one a reload removed, until the restart that applies the edit. A member reports the WORKFLOW.md key of its name; the derived members are `selected_by`, `agent_kind`, `usage_arrival`, `chains`, `hop_ceiling`, and `complete`. A member whose setting imposes no ceiling is `null`, present and never `0`. An optional string is omitted when unset, and a list member is `[]` when empty.
+`config` describes the workflow in effect, so a client draws the rules, stages, and reactions the workflow has and assumes none it lacks. It reports the configuration promoted at the last successful load, kept when a reload fails. A setting whose change needs a restart reports what the process applies: every reaction except `ci_failure` is the one built at startup. So `config` names no reaction a reload added and keeps naming one a reload removed, until the restart that applies the edit. A member reports the WORKFLOW.md key of its name; the derived members are `selected_by`, `agent_kind`, `usage_arrival`, `chains`, `hop_ceiling`, and `complete`. A member whose setting imposes no ceiling is `null`, present and never `0`. An optional string is omitted when unset, and a list member is `[]` when empty.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -2948,9 +2949,9 @@ A session whose `usage_arrival` is `none` contributes nothing to the token total
 | `escalation` | string | A member of every reaction that escalates: the mode the reaction applies, `label`, `comment`, or `none`. For `ci_failure`, a configuration in force that carries no `ci_failure` block while the CI check still runs from startup serves `none` and a `max_retries` of `0`. |
 | `triage` | boolean | A member of `ci_failure`, `review_comments`, `bot_review`, and `merge_conflicts`: `true` exactly when the kind runs a triage command, as configured at startup. |
 | `escalation_label` | string or absent | Present exactly when `escalation` is `label`. The label the reaction applies: the configured value, or `needs-human` where the block writes none. |
-| `token_rates` | object or `null` | The rates the process started with. `null` when it holds no entry. Otherwise a member per entry, keyed by the agent kind as written. |
-| `token_rates.<kind>.input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, `cache_write_per_mtok` | number or `null` | The rate as configured, `null` when not set. An unset cache rate prices that class at the input rate, and `config` serves the configured `null`, never the substituted rate. |
-| `token_rates.<kind>.complete` | boolean | `true` exactly when `input_per_mtok` and `output_per_mtok` are both set, the condition under which a session of the kind is priced. |
+| `token_rates` | object or `null` | The `token_rates` in force, which reload with the workflow. `null` when it holds no entry, which does not mean nothing is priced: the price tables can still price runs. Otherwise a member per entry, keyed by the agent kind or the model name as written. |
+| `token_rates.<key>.input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, `cache_write_per_mtok` | number or `null` | The rate as configured, `null` when not set. An unset cache rate of a kind entry prices that class at the input rate, an unset rate of a model entry comes from the table that lists the model, and `config` serves the configured `null`, never the substituted rate. |
+| `token_rates.<key>.complete` | boolean | `true` exactly when the entry prices on its own: both `input_per_mtok` and `output_per_mtok` set for a kind entry, all four rates set for a model entry. |
 
 `config` holds no credential. It is an allowlist of typed settings: it carries no tracker endpoint, key, or query filter, no agent command, hook, workspace or database path, or notification destination, no reaction extra key or triage script, and no settings block. Its configuration strings are served unmasked, as the parked record's `label` is, because they are configuration.
 
@@ -3369,8 +3370,8 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `uncached_tokens`        | integer or `null`  | `tokens.total_tokens` less `tokens.cache_read_tokens`, floored at zero, so `uncached_tokens` plus `tokens.cache_read_tokens` equals `tokens.total_tokens`. A sibling of `tokens`. `null` exactly when `tokens_measured` is `false`. |
 | `tokens_measured`        | boolean            | True when the runtime reported a usage figure for the run, or the run never entered an agent turn. |
 | `unaccounted_turns`      | integer            | The turns that issued a model request no token figure was proven to account for. When it is non-zero, the token figures are lower bounds. |
-| `estimated_cost_usd`     | number or `null`   | The estimated USD cost of the run from `tokens` and the `token_rates` entry of `agent_kind`. Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
-| `cost_status`            | string             | `estimated`, which a zero rate also gives, and which a run that spent nothing gives whether or not its kind has a rate; `partial` when the estimate is a lower bound because the run has unaccounted turns; `unpriced` when the run spent tokens and `token_rates` holds no entry with both `input_per_mtok` and `output_per_mtok` for `agent_kind`, an absent `token_rates` included; `unmeasured` when `tokens_measured` is `false`. |
+| `estimated_cost_usd`     | number or `null`   | The estimated USD cost recorded when the run finished, from its tokens per model under the rates in force then, and never re-priced ([Section 4.4](#44-token_rates--cost-estimation)). Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
+| `cost_status`            | string             | The status recorded with the cost: `estimated`, which a zero rate also gives, and which a run that spent nothing gives whether or not a rate prices its model; `partial` when the estimate is a lower bound because the run has unaccounted turns, or because a model or a token class it spent had no rate beside priced spend; `unpriced` when the run spent tokens and no rate priced any of them; `unmeasured` when `tokens_measured` is `false`. |
 | `chain_id`               | string or absent   | The stage chain identifier of the run. Omitted when empty. |
 | `stage_previous`, `stage_previous_outcome` | string or absent | The rule whose hop led to the run's dispatch and that hop's outcome, `succeeded` or `no_change`. Omitted when empty. |
 | `stage_target`, `stage_result` | string or absent | The rule the run's exit targeted with a hop decision and its result: `advanced`, `partial`, `failed`, or `ceiling`. Omitted when the run reached no decision. A read taken just after the run completes can precede the decision, and the next read carries it. |
@@ -3726,7 +3727,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
 | `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
 | `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
-| `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. The warnings of the `token_rates` the process started with follow. |
+| `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. A database whose runs carry no recorded cost, because no service start has applied the schema change that records it, names cost among what it leaves out. |
 | `summary`        | object            | The report-wide figures, below. |
 | `by_status`      | array of groups   | One group per run status. |
 | `by_adapter`     | array of groups   | One group per agent kind. `<none>` names the runs that carry no agent kind, a recorded CI result included. |
@@ -3755,11 +3756,11 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `duration_seconds`           | object           | `p50`, `p95`, `mean`, and `samples` over the succeeded runs. Each of them is `null` when `samples` is `0`. |
 | `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
 | `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage, and `uncached`, which is `total` less `cache_read`, floored at zero, so `uncached` plus `cache_read` equals `total` and cache writes stay in it. `null` on the `base` tier and when no run reported usage. |
-| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier and when no run is priced, which includes a workflow without `token_rates`. |
+| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier, when no run is priced, and when the runs carry no recorded cost. |
 | `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage. `null` when `cost_usd` is, and when no succeeded run reported usage. |
 | `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |
 | `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
-| `cost_unpriced_runs`         | integer          | The runs that reported usage under an agent kind with no complete `token_rates` entry, when `token_rates` is configured. |
+| `cost_unpriced_runs`         | integer          | The runs that reported usage and were recorded `unpriced`. |
 | `tokens_unmeasured_runs`     | integer          | The runs that reported no usage. They add nothing to `tokens` and `cost_usd`. |
 
 The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `runs`.
@@ -3777,7 +3778,7 @@ The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `
 | `tokens`                     | object or `null` | As in `summary`, over the group's runs. |
 | `cost_usd`, `cost_per_succeeded_run_usd` | number or `null` | As in `summary`, over the group's runs. |
 | `tokens_unmeasured_runs`     | integer          | The group's runs that reported no usage. |
-| `cost_unpriced_runs`         | integer          | The group's runs that `cost_usd` leaves out for want of a rate, counted as in `summary`. `0` on the `base` tier and while `token_rates` is not configured. |
+| `cost_unpriced_runs`         | integer          | The group's runs that `cost_usd` leaves out for want of a rate, counted as in `summary`. `0` on the `base` tier. |
 
 **`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
 
@@ -3827,9 +3828,9 @@ The groups partition the counted runs, so their `runs` sum to `summary.runs`. A 
 
 **`self_review` fields:** `runs_with_metadata`, the runs that carry a self-review record; `by_final_verdict`, a list of `verdict` and `runs` pairs in ascending verdict order, where the verdict is `pass`, `iterate`, or `none` for a record with an empty verdict; `cap_reached_runs`, the runs whose self-review stopped at its iteration cap; `mean_iterations`, `null` when `runs_with_metadata` is `0`; and `unparsed_runs`, the records that could not be read. With no run in range the full tier still serves the object, with zero counts and `mean_iterations` `null`.
 
-**`null` versus `0`.** A count is `0` when nothing matches. A figure that needs a measurement is `null` when no run supplies one: a run that reported no usage adds nothing to `tokens`, `cost_usd`, or their per-run figures, and a run that no `token_rates` entry prices adds nothing to `cost_usd`. Neither is reported as a zero.
+**`null` versus `0`.** A count is `0` when nothing matches. A figure that needs a measurement is `null` when no run supplies one: a run that reported no usage adds nothing to `tokens`, `cost_usd`, or their per-run figures, and a run recorded `unpriced` adds nothing to `cost_usd`. Neither is reported as a zero.
 
-Pricing uses the `token_rates` the process started with, the same rates `config.token_rates` of `GET /api/v1/state` serves. `sortie stats` reads the workflow file each time it runs, so after an edit of `token_rates` the command and the route price differently until the process restarts.
+Every cost is the cost recorded with each run when it finished ([Section 4.4](#44-token_rates--cost-estimation)). The report parses no rates and prices nothing, so `sortie stats` and `GET /api/v1/stats` report the same cost for the same range, and a later change of rates moves no figure.
 
 `sortie stats` loads the dispatch rules of the workflow to build the funnels, so it stops with the diagnostics `sortie validate` prints, and exits `1`, when they do not load, for example when a rule's prompt template file is missing. The route reads the dispatch rules in force on each request, so it follows a reload of the workflow.
 
@@ -4279,54 +4280,74 @@ You are a software engineer. Fix the issue described below.
 
 ```yaml
 token_rates:
-  claude-code:
-    input_per_mtok: 3.00
-    output_per_mtok: 15.00
-    cache_read_per_mtok: 0.30
-    cache_write_per_mtok: 3.75
-  copilot-cli:
-    input_per_mtok: 2.00
-    output_per_mtok: 8.00
-    cache_read_per_mtok: 0.20
-    cache_write_per_mtok: 2.50
-  codex:
-    input_per_mtok: 2.50
-    output_per_mtok: 10.00
-    cache_read_per_mtok: 0.25
+  claude-sonnet-4-5:
+    input_per_mtok: 2.70
+  my-local-model:
+    input_per_mtok: 0.50
+    output_per_mtok: 1.50
+    cache_read_per_mtok: 0.05
+    cache_write_per_mtok: 0.60
 ```
 
-When `token_rates` is configured, the dashboard labels every cost an estimate, estimates the cost of today's runs, and shows an estimate on each run, each issue, and each breakdown of its History and Analytics screens, the JSON API serves each running row's session estimate and the estimate of its whole issue (`estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status), serves an estimate with a status on every run row and on the history totals of an issue, including each issue of run history by issue, and the `sortie stats` subcommand and `GET /api/v1/stats` price the runs they aggregate from run history. Keys are agent adapter kind strings (e.g., `"claude-code"`, `"copilot-cli"`, `"codex"`, `"opencode"`). All rates are in USD per 1 million tokens.
+Sortie estimates the cost in USD of every measured run, per model, and shows it on the dashboard (an estimate on each run, each issue, and each breakdown of its History and Analytics screens, and the cost of today's runs), in the JSON API (each running row's session estimate and the estimate of its whole issue, `estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status, and an estimate with a status on every run row and on the history totals of an issue, including each issue of run history by issue), and in `sortie stats` and `GET /api/v1/stats`. All rates are in USD per 1 million tokens.
 
-Every figure Sortie prices is a fresh-input token, a cache-read token, a cache-write token, or an output token, priced once each at its own rate. An unset `cache_read_per_mtok` or `cache_write_per_mtok` prices that class at `input_per_mtok`, so a configuration that sets neither keeps pricing every input token, cached or not, at the input rate. `claude-code`, `copilot-cli`, and `opencode` report a cache-write count; an operator of one of those kinds sets `cache_write_per_mtok` to that provider's cache-write rate to price it separately.
+**Where rates come from.** A run's tokens are split by model, and each model's share takes its rates from the first of these layers that has an entry for it:
 
-One rate set prices every model of a kind alike: two models of one kind run under different dispatch rules are priced at the same rates, so the savings from routing show in token counts before they show in money.
+1. The operator's rates in `token_rates`. A key that names a registered agent kind (for example `claude-code`) prices every model of that kind alike; any other key names a model, matched to the model a run reports, or the model it was configured with when it reports none, by the same name matching the price tables use.
+2. The shared price table downloaded at runtime, unless `price_table.fetch` is `false`, once a downloaded table has passed validation.
+3. The price table embedded in the binary: a snapshot of the published LiteLLM `model_prices_and_context_window.json`, refreshed by each release, unless `price_table.embedded` is `false`.
 
-When `token_rates` is absent or empty, the dashboard shows no cost, its session view states a session's cost as unpriced, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
+`price_table.replace_file` or `price_table.replace_url` names a table of your own, in the same format as the shared table, that replaces layers 2 and 3 entirely; `token_rates` entries still lie over it. A deployment with no `token_rates` and no network access is priced from the embedded table.
 
-The `config.token_rates` member of `GET /api/v1/state` serves the rates the process started with: an entry per agent kind keyed as written, each rate `null` when not set, and `complete`, `true` exactly when both `input_per_mtok` and `output_per_mtok` are set. It is `null` when `token_rates` is absent or empty.
+**Matching model names.** Runtimes and tables spell the same model differently (a provider prefix such as `anthropic/claude-sonnet-4-5`, or a dotted version such as `claude-opus-4.6`), and one matching rule maps every runtime's names onto table keys. A name that maps to no key has no rate; matching never guesses, so `claude-sonnet-4` is never priced at the rates of `claude-sonnet-4-5`. A model no layer prices leaves its share unpriced, and one `token_rates` line for that model fixes it.
 
-An entry keyed to a kind whose usage-reporting declaration resolves to no token usage for the sessions a configuration produces has no effect: no cost can be estimated for it. `sortie validate` reports this under the check `agent.kind.no_cost_estimate`, naming the kind, so an operator who prices a non-reporting kind learns why the dashboard shows no cost for that kind rather than discovering it by reading source.
+**Per-model entries.** An entry for a model that a table in force lists may set any subset of the four rates and takes the rest from that table, so `claude-sonnet-4-5` above overrides only the input rate. An entry for a model no table lists must set all four.
+
+**Per-kind entries.** An entry keyed by an agent kind takes precedence over every table and over model entries, prices every model of its kind alike, and needs both `input_per_mtok` and `output_per_mtok` to price anything. An unset `cache_read_per_mtok` or `cache_write_per_mtok` in it prices that class at `input_per_mtok`, so a workflow that priced with per-kind entries sees the same figures as before. `sortie validate` warns that such an entry turns off per-model pricing for its kind.
+
+**How a share is priced.** Fresh input, cache reads, cache writes, and output are each priced once at their own rate. Outside a per-kind entry, no rate is ever substituted: a token class a model spent with no rate contributes nothing and marks the run `partial`, a lower bound. A run whose spend no rate prices is `unpriced`.
+
+**The price is recorded with the run.** When a run finishes, Sortie records its cost and status, and for each model's share the price source (`operator` for `token_rates` and your own table, `fetched`, or `embedded`) and the version of the rates (the embedded table's pinned upstream revision, or a digest of the downloaded table, your table, or `token_rates`). Every surface reads the recorded cost, so a later change of rates, a restart, an upgrade, or a newly downloaded table never moves a past figure, and `sortie stats` and `GET /api/v1/stats` report the same cost for the same range. A running session's figure is a live estimate under the rates in force, fixed when its run is recorded. Runs recorded before an upgrade that introduced recorded costs are priced once, at the first start after it, under the rates in force at that start.
+
+**The runtime download.** On by default: a default install downloads the table from `price_table.fetch_url` at startup and every 24 hours. Set `price_table.fetch: false`, or `SORTIE_PRICE_TABLE_FETCH=false` in the environment, to turn it off, for example on an audited network; Sortie then prices from `token_rates`, the last table it kept, and the embedded table. A table named by `price_table.replace_url` is downloaded the same way whenever it is set, whatever `price_table.fetch` says. A download, failed or not, never blocks startup, dispatch, or a reload, and until a downloaded table is in force the layers beneath it price runs. A response that does not parse as a price table, holds a rate that is not a finite non-negative number, or is smaller than a minimum size is rejected, and a model whose price fell to zero against the table in force keeps its previous price. The last table that passed validation is kept beside the database and loaded at startup, so a restart without network access keeps it. The request carries no run data and no configuration. `SORTIE_PRICE_TABLE_FETCH` overrides `price_table.fetch`, and like that setting it governs only the download of the shared table.
+
+**An estimate, not a bill.** The four rates per model do not express long-context price tiers, the separate price of one-hour cache writes, batch, flex, and priority service tiers, data-residency surcharges, negotiated discounts, subscription plans, or fees for tools such as web search, so the figure can differ from what the provider charges. Sortie never uses a cost figure an agent runtime reports on its own.
+
+When no rate source is available (the embedded table disabled, no downloaded table, no operator table, and no `token_rates`), the dashboard shows no cost, its session view states a session's cost as unpriced, every measured running row of the JSON API carries `cost_status` `unpriced`, and `sortie stats` and `GET /api/v1/stats` report no cost figures.
+
+The `config.token_rates` member of `GET /api/v1/state` serves the `token_rates` in force: an entry per key as written, each rate `null` when not set, and `complete`, `true` exactly when the entry prices on its own (both `input_per_mtok` and `output_per_mtok` for a kind entry, all four rates for a model entry). It is `null` when `token_rates` is absent or empty, which does not mean that nothing is priced.
+
+A kind entry that prices its kind (both `input_per_mtok` and `output_per_mtok` set) has no effect when the kind's usage-reporting declaration resolves to no token usage for the sessions a configuration produces: no cost can be estimated for it. `sortie validate` reports this under the check `agent.kind.no_cost_estimate`, naming the kind, so an operator who prices a non-reporting kind learns why the dashboard shows no cost for that kind rather than discovering it by reading source.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `token_rates` | map | _(absent)_ | Top-level extension key. Keys are agent adapter kind strings. |
-| `token_rates.<kind>.input_per_mtok` | number | _(not set)_ | USD per million input tokens. Required, with `output_per_mtok`, for the kind to price at all. |
-| `token_rates.<kind>.output_per_mtok` | number | _(not set)_ | USD per million output tokens. Required, with `input_per_mtok`, for the kind to price at all. |
-| `token_rates.<kind>.cache_read_per_mtok` | number | _(not set)_ | USD per million cache-read tokens; unset prices cache reads at `input_per_mtok`. |
-| `token_rates.<kind>.cache_write_per_mtok` | number | _(not set)_ | USD per million cache-write tokens; unset prices cache writes at `input_per_mtok`. |
+| `token_rates` | map | _(absent)_ | Top-level extension key. Keys are agent adapter kind strings or model names. |
+| `token_rates.<key>.input_per_mtok` | number | _(not set)_ | USD per million input tokens. A kind entry needs it, with `output_per_mtok`, to price at all. |
+| `token_rates.<key>.output_per_mtok` | number | _(not set)_ | USD per million output tokens. A kind entry needs it, with `input_per_mtok`, to price at all. |
+| `token_rates.<key>.cache_read_per_mtok` | number | _(not set)_ | USD per million cache-read tokens. Unset in a kind entry, cache reads are priced at `input_per_mtok`; unset in a model entry, the rate comes from the table that lists the model. |
+| `token_rates.<key>.cache_write_per_mtok` | number | _(not set)_ | USD per million cache-write tokens, unset under the same rule as `cache_read_per_mtok`. |
+| `price_table` | map | _(absent)_ | Top-level extension key governing the price tables beneath `token_rates`. |
+| `price_table.embedded` | boolean | `true` | `false` removes the table embedded in the binary from the layers. |
+| `price_table.fetch` | boolean | `true` | Downloads the shared price table at startup and every 24 hours; `false` turns the download off. Overridden by `SORTIE_PRICE_TABLE_FETCH`. |
+| `price_table.fetch_url` | string | `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` | Address of the shared price table. |
+| `price_table.replace_file` | path | _(not set)_ | A price table of your own, in the shared table's format, that replaces the downloaded and embedded tables. Supports `$VAR` and `~` expansion. |
+| `price_table.replace_url` | string | _(not set)_ | A price table of your own, downloaded like the shared table whenever it is set, whatever `price_table.fetch` says, that replaces the downloaded and embedded tables. |
 
 **Validation rules:**
 
 - `token_rates` MUST be a map when present. Non-map values produce a warning (not a fatal error).
-- Each `<kind>` value MUST be a map. Non-map values produce a warning for that kind.
+- Each entry value MUST be a map. Non-map values produce a warning for that key.
 - Rate values MUST be non-negative, finite numbers. A negative, non-finite, or non-numeric value produces a warning and is treated as not configured.
-- An unrecognized key inside a kind's entry produces a warning and is ignored.
-- An entry needs both `input_per_mtok` and `output_per_mtok` to price anything. An entry missing either one, or holding neither, prices nothing: its kind counts as unpriced on the dashboard, the JSON API, and `sortie stats`, the same as a kind `token_rates` never names. This holds even when the incomplete entry is the only one `token_rates` configures.
+- An unrecognized key inside an entry produces a warning and is ignored.
+- A kind entry needs both `input_per_mtok` and `output_per_mtok` to price anything. A kind entry missing either one, or holding neither, prices nothing: its kind's runs are unpriced on the dashboard, the JSON API, and `sortie stats`, and the price tables do not price them either. This holds even when the incomplete entry is the only one `token_rates` configures.
 - Zero-valued rates are valid and produce `$0.00` for that token type.
-- An entry keyed to the empty string is dropped and produces a warning; it prices no kind.
-- Every warning above is a configuration advisory under check `token_rates` (Section 8): it reaches the run log once per configuration change, `sortie validate`'s diagnostics without affecting `valid` or the exit status, and the dry run. `sortie stats` and `GET /api/v1/stats` also list their own `token_rates` warnings in their report, because they decide which runs they price.
+- An entry keyed to the empty string is dropped and produces a warning; it prices nothing.
+- Every warning above is a configuration advisory under check `token_rates` (Section 8): it reaches the run log once per configuration change, `sortie validate`'s diagnostics without affecting `valid` or the exit status, and the dry run.
+- A kind entry draws a configuration advisory under check `token_rates.per_kind`, saying that it turns off per-model pricing for its kind.
+- A model entry for a model no table in force at load lists that does not set all four rates is an error under check `token_rates.model_incomplete`.
+- `price_table.replace_file` and `price_table.replace_url` MUST NOT both be set; setting both is an error under check `price_table.replace_conflict`. A `price_table.replace_file` that cannot be read or fails the price-table validation is an error under check `price_table.replace_file`, at startup, in `sortie validate`, and on reload, which keeps the previous configuration.
 
-**Reload behavior:** Token rates do not reload dynamically. Changes require a process restart, consistent with `server.port` and `server.host`, so `config.token_rates` keeps serving the rates the process started with until then. `GET /api/v1/stats` prices at those same rates and lists their warnings, while `sortie stats` reads the workflow file each time it runs, so after an edit of `token_rates` the two price differently until the restart.
+**Reload behavior:** `token_rates` and `price_table` reload with the rest of WORKFLOW.md, and `price_table.replace_file` is read again on every load. New rates apply to the live estimate of running sessions and to every run recorded after the reload; a cost already recorded never changes. `config.token_rates` serves the rates in force from the reload on, and a reload that fails keeps the previous rates.
 
 ### 4.5 Adapter-Specific Pass-Through Config
 
@@ -5279,6 +5300,9 @@ Before dispatching work, the orchestrator validates the workflow configuration. 
 | `tracker.handoff_state` and `tracker.in_progress_state` free of collisions against the state lists | The state collides with `active_states` or `terminal_states` as written. |
 | `tracker.no_change_state` requires `tracker.handoff_state` | `no_change_state` is set while `handoff_state` is empty. Checked entirely offline, with no tracker call. |
 | `tracker.no_change_state` names a permitted value | `no_change_state` is neither equal to `handoff_state` nor a member of `terminal_states` exactly as written in front matter. Checked entirely offline, with no tracker call. |
+| `token_rates.model_incomplete` | A `token_rates` entry keyed by a model that no price table in force at load lists does not set all of `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, and `cache_write_per_mtok`. |
+| `price_table.replace_conflict` | `price_table.replace_file` and `price_table.replace_url` are both set. |
+| `price_table.replace_file` | The file `price_table.replace_file` names cannot be read, or fails the price-table validation: it does not parse as a price table, a rate is not a finite non-negative number, or it is smaller than the minimum size. |
 
 An empty `tracker.active_states` draws the warning `tracker.active_states.empty` (`tracker.active_states is empty, so no issue is dispatched`) and does not block startup.
 
@@ -5324,7 +5348,8 @@ These offline checks never contact Linear and never log the API key value. State
 | `notifications.tracker_comment.implicit_auto_merge`         | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `reactions.auto_merge` names a provider. |
 | `notifications.tracker_comment.implicit_budget_hold`        | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `agent.max_sessions` or `agent.max_tokens` is above `0`. |
 | `notifications[<i>].events.missing`                         | A `notifications` entry other than `tracker_comment` omits `events`. |
-| `token_rates`                                               | `token_rates` or one of its entries is not a map, an entry has an empty agent kind, a rate is not a finite, non-negative number, an entry names a key Sortie does not recognize, or an entry lacks `input_per_mtok` or `output_per_mtok`. |
+| `token_rates`                                               | `token_rates` or one of its entries is not a map, an entry has an empty key, a rate is not a finite, non-negative number, an entry names a key Sortie does not recognize, or a kind entry lacks `input_per_mtok` or `output_per_mtok`. |
+| `token_rates.per_kind`                                      | A `token_rates` entry is keyed by an agent kind. It prices every model of that kind alike, so it turns off per-model pricing for the kind. |
 
 ---
 
@@ -5355,6 +5380,9 @@ These errors are raised during typed config construction from the parsed front m
 | `config: agent.token_warning_percent: must be between 0 and 99`                 | Value for `token_warning_percent` below `0` or above `99`.               | Use an integer from `0` (off) to `99`.                                                                                               |
 | `config: agent.max_consecutive_absences: must be greater than 0`                | `0` or a negative value for `max_consecutive_absences`.                  | Use a positive integer, or remove the key to take the default of `3`.                                                                |
 | `config: agent.max_consecutive_absences: invalid integer value: <val>`          | Non-integer value for `max_consecutive_absences`.                        | Use a plain integer (e.g., `3`) or a quoted string integer (e.g., `"3"`).                                                            |
+| `config: token_rates.<model>: a model no price table lists must set input_per_mtok, output_per_mtok, cache_read_per_mtok, and cache_write_per_mtok` | A `token_rates` entry keyed by a model that no price table in force at load lists leaves a rate unset. | Set all four rates, or correct the model name so it matches a table entry. |
+| `config: price_table: replace_file and replace_url are mutually exclusive` | Both `price_table.replace_file` and `price_table.replace_url` are set. | Keep the one that names your table. |
+| `config: price_table.replace_file: <reason>` | The file cannot be read, does not parse as a price table, holds a rate that is not a finite non-negative number, or is smaller than the minimum size. | Fix the path or the file, in the format of the published LiteLLM `model_prices_and_context_window.json`. |
 | `config: agent.kind: expected string, got <type>`                               | `agent.kind` is not a string (e.g., integer, boolean, list).             | Ensure the value is a string, quoted if necessary.                                                                                   |
 | `config: agent.command: expected string or list, got <type>`                    | `agent.command` is neither a string nor a list (e.g., integer, boolean, mapping). | Write the value as a string, quoted if necessary, or as a list of strings.                  |
 | `config: agent.command: must not be an empty list`                              | `agent.command` is a list with no elements.                              | Add the program as the first element, or remove the key to take the kind's default command.          |
