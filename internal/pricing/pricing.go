@@ -2,6 +2,10 @@
 // advisories, and estimates the USD cost of token usage under a per-kind
 // rate. [ParseTokenRates] and [EstimateCost] are the entry points;
 // [TokenRateConfig.Complete] states which entries price anything.
+//
+// The package also holds the embedded price table ([EmbeddedTable]), the
+// validation every price table passes ([ParseTable]), and the rule that
+// maps a model name onto a table key ([Table.Lookup]).
 package pricing
 
 import (
