@@ -4297,7 +4297,7 @@ Sortie estimates the cost in USD of every measured run, per model, and shows it 
 
 1. The operator's rates in `token_rates`. A key that names a registered agent kind (for example `claude-code`) prices every model of that kind alike; any other key names a model, matched to the model a run reports, or the model it was configured with when it reports none, by the same name matching the price tables use.
 2. The shared price table downloaded at runtime, unless `price_table.fetch` is `false`, once a downloaded table has passed validation.
-3. The price table embedded in the binary: a snapshot of the published LiteLLM `model_prices_and_context_window.json`, refreshed by each release, unless `price_table.embedded` is `false`.
+3. The price table embedded in the binary: a snapshot of the published LiteLLM `model_prices_and_context_window.json`, refreshed from upstream regularly; each release embeds the copy its source holds, unless `price_table.embedded` is `false`.
 
 `price_table.replace_file` or `price_table.replace_url` names a table of your own, in the same format as the shared table, that replaces layers 2 and 3 entirely; `token_rates` entries still lie over it. A deployment with no `token_rates` and no network access is priced from the embedded table.
 

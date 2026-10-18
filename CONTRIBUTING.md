@@ -57,6 +57,14 @@ A change under `web/` passes `make ui-check`, which `make check` also runs. `int
 
 If `make ui-install` or `make ui-build` reports a missing native binding, run `make ui-install` again: it replaces `web/node_modules` with a clean install from the committed `web/package-lock.json`. If the binding is still missing, the lockfile lacks your platform: run `npm install` in `web/`, then review the lockfile change and commit it with the rebuilt output.
 
+### Price table
+
+The embedded price snapshot is generated: the upstream price file, `REVISION` and `REVISION_TIME` under `internal/pricing/snapshot`. The snapshot files are committed together and never edited by hand.
+
+`make price-table` refreshes them to the latest upstream revision that changed the price file. It needs Go and access to `api.github.com`, and an optional `GITHUB_TOKEN` raises the rate limit. The command changes nothing when it fails. `make build` then embeds the new prices.
+
+A weekly workflow opens a pull request with the refresh and posts to the CI Discord channel when the refresh fails. A conflict in the snapshot is resolved by rerunning the refresh.
+
 ### Integration tests
 
 Integration tests are gated by environment variables and skip cleanly without them:
