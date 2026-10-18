@@ -40,6 +40,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Removing the parking label from a parked issue now releases it on the next poll even when `tracker.query_filter` excludes issues that carry the label; before, only moving the issue to another state did. An issue whose label was removed before you upgrade stays parked until you move it to another state, or add the label back, wait for the next poll, and remove it again. ([#1406](https://github.com/sortie-ai/sortie/issues/1406))
 
+## [1.28.1] - 2026-10-18
+
+### Security
+
+- A page served from another origin can no longer start a retry, run a reaction check, acknowledge an attention item, or force a refresh through Sortie's HTTP server. A reverse proxy in front of Sortie must pass on the browser's Host header unchanged, including its port. ([GHSA-hrwv-5v9g-qv57](https://github.com/sortie-ai/sortie/security/advisories/GHSA-hrwv-5v9g-qv57))
+
 ## [1.28.0] - 2026-10-11
 
 ### Added
@@ -1318,7 +1324,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CI pipeline with `golangci-lint`, `gofmt` enforcement, and test execution via GitHub Actions.
 - Architecture Decision Records (ADR-0001 through ADR-0005).
 
-[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.28.0...HEAD
+[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.28.1...HEAD
+[1.28.1]: https://github.com/sortie-ai/sortie/compare/v1.28.0...v1.28.1
 [1.28.0]: https://github.com/sortie-ai/sortie/compare/v1.27.0...v1.28.0
 [1.27.0]: https://github.com/sortie-ai/sortie/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/sortie-ai/sortie/compare/v1.25.0...v1.26.0
