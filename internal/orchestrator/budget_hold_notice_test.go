@@ -355,7 +355,7 @@ func TestBuildBudgetHoldComment_CrossLaneParity(t *testing.T) {
 	rebuildStore := &stubStore{
 		tokenExhaustedIDs: []string{issueID},
 		tokenExhaustedUsage: map[string]persistence.IssueTokenUsage{
-			issueID: {TotalTokens: 128400, Sessions: 5, StoppedInFlight: 2},
+			issueID: {TotalTokens: 128400, UncachedTokens: 128400, Sessions: 5, StoppedInFlight: 2},
 		},
 	}
 	rebuildState := NewState(60000, 10, 0, nil, AgentTotals{})

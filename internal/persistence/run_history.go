@@ -979,7 +979,15 @@ func (s *Store) LatestResumeUsage(ctx context.Context, issueID, sessionID string
 // and the cost_budget tool. The ByKind map makes the struct incomparable
 // with ==; compare the scalar fields instead.
 type IssueTokenUsage struct {
-	TotalTokens        int64
+	// TotalTokens sums total_tokens, prompt-cache reads included. It is not
+	// the figure the token ceiling compares; see UncachedTokens.
+	TotalTokens int64
+
+	// UncachedTokens sums, per row, total_tokens less cache_read_tokens
+	// floored at zero. Flooring each row keeps one row's excess cache reads
+	// from cancelling another row's spend. Cache writes stay counted.
+	UncachedTokens int64
+
 	Sessions           int
 	UnmeasuredSessions int
 
@@ -988,7 +996,7 @@ type IssueTokenUsage struct {
 	StoppedInFlight int
 
 	// UnaccountedTurns is the summed count of turns that spent tokens no
-	// figure was proven to cover, so a non-zero value makes TotalTokens a
+	// figure was proven to cover, so a non-zero value makes UncachedTokens a
 	// lower bound even when every row is measured.
 	UnaccountedTurns int
 
@@ -1018,24 +1026,26 @@ type KindTokenUsage struct {
 	OutputTokens     int64
 }
 
-// SpendIncomplete reports whether TotalTokens is a lower bound rather than
+// SpendIncomplete reports whether UncachedTokens is a lower bound rather than
 // the whole of the issue's spend. Either count that leaves spend out of the
 // sum answers true.
 func (u IssueTokenUsage) SpendIncomplete() bool {
 	return u.UnmeasuredSessions > 0 || u.UnaccountedTurns > 0
 }
 
-// TokenUsageByIssue returns the summed total_tokens, row count, unmeasured
-// row count, and in-flight-stopped count across all rows for the issue, plus
-// the measured spend per agent kind, or the zero [IssueTokenUsage] when the
-// issue has no rows. An unmeasured row's token columns are zero, so a
-// non-zero UnmeasuredSessions makes the total a lower bound. The totals and
+// TokenUsageByIssue returns the summed total_tokens and uncached tokens, row
+// count, unmeasured row count, and in-flight-stopped count across all rows
+// for the issue, plus the measured spend per agent kind, or the zero
+// [IssueTokenUsage] when the issue has no rows. An unmeasured row's token
+// columns are zero, so a non-zero UnmeasuredSessions makes the totals a lower
+// bound. The totals and
 // the per-kind breakdown come from one statement and describe the same rows.
 // A kind whose measured rows spent nothing gets no ByKind entry.
 func (s *Store) TokenUsageByIssue(ctx context.Context, issueID string) (IssueTokenUsage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT agent_adapter,
 			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(MAX(total_tokens - cache_read_tokens, 0)), 0),
 			COUNT(*),
 			SUM(CASE WHEN tokens_measured = 0 THEN 1 ELSE 0 END),
 			SUM(CASE WHEN status = 'budget_stopped' THEN 1 ELSE 0 END),
@@ -1055,16 +1065,17 @@ func (s *Store) TokenUsageByIssue(ctx context.Context, issueID string) (IssueTok
 	var usage IssueTokenUsage
 	for rows.Next() {
 		var kind string
-		var total int64
+		var total, uncached int64
 		var count int
 		var unmeasured, stoppedInFlight, unaccounted sql.NullInt64
 		var spent KindTokenUsage
 		var rawInput int64
-		if err := rows.Scan(&kind, &total, &count, &unmeasured, &stoppedInFlight, &unaccounted,
+		if err := rows.Scan(&kind, &total, &uncached, &count, &unmeasured, &stoppedInFlight, &unaccounted,
 			&spent.FreshInputTokens, &spent.CacheReadTokens, &spent.CacheWriteTokens, &spent.OutputTokens, &rawInput); err != nil {
 			return IssueTokenUsage{}, fmt.Errorf("token usage by issue %q: %w", issueID, err)
 		}
 		usage.TotalTokens += total
+		usage.UncachedTokens += uncached
 		usage.Sessions += count
 		usage.UnmeasuredSessions += int(unmeasured.Int64)
 		usage.StoppedInFlight += int(stoppedInFlight.Int64)
@@ -1164,7 +1175,7 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 	}
 
 	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(candidateIDs); no user data in format string
-		`SELECT issue_id, COALESCE(SUM(total_tokens), 0), COUNT(*), SUM(CASE WHEN tokens_measured = 0 THEN 1 ELSE 0 END),
+		`SELECT issue_id, COALESCE(SUM(total_tokens), 0), COALESCE(SUM(MAX(total_tokens - cache_read_tokens, 0)), 0), COUNT(*), SUM(CASE WHEN tokens_measured = 0 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN status = 'budget_stopped' THEN 1 ELSE 0 END), COALESCE(SUM(unaccounted_turns), 0)
 		FROM run_history WHERE issue_id IN (%s) GROUP BY issue_id`,
 		placeholders,
@@ -1180,7 +1191,7 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 		var issueID string
 		var issueUsage IssueTokenUsage
 		var unmeasured, stoppedInFlight, unaccounted sql.NullInt64
-		if err := rows.Scan(&issueID, &issueUsage.TotalTokens, &issueUsage.Sessions, &unmeasured, &stoppedInFlight, &unaccounted); err != nil {
+		if err := rows.Scan(&issueID, &issueUsage.TotalTokens, &issueUsage.UncachedTokens, &issueUsage.Sessions, &unmeasured, &stoppedInFlight, &unaccounted); err != nil {
 			return nil, fmt.Errorf("scan token budget usage: %w", err)
 		}
 		issueUsage.UnmeasuredSessions = int(unmeasured.Int64)

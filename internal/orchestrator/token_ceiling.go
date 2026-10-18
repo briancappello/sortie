@@ -20,13 +20,16 @@ type TokenCeilingStopRequest struct {
 	// BudgetTokens is the ceiling in force when the stop was decided.
 	BudgetTokens int
 
-	// UsedTokens is IssueTokensCompleted plus SessionTokens at the decision.
+	// UsedTokens is IssueTokensCompleted plus SessionTokens at the decision,
+	// in uncached tokens.
 	UsedTokens int64
 
-	// IssueTokensCompleted is the issue's completed-session sum at the decision.
+	// IssueTokensCompleted is the issue's completed-session sum of uncached
+	// tokens at the decision.
 	IssueTokensCompleted int64
 
-	// SessionTokens is this session's own cumulative spend at the decision.
+	// SessionTokens is this session's own cumulative uncached tokens at the
+	// decision.
 	SessionTokens int64
 
 	// SumSource is tokenSumConfirmedRead or tokenSumSessionSpendAlone.
@@ -40,6 +43,18 @@ type TokenCeilingStopRequest struct {
 // and [enforceInFlightTokenCeiling] need.
 type issueTokenStore interface {
 	TokenUsageByIssue(ctx context.Context, issueID string) (persistence.IssueTokenUsage, error)
+}
+
+// sessionUncachedTokens returns the running session's total tokens less its
+// cache reads, floored at zero.
+func (e *RunningEntry) sessionUncachedTokens() int64 {
+	return domain.TokenUsage{TotalTokens: e.AgentTotalTokens, CacheReadTokens: e.CacheReadTokens}.Uncached()
+}
+
+// issueUncachedTokens returns the issue's completed-session uncached tokens
+// plus the running session's own.
+func (e *RunningEntry) issueUncachedTokens() int64 {
+	return e.IssueTokensCompleted + e.sessionUncachedTokens()
 }
 
 // freezeIssueTokenBaseline reads the issue's completed-session usage onto
@@ -63,7 +78,7 @@ func freezeIssueTokenBaseline(ctx context.Context, state *State, issueID string,
 	if err != nil {
 		return
 	}
-	entry.IssueTokensCompleted = usage.TotalTokens
+	entry.IssueTokensCompleted = usage.UncachedTokens
 	entry.IssueUsage = &usage
 	if entry.UsageArrival.ReportsAnyFigure() {
 		reachTokenWarning(state, issueID, entry, logger)
@@ -118,7 +133,7 @@ func enforceInFlightTokenCeiling(ctx context.Context, state *State, issueID stri
 	if !admitsUsageFigures(entry.UsageArrival) {
 		return
 	}
-	if entry.IssueTokensCompleted+entry.AgentTotalTokens < int64(ceiling) {
+	if entry.issueUncachedTokens() < int64(ceiling) {
 		return
 	}
 	log := issueTokenCeilingLogger(logger, issueID, entry)
@@ -128,7 +143,7 @@ func enforceInFlightTokenCeiling(ctx context.Context, state *State, issueID stri
 		// A completed sum is never negative, so a session whose own spend
 		// already reaches the ceiling proves the breach without the failed
 		// read, keeping a persistence outage from suspending the ceiling.
-		if entry.AgentTotalTokens >= int64(ceiling) {
+		if entry.sessionUncachedTokens() >= int64(ceiling) {
 			requestTokenCeilingStop(entry, ceiling, nil, tokenSumSessionSpendAlone)
 			return
 		}
@@ -141,9 +156,9 @@ func enforceInFlightTokenCeiling(ctx context.Context, state *State, issueID stri
 		}
 		return
 	}
-	entry.IssueTokensCompleted = usage.TotalTokens
+	entry.IssueTokensCompleted = usage.UncachedTokens
 	entry.IssueUsage = &usage
-	if entry.IssueTokensCompleted+entry.AgentTotalTokens < int64(ceiling) {
+	if entry.issueUncachedTokens() < int64(ceiling) {
 		return
 	}
 
@@ -194,7 +209,7 @@ func reachTokenWarning(state *State, issueID string, entry *RunningEntry, logger
 		return false
 	default:
 	}
-	used := entry.IssueTokensCompleted + entry.AgentTotalTokens
+	used := entry.issueUncachedTokens()
 	if used < int64(threshold) {
 		return false
 	}
@@ -206,7 +221,7 @@ func reachTokenWarning(state *State, issueID string, entry *RunningEntry, logger
 		slog.Int("warning_tokens", threshold),
 		slog.Int("budget_tokens", state.MaxTokens),
 		slog.Int64("issue_tokens_completed", entry.IssueTokensCompleted),
-		slog.Int64("session_tokens", entry.AgentTotalTokens),
+		slog.Int64("session_tokens", entry.sessionUncachedTokens()),
 		slog.String("ceiling_setting", ceilingSettingByBudgetReason[budgetReasonToken]),
 		slog.String("warning_setting", "agent.token_warning_percent"),
 	)
@@ -227,9 +242,9 @@ const (
 func requestTokenCeilingStop(entry *RunningEntry, ceiling int, usage *persistence.IssueTokenUsage, sumSource string) {
 	entry.TokenCeilingStopRequest = &TokenCeilingStopRequest{
 		BudgetTokens:         ceiling,
-		UsedTokens:           entry.IssueTokensCompleted + entry.AgentTotalTokens,
+		UsedTokens:           entry.issueUncachedTokens(),
 		IssueTokensCompleted: entry.IssueTokensCompleted,
-		SessionTokens:        entry.AgentTotalTokens,
+		SessionTokens:        entry.sessionUncachedTokens(),
 		SumSource:            sumSource,
 		Usage:                usage,
 	}
@@ -273,7 +288,7 @@ func incompleteSpendAttrs(usage persistence.IssueTokenUsage) []any {
 // the ceiling but only a lower bound, so the dispatch proceeds anyway.
 func warnTokenBudgetIncomplete(log *slog.Logger, usage persistence.IssueTokenUsage, budgetTokens int) {
 	attrs := append([]any{
-		slog.Int64("used_tokens", usage.TotalTokens),
+		slog.Int64("used_tokens", usage.UncachedTokens),
 		slog.Int64("budget_tokens", int64(budgetTokens)),
 	}, incompleteSpendAttrs(usage)...)
 	log.Warn("token budget cannot be fully evaluated, allowing dispatch", attrs...)

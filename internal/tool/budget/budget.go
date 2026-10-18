@@ -19,31 +19,32 @@ var inputSchema = json.RawMessage(`{
   "additionalProperties": false
 }`)
 
-// BudgetQueryFunc returns per-issue token accounting. The running-session
-// total is taken from session_metadata only when its stored dispatch ID
-// matches runningDispatchID; otherwise it is 0. Implementations make no
+// BudgetQueryFunc returns per-issue token accounting in uncached tokens, the
+// figure the token ceiling compares. The running-session figure is taken from
+// session_metadata only when its stored dispatch ID matches
+// runningDispatchID; otherwise it is 0. Implementations make no
 // external calls.
 type BudgetQueryFunc func(ctx context.Context, issueID string, runningDispatchID string) (BudgetUsage, error)
 
 // BudgetUsage is the per-issue token accounting returned by a
 // [BudgetQueryFunc].
 type BudgetUsage struct {
-	CompletedTotalTokens int64
-	CompletedSessions    int
-	RunningTotalTokens   int64 // session_metadata.total_tokens when dispatch_id matches; else 0.
+	CompletedUncachedTokens int64
+	CompletedSessions       int
+	RunningUncachedTokens   int64 // session_metadata total less cache reads when dispatch_id matches; else 0.
 
 	UnmeasuredSessions int
 
 	// UnaccountedTurns is the summed count of turns that spent tokens no
 	// figure was proven to cover, across the completed sessions and the
 	// matched running session, so a non-zero value makes the sum of
-	// CompletedTotalTokens and RunningTotalTokens a lower bound even when
-	// every session was measured.
+	// CompletedUncachedTokens and RunningUncachedTokens a lower bound even
+	// when every session was measured.
 	UnaccountedTurns int
 
 	// RunningMeasured is true when a session_metadata row matched the
 	// running dispatch ID, the same condition that gates
-	// RunningTotalTokens.
+	// RunningUncachedTokens.
 	RunningMeasured bool
 }
 
@@ -108,7 +109,9 @@ func (t *BudgetTool) Description() string {
 		"or hand off before the token ceiling stops this run in flight or blocks a further " +
 		"session. A false used_tokens_complete means some sessions could not be measured, a " +
 		"turn spent an amount that was never fully reported, or the running session's spend " +
-		"is not included yet, so used_tokens is a lower bound."
+		"is not included yet, so used_tokens is a lower bound. Prompt-cache reads are not " +
+		"counted in used_tokens or remaining_tokens, so used_tokens is lower than a token " +
+		"total your runtime may report; do not compare the two."
 	if t.warningTokens == 0 {
 		return desc
 	}
@@ -135,7 +138,7 @@ func (t *BudgetTool) Execute(ctx context.Context, _ json.RawMessage) (json.RawMe
 		return toolresult.Failure("query_failed", err.Error())
 	}
 
-	usedTokens := usage.CompletedTotalTokens + usage.RunningTotalTokens
+	usedTokens := usage.CompletedUncachedTokens + usage.RunningUncachedTokens
 
 	var remaining *int64
 	if t.budgetTokens > 0 {

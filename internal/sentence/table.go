@@ -166,7 +166,7 @@ var table = map[string]parts{
 
 	"held_budget_tokens": {
 		short: "Held: token budget reached",
-		long:  "Held at the token budget{{if .HasBudget}} of {{tokens .Budget}}{{end}}. Tokens and cache reads used: {{if .AtLeast}}at least {{end}}{{tokens .Used}}.",
+		long:  "Held at the token budget{{if .HasBudget}} of {{tokens .Budget}}{{end}}. Tokens used: {{if .AtLeast}}at least {{end}}{{tokens .Used}}.",
 	},
 	"held_budget_sessions": {
 		short: "Held: session budget reached",
@@ -252,7 +252,7 @@ var table = map[string]parts{
 	},
 	"attn_budget_tokens": {
 		reason: "Token budget reached",
-		why: "The issue has used {{if .AtLeast}}at least {{end}}{{tokens .Used}} tokens and cache reads of its budget of {{tokens .Budget}}" +
+		why: "The issue has used {{if .AtLeast}}at least {{end}}{{tokens .Used}} tokens of its budget of {{tokens .Budget}}" +
 			"{{if .Stopped}}, and the budget stopped {{plural .Stopped \"session\" \"sessions\"}} mid-run{{end}}.",
 		clears: "Clears on the next poll tick after `agent.max_tokens` is raised above what the issue has used or is removed, " + budgetLeaves,
 	},
@@ -352,7 +352,7 @@ var table = map[string]parts{
 
 	"next_if_run_succeeds": {condition: "If the run succeeds"},
 	"next_if_run_fails":    {condition: "If the run fails"},
-	"next_if_tokens_reach": {condition: "If tokens and cache reads reach {{tokens .Budget}}"},
+	"next_if_tokens_reach": {condition: "If tokens reach {{tokens .Budget}}"},
 	"next_when_retry_due":  {condition: "When {{retry .Trigger .RunInline .Attempt}} comes due"},
 	"next_when_label_read": {condition: "When a poll tick reads `{{.Label}}` on the issue"},
 	"next_if_ci_fails":     {condition: "If a check" + inNext + " finds CI failing on " + thePR},

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
@@ -108,13 +107,14 @@ type runningEntryResponse struct {
 
 	// The issue-level figures below are nil when unknown. The two budget
 	// keys are nil when no limit is configured and are never omitted.
+	// IssueTokensCompleted and UsedTokens count uncached tokens, the unit of
+	// the token budget.
 	UsedSessions          *int     `json:"used_sessions"`
 	BudgetSessions        *int     `json:"budget_sessions"`
 	IssueTokensCompleted  *int64   `json:"issue_tokens_completed"`
 	UnmeasuredSessions    *int     `json:"unmeasured_sessions"`
 	UsedTokens            *int64   `json:"used_tokens"`
 	UsedTokensComplete    bool     `json:"used_tokens_complete"`
-	IssueUncachedTokens   *int64   `json:"issue_uncached_tokens"`
 	BudgetTokens          *int64   `json:"budget_tokens"`
 	EstimatedCostUSD      *float64 `json:"estimated_cost_usd"`
 	CostStatus            string   `json:"cost_status"`
@@ -583,7 +583,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 			CacheReadTokens:  &e.CacheReadTokens,
 			CacheWriteTokens: &e.CacheWriteTokens,
 		}
-		resp.UncachedTokens = new(domain.TokenUsage{TotalTokens: e.AgentTotalTokens, CacheReadTokens: e.CacheReadTokens}.Uncached())
+		resp.UncachedTokens = new(e.UncachedTokens())
 	}
 	if e.APIRequestsMeasured {
 		resp.APIRequestCount = &e.APIRequestCount
@@ -618,17 +618,15 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 	var completed int64
 	var completedIncomplete bool
 	if usage := e.IssueUsage; usage != nil {
-		completed = usage.TotalTokens
+		completed = usage.UncachedTokens
 		completedIncomplete = orchestrator.SpendIncomplete(usage.UnmeasuredSessions, usage.UnaccountedTurns)
 		resp.UsedSessions = new(usage.Sessions)
 		resp.UnmeasuredSessions = new(usage.UnmeasuredSessions)
 	}
 
 	known := completed
-	knownCacheReads := completedCacheReads(e.IssueUsage)
 	if e.UsageMeasured {
-		known += e.AgentTotalTokens
-		knownCacheReads += e.CacheReadTokens
+		known += e.UncachedTokens()
 	}
 	resp.UsedTokensComplete = e.IssueUsage != nil && !completedIncomplete && e.UsageMeasured && e.UnaccountedTurns == 0
 
@@ -639,7 +637,6 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 	}
 	if known != 0 || resp.UsedTokensComplete {
 		resp.UsedTokens = new(known)
-		resp.IssueUncachedTokens = new(domain.TokenUsage{TotalTokens: known, CacheReadTokens: knownCacheReads}.Uncached())
 	}
 
 	if snap.MaxTokens > 0 {
@@ -652,19 +649,6 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 	resp.EstimatedCostUSD, resp.CostStatus = sessionCostOf(e, rates)
 	resp.IssueEstimatedCostUSD, resp.IssueCostStatus = issueCostOf(e, resp.UsedTokens, resp.UsedTokensComplete, resp.EstimatedCostUSD, resp.CostStatus, rates)
 	return resp
-}
-
-// completedCacheReads sums the cache reads of the sessions an issue's
-// completed total counts.
-func completedCacheReads(usage *orchestrator.SnapshotIssueUsage) int64 {
-	if usage == nil {
-		return 0
-	}
-	var sum int64
-	for _, kind := range usage.ByKind {
-		sum += kind.CacheReadTokens
-	}
-	return sum
 }
 
 // utcOrNil returns the UTC value of at, or nil for the zero time, so a time
@@ -1277,7 +1261,7 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 		detail = historyOnlyDetail(issueID, newest)
 		detail.StatusText, detail.StatusTextFull = sentencesOf(sentence.Entry{Finished: finishedOf(newest, outcome, hasOutcome)}, words)
 	}
-	detail.situation.Spend = &sentence.Spend{Sessions: totals.Usage.Sessions, Tokens: totals.Usage.TotalTokens}
+	detail.situation.Spend = &sentence.Spend{Sessions: totals.Usage.Sessions, Tokens: totals.Usage.UncachedTokens}
 	var chains [][]string
 	if words.Shape != nil {
 		chains = words.Shape.Dispatch.Chains

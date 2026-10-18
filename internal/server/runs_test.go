@@ -230,7 +230,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 		{
 			name: "every run measured and priced",
 			in: IssueRunTotals{
-				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, TotalTokens: 1_100_000, ByKind: byKind},
+				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, TotalTokens: 1_100_000, UncachedTokens: 850_000, ByKind: byKind},
 				Tokens: domain.TokenUsage{InputTokens: 1_000_000, OutputTokens: 100_000, CacheReadTokens: 300_000},
 			},
 			want: historyTotalsResponse{
@@ -239,7 +239,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 					InputTokens: new(int64(1_000_000)), OutputTokens: new(int64(100_000)), TotalTokens: new(int64(1_100_000)),
 					CacheReadTokens: new(int64(300_000)), CacheWriteTokens: new(int64(0)),
 				},
-				UncachedTokens:   new(int64(800_000)),
+				UncachedTokens:   new(int64(850_000)),
 				TokensComplete:   true,
 				EstimatedCostUSD: new(4.5),
 				CostStatus:       costStatusEstimated,
@@ -248,7 +248,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 		{
 			name: "unmeasured run beside priced spend",
 			in: IssueRunTotals{
-				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 3, UnmeasuredSessions: 1, TotalTokens: 1_100_000, ByKind: byKind},
+				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 3, UnmeasuredSessions: 1, TotalTokens: 1_100_000, UncachedTokens: 1_100_000, ByKind: byKind},
 				Tokens: spend,
 			},
 			want: historyTotalsResponse{
@@ -263,7 +263,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 		{
 			name: "unaccounted turn beside priced spend",
 			in: IssueRunTotals{
-				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, UnaccountedTurns: 1, TotalTokens: 1_100_000, ByKind: byKind},
+				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, UnaccountedTurns: 1, TotalTokens: 1_100_000, UncachedTokens: 1_100_000, ByKind: byKind},
 				Tokens: spend,
 			},
 			want: historyTotalsResponse{

@@ -135,7 +135,7 @@ type stubStore struct {
 	// is zero.
 	tokenUnaccountedIDs []string
 
-	// tokenExhaustedUsage overrides the fixed {TotalTokens: 1000} usage
+	// tokenExhaustedUsage overrides the fixed 1000-token usage
 	// for a tokenExhaustedIDs member, for a test controlling every field.
 	tokenExhaustedUsage map[string]persistence.IssueTokenUsage
 
@@ -267,6 +267,7 @@ func (s *stubStore) TokenUsageByIssue(_ context.Context, _ string) (persistence.
 	defer s.mu.Unlock()
 	return persistence.IssueTokenUsage{
 		TotalTokens:        s.tokenSum,
+		UncachedTokens:     s.tokenSum,
 		Sessions:           s.tokenSessionCount,
 		UnmeasuredSessions: s.tokenUnmeasured,
 		UnaccountedTurns:   s.tokenUnaccounted,
@@ -326,11 +327,11 @@ func (s *stubStore) QueryTokenBudgetUsage(_ context.Context, candidateIDs []stri
 				usage[id] = custom
 				continue
 			}
-			usage[id] = persistence.IssueTokenUsage{TotalTokens: 1000}
+			usage[id] = persistence.IssueTokenUsage{TotalTokens: 1000, UncachedTokens: 1000}
 		case slices.Contains(s.tokenIncompleteIDs, id):
 			usage[id] = persistence.IssueTokenUsage{TotalTokens: 0, UnmeasuredSessions: 1}
 		case slices.Contains(s.tokenUnaccountedIDs, id):
-			usage[id] = persistence.IssueTokenUsage{TotalTokens: 500, Sessions: 1, UnaccountedTurns: 1}
+			usage[id] = persistence.IssueTokenUsage{TotalTokens: 500, UncachedTokens: 500, Sessions: 1, UnaccountedTurns: 1}
 		}
 	}
 	return usage, nil
@@ -5845,6 +5846,29 @@ func TestHandleTick_TokenBudgetRebuild(t *testing.T) {
 		}
 		if _, running := state.Running[issueA.ID]; running {
 			t.Errorf("Running[%s] present, want absent (token budget exhausted)", issueA.ID)
+		}
+	})
+
+	t.Run("the hold follows uncached tokens, not the raw total", func(t *testing.T) {
+		t.Parallel()
+
+		store := &stubStore{
+			tokenExhaustedIDs: []string{issueA.ID, issueB.ID},
+			tokenExhaustedUsage: map[string]persistence.IssueTokenUsage{
+				issueA.ID: {TotalTokens: 1600, UncachedTokens: 600},
+				issueB.ID: {TotalTokens: 2500, UncachedTokens: 1100},
+			},
+		}
+		state := NewState(60000, 10, 0, nil, AgentTotals{})
+
+		budgetOrchestrator(state, budgetTickConfigTokens(0, 1000), store, candidates(issueA, issueB)).handleTick(context.Background())
+
+		if _, held := state.BudgetExhausted[issueA.ID]; held {
+			t.Errorf("BudgetExhausted[%s] present, want absent (600 uncached under 1000)", issueA.ID)
+		}
+		held, ok := state.BudgetExhausted[issueB.ID]
+		if !ok || held.UsedTokens == nil || *held.UsedTokens != 1100 {
+			t.Errorf("BudgetExhausted[%s] = %+v, want held with UsedTokens 1100", issueB.ID, held)
 		}
 	})
 

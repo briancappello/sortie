@@ -63,7 +63,7 @@ func TestFreezeIssueTokenBaseline(t *testing.T) {
 			AgentKind:    "mock",
 			UsageArrival: registry.UsageArrivalNone,
 		}
-		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 42}}}}
+		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 42, UncachedTokens: 42}}}}
 
 		freezeIssueTokenBaseline(context.Background(), state, "ISS-1", store, logger)
 
@@ -116,7 +116,7 @@ func TestFreezeIssueTokenBaseline(t *testing.T) {
 			{
 				name:      "successful read",
 				arrival:   registry.UsageArrivalNone,
-				response:  tokenStoreResponse{usage: persistence.IssueTokenUsage{TotalTokens: 420, Sessions: 3}},
+				response:  tokenStoreResponse{usage: persistence.IssueTokenUsage{TotalTokens: 420, UncachedTokens: 420, Sessions: 3}},
 				wantUsage: true,
 			},
 			{
@@ -169,8 +169,8 @@ func TestFreezeIssueTokenBaseline(t *testing.T) {
 		state.Running["ISS-POLL"] = &RunningEntry{Identifier: "ISS-POLL-ident", AgentKind: "mock", UsageArrival: registry.UsageArrivalIncremental}
 		state.Running["ISS-RETRY"] = &RunningEntry{Identifier: "ISS-RETRY-ident", AgentKind: "mock", UsageArrival: registry.UsageArrivalIncremental}
 		store := &fakeTokenStore{responses: []tokenStoreResponse{
-			{usage: persistence.IssueTokenUsage{TotalTokens: 777}},
-			{usage: persistence.IssueTokenUsage{TotalTokens: 777}},
+			{usage: persistence.IssueTokenUsage{TotalTokens: 777, UncachedTokens: 777}},
+			{usage: persistence.IssueTokenUsage{TotalTokens: 777, UncachedTokens: 777}},
 		}}
 
 		freezeIssueTokenBaseline(context.Background(), state, "ISS-POLL", store, logger)
@@ -283,7 +283,7 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		// Every completed session was measured, but the sum still omits
 		// two unaccounted turns.
 		store := &fakeTokenStore{responses: []tokenStoreResponse{
-			{usage: persistence.IssueTokenUsage{TotalTokens: 40, Sessions: 1, UnaccountedTurns: 2}},
+			{usage: persistence.IssueTokenUsage{TotalTokens: 40, UncachedTokens: 40, Sessions: 1, UnaccountedTurns: 2}},
 		}}
 
 		driveEvent(state, "ISS-UNACC", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
@@ -379,7 +379,7 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		store := &fakeTokenStore{responses: []tokenStoreResponse{
 			{err: queryErr},
 			{err: queryErr},
-			{usage: persistence.IssueTokenUsage{TotalTokens: 80}},
+			{usage: persistence.IssueTokenUsage{TotalTokens: 80, UncachedTokens: 80}},
 		}}
 
 		driveEvent(state, "ISS-FAILREAD", domain.TokenUsage{TotalTokens: 25}, store, spy, logger)
@@ -454,7 +454,7 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		}
 		// Pre-filter (stale 900 + 150 = 1050) crosses the ceiling, but
 		// the confirming read's true 800 + 150 = 950 stays under it.
-		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 800, Sessions: 2}}}}
+		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 800, UncachedTokens: 800, Sessions: 2}}}}
 
 		driveEvent(state, "ISS-BELOW", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
 
@@ -516,7 +516,7 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 			IssueTokensCompleted:   100,
 			TokenCeilingCancelFunc: func() { cancelCalls++ },
 		}
-		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 100}}}}
+		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 100, UncachedTokens: 100}}}}
 
 		enforceInFlightTokenCeiling(context.Background(), state, "ISS-INC-CEIL",
 			domain.AgentEvent{Type: domain.EventTokenUsage, Usage: domain.TokenUsage{TotalTokens: 1}},
@@ -534,23 +534,31 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		}
 	})
 
-	t.Run("UsedTokens on the stop request equals the confirming read's sum plus AgentTotalTokens", func(t *testing.T) {
+	t.Run("the ceiling is judged on uncached tokens, not the raw total", func(t *testing.T) {
 		t.Parallel()
 
 		_, logger := textLogger()
-		spy := &spyMetrics{}
-		state := NewState(5000, 4, 50, nil, AgentTotals{})
-		state.Running["ISS-MATH"] = &RunningEntry{Identifier: "ISS-MATH-ident"}
-		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 20}}}}
-
-		driveEvent(state, "ISS-MATH", domain.TokenUsage{TotalTokens: 80}, store, spy, logger)
-
-		request := state.Running["ISS-MATH"].TokenCeilingStopRequest
-		if request == nil {
-			t.Fatal("setup failed: run did not record a stop request")
+		state := NewState(5000, 4, 1000, nil, AgentTotals{})
+		state.Running["ISS-UNCACHED"] = &RunningEntry{
+			Identifier:             "ISS-UNCACHED-ident",
+			IssueTokensCompleted:   600,
+			TokenCeilingCancelFunc: func() {},
 		}
-		if request.UsedTokens != 100 {
-			t.Errorf("request.UsedTokens = %d, want 100 (confirming sum 20 + AgentTotalTokens 80)", request.UsedTokens)
+		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 1600, UncachedTokens: 600}}}}
+
+		driveEvent(state, "ISS-UNCACHED", domain.TokenUsage{TotalTokens: 900, CacheReadTokens: 600}, store, &spyMetrics{}, logger)
+		if request := state.Running["ISS-UNCACHED"].TokenCeilingStopRequest; request != nil || len(store.calls) != 0 {
+			t.Fatalf("live 900 with 600 cache reads: stop request = %v, store reads = %d, want none of either", request, len(store.calls))
+		}
+
+		driveEvent(state, "ISS-UNCACHED", domain.TokenUsage{TotalTokens: 1000, CacheReadTokens: 600}, store, &spyMetrics{}, logger)
+
+		request := state.Running["ISS-UNCACHED"].TokenCeilingStopRequest
+		if request == nil {
+			t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil at 600 + 400 uncached")
+		}
+		if request.UsedTokens != 1000 || request.SessionTokens != 400 {
+			t.Errorf("request (UsedTokens, SessionTokens) = (%d, %d), want (1000, 400)", request.UsedTokens, request.SessionTokens)
 		}
 	})
 }
@@ -857,7 +865,7 @@ func TestFreezeIssueTokenBaselineThenEvaluateTokenWarning_LatchesAcrossDispatchA
 		AgentKind:    "mock",
 		UsageArrival: registry.UsageArrivalIncremental,
 	}
-	store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 60}}}}
+	store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 60, UncachedTokens: 60}}}}
 
 	freezeIssueTokenBaseline(context.Background(), state, "ISS-CROSS", store, logger)
 
@@ -998,7 +1006,7 @@ func TestFreezeIssueTokenBaseline_NoWarningConditions(t *testing.T) {
 			AgentKind:    "mock",
 			UsageArrival: registry.UsageArrivalNone,
 		}
-		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 90}}}}
+		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 90, UncachedTokens: 90}}}}
 
 		freezeIssueTokenBaseline(context.Background(), state, "ISS-NOFIG", store, logger)
 
@@ -1049,7 +1057,7 @@ func TestFreezeIssueTokenBaseline_DispatchTimeReach(t *testing.T) {
 		AgentKind:    "mock",
 		UsageArrival: registry.UsageArrivalIncremental,
 	}
-	store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 60}}}}
+	store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 60, UncachedTokens: 60}}}}
 
 	freezeIssueTokenBaseline(context.Background(), state, "ISS-DISPATCH-REACH", store, logger)
 

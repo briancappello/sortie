@@ -1763,7 +1763,7 @@ func TestToServedRunningEntry(t *testing.T) {
 		return entry{
 			AgentKind: "claude-code", UsageMeasured: true,
 			AgentInputTokens: 60000, CacheReadTokens: 40000, AgentOutputTokens: 5000, AgentTotalTokens: 65000,
-			IssueUsage: &orchestrator.SnapshotIssueUsage{Sessions: 3, TotalTokens: 420000, ByKind: byKind},
+			IssueUsage: &orchestrator.SnapshotIssueUsage{Sessions: 3, TotalTokens: 420000, UncachedTokens: 120000, ByKind: byKind},
 		}
 	}
 	workedRates := TokenRates{"claude-code": {
@@ -1774,11 +1774,11 @@ func TestToServedRunningEntry(t *testing.T) {
 	}
 	unknownSpend := func(completed any) map[string]any {
 		return map[string]any{
-			"issue_tokens_completed": completed, "used_tokens": nil, "issue_uncached_tokens": nil, "used_tokens_complete": false,
+			"issue_tokens_completed": completed, "used_tokens": nil, "used_tokens_complete": false,
 			"cost_status": "unmeasured", "estimated_cost_usd": nil, "issue_cost_status": "unmeasured", "issue_estimated_cost_usd": nil,
 		}
 	}
-	partialWorked := map[string]any{"used_tokens": 485000, "issue_uncached_tokens": 145000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.837}
+	partialWorked := map[string]any{"used_tokens": 145000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.837}
 
 	tests := []struct {
 		name                   string
@@ -1790,14 +1790,14 @@ func TestToServedRunningEntry(t *testing.T) {
 		{
 			name: "worked example", maxTokens: 1_000_000, maxSessions: 5,
 			want: map[string]any{
-				"used_sessions": 3, "budget_sessions": 5, "issue_tokens_completed": 420000, "unmeasured_sessions": 0,
-				"used_tokens": 485000, "issue_uncached_tokens": 145000, "used_tokens_complete": true, "budget_tokens": 1_000_000,
+				"used_sessions": 3, "budget_sessions": 5, "issue_tokens_completed": 120000, "unmeasured_sessions": 0,
+				"used_tokens": 145000, "used_tokens_complete": true, "budget_tokens": 1_000_000,
 				"estimated_cost_usd": 0.147, "cost_status": "estimated", "issue_estimated_cost_usd": 0.837, "issue_cost_status": "estimated",
 			},
 		},
 		{
 			name: "larger live total with no ceilings", edit: func(e *entry) { e.AgentTotalTokens = 75000 },
-			want: map[string]any{"used_tokens": 495000, "issue_tokens_completed": 420000, "budget_tokens": nil, "budget_sessions": nil},
+			want: map[string]any{"used_tokens": 155000, "issue_tokens_completed": 120000, "budget_tokens": nil, "budget_sessions": nil},
 		},
 		{
 			name: "session budget served, token ceiling null", maxSessions: 3,
@@ -1814,7 +1814,7 @@ func TestToServedRunningEntry(t *testing.T) {
 		{
 			name: "unmeasured completed session beside a measured one",
 			edit: func(e *entry) { e.IssueUsage = &orchestrator.SnapshotIssueUsage{Sessions: 1, UnmeasuredSessions: 1} },
-			want: map[string]any{"issue_tokens_completed": nil, "used_tokens": 65000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.147},
+			want: map[string]any{"issue_tokens_completed": nil, "used_tokens": 25000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.147},
 		},
 		{
 			name: "unaccounted turn of the running session", edit: func(e *entry) { e.UnaccountedTurns = 1 },
@@ -1826,7 +1826,7 @@ func TestToServedRunningEntry(t *testing.T) {
 		},
 		{
 			name: "no usage read and a priced session", edit: func(e *entry) { e.IssueUsage = nil },
-			want: map[string]any{"used_sessions": nil, "unmeasured_sessions": nil, "issue_tokens_completed": nil, "used_tokens": 65000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.147},
+			want: map[string]any{"used_sessions": nil, "unmeasured_sessions": nil, "issue_tokens_completed": nil, "used_tokens": 25000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.147},
 		},
 		{
 			name: "session kind without a rate entry", edit: func(e *entry) { e.AgentKind = "other" },
@@ -1855,7 +1855,7 @@ func TestToServedRunningEntry(t *testing.T) {
 				e.AgentInputTokens, e.CacheReadTokens, e.AgentOutputTokens, e.AgentTotalTokens = 0, 0, 0, 0
 				e.AgentKind = "unrated"
 			},
-			want: map[string]any{"cost_status": "unpriced", "used_tokens": 420000, "used_tokens_complete": true, "issue_cost_status": "estimated", "issue_estimated_cost_usd": 0.69},
+			want: map[string]any{"cost_status": "unpriced", "used_tokens": 120000, "used_tokens_complete": true, "issue_cost_status": "estimated", "issue_estimated_cost_usd": 0.69},
 		},
 	}
 

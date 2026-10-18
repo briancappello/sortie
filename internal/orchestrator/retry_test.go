@@ -41,6 +41,7 @@ type mockRetryStore struct {
 	absenceCountedIssueIDs    []string
 
 	tokenSum                 int64
+	tokenCacheReads          int64
 	tokenSessionCount        int
 	tokenUnmeasured          int
 	tokenUnaccounted         int
@@ -98,6 +99,7 @@ func (m *mockRetryStore) TokenUsageByIssue(_ context.Context, issueID string) (p
 	m.summedTokenIssueIDs = append(m.summedTokenIssueIDs, issueID)
 	return persistence.IssueTokenUsage{
 		TotalTokens:        m.tokenSum,
+		UncachedTokens:     m.tokenSum - m.tokenCacheReads,
 		Sessions:           m.tokenSessionCount,
 		UnmeasuredSessions: m.tokenUnmeasured,
 		UnaccountedTurns:   m.tokenUnaccounted,
@@ -976,7 +978,7 @@ func TestHandleRetryTimer(t *testing.T) {
 				return retryState(t, id, "PROJ-TOK", 2)
 			},
 			store: func() *mockRetryStore {
-				return &mockRetryStore{tokenSum: 1000, tokenSessionCount: 2}
+				return &mockRetryStore{tokenSum: 2500, tokenCacheReads: 1400, tokenSessionCount: 2}
 			},
 			tracker: func(_ string) *mockRetryTracker {
 				return &mockRetryTracker{}
@@ -1019,7 +1021,7 @@ func TestHandleRetryTimer(t *testing.T) {
 				return retryState(t, id, "PROJ-TOK-UNDER", 1)
 			},
 			store: func() *mockRetryStore {
-				return &mockRetryStore{tokenSum: 999, tokenSessionCount: 3}
+				return &mockRetryStore{tokenSum: 1600, tokenCacheReads: 1000, tokenSessionCount: 3}
 			},
 			tracker: func(id string) *mockRetryTracker {
 				return &mockRetryTracker{
