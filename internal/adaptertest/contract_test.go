@@ -2116,9 +2116,49 @@ func contractIdentitySeamImportPath(importPath string) bool {
 // contractIdentitySeamDir reports whether walkPath is the measurement
 // seam, under whatever root the walk started from.
 func contractIdentitySeamDir(walkPath string) bool {
+	return contractPathIsDir(walkPath, contractIdentityMeasurementSeam)
+}
+
+func contractPathIsDir(walkPath, dir string) bool {
 	clean := filepath.Clean(walkPath)
-	return clean == contractIdentityMeasurementSeam ||
-		strings.HasSuffix(clean, string(filepath.Separator)+contractIdentityMeasurementSeam)
+	return clean == dir || strings.HasSuffix(clean, string(filepath.Separator)+dir)
+}
+
+var contractIdentityCatalogDir = filepath.Join("internal", "pricing")
+
+// contractIdentityCatalogSplit separates the violations that sit inside the
+// package-level providerAliases literal of internal/pricing from the rest.
+// Its string literals are price-catalog provider ids, not agent kinds, so
+// they are legal; anything else in that package is still bound by the rule.
+func contractIdentityCatalogSplit(fset *token.FileSet, file *ast.File, violations []contractViolation) (outside, inside []contractViolation) {
+	filename := fset.Position(file.Pos()).Filename
+	if !contractPathIsDir(filepath.Dir(filename), contractIdentityCatalogDir) {
+		return violations, nil
+	}
+	var start, end int
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs := spec.(*ast.ValueSpec)
+			for i, name := range vs.Names {
+				if name.Name == "providerAliases" && i < len(vs.Values) {
+					start = fset.Position(vs.Values[i].Pos()).Offset
+					end = fset.Position(vs.Values[i].End()).Offset
+				}
+			}
+		}
+	}
+	for _, v := range violations {
+		if end > start && v.pos.Filename == filename && v.pos.Offset >= start && v.pos.Offset < end {
+			inside = append(inside, v)
+			continue
+		}
+		outside = append(outside, v)
+	}
+	return outside, inside
 }
 
 // contractWideIdentityNonTestViolations walks every non-test .go file
@@ -2147,7 +2187,8 @@ func contractWideIdentityNonTestViolations(t *testing.T, fset *token.FileSet, ro
 			t.Fatalf("parse %s: %v", walkPath, parseErr)
 		}
 		scanned = append(scanned, walkPath)
-		violations = append(violations, contractIdentityArm1Violations(fset, file, tokens, map[string]bool{})...)
+		outside, _ := contractIdentityCatalogSplit(fset, file, contractIdentityArm1Violations(fset, file, tokens, map[string]bool{}))
+		violations = append(violations, outside...)
 		return nil
 	})
 	if err != nil {
@@ -2232,7 +2273,7 @@ func TestContractIdentitySeamIsNarrow(t *testing.T) {
 	fset := token.NewFileSet()
 	wideTokens := contractWideScopedTokens(contractAgentIdentitySnapshotData())
 
-	var unexempted []contractViolation
+	var unexempted, catalogExempted []contractViolation
 	for _, root := range contractWideIdentityRoots {
 		err := filepath.WalkDir(root, func(walkPath string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -2255,7 +2296,9 @@ func TestContractIdentitySeamIsNarrow(t *testing.T) {
 				unexempted = append(unexempted, contractIdentityTestFileIdentViolations(fset, file, wideTokens)...)
 				return nil
 			}
-			unexempted = append(unexempted, contractIdentityArm1Violations(fset, file, wideTokens, map[string]bool{})...)
+			outside, inside := contractIdentityCatalogSplit(fset, file, contractIdentityArm1Violations(fset, file, wideTokens, map[string]bool{}))
+			unexempted = append(unexempted, outside...)
+			catalogExempted = append(catalogExempted, inside...)
 			return nil
 		})
 		if err != nil {
@@ -2265,6 +2308,9 @@ func TestContractIdentitySeamIsNarrow(t *testing.T) {
 
 	if len(unexempted) == 0 {
 		t.Fatal("removing the seam exemption produced no violation, so the exemption is dead and this check proves nothing")
+	}
+	if len(catalogExempted) == 0 {
+		t.Fatal("removing the catalog exemption produced no violation, so the exemption is dead and this check proves nothing")
 	}
 	for _, v := range unexempted {
 		if !contractIdentitySeamDir(filepath.Dir(v.pos.Filename)) {
