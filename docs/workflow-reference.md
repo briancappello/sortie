@@ -4827,6 +4827,8 @@ The built-in prompts ask for the following.
 - `ci_failure`: fix the failing CI checks, listing each check with the excerpt of the log of the first failing one, then commit and push the fix to the branch the checks ran on.
 - `review_comments`: address every review comment, each listed with its reviewer and location, then commit and push the changes to the pull request's branch.
 - `bot_review_comments`: the same for the comments that automated review tools left.
+
+The log excerpt and each comment body come from outside Sortie, so the built-in prompts pass them as JSON strings inside `<ci_log>` and `<review_comment>` blocks and tell the agent to treat them as data. JSON encoding escapes quotes, line breaks and angle brackets, so the text cannot close its block.
 - `merge_conflict`: fetch the base branch, rebase the pull request's branch onto it, resolve every conflict while keeping both the intent of the pull request and the base changes, and push.
 - `label_review`: fetch the diff of the pull request, review it, and post the review comments, without modifying the branch or pushing.
 - `label_fix`: check out the pull request's branch, fetch the outstanding review comments, address them, push to that branch only, and post a summary comment.
