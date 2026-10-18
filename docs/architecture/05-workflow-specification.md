@@ -54,7 +54,7 @@ Note:
 
 - The workflow front matter is extensible. Optional extensions may define additional top-level keys (for example `server`) without changing the core schema above.
 - Extensions should document their field schema, defaults, validation rules, and whether changes apply dynamically or require restart.
-- Common extensions: `server.port` (integer) overrides the default HTTP server port (7678); `server.host` (string, IP address) overrides the default bind address (`127.0.0.1`). The HTTP server starts unconditionally unless `server.port` or `--port` is `0`. See Section 13.7 for full semantics.
+- Common extensions: `server.port` (integer) overrides the default HTTP server port (7678); `server.host` (string, IP address) overrides the default bind address (`127.0.0.1`). The HTTP server starts unconditionally unless `server.port` or `--port` is `0`. See Section 13.7 for full semantics. `token_rates` (map) holds the operator's rates, keyed by agent kind or by model name; `price_table` (object) governs the shared price tables beneath them: `embedded` (boolean, default `true`) keeps the table embedded in the binary in force, `fetch` (boolean, default `true`) governs the runtime download of the shared table from `fetch_url`, and `replace_file` or `replace_url` names an operator table that replaces both shared tables. Both keys reload live and are parsed whether or not the HTTP server is enabled. See Section 13.5 for the layers, their precedence, and how a run is priced.
 
 #### 5.3.1 `tracker` (object)
 
