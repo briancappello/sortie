@@ -302,14 +302,14 @@ func TestBuildBudgetQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildBudgetQuery query: %v", err)
 		}
-		if usage.CompletedTotalTokens != 600 {
-			t.Errorf("CompletedTotalTokens = %d, want 600", usage.CompletedTotalTokens)
+		if usage.CompletedUncachedTokens != 600 {
+			t.Errorf("CompletedUncachedTokens = %d, want 600", usage.CompletedUncachedTokens)
 		}
 		if usage.CompletedSessions != 2 {
 			t.Errorf("CompletedSessions = %d, want 2", usage.CompletedSessions)
 		}
-		if usage.RunningTotalTokens != 150 {
-			t.Errorf("RunningTotalTokens = %d, want 150 (dispatch_id matches)", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 150 {
+			t.Errorf("RunningUncachedTokens = %d, want 150 (dispatch_id matches)", usage.RunningUncachedTokens)
 		}
 		if usage.UnaccountedTurns != 2 {
 			t.Errorf("UnaccountedTurns = %d, want 2 (running row's count after the conflict update)", usage.UnaccountedTurns)
@@ -327,11 +327,11 @@ func TestBuildBudgetQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildBudgetQuery query: %v", err)
 		}
-		if usage.CompletedTotalTokens != 600 {
-			t.Errorf("CompletedTotalTokens = %d, want 600", usage.CompletedTotalTokens)
+		if usage.CompletedUncachedTokens != 600 {
+			t.Errorf("CompletedUncachedTokens = %d, want 600", usage.CompletedUncachedTokens)
 		}
-		if usage.RunningTotalTokens != 0 {
-			t.Errorf("RunningTotalTokens = %d, want 0 (stale dispatch row)", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 0 {
+			t.Errorf("RunningUncachedTokens = %d, want 0 (stale dispatch row)", usage.RunningUncachedTokens)
 		}
 		if usage.UnaccountedTurns != 0 {
 			t.Errorf("UnaccountedTurns = %d, want 0 (stale dispatch row)", usage.UnaccountedTurns)
@@ -350,8 +350,8 @@ func TestBuildBudgetQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildBudgetQuery query: %v", err)
 		}
-		if usage.RunningTotalTokens != 0 {
-			t.Errorf("RunningTotalTokens = %d, want 0 (dispatch_id cleared, not a session_id match)", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 0 {
+			t.Errorf("RunningUncachedTokens = %d, want 0 (dispatch_id cleared, not a session_id match)", usage.RunningUncachedTokens)
 		}
 		if usage.RunningMeasured {
 			t.Error("RunningMeasured = true, want false")
@@ -367,8 +367,8 @@ func TestBuildBudgetQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildBudgetQuery query: %v", err)
 		}
-		if usage.RunningTotalTokens != 0 {
-			t.Errorf("RunningTotalTokens = %d, want 0 (no running dispatch id)", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 0 {
+			t.Errorf("RunningUncachedTokens = %d, want 0 (no running dispatch id)", usage.RunningUncachedTokens)
 		}
 	})
 
@@ -381,7 +381,7 @@ func TestBuildBudgetQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildBudgetQuery query: %v", err)
 		}
-		if usage.CompletedTotalTokens != 0 || usage.CompletedSessions != 0 || usage.RunningTotalTokens != 0 {
+		if usage.CompletedUncachedTokens != 0 || usage.CompletedSessions != 0 || usage.RunningUncachedTokens != 0 {
 			t.Errorf("usage = %+v, want all-zero", usage)
 		}
 	})
@@ -473,14 +473,14 @@ func TestBuildBudgetQuery_Measurement(t *testing.T) {
 		if usage.UnmeasuredSessions != 1 {
 			t.Errorf("UnmeasuredSessions = %d, want 1", usage.UnmeasuredSessions)
 		}
-		if usage.CompletedTotalTokens != 400 {
-			t.Errorf("CompletedTotalTokens = %d, want 400 (the unmeasured row contributes zero)", usage.CompletedTotalTokens)
+		if usage.CompletedUncachedTokens != 400 {
+			t.Errorf("CompletedUncachedTokens = %d, want 400 (the unmeasured row contributes zero)", usage.CompletedUncachedTokens)
 		}
 		if !usage.RunningMeasured {
 			t.Error("RunningMeasured = false, want true (session_metadata row matches the running dispatch id)")
 		}
-		if usage.RunningTotalTokens != 50 {
-			t.Errorf("RunningTotalTokens = %d, want 50", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 50 {
+			t.Errorf("RunningUncachedTokens = %d, want 50", usage.RunningUncachedTokens)
 		}
 	})
 
@@ -496,8 +496,8 @@ func TestBuildBudgetQuery_Measurement(t *testing.T) {
 		if usage.RunningMeasured {
 			t.Error("RunningMeasured = true, want false (no matching session_metadata row)")
 		}
-		if usage.RunningTotalTokens != 0 {
-			t.Errorf("RunningTotalTokens = %d, want 0", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 0 {
+			t.Errorf("RunningUncachedTokens = %d, want 0", usage.RunningUncachedTokens)
 		}
 	})
 
@@ -516,11 +516,11 @@ func TestBuildBudgetQuery_Measurement(t *testing.T) {
 		if !usage.RunningMeasured {
 			t.Error("RunningMeasured = false, want true (the session_metadata row exists, reporting zero)")
 		}
-		if usage.RunningTotalTokens != 0 {
-			t.Errorf("RunningTotalTokens = %d, want 0", usage.RunningTotalTokens)
+		if usage.RunningUncachedTokens != 0 {
+			t.Errorf("RunningUncachedTokens = %d, want 0", usage.RunningUncachedTokens)
 		}
-		if usage.CompletedTotalTokens != 500 {
-			t.Errorf("CompletedTotalTokens = %d, want 500", usage.CompletedTotalTokens)
+		if usage.CompletedUncachedTokens != 500 {
+			t.Errorf("CompletedUncachedTokens = %d, want 500", usage.CompletedUncachedTokens)
 		}
 	})
 }

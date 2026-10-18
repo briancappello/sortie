@@ -1875,7 +1875,7 @@ func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.Se
 		} else {
 			for _, id := range candidateIDs {
 				usage := usageByIssue[id]
-				if usage.TotalTokens >= int64(cfg.Agent.MaxTokens) {
+				if usage.UncachedTokens >= int64(cfg.Agent.MaxTokens) {
 					entry := &BudgetExhaustedEntry{
 						Identifier:     identifierByID[id],
 						DisplayID:      displayIDByID[id],

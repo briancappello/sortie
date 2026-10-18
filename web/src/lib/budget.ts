@@ -18,7 +18,7 @@ export interface BudgetLine {
 export interface BudgetFigures {
   sessions: BudgetLine;
   tokens: BudgetLine & { complete: boolean };
-  /** The tokens of the issue without cache reads; null while the spend is not known. */
+  /** The issue's tokens as the peek shows them; null while the spend is not known. */
   uncachedTokens: number | null;
   /** Null while `config` or its `token_rates` is absent, and when the issue has no recorded run. */
   cost: CostFigure | null;
@@ -45,7 +45,7 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
         limitKnown: true,
         complete: running.used_tokens_complete,
       },
-      uncachedTokens: running.issue_uncached_tokens,
+      uncachedTokens: running.used_tokens,
       cost: { usd: running.issue_estimated_cost_usd, status: running.issue_cost_status },
     };
   }
@@ -57,7 +57,8 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
         limitKnown: true,
       },
       tokens: {
-        used: exhausted.used_tokens,
+        // A hold by the session budget carries no token figure of its own; History's figure keeps the note honest.
+        used: exhausted.budget_tokens === null ? uncachedTotal(history) : exhausted.used_tokens,
         limit: exhausted.budget_tokens,
         limitKnown: true,
         complete: exhausted.unmeasured_sessions === 0,
@@ -74,7 +75,7 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
       limitKnown: isKnown,
     },
     tokens: {
-      used: history === null ? 0 : history.totals.tokens.total_tokens,
+      used: uncachedTotal(history),
       limit: config?.agent.max_tokens ?? null,
       limitKnown: isKnown,
       complete: history === null ? true : history.totals.tokens_complete,

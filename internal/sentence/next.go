@@ -24,8 +24,8 @@ type Situation struct {
 	Spend            *Spend                                 // nil when run history was not read
 }
 
-// Spend is the issue's completed sessions and their summed total tokens, the
-// figures the session and token budget gates compare.
+// Spend is the issue's completed sessions and their summed uncached tokens,
+// the figures the session and token budget gates compare.
 type Spend struct {
 	Sessions int
 	Tokens   int64
@@ -173,7 +173,7 @@ func holdOf(s Situation, c Context, extra int) (budgetHold, bool) {
 	if s.Running != nil {
 		sessions++
 		if s.Running.UsageMeasured {
-			tokens += s.Running.AgentTotalTokens
+			tokens += s.Running.UncachedTokens()
 		}
 	}
 	agent := c.Shape.Agent

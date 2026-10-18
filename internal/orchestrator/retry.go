@@ -372,10 +372,10 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			log.Warn("token budget check failed, proceeding with dispatch",
 				slog.Any("error", usageErr),
 			)
-		} else if usage.TotalTokens >= int64(params.MaxTokens) {
+		} else if usage.UncachedTokens >= int64(params.MaxTokens) {
 			log.Warn("token budget exhausted, blocking re-dispatch",
 				slog.String("reason", budgetReasonToken),
-				slog.Int64("used_tokens", usage.TotalTokens),
+				slog.Int64("used_tokens", usage.UncachedTokens),
 				slog.Int("budget_tokens", params.MaxTokens),
 				slog.Int("used_sessions", usage.Sessions),
 				slog.Int("budget_sessions", params.MaxSessions),

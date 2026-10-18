@@ -428,7 +428,7 @@ func historyTotalsOf(t IssueRunTotals, rates TokenRates) historyTotalsResponse {
 		RunCount:         t.Usage.Sessions,
 		UnmeasuredRuns:   t.Usage.UnmeasuredSessions,
 		Tokens:           tokens,
-		UncachedTokens:   known(domain.TokenUsage{TotalTokens: t.Usage.TotalTokens, CacheReadTokens: t.Tokens.CacheReadTokens}.Uncached()),
+		UncachedTokens:   known(t.Usage.UncachedTokens),
 		TokensComplete:   complete,
 		EstimatedCostUSD: cost,
 		CostStatus:       status,

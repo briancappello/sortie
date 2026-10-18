@@ -387,7 +387,7 @@ func TestTokenUsageByIssue(t *testing.T) {
 			t.Errorf("TokenUsageByIssue(%s).ByKind = %+v, want %+v", issueID, usage.ByKind, wantByKind)
 		}
 		wantTotals := IssueTokenUsage{
-			TotalTokens: 215, Sessions: 4, UnmeasuredSessions: 1,
+			TotalTokens: 215, UncachedTokens: 145, Sessions: 4, UnmeasuredSessions: 1,
 			InputTokens: 110, OutputTokens: 15, CacheReadTokens: 70, CacheWriteTokens: 20,
 		}
 		if !sameScalars(usage, wantTotals) {
@@ -544,31 +544,6 @@ func TestQueryTokenBudgetUsage(t *testing.T) {
 			t.Errorf("result = %v, want empty (outside issue not in candidate list)", result)
 		}
 	})
-
-	t.Run("completed-session sum matches across both queries", func(t *testing.T) {
-		t.Parallel()
-		s := openTestStore(t)
-		migrateOrFatal(t, s)
-		ctx := context.Background()
-
-		appendOrFatal(t, s, tokenRun(1, "ISS-PARITY", 123))
-		appendOrFatal(t, s, tokenRun(2, "ISS-PARITY", 456))
-		appendOrFatal(t, s, tokenRun(3, "ISS-PARITY", 789))
-
-		usage, err := s.TokenUsageByIssue(ctx, "ISS-PARITY")
-		if err != nil {
-			t.Fatalf("TokenUsageByIssue(ISS-PARITY) unexpected error: %v", err)
-		}
-
-		budget, err := s.QueryTokenBudgetUsage(ctx, []string{"ISS-PARITY"})
-		if err != nil {
-			t.Fatalf("QueryTokenBudgetUsage unexpected error: %v", err)
-		}
-		if budget["ISS-PARITY"].TotalTokens != usage.TotalTokens {
-			t.Errorf("QueryTokenBudgetUsage total = %d, want %d (parity with TokenUsageByIssue)",
-				budget["ISS-PARITY"].TotalTokens, usage.TotalTokens)
-		}
-	})
 }
 
 func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testing.T) {
@@ -579,30 +554,24 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 
 	const issueID = "ISS-STOPPED-PARITY"
 
-	stopped1 := tokenRun(1, issueID, 500)
-	stopped1.Status = "budget_stopped"
-	stopped1.TokensMeasured = true
-	appendOrFatal(t, s, stopped1)
-
-	stopped2 := tokenRun(2, issueID, 300)
-	stopped2.Status = "budget_stopped"
-	stopped2.TokensMeasured = true
-	appendOrFatal(t, s, stopped2)
-
-	cancelled := tokenRun(3, issueID, 200)
-	cancelled.Status = "cancelled"
-	cancelled.TokensMeasured = true
-	appendOrFatal(t, s, cancelled)
-
-	succeeded := tokenRun(4, issueID, 400)
-	succeeded.Status = "succeeded"
-	succeeded.TokensMeasured = true
-	appendOrFatal(t, s, succeeded)
-
-	unmeasured := tokenRun(5, issueID, 0)
-	unmeasured.Status = "succeeded"
-	unmeasured.TokensMeasured = false
-	appendOrFatal(t, s, unmeasured)
+	fixture := []struct {
+		totalTokens, cacheReadTokens int64
+		agentAdapter, status         string
+		measured                     bool
+	}{
+		{totalTokens: 1500, cacheReadTokens: 900, agentAdapter: "claude", status: "budget_stopped", measured: true},
+		{totalTokens: 100, cacheReadTokens: 150, agentAdapter: "claude", status: "budget_stopped", measured: true},
+		{totalTokens: 2500, cacheReadTokens: 1400, agentAdapter: "codex", status: "cancelled", measured: true},
+		{agentAdapter: "mock", status: "succeeded"},
+	}
+	for i, row := range fixture {
+		run := tokenRun(i+1, issueID, row.totalTokens)
+		run.CacheReadTokens = row.cacheReadTokens
+		run.AgentAdapter = row.agentAdapter
+		run.Status = row.status
+		run.TokensMeasured = row.measured
+		appendOrFatal(t, s, run)
+	}
 
 	byIssue, err := s.TokenUsageByIssue(ctx, issueID)
 	if err != nil {
@@ -618,19 +587,19 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 	}
 
 	want := IssueTokenUsage{
-		TotalTokens:        1400,
-		Sessions:           5,
+		TotalTokens:        4100,
+		UncachedTokens:     1700,
+		Sessions:           4,
 		UnmeasuredSessions: 1,
 		StoppedInFlight:    2,
 	}
-	if !sameScalars(byIssue, want) {
-		t.Errorf("TokenUsageByIssue(%s) = %+v, want %+v", issueID, byIssue, want)
+	wantByIssue := want
+	wantByIssue.CacheReadTokens = 2450
+	if !sameScalars(byIssue, wantByIssue) {
+		t.Errorf("TokenUsageByIssue(%s) = %+v, want %+v", issueID, byIssue, wantByIssue)
 	}
 	if !sameScalars(budgetUsage, want) {
 		t.Errorf("QueryTokenBudgetUsage()[%s] = %+v, want %+v", issueID, budgetUsage, want)
-	}
-	if !sameScalars(byIssue, budgetUsage) {
-		t.Errorf("TokenUsageByIssue = %+v, QueryTokenBudgetUsage = %+v, want identical", byIssue, budgetUsage)
 	}
 }
 

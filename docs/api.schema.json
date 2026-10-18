@@ -2946,16 +2946,6 @@
         "issue_type": {
           "type": "string"
         },
-        "issue_uncached_tokens": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "issue_url": {
           "type": "string"
         },
@@ -3212,7 +3202,6 @@
         "unmeasured_sessions",
         "used_tokens",
         "used_tokens_complete",
-        "issue_uncached_tokens",
         "budget_tokens",
         "estimated_cost_usd",
         "cost_status",

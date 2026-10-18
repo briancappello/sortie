@@ -78,7 +78,7 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
           </>
         ) : undefined}
       </TableCell>
-      <CountCell value={stage.runs} />
+      <TableCell look={stage.runs === 0 ? "muted" : "text"}>{fmtCount(stage.runs)}</TableCell>
       <TableCell>
         <CountBar value={stage.entered} max={widest} />
       </TableCell>
@@ -133,14 +133,13 @@ export function ChainFunnel({ funnel, config }: ChainFunnelProps) {
   const targets = handoffTargets(config);
 
   return (
-    <Table title={headingOf(stages)}>
+    <Table title={headingOf(stages)} className="table-fixed min-w-287">
       <TableHeader>
         <TableHead align="right" className={COLUMN_WIDTH.stageNumber}>
           #
         </TableHead>
         <TableHead className={COLUMN_WIDTH.stage}>Stage</TableHead>
         <TableHead
-          align="right"
           className={COLUMN_WIDTH.runs}
           title="Finished runs of the rule, retries and pull request fixes included"
         >

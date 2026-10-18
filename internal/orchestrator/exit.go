@@ -399,7 +399,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	request := entry.TokenCeilingStopRequest
 	if workerResult.ExitKind == WorkerExitCancelled && workerResult.StoppedByTokenCeiling && request != nil {
 		status = "budget_stopped"
-		runError = tokenCeilingStopError(entry.IssueTokensCompleted+entry.AgentTotalTokens, request.BudgetTokens)
+		runError = tokenCeilingStopError(entry.issueUncachedTokens(), request.BudgetTokens)
 		reportTokenCeilingStop(log, metrics, request)
 	}
 

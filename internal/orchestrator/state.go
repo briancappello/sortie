@@ -270,9 +270,9 @@ type RunningEntry struct {
 	// turn-terminal event, zero until the first turn ends.
 	APIRequestCountAtLastTurnEnd int
 
-	// IssueTokensCompleted is the issue's summed run_history total_tokens
-	// across completed sessions, read at dispatch and replaced by a
-	// confirming read. 0 when the dispatch read failed.
+	// IssueTokensCompleted is the issue's uncached tokens summed from
+	// run_history across completed sessions, read at dispatch and replaced
+	// by a confirming read. 0 when the dispatch read failed.
 	IssueTokensCompleted int64
 
 	// IssueUsage is the issue's completed-session usage as of the last
@@ -921,7 +921,7 @@ type BudgetExhaustedEntry struct {
 	Reason             string // budgetReasonSession or budgetReasonToken
 	UsedSessions       int    // completed sessions counted from run history
 	BudgetSessions     int    // configured agent.max_sessions; 0 means unlimited
-	UsedTokens         *int64 // nil when the token ceiling was not evaluated for this issue
+	UsedTokens         *int64 // uncached tokens; nil when the token ceiling was not evaluated for this issue
 	BudgetTokens       int64  // configured agent.max_tokens; 0 means unlimited
 	UnmeasuredSessions *int   // nil exactly when UsedTokens is nil; else runs whose spend is unknown
 	StoppedInFlight    *int   // nil exactly when UsedTokens is nil; else sessions the token ceiling stopped mid-run
@@ -941,7 +941,7 @@ type BudgetExhaustedEntry struct {
 // run history. It copies the counts, so the entry never aliases the
 // caller's usage value.
 func (e *BudgetExhaustedEntry) setTokenUsage(usage persistence.IssueTokenUsage) {
-	used, unmeasured, stopped := usage.TotalTokens, usage.UnmeasuredSessions, usage.StoppedInFlight
+	used, unmeasured, stopped := usage.UncachedTokens, usage.UnmeasuredSessions, usage.StoppedInFlight
 	e.UsedTokens = &used
 	e.UnmeasuredSessions = &unmeasured
 	e.StoppedInFlight = &stopped
@@ -1471,10 +1471,12 @@ func RunningCountByState(running map[string]*RunningEntry, state string) int {
 // SnapshotIssueUsage is a running issue's completed-session usage,
 // value-copied by [RuntimeSnapshot]. Each ByKind value is shaped for cost
 // estimation: InputTokens spans fresh input and both cache classes, and
-// TotalTokens is left zero because pricing never reads it.
+// TotalTokens is left zero because pricing never reads it. UncachedTokens is
+// the figure compared with the token budget.
 type SnapshotIssueUsage struct {
 	Sessions           int                          `json:"sessions"`
 	TotalTokens        int64                        `json:"total_tokens"`
+	UncachedTokens     int64                        `json:"uncached_tokens"`
 	UnmeasuredSessions int                          `json:"unmeasured_sessions"`
 	UnaccountedTurns   int                          `json:"unaccounted_turns"`
 	ByKind             map[string]domain.TokenUsage `json:"by_kind"`
@@ -1587,6 +1589,12 @@ type SnapshotRunningEntry struct {
 	// StallReference is the last agent event instant, else the start of the
 	// run: the instant the stall timeout is measured from.
 	StallReference time.Time `json:"-"`
+}
+
+// UncachedTokens returns the session's total tokens less its cache reads,
+// floored at zero: the figure the token budget compares.
+func (e SnapshotRunningEntry) UncachedTokens() int64 {
+	return domain.TokenUsage{TotalTokens: e.AgentTotalTokens, CacheReadTokens: e.CacheReadTokens}.Uncached()
 }
 
 // SnapshotRetryEntry is a read-only view of a pending retry, produced by
@@ -1851,6 +1859,7 @@ func SnapshotIssueUsageOf(usage *persistence.IssueTokenUsage) *SnapshotIssueUsag
 	return &SnapshotIssueUsage{
 		Sessions:           usage.Sessions,
 		TotalTokens:        usage.TotalTokens,
+		UncachedTokens:     usage.UncachedTokens,
 		UnmeasuredSessions: usage.UnmeasuredSessions,
 		UnaccountedTurns:   usage.UnaccountedTurns,
 		ByKind:             byKind,

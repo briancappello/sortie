@@ -200,10 +200,10 @@ func buildBudgetQuery(store *persistence.Store) budget.BudgetQueryFunc {
 		}
 
 		usage := budget.BudgetUsage{
-			CompletedTotalTokens: completed.TotalTokens,
-			CompletedSessions:    completed.Sessions,
-			UnmeasuredSessions:   completed.UnmeasuredSessions,
-			UnaccountedTurns:     completed.UnaccountedTurns,
+			CompletedUncachedTokens: completed.UncachedTokens,
+			CompletedSessions:       completed.Sessions,
+			UnmeasuredSessions:      completed.UnmeasuredSessions,
+			UnaccountedTurns:        completed.UnaccountedTurns,
 		}
 
 		// Add the running session's spend only when its stored dispatch ID
@@ -217,7 +217,7 @@ func buildBudgetQuery(store *persistence.Store) budget.BudgetQueryFunc {
 			return budget.BudgetUsage{}, err
 		}
 		if found && meta.DispatchID == runningDispatchID {
-			usage.RunningTotalTokens = meta.TotalTokens
+			usage.RunningUncachedTokens = domain.TokenUsage{TotalTokens: meta.TotalTokens, CacheReadTokens: meta.CacheReadTokens}.Uncached()
 			usage.RunningMeasured = true
 			usage.UnaccountedTurns += meta.UnaccountedTurns
 		}

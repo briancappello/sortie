@@ -89,26 +89,26 @@ func TestBudgetTool_Execute_WarningThreshold(t *testing.T) {
 	}{
 		{
 			name:          "warningTokens zero omits both fields",
-			usage:         BudgetUsage{CompletedTotalTokens: 900},
+			usage:         BudgetUsage{CompletedUncachedTokens: 900},
 			warningTokens: 0,
 		},
 		{
 			name:               "used_tokens below the threshold",
-			usage:              BudgetUsage{CompletedTotalTokens: 799},
+			usage:              BudgetUsage{CompletedUncachedTokens: 799},
 			warningTokens:      800,
 			wantWarningTokens:  new(int64(800)),
 			wantWarningReached: new(false),
 		},
 		{
 			name:               "used_tokens exactly at the threshold",
-			usage:              BudgetUsage{CompletedTotalTokens: 800},
+			usage:              BudgetUsage{CompletedUncachedTokens: 800},
 			warningTokens:      800,
 			wantWarningTokens:  new(int64(800)),
 			wantWarningReached: new(true),
 		},
 		{
 			name:               "used_tokens above the threshold",
-			usage:              BudgetUsage{CompletedTotalTokens: 950},
+			usage:              BudgetUsage{CompletedUncachedTokens: 950},
 			warningTokens:      800,
 			wantWarningTokens:  new(int64(800)),
 			wantWarningReached: new(true),
@@ -205,7 +205,7 @@ func TestBudgetTool_Execute(t *testing.T) {
 	}{
 		{
 			name:               "used tokens sums completed and running, used sessions counts completed only",
-			usage:              BudgetUsage{CompletedTotalTokens: 600, CompletedSessions: 3, RunningTotalTokens: 150},
+			usage:              BudgetUsage{CompletedUncachedTokens: 600, CompletedSessions: 3, RunningUncachedTokens: 150},
 			budgetTokens:       1000,
 			budgetSessions:     5,
 			wantUsedTokens:     750,
@@ -216,7 +216,7 @@ func TestBudgetTool_Execute(t *testing.T) {
 		},
 		{
 			name:               "remaining floored at zero when over budget",
-			usage:              BudgetUsage{CompletedTotalTokens: 900, CompletedSessions: 2, RunningTotalTokens: 200},
+			usage:              BudgetUsage{CompletedUncachedTokens: 900, CompletedSessions: 2, RunningUncachedTokens: 200},
 			budgetTokens:       1000,
 			budgetSessions:     0,
 			wantUsedTokens:     1100,
@@ -227,7 +227,7 @@ func TestBudgetTool_Execute(t *testing.T) {
 		},
 		{
 			name:               "remaining zero at exact budget consumption",
-			usage:              BudgetUsage{CompletedTotalTokens: 1000, CompletedSessions: 4},
+			usage:              BudgetUsage{CompletedUncachedTokens: 1000, CompletedSessions: 4},
 			budgetTokens:       1000,
 			budgetSessions:     4,
 			wantUsedTokens:     1000,
@@ -238,7 +238,7 @@ func TestBudgetTool_Execute(t *testing.T) {
 		},
 		{
 			name:               "unlimited token budget reports null remaining",
-			usage:              BudgetUsage{CompletedTotalTokens: 600, CompletedSessions: 3, RunningTotalTokens: 150},
+			usage:              BudgetUsage{CompletedUncachedTokens: 600, CompletedSessions: 3, RunningUncachedTokens: 150},
 			budgetTokens:       0,
 			budgetSessions:     5,
 			wantUsedTokens:     750,
@@ -303,11 +303,11 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 
 		query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 			return BudgetUsage{
-				CompletedTotalTokens: 500,
-				CompletedSessions:    2,
-				RunningTotalTokens:   40,
-				RunningMeasured:      true,
-				UnaccountedTurns:     1,
+				CompletedUncachedTokens: 500,
+				CompletedSessions:       2,
+				RunningUncachedTokens:   40,
+				RunningMeasured:         true,
+				UnaccountedTurns:        1,
 			}, nil
 		}
 		tool := New(query, "10042", "dispatch-1", 1000, 5, 0)
@@ -331,9 +331,9 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 
 		query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 			return BudgetUsage{
-				CompletedTotalTokens: 500,
-				CompletedSessions:    2,
-				UnmeasuredSessions:   1,
+				CompletedUncachedTokens: 500,
+				CompletedSessions:       2,
+				UnmeasuredSessions:      1,
 			}, nil
 		}
 		tool := New(query, "10042", "", 1000, 5, 0)
@@ -368,11 +368,11 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 
 		query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 			return BudgetUsage{
-				CompletedTotalTokens: 500,
-				CompletedSessions:    2,
-				UnmeasuredSessions:   0,
-				RunningTotalTokens:   50,
-				RunningMeasured:      true,
+				CompletedUncachedTokens: 500,
+				CompletedSessions:       2,
+				UnmeasuredSessions:      0,
+				RunningUncachedTokens:   50,
+				RunningMeasured:         true,
 			}, nil
 		}
 		tool := New(query, "10042", "sess-running", 1000, 5, 0)
@@ -395,11 +395,11 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 
 		query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 			return BudgetUsage{
-				CompletedTotalTokens: 500,
-				CompletedSessions:    2,
-				UnmeasuredSessions:   0,
-				RunningTotalTokens:   0,
-				RunningMeasured:      true,
+				CompletedUncachedTokens: 500,
+				CompletedSessions:       2,
+				UnmeasuredSessions:      0,
+				RunningUncachedTokens:   0,
+				RunningMeasured:         true,
 			}, nil
 		}
 		tool := New(query, "10042", "sess-running", 1000, 5, 0)
@@ -419,11 +419,11 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 
 		query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 			return BudgetUsage{
-				CompletedTotalTokens: 500,
-				CompletedSessions:    2,
-				UnmeasuredSessions:   0,
-				RunningTotalTokens:   0,
-				RunningMeasured:      true,
+				CompletedUncachedTokens: 500,
+				CompletedSessions:       2,
+				UnmeasuredSessions:      0,
+				RunningUncachedTokens:   0,
+				RunningMeasured:         true,
 			}, nil
 		}
 		tool := New(query, "10042", "", 1000, 5, 0)
@@ -440,10 +440,10 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 
 		query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 			return BudgetUsage{
-				CompletedTotalTokens: 500,
-				CompletedSessions:    2,
-				UnmeasuredSessions:   0,
-				RunningMeasured:      false,
+				CompletedUncachedTokens: 500,
+				CompletedSessions:       2,
+				UnmeasuredSessions:      0,
+				RunningMeasured:         false,
 			}, nil
 		}
 		tool := New(query, "10042", "sess-running", 1000, 5, 0)
@@ -460,7 +460,7 @@ func TestBudgetTool_Execute_SuccessEnvelopeShape(t *testing.T) {
 	t.Parallel()
 
 	query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
-		return BudgetUsage{CompletedTotalTokens: 10, CompletedSessions: 1}, nil
+		return BudgetUsage{CompletedUncachedTokens: 10, CompletedSessions: 1}, nil
 	}
 	tool := New(query, "10042", "", 0, 0, 0)
 

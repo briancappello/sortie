@@ -93,9 +93,10 @@ func (tr *budgetE2ETracker) AddLabel(_ context.Context, _ string, _ string) erro
 func (tr *budgetE2ETracker) RemoveLabel(_ context.Context, _ string, _ string) error { return nil }
 
 type budgetE2EAgent struct {
-	started     chan domain.StartSessionParams
-	emitUsage   chan int64
-	proceedTurn chan struct{}
+	started         chan domain.StartSessionParams
+	emitUsage       chan int64
+	proceedTurn     chan struct{}
+	cacheReadTokens int64
 }
 
 func newBudgetE2EAgent() *budgetE2EAgent {
@@ -131,7 +132,7 @@ func (a *budgetE2EAgent) RunTurn(ctx context.Context, session domain.Session, pa
 			params.OnEvent(domain.AgentEvent{
 				Type:      domain.EventTokenUsage,
 				Timestamp: time.Now().UTC(),
-				Usage:     domain.TokenUsage{TotalTokens: total},
+				Usage:     domain.TokenUsage{TotalTokens: total, CacheReadTokens: a.cacheReadTokens},
 			})
 		case <-a.proceedTurn:
 			return domain.TurnResult{
@@ -197,6 +198,7 @@ func waitForSessionMetadataTotal(t *testing.T, store *persistence.Store, issueID
 type costBudgetResult struct {
 	UsedTokens         int64  `json:"used_tokens"`
 	UsedTokensComplete bool   `json:"used_tokens_complete"`
+	RemainingTokens    *int64 `json:"remaining_tokens"`
 	WarningTokens      *int64 `json:"warning_tokens"`
 	WarningReached     *bool  `json:"warning_reached"`
 }
@@ -242,19 +244,20 @@ func TestMCPServerBudget(t *testing.T) {
 
 	const issueID = "budget-e2e-issue"
 	const identifier = "BUDGET-E2E-1"
-	const seededTotal int64 = 1000
+	const budgetTokens = 1000
 
 	if _, err := rw.AppendRunHistory(ctx, persistence.RunHistory{
-		IssueID:        issueID,
-		Identifier:     identifier,
-		Attempt:        1,
-		AgentAdapter:   fixtureBudgetAgentKind,
-		Workspace:      "/tmp/ws/BUDGET-E2E-1",
-		StartedAt:      "2026-03-19T09:00:00Z",
-		CompletedAt:    "2026-03-19T09:05:00Z",
-		Status:         "succeeded",
-		TotalTokens:    seededTotal,
-		TokensMeasured: true,
+		IssueID:         issueID,
+		Identifier:      identifier,
+		Attempt:         1,
+		AgentAdapter:    fixtureBudgetAgentKind,
+		Workspace:       "/tmp/ws/BUDGET-E2E-1",
+		StartedAt:       "2026-03-19T09:00:00Z",
+		CompletedAt:     "2026-03-19T09:05:00Z",
+		Status:          "succeeded",
+		TotalTokens:     1500,
+		CacheReadTokens: 900,
+		TokensMeasured:  true,
 	}); err != nil {
 		t.Fatalf("AppendRunHistory: %v", err)
 	}
@@ -280,6 +283,7 @@ func TestMCPServerBudget(t *testing.T) {
 			ReadTimeoutMS:       5000,
 			TurnTimeoutMS:       30000,
 			StopGraceMS:         5000,
+			MaxTokens:           budgetTokens,
 		},
 	}
 
@@ -293,7 +297,7 @@ func TestMCPServerBudget(t *testing.T) {
 		absPath:  filepath.Join(tmpDir, "WORKFLOW.md"),
 	}
 
-	state := orchestrator.NewState(cfg.Polling.IntervalMS, cfg.Agent.MaxConcurrentAgents, 0, nil, orchestrator.AgentTotals{})
+	state := orchestrator.NewState(cfg.Polling.IntervalMS, cfg.Agent.MaxConcurrentAgents, budgetTokens, nil, orchestrator.AgentTotals{})
 
 	o := orchestrator.NewOrchestrator(orchestrator.OrchestratorParams{
 		State:           state,
@@ -391,14 +395,15 @@ func TestMCPServerBudget(t *testing.T) {
 	}
 
 	before := executeBudgetTool(t, costBudget)
-	if before.UsedTokens != seededTotal {
-		t.Errorf("before the usage event: used_tokens = %d, want %d (seeded total)", before.UsedTokens, seededTotal)
+	if before.UsedTokens != 600 {
+		t.Errorf("before the usage event: used_tokens = %d, want 600 (seeded uncached)", before.UsedTokens)
 	}
 	if before.UsedTokensComplete {
 		t.Error("before the usage event: used_tokens_complete = true, want false")
 	}
 
-	const eventTotal int64 = 400
+	const eventTotal int64 = 900
+	agent.cacheReadTokens = 600
 	agent.emitUsage <- eventTotal
 
 	meta := waitForSessionMetadataTotal(t, reg.Store, issueID, eventTotal, 15*time.Second)
@@ -407,8 +412,11 @@ func TestMCPServerBudget(t *testing.T) {
 	}
 
 	after := executeBudgetTool(t, costBudget)
-	if after.UsedTokens != seededTotal+eventTotal {
-		t.Errorf("after the usage event: used_tokens = %d, want %d", after.UsedTokens, seededTotal+eventTotal)
+	if after.UsedTokens != 900 {
+		t.Errorf("after the usage event: used_tokens = %d, want 900 (completed 600 + running 300 uncached)", after.UsedTokens)
+	}
+	if after.RemainingTokens == nil || *after.RemainingTokens != 100 {
+		t.Errorf("after the usage event: remaining_tokens = %v, want 100", after.RemainingTokens)
 	}
 	if !after.UsedTokensComplete {
 		t.Error("after the usage event: used_tokens_complete = false, want true")
