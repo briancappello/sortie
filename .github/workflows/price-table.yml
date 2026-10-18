@@ -69,7 +69,7 @@ jobs:
 
           number=$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty')
           if [ -n "${number}" ]; then
-            gh pr edit "${number}" --title "${subject}"
+            gh pr edit "${number}" --title "${subject}" --body "${body}"
           else
             gh pr create --head "${branch}" --base main --title "${subject}" --body "${body}"
           fi
