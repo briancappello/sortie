@@ -8328,6 +8328,10 @@ func (s *sweepThrottleTracker) FetchIssuesByStates(_ context.Context, _ []string
 	return nil, nil
 }
 
+func (s *sweepThrottleTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (s *sweepThrottleTracker) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }

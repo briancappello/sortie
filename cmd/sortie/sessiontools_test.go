@@ -150,6 +150,9 @@ func (s *stubTrackerAdapter) FetchIssuesByStates(_ context.Context, _ []string) 
 func (s *stubTrackerAdapter) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }
+func (s *stubTrackerAdapter) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
 func (s *stubTrackerAdapter) FetchIssueStatesByIdentifiers(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }

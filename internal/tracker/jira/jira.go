@@ -413,32 +413,62 @@ func (a *JiraAdapter) FetchIssueStatesByIDs(ctx context.Context, issueIDs []stri
 
 	var statesByID map[string]string
 	err := trackermetrics.Track(a.metrics, "fetch_states_by_ids", func() error {
-		fetchedStates := make(map[string]string, len(issueIDs))
-		for start := 0; start < len(issueIDs); start += batchSize {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			end := min(start+batchSize, len(issueIDs))
-			batch := issueIDs[start:end]
-
-			jql := buildIDINJQL(batch)
-			if jql == "" {
-				continue
-			}
-
-			issues, err := a.paginatedSearch(ctx, jql, "status")
-			if err != nil {
-				return err
-			}
-			for _, iss := range issues {
-				fetchedStates[iss.ID] = iss.State
-			}
+		reads, fetchErr := a.fetchStatesByIDs(ctx, issueIDs, "status")
+		if fetchErr != nil {
+			return fetchErr
 		}
-		statesByID = fetchedStates
+		statesByID = issuekit.StatesOf(reads)
 		return nil
 	})
 	return statesByID, err
+}
+
+// FetchIssueStatesAndLabelsByIDs returns the current state and labels for
+// each requested issue ID (Jira internal numeric ID). Issues not found are
+// omitted from the result map. Sends the same batched requests as
+// FetchIssueStatesByIDs, with the labels field added. The queryFilter is
+// intentionally not applied.
+func (a *JiraAdapter) FetchIssueStatesAndLabelsByIDs(ctx context.Context, issueIDs []string) (map[string]domain.IssueStateAndLabels, error) {
+	if len(issueIDs) == 0 {
+		return map[string]domain.IssueStateAndLabels{}, nil
+	}
+
+	var reads map[string]domain.IssueStateAndLabels
+	err := trackermetrics.Track(a.metrics, "fetch_states_by_ids", func() error {
+		var fetchErr error
+		reads, fetchErr = a.fetchStatesByIDs(ctx, issueIDs, "status,labels")
+		return fetchErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return reads, nil
+}
+
+// fetchStatesByIDs reads the requested fields of each issue ID in batches of
+// batchSize and reports the state and labels the response carries.
+func (a *JiraAdapter) fetchStatesByIDs(ctx context.Context, issueIDs []string, fields string) (map[string]domain.IssueStateAndLabels, error) {
+	reads := make(map[string]domain.IssueStateAndLabels, len(issueIDs))
+	for start := 0; start < len(issueIDs); start += batchSize {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		end := min(start+batchSize, len(issueIDs))
+		jql := buildIDINJQL(issueIDs[start:end])
+		if jql == "" {
+			continue
+		}
+
+		issues, err := a.paginatedSearch(ctx, jql, fields)
+		if err != nil {
+			return nil, err
+		}
+		for _, iss := range issues {
+			reads[iss.ID] = domain.IssueStateAndLabels{State: iss.State, Labels: iss.Labels}
+		}
+	}
+	return reads, nil
 }
 
 // FetchIssueStatesByIdentifiers returns the current state for each

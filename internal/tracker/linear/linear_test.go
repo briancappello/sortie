@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -910,6 +911,41 @@ func TestFetchIssueStatesByIDs(t *testing.T) {
 			t.Errorf("call count = %d, want 0 when context already cancelled", len(calls))
 		}
 	})
+}
+
+type labelPageGatedClient struct {
+	*fakeGraphQLClient
+	wantAfter string
+}
+
+func (c labelPageGatedClient) Execute(ctx context.Context, query string, variables map[string]any) ([]byte, http.Header, error) {
+	if strings.Contains(query, "query IssueLabels") && variables["after"] != c.wantAfter {
+		return nil, nil, errors.New("label page requested for an unknown cursor")
+	}
+	return c.fakeGraphQLClient.Execute(ctx, query, variables)
+}
+
+func TestFetchIssueStatesAndLabelsByIDsCompletesSecondLabelPage(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeClient()
+	seedPreflight(f, t)
+	f.queueBody("query IssueStatesAndLabelsByIDs", loadFixture(t, "states_and_labels_by_ids_many_labels.json"))
+	f.queueBody("query IssueLabels", loadFixture(t, "issue_labels_rest.json"))
+	a, err := newAdapter(labelPageGatedClient{f, "labels-cursor-03"}, "SOR", testStates(testActiveStates, "In Review"), nil, nil)
+	if err != nil {
+		t.Fatalf("newAdapter: %v", err)
+	}
+
+	got, err := a.FetchIssueStatesAndLabelsByIDs(context.Background(), []string{"a7c4f8e2-1b9d-4e3a-8f2c-6d5e4a3b2c1f"})
+	if err != nil {
+		t.Fatalf("FetchIssueStatesAndLabelsByIDs: %v", err)
+	}
+
+	want := []string{"label-01", "label-02", "label-03", "label-04", "label-05"}
+	if labels := got["a7c4f8e2-1b9d-4e3a-8f2c-6d5e4a3b2c1f"].Labels; !slices.Equal(labels, want) {
+		t.Errorf("FetchIssueStatesAndLabelsByIDs labels = %v, want %v", labels, want)
+	}
 }
 
 func TestFetchIssueStatesByIdentifiers(t *testing.T) {

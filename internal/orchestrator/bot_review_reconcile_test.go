@@ -991,6 +991,10 @@ func (s *botReviewErrTrackerStub) SetTrackerStates(func() domain.TrackerStates) 
 func (s *botReviewErrTrackerStub) FetchIssueByID(_ context.Context, _ string) (domain.Issue, error) {
 	return domain.Issue{}, nil
 }
+func (s *botReviewErrTrackerStub) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (s *botReviewErrTrackerStub) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }

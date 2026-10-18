@@ -1577,7 +1577,8 @@ func (o *Orchestrator) fillRetryIdentity(candidates []domain.Issue) {
 
 // refreshParkedIssues evaluates the release rule against this tick's
 // candidates, then against every parked issue the candidate slice omits,
-// read through one batched, comment-free tracker call. A park that still
+// read through one batched, comment-free tracker call that returns state and
+// labels, so the omitted issue is observed as a candidate is. A park that still
 // holds no read of its issue takes the candidate's, or, when the candidates
 // omit the issue and the batched read finds it, one single-issue read. A
 // park that holds a title or link and no labels takes the candidate's issue
@@ -1615,7 +1616,7 @@ func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []dom
 	}
 	slices.Sort(missing)
 
-	states, err := o.trackerAdapter.FetchIssueStatesByIDs(ctx, missing)
+	reads, err := o.trackerAdapter.FetchIssueStatesAndLabelsByIDs(ctx, missing)
 	if err != nil {
 		o.logger.Warn("parked issue state read failed, retaining parks",
 			slog.Any("error", err),
@@ -1627,12 +1628,16 @@ func (o *Orchestrator) refreshParkedIssues(ctx context.Context, candidates []dom
 		if !ok {
 			continue
 		}
-		observed, found := states[id]
+		read, found := reads[id]
 		if !found {
 			continue
 		}
-		if !observeParkedState(ctx, o.state, o.store, o.logger, entry, id, observed) {
-			o.recordParkReleaseOutcome(ctx, id, entry.Identifier, observed, terminalStates)
+		if !observeParkedState(ctx, o.state, o.store, o.logger, entry, id, read.State) {
+			o.recordParkReleaseOutcome(ctx, id, entry.Identifier, read.State, terminalStates)
+			continue
+		}
+		observeParkedLabels(ctx, o.state, o.store, o.logger, entry, id, read.Labels)
+		if o.state.Parked[id] != entry {
 			continue
 		}
 		if !entry.IssueIdentity.isZero() {

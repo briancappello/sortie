@@ -173,6 +173,10 @@ func (s *reviewTrackerStub) SetTrackerStates(func() domain.TrackerStates) {}
 func (s *reviewTrackerStub) FetchIssueByID(_ context.Context, _ string) (domain.Issue, error) {
 	return domain.Issue{}, nil
 }
+func (s *reviewTrackerStub) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (s *reviewTrackerStub) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }

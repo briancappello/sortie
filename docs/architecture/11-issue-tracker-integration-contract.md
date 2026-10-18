@@ -22,23 +22,28 @@ A tracker adapter must support these operations:
    - An issue that reads no configured state returns an empty state, which is never active, terminal, or the handoff state.
    - Callers: active-run reconciliation, the worker's per-turn state refresh, startup pending-reaction recovery, merge-completion reconciliation (reconciliation also reads every issue that holds a stage hop record, Section 8.5), and the exit-time verification read that precedes an orchestrator-initiated handoff transition or stage hop.
 
-5. `fetch_issue_states_by_identifiers(identifiers)`
+5. `fetch_issue_states_and_labels_by_ids(issue_ids)`
+   - Return the current state and every label of each requested issue ID. An issue is omitted exactly when `fetch_issue_states_by_ids` omits it. The state has the meaning it has there, and the labels are normalized as Section 11.3 states.
+   - Each returned entry carries the issue's complete label set; an adapter that cannot read every label of an issue it would return fails the call. `tracker.query_filter` is not applied. The call sends no request that `fetch_issue_states_by_ids` would not send for the same IDs, except for further pages of an issue's labels. An empty `issue_ids` returns an empty result and sends no request; on error no result is returned.
+   - Caller: the park release step, which reads the parked issues the candidate fetch omitted (Section 8.1).
+
+6. `fetch_issue_states_by_identifiers(identifiers)`
    - Return the current state for each requested issue identifier (human-readable key). Issues not found are omitted. Used for startup terminal workspace cleanup.
 
-6. `fetch_issue_comments(issue_id)`
+7. `fetch_issue_comments(issue_id)`
    - Return comments for an issue. Used for continuation runs and the agent workpad pattern.
 
-7. `transition_issue(issue_id, target_state)`
+8. `transition_issue(issue_id, target_state)`
    - Transition an issue to the named target state in the tracker's native workflow system.
    - Used for orchestrator-initiated handoff transitions (ADR-0007).
    - Error semantics: returns normalized error categories per Section 11.4.
    - All errors are non-fatal from the orchestrator's perspective.
 
-8. `add_label(issue_id, label)`
+9. `add_label(issue_id, label)`
    - Add a label to an issue and remove no other label. The one exception is a Linear label in a single-select label group, which replaces the group's other label on the issue (§11.6.1).
    - A successful return means the issue's label set after the write, as the write's response or a read issued after it reports it, carries the label.
 
-9. `remove_label(issue_id, label)`
+10. `remove_label(issue_id, label)`
    - Remove every label the issue carries that names the requested label, and no other. An issue that carries none succeeds without a write request.
    - A successful return means the issue's label set after the write, as the write's response or a read issued after it reports it, carries no label naming the requested label.
 
@@ -110,7 +115,7 @@ The destination posts the event's body on the event's issue through `comment_iss
 
 A `session.stopped` event may also carry the agent's statement (Section 21.1). The destination then posts through `comment_issue_with_literal(issue_id, text, literal)` in place of `comment_issue`, passing the event's body as `text` and the statement as `literal`, and the adapter renders `literal` after `text` as its tracker's literal block, so the tracker shows it as written and acts on nothing in it. `literal` is non-empty valid UTF-8 with no C0 control character other than tab and line feed and no DEL; errors and cancellation behave as for `comment_issue`. The statement is the one piece of agent-authored text a tracker comment carries, and the public-comment rule above extends to it: Sortie removes control characters and masks every registered secret before the text reaches the adapter, and the literal block keeps a mention, link, markup, or slash command inside it from taking effect. Only registered secrets are masked, so the injected status instructions ask the agent to name files by repository path and never to include credentials (Section 21.1). A comment without a statement is posted through `comment_issue` unchanged.
 
-The parking label is a non-state write whose later presence or absence on the issue is read back: the orchestrator's own release rule observes the label on a subsequent fetch of the issue to confirm the write took effect, and observes its absence to decide the park is released. An adapter that accepts a parking-label write MUST make that label visible to a subsequent `fetch_issue_by_id`, and to the candidate fetch once the tracker's listing reflects the write (§11.1), so the release rule can observe it, and no adapter accepts a label write and records nothing (§11.1).
+The parking label is a non-state write whose later presence or absence on the issue is read back: the orchestrator's own release rule observes the label on a subsequent fetch of the issue to confirm the write took effect, and observes its absence to decide the park is released. An adapter that accepts a parking-label write MUST make that label visible to a subsequent `fetch_issue_by_id`, and to the candidate fetch and to `fetch_issue_states_and_labels_by_ids` once the tracker's listing or read path reflects the write (§11.1), so the release rule can observe it, and no adapter accepts a label write and records nothing (§11.1). Where an adapter reads by ID through a search index that can lag a write, such as Jira, and successive reads of an issue never return an older version than an earlier read returned, the lag delays the confirmation and the release of a park and never inverts them.
 
 Free-form ticket mutation falls outside these three writes and stays with the coding agent, which mutates tickets through the `tracker_api` tool subsystem (Section 10.4), part of the agent toolchain rather than orchestrator business logic.
 
@@ -173,7 +178,7 @@ The Linear adapter targets Linear's single GraphQL endpoint (`https://api.linear
 - `assignee` resolves through `displayName`, then `name`, then `email`; only a null assignee maps to the empty string, so an assignee carrying just an email resolves to that email.
 - `blocked_by` is derived from `inverseRelations` nodes whose `type` equals `blocks`, matching the Section 11.3 rule, which was phrased for Linear's native relation model.
 - `issue_type` is always empty because Linear has no native issue-type field.
-- `labels` holds every label of the issue. The candidate, by-states, and by-id reads select the first 25 labels of each issue together with a cursor, and an issue whose label connection reports another page gets the rest of its labels from a dedicated labels query before normalization. A next page reported without an end cursor returns `tracker_missing_end_cursor` and sends no completing request, and a failed completing request fails the read.
+- `labels` holds every label of the issue. The candidate, by-states, by-id, and state-and-label by-ID reads select the first 25 labels of each issue together with a cursor, and an issue whose label connection reports another page gets the rest of its labels from a dedicated labels query before normalization. A next page reported without an end cursor returns `tracker_missing_end_cursor` and sends no completing request, and a failed completing request fails the read.
 - Comments are fetched only by `fetch_issue_by_id` and `fetch_issue_comments`; Linear returns them newest-first, so the adapter re-sorts them ascending by creation time before returning.
 
 **Transport and pagination.** Linear uses Relay-style cursor connections (`first` plus `after`, with `pageInfo { hasNextPage endCursor }`). The adapter paginates candidate and comment fetches to exhaustion with a top-level page size of 50 and a 30,000 ms network timeout. A `hasNextPage` of true with an empty `endCursor` returns `tracker_missing_end_cursor` rather than silently truncating, mirroring the Jira guard.
@@ -281,7 +286,7 @@ The GitHub adapter targets the REST API (plus the search endpoint) at `tracker.e
 - Comments are fetched only by `fetch_issue_by_id` and `fetch_issue_comments`; GitHub returns them in ascending creation order already, so the adapter re-sorts nothing.
 - The issues-list and search routes co-mingle pull requests with issues; the adapter drops any entry carrying a non-nil pull-request marker before it reaches normalization.
 
-**Transport and pagination.** GitHub paginates with `Link` response headers, so the adapter follows the header to exhaustion with a page size of 50, a bounded ceiling of 200 pages, and a 30,000 ms network timeout. `fetch_issue_states_by_ids` and `fetch_issue_states_by_identifiers` read one issue at a time instead, through a per-path ETag cache: a cached `304 Not Modified` response reuses the issue's cached label names and closed flag and derives the state from them under the lists in force, and a fresh response replaces the cache entry.
+**Transport and pagination.** GitHub paginates with `Link` response headers, so the adapter follows the header to exhaustion with a page size of 50, a bounded ceiling of 200 pages, and a 30,000 ms network timeout. `fetch_issue_states_by_ids`, `fetch_issue_states_and_labels_by_ids`, and `fetch_issue_states_by_identifiers` read one issue at a time instead, through a per-path ETag cache: a cached `304 Not Modified` response reuses the issue's cached label names and closed flag and derives the state from them under the lists in force, `fetch_issue_states_and_labels_by_ids` returns those cached label names with that state, and a fresh response replaces the cache entry.
 
 **Error classification.** The adapter maps HTTP status to the Section 11.4 categories from the response body's first bytes, read only as a bounded diagnostic snippet and never echoing the token. 401 maps to `tracker_auth_error`; 403 maps to `tracker_auth_error` unless the response carries an exhausted primary rate-limit header or a secondary rate-limit message, in which case it maps to `tracker_api_error`; 404 maps to a not-found result; 400 and 422 map to `tracker_payload_error`; 410, 405, 409, and 429 map to `tracker_api_error`; 5xx and transport failures map to `tracker_transport_error`; and any other status maps to `tracker_api_error`.
 

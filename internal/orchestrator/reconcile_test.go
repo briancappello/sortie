@@ -176,6 +176,10 @@ type mockReconcileTracker struct {
 
 var _ domain.TrackerAdapter = (*mockReconcileTracker)(nil)
 
+func (m *mockReconcileTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (m *mockReconcileTracker) FetchIssueStatesByIDs(_ context.Context, ids []string) (map[string]string, error) {
 	m.calls++
 	cp := make([]string, len(ids))
@@ -255,6 +259,10 @@ func (s *sweepTracker) FetchIssueByID(context.Context, string) (domain.Issue, er
 
 func (s *sweepTracker) FetchIssuesByStates(context.Context, []string) ([]domain.Issue, error) {
 	panic("FetchIssuesByStates must not be called by SweepWorkspaces")
+}
+
+func (s *sweepTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
 }
 
 func (s *sweepTracker) FetchIssueStatesByIDs(context.Context, []string) (map[string]string, error) {

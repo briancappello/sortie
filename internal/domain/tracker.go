@@ -21,6 +21,13 @@ type TrackerStates struct {
 	InProgress string
 }
 
+// IssueStateAndLabels is an issue's tracker state and labels as one by-ID
+// read reports them.
+type IssueStateAndLabels struct {
+	State  string   // as FetchIssueStatesByIDs reports it; empty: no configured state
+	Labels []string // every label, normalized as Issue.Labels; empty: none
+}
+
 // TrackerAdapter defines the contract that all issue tracker
 // integrations must satisfy.
 //
@@ -67,6 +74,19 @@ type TrackerAdapter interface {
 	// from the map (not an error). An empty state means the issue reads no
 	// configured state. Used for active-run reconciliation.
 	FetchIssueStatesByIDs(ctx context.Context, issueIDs []string) (map[string]string, error)
+
+	// FetchIssueStatesAndLabelsByIDs returns the current state and labels of
+	// each requested issue ID, keyed by issue ID.
+	//
+	// An issue is omitted exactly when FetchIssueStatesByIDs omits it. A
+	// returned entry carries the issue's complete label set; an adapter that
+	// cannot read every label of an issue it would return fails the call. The
+	// query filter is not applied. It sends no request FetchIssueStatesByIDs
+	// would not send for the same IDs, except for further pages of an issue's
+	// labels. An empty issueIDs returns an empty map and sends no request; on
+	// error the map is nil. Used to release parked issues the candidate query
+	// omits.
+	FetchIssueStatesAndLabelsByIDs(ctx context.Context, issueIDs []string) (map[string]IssueStateAndLabels, error)
 
 	// FetchIssueStatesByIdentifiers returns the current state for each
 	// requested issue identifier (human-readable key, e.g. "PROJ-123").

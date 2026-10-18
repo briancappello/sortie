@@ -238,6 +238,8 @@ type mockTrackerAdapter struct {
 	commentIssueFn    func(ctx context.Context, issueID, text string) error
 	fetchIssueByIDFn  func(ctx context.Context, id string) (domain.Issue, error)
 
+	fetchStatesAndLabelsFn func(ctx context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error)
+
 	// commentMu guards commentCalls: several detached budget-hold-notice
 	// goroutines can write it concurrently within a single tick.
 	commentMu    sync.Mutex
@@ -283,6 +285,18 @@ func (m *mockTrackerAdapter) FetchIssueStatesByIDs(ctx context.Context, ids []st
 		result[id] = "To Do"
 	}
 	return result, nil
+}
+
+func (m *mockTrackerAdapter) FetchIssueStatesAndLabelsByIDs(ctx context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error) {
+	if m.fetchStatesAndLabelsFn != nil {
+		return m.fetchStatesAndLabelsFn(ctx, ids)
+	}
+	states, err := m.FetchIssueStatesByIDs(ctx, ids)
+	reads := make(map[string]domain.IssueStateAndLabels, len(states))
+	for id, state := range states {
+		reads[id] = domain.IssueStateAndLabels{State: state}
+	}
+	return reads, err
 }
 
 func (m *mockTrackerAdapter) FetchIssueStatesByIdentifiers(_ context.Context, _ []string) (map[string]string, error) {
