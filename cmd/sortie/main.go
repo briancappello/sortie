@@ -33,6 +33,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/runstats"
 	"github.com/sortie-ai/sortie/internal/server"
@@ -893,10 +894,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	})
 
 	var srv *server.Server
+	tokenRates, rateWarnings := pricing.ParseTokenRates(br.cfg.ExtensionValue("token_rates"))
 	if serverEnabled {
-		rawTokenRates, tokenRatesPresent := br.cfg.ExtensionValue("token_rates")
-		tokenRates, rateWarnings := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
-
 		addr := net.JoinHostPort(br.serverHost, strconv.Itoa(br.serverPort))
 		stats := statsSource{
 			dbPath:       dbPath,

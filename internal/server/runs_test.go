@@ -11,11 +11,12 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
-func pricedRates() TokenRates {
-	return TokenRates{"claude-code": {InputPerMtok: new(3.0), OutputPerMtok: new(15.0)}}
+func pricedRates() pricing.TokenRates {
+	return pricing.TokenRates{"claude-code": {InputPerMtok: new(3.0), OutputPerMtok: new(15.0)}}
 }
 
 func costOrNil(p *float64) any {

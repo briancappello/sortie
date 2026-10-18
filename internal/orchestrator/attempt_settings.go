@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -78,7 +79,7 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 					" reports no token usage for the sessions this configuration produces: the per-issue token ceiling can never be reached for it",
 			})
 		}
-		if tokenRatesPrice(cfg, kind) {
+		if rates, _ := pricing.ParseTokenRates(cfg.ExtensionValue("token_rates")); rates[kind].Complete() {
 			warns = append(warns, PreflightWarning{
 				Check: "agent.kind.no_cost_estimate",
 				Message: "token_rates prices agent kind " + strconv.Quote(kind) +
@@ -117,20 +118,4 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 		}
 	}
 	return errs, warns
-}
-
-// tokenRatesPrice reports whether token_rates prices kind. It reads only
-// the key set because the rate values belong to internal/server, which
-// this package must not import.
-func tokenRatesPrice(cfg config.ServiceConfig, kind string) bool {
-	raw, present := cfg.ExtensionValue("token_rates")
-	if !present {
-		return false
-	}
-	rates, ok := raw.(map[string]any)
-	if !ok {
-		return false
-	}
-	_, priced := rates[kind]
-	return priced
 }

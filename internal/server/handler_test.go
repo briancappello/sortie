@@ -19,6 +19,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -1467,14 +1468,14 @@ func TestToStateResponse(t *testing.T) {
 				AgentInputTokens: 1_000_000, AgentOutputTokens: 0, UsageMeasured: measured,
 			}
 		}
-		rates := TokenRates{"claude": TokenRateConfig{InputPerMtok: new(3.0), OutputPerMtok: new(15.0)}}
+		rates := pricing.TokenRates{"claude": pricing.TokenRateConfig{InputPerMtok: new(3.0), OutputPerMtok: new(15.0)}}
 		otherKind := claude(true)
 		otherKind.AgentKind = "other-adapter"
 
 		tests := []struct {
 			name    string
 			running []orchestrator.SnapshotRunningEntry
-			rates   TokenRates
+			rates   pricing.TokenRates
 			want    *float64
 		}{
 			{"no rates", []orchestrator.SnapshotRunningEntry{claude(true)}, nil, nil},
@@ -1597,8 +1598,8 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 	t.Parallel()
 
 	fptr := func(v float64) *float64 { return &v }
-	rates := TokenRates{
-		"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
+	rates := pricing.TokenRates{
+		"claude": pricing.TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 	}
 
 	t.Run("measured session with no configured rate is counted", func(t *testing.T) {
@@ -1619,8 +1620,8 @@ func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 	t.Run("measured session under an incomplete entry is counted with no cost", func(t *testing.T) {
 		t.Parallel()
 
-		incompleteRates := TokenRates{
-			"claude-code": TokenRateConfig{OutputPerMtok: fptr(15.0)},
+		incompleteRates := pricing.TokenRates{
+			"claude-code": pricing.TokenRateConfig{OutputPerMtok: fptr(15.0)},
 		}
 		snap := orchestrator.RuntimeSnapshotResult{
 			GeneratedAt: time.Now().UTC(),
@@ -1766,7 +1767,7 @@ func TestToServedRunningEntry(t *testing.T) {
 			IssueUsage: &orchestrator.SnapshotIssueUsage{Sessions: 3, TotalTokens: 420000, UncachedTokens: 120000, ByKind: byKind},
 		}
 	}
-	workedRates := TokenRates{"claude-code": {
+	workedRates := pricing.TokenRates{"claude-code": {
 		InputPerMtok: new(3.0), OutputPerMtok: new(15.0), CacheReadPerMtok: new(0.3), CacheWritePerMtok: new(3.75),
 	}}
 	noFigure := func(usage orchestrator.SnapshotIssueUsage) func(*entry) {
@@ -1783,7 +1784,7 @@ func TestToServedRunningEntry(t *testing.T) {
 	tests := []struct {
 		name                   string
 		maxTokens, maxSessions int
-		rates                  *TokenRates
+		rates                  *pricing.TokenRates
 		edit                   func(*entry)
 		want                   map[string]any
 	}{
@@ -1833,7 +1834,7 @@ func TestToServedRunningEntry(t *testing.T) {
 			want: map[string]any{"cost_status": "unpriced", "estimated_cost_usd": nil, "issue_cost_status": "partial", "issue_estimated_cost_usd": 0.69},
 		},
 		{
-			name: "token_rates absent", rates: new(TokenRates),
+			name: "token_rates absent", rates: new(pricing.TokenRates),
 			want: map[string]any{"cost_status": "unpriced", "estimated_cost_usd": nil, "issue_cost_status": "unpriced", "issue_estimated_cost_usd": nil},
 		},
 		{

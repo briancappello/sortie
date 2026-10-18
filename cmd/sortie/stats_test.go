@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/runstats"
-	"github.com/sortie-ai/sortie/internal/server"
 )
 
 var fullCaps = persistence.RunHistoryCapabilities{
@@ -224,9 +224,9 @@ func TestStatsCostDerivation(t *testing.T) {
 	t.Run("every adapter priced", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{
-			"claude-code": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
-			"codex":       server.TokenRateConfig{InputPerMtok: new(float64(20)), OutputPerMtok: new(float64(0))},
+		rates := pricing.TokenRates{
+			"claude-code": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
+			"codex":       pricing.TokenRateConfig{InputPerMtok: new(float64(20)), OutputPerMtok: new(float64(0))},
 		}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, makeRow("claude-code", 1_000_000), makeRow("codex", 1_000_000))
@@ -247,8 +247,8 @@ func TestStatsCostDerivation(t *testing.T) {
 	t.Run("one adapter priced, one not", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{
-			"claude-code": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
+		rates := pricing.TokenRates{
+			"claude-code": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
 		}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, makeRow("claude-code", 1_000_000), makeRow("codex", 1_000_000))
@@ -273,8 +273,8 @@ func TestStatsCostDerivation(t *testing.T) {
 	t.Run("the only entry is incomplete: dash and cost-unpriced footnote, not the token_rates remedy", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{
-			"claude-code": server.TokenRateConfig{OutputPerMtok: new(float64(15))},
+		rates := pricing.TokenRates{
+			"claude-code": pricing.TokenRateConfig{OutputPerMtok: new(float64(15))},
 		}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, makeRow("claude-code", 1_000_000))
@@ -338,7 +338,7 @@ func TestStatsCostDerivation(t *testing.T) {
 	t.Run("all runs unmeasured with token_rates configured renders a dash for both figures", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{"kiro": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))}}
+		rates := pricing.TokenRates{"kiro": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))}}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, persistence.RunStatsRow{
 			Status: "succeeded", AgentAdapter: "kiro",
@@ -363,7 +363,7 @@ func TestStatsCostDerivation(t *testing.T) {
 	t.Run("a range of only ci_failed rows under a complete rate entry renders the dash line without a skip note", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{"claude-code": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))}}
+		rates := pricing.TokenRates{"claude-code": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))}}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, persistence.RunStatsRow{
 			Status:    "ci_failed",
@@ -408,7 +408,7 @@ func TestStatsCostDerivation(t *testing.T) {
 	t.Run("a range with a measured priced run renders numbers", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{"claude-code": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))}}
+		rates := pricing.TokenRates{"claude-code": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))}}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, makeRow("claude-code", 1_000_000))
 
@@ -470,9 +470,9 @@ func TestStatsTokenReporting(t *testing.T) {
 	t.Run("JSON form folds a measured, measured-zero, and unmeasured run", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{
-			"claude-code": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
-			"kiro":        server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
+		rates := pricing.TokenRates{
+			"claude-code": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
+			"kiro":        pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
 		}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, measuredUnmeasuredRows()...)
@@ -507,9 +507,9 @@ func TestStatsTokenReporting(t *testing.T) {
 	t.Run("text form labels the measured-runs lines and dashes the unmeasured adapter row", func(t *testing.T) {
 		t.Parallel()
 
-		rates := server.TokenRates{
-			"claude-code": server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
-			"kiro":        server.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
+		rates := pricing.TokenRates{
+			"claude-code": pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
+			"kiro":        pricing.TokenRateConfig{InputPerMtok: new(float64(10)), OutputPerMtok: new(float64(0))},
 		}
 		agg := runstats.New(fullCaps, statsPricer(rates))
 		addRows(t, agg, measuredUnmeasuredRows()...)

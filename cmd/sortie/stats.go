@@ -16,6 +16,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/runstats"
 	"github.com/sortie-ai/sortie/internal/server"
 	"github.com/sortie-ai/sortie/internal/workflow"
@@ -34,7 +35,7 @@ const statsChainTextRows = 20
 // statsPricer adapts the workflow's token rates to a [runstats.Pricer]. It
 // returns nil when rates holds no entry, which tells the aggregator that no
 // token_rates are configured.
-func statsPricer(rates server.TokenRates) runstats.Pricer {
+func statsPricer(rates pricing.TokenRates) runstats.Pricer {
 	if len(rates) == 0 {
 		return nil
 	}
@@ -43,7 +44,7 @@ func statsPricer(rates server.TokenRates) runstats.Pricer {
 		if !ok {
 			return nil
 		}
-		return server.EstimateCost(usage, &entry)
+		return pricing.EstimateCost(usage, &entry)
 	}
 }
 
@@ -51,7 +52,7 @@ func statsPricer(rates server.TokenRates) runstats.Pricer {
 type statsSource struct {
 	dbPath       string
 	workflowPath string
-	rates        server.TokenRates
+	rates        pricing.TokenRates
 	rateWarnings []string
 
 	// stages supplies the stage chains chain_funnels reads; nil serves an
@@ -561,8 +562,7 @@ func runStats(ctx context.Context, args []string, stdout io.Writer, stderr io.Wr
 	}
 
 	dbPath := resolveDBPath(cfg.DBPath, filepath.Dir(path))
-	rawTokenRates, tokenRatesPresent := cfg.ExtensionValue("token_rates")
-	rates, rateWarnings := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
+	rates, rateWarnings := pricing.ParseTokenRates(cfg.ExtensionValue("token_rates"))
 
 	src := statsSource{
 		dbPath:       dbPath,

@@ -18,6 +18,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server"
 	"github.com/sortie-ai/sortie/internal/workflow"
 )
@@ -168,7 +169,7 @@ func statsSourceFromWorkflow(t *testing.T, wfPath, dbPath string) statsSource {
 		t.Fatalf("NewServiceConfig: %v", err)
 	}
 	rawRates, present := cfg.ExtensionValue("token_rates")
-	rates, rateWarnings := server.ParseTokenRates(rawRates, present)
+	rates, rateWarnings := pricing.ParseTokenRates(rawRates, present)
 	return statsSource{dbPath: dbPath, workflowPath: wfPath, rates: rates, rateWarnings: rateWarnings}
 }
 

@@ -117,8 +117,6 @@ func hasWarnCheck(t *testing.T, result PreflightResult, check string) bool {
 	return false
 }
 
-// requireWarnCheck fails the test if the result does not contain a
-// warning with the given check name.
 func requireWarnCheck(t *testing.T, result PreflightResult, check string) {
 	t.Helper()
 	if !hasWarnCheck(t, result, check) {
@@ -126,8 +124,6 @@ func requireWarnCheck(t *testing.T, result PreflightResult, check string) {
 	}
 }
 
-// requireNoWarnCheck fails the test if the result contains a warning
-// with the given check name.
 func requireNoWarnCheck(t *testing.T, result PreflightResult, check string) {
 	t.Helper()
 	if hasWarnCheck(t, result, check) {
@@ -1272,12 +1268,6 @@ func TestValidateDispatchConfig_NoToolChannelWarning(t *testing.T) {
 	})
 }
 
-// TestValidateDispatchConfig_UsageReportingWarnings covers both
-// preflight diagnostics a kind resolving to no usage figure draws:
-// agent.kind.no_usage_reporting when agent.max_tokens is set, and
-// agent.kind.no_cost_estimate when token_rates prices that kind. Each
-// arm's negative control proves the warning is scoped to the kind
-// under test, not to the setting's mere presence.
 func TestValidateDispatchConfig_UsageReportingWarnings(t *testing.T) {
 	t.Parallel()
 
@@ -1295,130 +1285,90 @@ func TestValidateDispatchConfig_UsageReportingWarnings(t *testing.T) {
 			UsageAttribution: registry.UsageAttributionPerModel,
 		}, true
 	}
+	completeEntry := map[string]any{"input_per_mtok": 3.0, "output_per_mtok": 15.0}
 
-	t.Run("agent.max_tokens set against a kind resolving to no usage produces the warning", func(t *testing.T) {
-		t.Parallel()
+	tests := []struct {
+		name      string
+		maxTokens int
+		rates     map[string]any
+		meta      func(string) (registry.AgentMeta, bool)
+		check     string
+		wantWarn  bool
+	}{
+		{
+			name:      "agent.max_tokens set against a kind resolving to no usage warns",
+			maxTokens: 50000,
+			meta:      noneMeta,
+			check:     "agent.kind.no_usage_reporting",
+			wantWarn:  true,
+		},
+		{
+			name:      "a reporting kind with agent.max_tokens set draws no warning",
+			maxTokens: 50000,
+			meta:      reportingMeta,
+			check:     "agent.kind.no_usage_reporting",
+		},
+		{
+			name:     "complete token_rates entry for a kind resolving to no usage warns",
+			rates:    map[string]any{"test-agent": completeEntry},
+			meta:     noneMeta,
+			check:    "agent.kind.no_cost_estimate",
+			wantWarn: true,
+		},
+		{
+			name:  "complete token_rates entry for another kind draws no warning",
+			rates: map[string]any{"some-other-kind": completeEntry},
+			meta:  noneMeta,
+			check: "agent.kind.no_cost_estimate",
+		},
+		{
+			name:  "complete token_rates entry for a reporting kind draws no warning",
+			rates: map[string]any{"test-agent": completeEntry},
+			meta:  reportingMeta,
+			check: "agent.kind.no_cost_estimate",
+		},
+		{
+			name:  "incomplete token_rates entry prices nothing and draws no warning",
+			rates: map[string]any{"test-agent": map[string]any{"input_per_mtok": 3.0}},
+			meta:  noneMeta,
+			check: "agent.kind.no_cost_estimate",
+		},
+	}
 
-		params := validPreflightParams()
-		params.ConfigFunc = func() config.ServiceConfig {
-			return config.ServiceConfig{
-				Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
-				Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent", MaxTokens: 50000},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := validPreflightParams()
+			params.ConfigFunc = func() config.ServiceConfig {
+				cfg := config.ServiceConfig{
+					Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
+					Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent", MaxTokens: tt.maxTokens},
+				}
+				if tt.rates != nil {
+					cfg.SetExtensionSection("token_rates", tt.rates)
+				}
+				return cfg
 			}
-		}
-		params.AgentRegistry = &stubAgentRegistry{
-			getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
-			metaFunc: noneMeta,
-		}
-
-		result := ValidateDispatchConfig(params)
-
-		requireWarnCheck(t, result, "agent.kind.no_usage_reporting")
-		if !strings.Contains(warnMessageForCheck(t, result, "agent.kind.no_usage_reporting"), "test-agent") {
-			t.Errorf("warning message does not name the agent kind %q", "test-agent")
-		}
-	})
-
-	t.Run("a reporting kind with agent.max_tokens set draws no warning", func(t *testing.T) {
-		t.Parallel()
-
-		params := validPreflightParams()
-		params.ConfigFunc = func() config.ServiceConfig {
-			return config.ServiceConfig{
-				Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
-				Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent", MaxTokens: 50000},
+			params.AgentRegistry = &stubAgentRegistry{
+				getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
+				metaFunc: tt.meta,
 			}
-		}
-		params.AgentRegistry = &stubAgentRegistry{
-			getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
-			metaFunc: reportingMeta,
-		}
 
-		result := ValidateDispatchConfig(params)
+			result := ValidateDispatchConfig(params)
 
-		requireNoWarnCheck(t, result, "agent.kind.no_usage_reporting")
-	})
-
-	t.Run("token_rates entry keyed to a kind resolving to no usage produces the warning", func(t *testing.T) {
-		t.Parallel()
-
-		params := validPreflightParams()
-		params.ConfigFunc = func() config.ServiceConfig {
-			cfg := config.ServiceConfig{
-				Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
-				Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent"},
+			if !tt.wantWarn {
+				requireNoWarnCheck(t, result, tt.check)
+				return
 			}
-			cfg.SetExtensionSection("token_rates", map[string]any{
-				"test-agent": map[string]any{"input_per_mtok": 3.0},
-			})
-			return cfg
-		}
-		params.AgentRegistry = &stubAgentRegistry{
-			getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
-			metaFunc: noneMeta,
-		}
-
-		result := ValidateDispatchConfig(params)
-
-		requireWarnCheck(t, result, "agent.kind.no_cost_estimate")
-		if !strings.Contains(warnMessageForCheck(t, result, "agent.kind.no_cost_estimate"), "test-agent") {
-			t.Errorf("warning message does not name the agent kind %q", "test-agent")
-		}
-	})
-
-	t.Run("token_rates pricing only other kinds while this kind resolves to no usage draws no warning", func(t *testing.T) {
-		t.Parallel()
-
-		// The noise control: the section's mere presence must not
-		// trigger the warning for a kind it does not price.
-		params := validPreflightParams()
-		params.ConfigFunc = func() config.ServiceConfig {
-			cfg := config.ServiceConfig{
-				Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
-				Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent"},
+			requireWarnCheck(t, result, tt.check)
+			if !strings.Contains(warnMessageForCheck(t, result, tt.check), "test-agent") {
+				t.Errorf("warning %q does not name the agent kind %q", tt.check, "test-agent")
 			}
-			cfg.SetExtensionSection("token_rates", map[string]any{
-				"some-other-kind": map[string]any{"input_per_mtok": 3.0},
-			})
-			return cfg
-		}
-		params.AgentRegistry = &stubAgentRegistry{
-			getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
-			metaFunc: noneMeta,
-		}
-
-		result := ValidateDispatchConfig(params)
-
-		requireNoWarnCheck(t, result, "agent.kind.no_cost_estimate")
-	})
-
-	t.Run("token_rates entry keyed to a reporting kind draws no warning", func(t *testing.T) {
-		t.Parallel()
-
-		params := validPreflightParams()
-		params.ConfigFunc = func() config.ServiceConfig {
-			cfg := config.ServiceConfig{
-				Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
-				Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent"},
-			}
-			cfg.SetExtensionSection("token_rates", map[string]any{
-				"test-agent": map[string]any{"input_per_mtok": 3.0},
-			})
-			return cfg
-		}
-		params.AgentRegistry = &stubAgentRegistry{
-			getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
-			metaFunc: reportingMeta,
-		}
-
-		result := ValidateDispatchConfig(params)
-
-		requireNoWarnCheck(t, result, "agent.kind.no_cost_estimate")
-	})
+		})
+	}
 }
 
-// warnMessageForCheck returns the message of the first warning
-// carrying check, failing the test if none is present.
 func warnMessageForCheck(t *testing.T, result PreflightResult, check string) string {
 	t.Helper()
 	for _, w := range result.Warnings {

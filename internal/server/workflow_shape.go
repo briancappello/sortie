@@ -1,6 +1,9 @@
 package server
 
-import "github.com/sortie-ai/sortie/internal/orchestrator"
+import (
+	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
+)
 
 // configResponse is the JSON wire format of the config member of
 // GET /api/v1/state.
@@ -22,7 +25,7 @@ type tokenRateResponse struct {
 
 // toConfigResponse joins the shape with the rates the process started with.
 // The rates serialize as null when none are configured.
-func toConfigResponse(shape orchestrator.WorkflowShape, rates TokenRates) *configResponse {
+func toConfigResponse(shape orchestrator.WorkflowShape, rates pricing.TokenRates) *configResponse {
 	resp := &configResponse{WorkflowShape: shape}
 	if len(rates) == 0 {
 		return resp
@@ -35,7 +38,7 @@ func toConfigResponse(shape orchestrator.WorkflowShape, rates TokenRates) *confi
 			OutputPerMtok:     rate.OutputPerMtok,
 			CacheReadPerMtok:  rate.CacheReadPerMtok,
 			CacheWritePerMtok: rate.CacheWritePerMtok,
-			Complete:          rate.InputPerMtok != nil && rate.OutputPerMtok != nil,
+			Complete:          rate.Complete(),
 		}
 	}
 	return resp

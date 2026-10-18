@@ -16,9 +16,9 @@ import (
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
-	"github.com/sortie-ai/sortie/internal/server"
 	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
@@ -53,7 +53,7 @@ var workflowAdvisories workflow.AdvisoryFunc = func(cfg config.ServiceConfig) []
 	advisories := orchestrator.AgentKindDeprecations(cfg, registry.Agents.Meta)
 	advisories = append(advisories, orchestrator.AgentKindEffortAdvisories(cfg, registry.Agents.Meta)...)
 	advisories = append(advisories, orchestrator.DispatchRuleEffortAdvisories(cfg)...)
-	advisories = append(advisories, server.TokenRateAdvisories(cfg)...)
+	advisories = append(advisories, pricing.TokenRateAdvisories(cfg)...)
 	advisories = append(advisories, orchestrator.StageChainAdvisories(cfg)...)
 	return append(advisories, route.Advisories(cfg)...)
 }
