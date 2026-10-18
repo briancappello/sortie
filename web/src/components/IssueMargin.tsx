@@ -376,13 +376,14 @@ function BudgetMeter({ name, line, format }: BudgetMeterProps) {
 }
 
 function noTokenBudgetText(tokens: BudgetLine & { complete: boolean }): string | undefined {
-  if (tokens.used !== null && tokens.limit !== null && tokens.limit > 0) {
-    return undefined;
-  }
   if (!tokens.limitKnown) {
     return undefined;
   }
-  return tokens.used === null ? "No token budget: tokens not reported." : "No token budget.";
+  const hasBudget = tokens.limit !== null && tokens.limit > 0;
+  if (tokens.used === null) {
+    return hasBudget ? "Tokens not reported." : "No token budget: tokens not reported.";
+  }
+  return hasBudget ? undefined : "No token budget.";
 }
 
 function costShares(runs: readonly RunResponse[], chained: boolean): [string, number | null][] {
@@ -424,7 +425,7 @@ function BudgetPanel({ detail, config, chained }: BudgetPanelProps) {
         ) : (
           <BudgetMeter name="Sessions" line={sessions} format={fmtCount} />
         )}
-        <BudgetMeter name="Tokens and cache reads" line={tokens} format={fmtTokens} />
+        <BudgetMeter name="Tokens" line={tokens} format={fmtTokens} />
         {note === undefined ? undefined : <p className="text-body-sm text-ink-muted">{note}</p>}
       </div>
       {cost === null ? undefined : (
@@ -444,15 +445,16 @@ function BudgetPanel({ detail, config, chained }: BudgetPanelProps) {
 }
 
 function agentOf(detail: IssueDetailResponse): string | undefined {
+  const kind = detail.running?.agent_kind ?? detail.history?.runs?.[0]?.agent_kind;
+  return kind ? agentLabel(kind) : undefined;
+}
+
+function modelOf(detail: IssueDetailResponse): string {
   const { running } = detail;
   const last = detail.history?.runs?.[0];
-  const kind = running?.agent_kind ?? last?.agent_kind;
   const model =
     running?.model_name || running?.configured_model || last?.model_name || last?.configured_model;
-  if (!kind) {
-    return undefined;
-  }
-  return model ? `${agentLabel(kind)} · ${modelLabel(model)}` : agentLabel(kind);
+  return model ? modelLabel(model) : "agent default";
 }
 
 function ruleOf(detail: IssueDetailResponse): string | undefined {
@@ -491,6 +493,7 @@ function RoutePanel({ detail, position }: RoutePanelProps) {
           </>
         )}
         {agent === undefined ? undefined : <Pair label="Agent">{agent}</Pair>}
+        {agent === undefined ? undefined : <Pair label="Model">{modelOf(detail)}</Pair>}
       </Pairs>
     </Panel>
   );

@@ -624,7 +624,6 @@ export interface RunningEntryResponse {
   unmeasured_sessions: number | null;
   used_tokens: number | null;
   used_tokens_complete: boolean;
-  issue_uncached_tokens: number | null;
   budget_tokens: number | null;
   estimated_cost_usd: number | null;
   cost_status: string;
