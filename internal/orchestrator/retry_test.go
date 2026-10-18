@@ -186,6 +186,10 @@ func (m *mockRetryTracker) FetchIssuesByStates(context.Context, []string) ([]dom
 	panic("FetchIssuesByStates must not be called by HandleRetryTimer")
 }
 
+func (m *mockRetryTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (m *mockRetryTracker) FetchIssueStatesByIDs(context.Context, []string) (map[string]string, error) {
 	panic("FetchIssueStatesByIDs must not be called by HandleRetryTimer")
 }

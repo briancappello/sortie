@@ -208,30 +208,57 @@ func (a *FileAdapter) FetchIssueStatesByIDs(_ context.Context, issueIDs []string
 		return map[string]string{}, nil
 	}
 
-	states := make(map[string]string, len(issueIDs))
+	var states map[string]string
 	err := trackermetrics.Track(a.metrics, "fetch_states_by_ids", func() error {
-		raws, err := loadIssues(a.path)
+		reads, err := a.readStatesAndLabels(issueIDs)
 		if err != nil {
 			return err
 		}
-
-		a.mu.RLock()
-		defer a.mu.RUnlock()
-
-		wanted := make(map[string]bool, len(issueIDs))
-		for _, id := range issueIDs {
-			wanted[id] = true
-		}
-
-		for _, raw := range raws {
-			if wanted[raw.ID] {
-				raw = a.applyOverride(raw)
-				states[raw.ID] = raw.State
-			}
-		}
+		states = issuekit.StatesOf(reads)
 		return nil
 	})
 	return states, err
+}
+
+// FetchIssueStatesAndLabelsByIDs returns the current state and labels for
+// each requested issue ID, with the in-memory state and label overlays
+// applied. Issues not found in the file are omitted from the map.
+func (a *FileAdapter) FetchIssueStatesAndLabelsByIDs(_ context.Context, issueIDs []string) (map[string]domain.IssueStateAndLabels, error) {
+	if len(issueIDs) == 0 {
+		return map[string]domain.IssueStateAndLabels{}, nil
+	}
+
+	var reads map[string]domain.IssueStateAndLabels
+	err := trackermetrics.Track(a.metrics, "fetch_states_by_ids", func() error {
+		var err error
+		reads, err = a.readStatesAndLabels(issueIDs)
+		return err
+	})
+	return reads, err
+}
+
+func (a *FileAdapter) readStatesAndLabels(issueIDs []string) (map[string]domain.IssueStateAndLabels, error) {
+	raws, err := loadIssues(a.path)
+	if err != nil {
+		return nil, err
+	}
+
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	wanted := make(map[string]bool, len(issueIDs))
+	for _, id := range issueIDs {
+		wanted[id] = true
+	}
+
+	reads := make(map[string]domain.IssueStateAndLabels, len(issueIDs))
+	for _, raw := range raws {
+		if wanted[raw.ID] {
+			raw = a.applyOverride(raw)
+			reads[raw.ID] = domain.IssueStateAndLabels{State: raw.State, Labels: issuekit.NormalizeLabels(raw.Labels)}
+		}
+	}
+	return reads, nil
 }
 
 // FetchIssueStatesByIdentifiers returns the current state for each

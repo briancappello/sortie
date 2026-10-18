@@ -30,6 +30,16 @@ func NormalizeLabels(in []string) []string {
 	return out
 }
 
+// StatesOf returns the state of each entry of reads, keyed as reads is, as a
+// non-nil map.
+func StatesOf(reads map[string]domain.IssueStateAndLabels) map[string]string {
+	states := make(map[string]string, len(reads))
+	for id, read := range reads {
+		states[id] = read.State
+	}
+	return states
+}
+
 // ParsePriorityIntStrict parses a JSON integer literal and returns nil for all other JSON values.
 func ParsePriorityIntStrict(raw json.RawMessage) *int {
 	text := strings.TrimSpace(string(raw))

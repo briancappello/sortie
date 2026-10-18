@@ -372,6 +372,9 @@ func (f *dryRunFakeTracker) FetchIssuesByStates(context.Context, []string) ([]do
 func (f *dryRunFakeTracker) FetchIssueStatesByIDs(context.Context, []string) (map[string]string, error) {
 	return nil, nil
 }
+func (f *dryRunFakeTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
 func (f *dryRunFakeTracker) FetchIssueStatesByIdentifiers(context.Context, []string) (map[string]string, error) {
 	return nil, nil
 }

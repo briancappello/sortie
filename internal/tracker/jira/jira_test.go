@@ -918,6 +918,33 @@ func TestFetchIssueStatesByIDs_ResultKeyedByID(t *testing.T) {
 	}
 }
 
+func TestFetchIssueStatesAndLabelsByIDs_RequestsAndReturnsLabels(t *testing.T) {
+	t.Parallel()
+
+	respBytes, _ := json.Marshal(searchResponse{Issues: []jiraIssue{
+		{ID: "10001", Key: "PROJ-1", Fields: jiraFields{Status: &jiraStatus{Name: "Parked"}, Labels: []string{"Needs-Review", "backend"}}},
+	}})
+	var gotFields atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotFields.Store(r.URL.Query().Get("fields"))
+		w.Write(respBytes) //nolint:errcheck // test helper
+	}))
+	defer srv.Close()
+
+	a := mustAdapter(t, validConfig(srv.URL))
+	got, err := a.FetchIssueStatesAndLabelsByIDs(context.Background(), []string{"10001"})
+	if err != nil {
+		t.Fatalf("FetchIssueStatesAndLabelsByIDs: %v", err)
+	}
+
+	if fields, _ := gotFields.Load().(string); fields != "status,labels" {
+		t.Errorf("search fields = %q, want %q", fields, "status,labels")
+	}
+	if labels, want := got["10001"].Labels, []string{"needs-review", "backend"}; !slices.Equal(labels, want) {
+		t.Errorf("FetchIssueStatesAndLabelsByIDs labels = %v, want %v", labels, want)
+	}
+}
+
 func TestFetchIssueStatesByIdentifiers_Empty(t *testing.T) {
 	t.Parallel()
 

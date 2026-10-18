@@ -2259,6 +2259,38 @@ func TestFetchIssueStatesByIDs_304_DerivedUnderReloadedStates(t *testing.T) {
 	}
 }
 
+func TestFetchIssueStatesAndLabelsByIDs_304_KeepsFirstReadLabels(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("ETag", `"v1"`)
+			_, _ = io.WriteString(w, issueJSON(42, "Parked"))
+			return
+		}
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = io.WriteString(w, `{"number":42,"state":"open","labels":[]}`)
+	}))
+	defer srv.Close()
+	a := mustAdapter(t, validConfig(srv.URL))
+	if _, err := a.FetchIssueStatesAndLabelsByIDs(context.Background(), []string{"42"}); err != nil {
+		t.Fatalf("first FetchIssueStatesAndLabelsByIDs: %v", err)
+	}
+
+	got, err := a.FetchIssueStatesAndLabelsByIDs(context.Background(), []string{"42"})
+
+	if err != nil {
+		t.Fatalf("second FetchIssueStatesAndLabelsByIDs: %v", err)
+	}
+	if want := []string{"parked"}; !slices.Equal(got["42"].Labels, want) {
+		t.Errorf("FetchIssueStatesAndLabelsByIDs([42]) labels after a 304 = %v, want %v", got["42"].Labels, want)
+	}
+}
+
 func TestFetchIssueStatesByIDs_ConditionalRequest_200_UpdatesCache(t *testing.T) {
 	t.Parallel()
 

@@ -85,6 +85,10 @@ func (tr *notifyE2ETracker) FetchIssueStatesByIDs(_ context.Context, ids []strin
 	return out, nil
 }
 
+func (tr *notifyE2ETracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (tr *notifyE2ETracker) FetchIssueStatesByIdentifiers(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }

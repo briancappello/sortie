@@ -31,6 +31,9 @@ func (fakeTrackerAdapter) FetchIssuesByStates(context.Context, []string) ([]doma
 func (fakeTrackerAdapter) FetchIssueStatesByIDs(context.Context, []string) (map[string]string, error) {
 	return nil, nil
 }
+func (fakeTrackerAdapter) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
 func (fakeTrackerAdapter) FetchIssueStatesByIdentifiers(context.Context, []string) (map[string]string, error) {
 	return nil, nil
 }

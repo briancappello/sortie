@@ -585,14 +585,30 @@ func (a *GitHubAdapter) fetchClosedIssuesByLabel(ctx context.Context, label stri
 func (a *GitHubAdapter) FetchIssueStatesByIDs(ctx context.Context, issueIDs []string) (map[string]string, error) {
 	var states map[string]string
 	err := trackermetrics.Track(a.metrics, "fetch_states_by_ids", func() error {
-		fetchedStates, err := a.fetchStatesByNumbers(ctx, issueIDs)
+		reads, err := a.fetchStatesByNumbers(ctx, issueIDs)
 		if err != nil {
 			return err
 		}
-		states = fetchedStates
+		states = issuekit.StatesOf(reads)
 		return nil
 	})
 	return states, err
+}
+
+// FetchIssueStatesAndLabelsByIDs returns the current state and labels for
+// each requested issue ID. A conditional-request hit reports the labels the
+// cache holds for the issue. The query filter is not applied.
+func (a *GitHubAdapter) FetchIssueStatesAndLabelsByIDs(ctx context.Context, issueIDs []string) (map[string]domain.IssueStateAndLabels, error) {
+	var reads map[string]domain.IssueStateAndLabels
+	err := trackermetrics.Track(a.metrics, "fetch_states_by_ids", func() error {
+		fetched, err := a.fetchStatesByNumbers(ctx, issueIDs)
+		if err != nil {
+			return err
+		}
+		reads = fetched
+		return nil
+	})
+	return reads, err
 }
 
 // FetchIssueStatesByIdentifiers returns the current state for each
@@ -601,23 +617,23 @@ func (a *GitHubAdapter) FetchIssueStatesByIDs(ctx context.Context, issueIDs []st
 func (a *GitHubAdapter) FetchIssueStatesByIdentifiers(ctx context.Context, identifiers []string) (map[string]string, error) {
 	var states map[string]string
 	err := trackermetrics.Track(a.metrics, "fetch_states_by_identifiers", func() error {
-		fetchedStates, err := a.fetchStatesByNumbers(ctx, identifiers)
+		reads, err := a.fetchStatesByNumbers(ctx, identifiers)
 		if err != nil {
 			return err
 		}
-		states = fetchedStates
+		states = issuekit.StatesOf(reads)
 		return nil
 	})
 	return states, err
 }
 
-func (a *GitHubAdapter) fetchStatesByNumbers(ctx context.Context, numbers []string) (map[string]string, error) {
+func (a *GitHubAdapter) fetchStatesByNumbers(ctx context.Context, numbers []string) (map[string]domain.IssueStateAndLabels, error) {
 	if len(numbers) == 0 {
-		return map[string]string{}, nil
+		return map[string]domain.IssueStateAndLabels{}, nil
 	}
 
 	snapshot := a.model.Snapshot()
-	states := make(map[string]string, len(numbers))
+	reads := make(map[string]domain.IssueStateAndLabels, len(numbers))
 	for _, num := range numbers {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -636,7 +652,10 @@ func (a *GitHubAdapter) fetchStatesByNumbers(ctx context.Context, numbers []stri
 
 		if notModified && cacheHit {
 			a.etagCache.touch(path)
-			states[num] = a.model.Derive(snapshot, num, cachedLabels, cachedClosed)
+			reads[num] = domain.IssueStateAndLabels{
+				State:  a.model.Derive(snapshot, num, cachedLabels, cachedClosed),
+				Labels: issuekit.NormalizeLabels(cachedLabels),
+			}
 			continue
 		}
 
@@ -658,10 +677,13 @@ func (a *GitHubAdapter) fetchStatesByNumbers(ctx context.Context, numbers []stri
 			a.etagCache.put(path, responseETag, labels, closed)
 		}
 
-		states[num] = a.model.Derive(snapshot, num, labels, closed)
+		reads[num] = domain.IssueStateAndLabels{
+			State:  a.model.Derive(snapshot, num, labels, closed),
+			Labels: issuekit.NormalizeLabels(labels),
+		}
 	}
 
-	return states, nil
+	return reads, nil
 }
 
 // FetchIssueComments returns comments for the specified issue.

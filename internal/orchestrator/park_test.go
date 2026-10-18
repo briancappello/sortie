@@ -338,139 +338,107 @@ func TestParkSurvivesRestart(t *testing.T) {
 	}
 }
 
-// The release pass reads the state of every parked issue the tick's
-// candidate slice does not carry, through one batched tracker call, and
-// applies the state rule to whatever it returns.
+func newParkedOrchestrator(state *State, tracker domain.TrackerAdapter) *Orchestrator {
+	return NewOrchestrator(OrchestratorParams{
+		State:           state,
+		Logger:          discardLogger(),
+		TrackerAdapter:  tracker,
+		AgentAdapter:    &mockAgentAdapter{},
+		WorkflowManager: &stubWorkflowManager{config: config.ServiceConfig{}},
+		Store:           &stubStore{},
+	})
+}
 
 func TestRefreshParkedIssuesNonCandidateStateRead(t *testing.T) {
 	t.Parallel()
 
-	t.Run("state differs from parked_state unparks with trigger state_changed", func(t *testing.T) {
-		t.Parallel()
+	const parkedID, candidateID = "MISS-1", "CAND-1"
+	candidates := []domain.Issue{{ID: candidateID, Identifier: "PROJ-CAND-1", Title: "T", State: "To Do"}}
+	confirmed := func() *ParkedEntry {
+		return &ParkedEntry{Identifier: "PROJ-MISS-1", Reason: parkReasonAgentBlocked, ParkedState: "In Progress", Label: "needs-human", LabelApplied: true}
+	}
 
-		const parkedID, candidateID = "MISS-1", "CAND-1"
-		state := NewState(1000, 1, 0, nil, AgentTotals{})
-		state.Parked[parkedID] = &ParkedEntry{Identifier: "PROJ-MISS-1", Reason: parkReasonAgentBlocked, ParkedState: "In Progress"}
+	tests := []struct {
+		name       string
+		reads      map[string]domain.IssueStateAndLabels
+		err        error
+		wantParked bool
+	}{
+		{
+			name:  "state differs from parked_state unparks",
+			reads: map[string]domain.IssueStateAndLabels{parkedID: {State: "Done", Labels: []string{"needs-human"}}},
+		},
+		{
+			name:       "same state and label leaves the park",
+			reads:      map[string]domain.IssueStateAndLabels{parkedID: {State: "In Progress", Labels: []string{"needs-human"}}},
+			wantParked: true,
+		},
+		{
+			name:       "issue omitted from the returned map leaves the park",
+			reads:      map[string]domain.IssueStateAndLabels{},
+			wantParked: true,
+		},
+		{
+			name:       "read error leaves the park in place",
+			err:        errors.New("tracker unavailable"),
+			wantParked: true,
+		},
+	}
 
-		var fetchedIDs []string
-		tracker := &mockTrackerAdapter{
-			fetchStatesFn: func(_ context.Context, ids []string) (map[string]string, error) {
-				fetchedIDs = append([]string(nil), ids...)
-				return map[string]string{parkedID: "Done"}, nil
-			},
-		}
-		store := &stubStore{}
-		orchestrator := NewOrchestrator(OrchestratorParams{
-			State:           state,
-			Logger:          discardLogger(),
-			TrackerAdapter:  tracker,
-			AgentAdapter:    &mockAgentAdapter{},
-			WorkflowManager: &stubWorkflowManager{config: config.ServiceConfig{}},
-			Store:           store,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := NewState(1000, 1, 0, nil, AgentTotals{})
+			state.Parked[parkedID] = confirmed()
+			var fetchedIDs []string
+			tracker := &mockTrackerAdapter{
+				fetchStatesAndLabelsFn: func(_ context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error) {
+					fetchedIDs = slices.Clone(ids)
+					return tt.reads, tt.err
+				},
+			}
+
+			newParkedOrchestrator(state, tracker).refreshParkedIssues(context.Background(), candidates, nil)
+
+			if !slices.Equal(fetchedIDs, []string{parkedID}) {
+				t.Errorf("FetchIssueStatesAndLabelsByIDs called with %v, want [%s] only", fetchedIDs, parkedID)
+			}
+			if _, parked := state.Parked[parkedID]; parked != tt.wantParked {
+				t.Errorf("parked after refreshParkedIssues = %v, want %v", parked, tt.wantParked)
+			}
 		})
-		candidates := []domain.Issue{{ID: candidateID, Identifier: "PROJ-CAND-1", Title: "T", State: "To Do"}}
+	}
 
-		orchestrator.refreshParkedIssues(context.Background(), candidates, nil)
-
-		// The regression this guards against: a read that fetches every
-		// parked issue on every tick instead of only the ones the
-		// candidate slice did not carry.
-		if !slices.Equal(fetchedIDs, []string{parkedID}) {
-			t.Errorf("FetchIssueStatesByIDs called with %v, want [%s] only", fetchedIDs, parkedID)
-		}
-		if _, ok := state.Parked[parkedID]; ok {
-			t.Error("issue remains parked after the non-candidate read reported a different state")
-		}
-	})
-
-	t.Run("same state leaves the park", func(t *testing.T) {
+	t.Run("parking label is observed on a read of an issue the candidates omit", func(t *testing.T) {
 		t.Parallel()
 
-		const parkedID = "MISS-2"
 		state := NewState(1000, 1, 0, nil, AgentTotals{})
-		state.Parked[parkedID] = &ParkedEntry{Identifier: "PROJ-MISS-2", Reason: parkReasonAgentBlocked, ParkedState: "In Progress"}
-		tracker := &mockTrackerAdapter{
-			fetchStatesFn: func(_ context.Context, _ []string) (map[string]string, error) {
-				return map[string]string{parkedID: "In Progress"}, nil
-			},
-		}
-		store := &stubStore{}
-		orchestrator := NewOrchestrator(OrchestratorParams{
-			State:           state,
-			Logger:          discardLogger(),
-			TrackerAdapter:  tracker,
-			AgentAdapter:    &mockAgentAdapter{},
-			WorkflowManager: &stubWorkflowManager{config: config.ServiceConfig{}},
-			Store:           store,
-		})
-
-		orchestrator.refreshParkedIssues(context.Background(), nil, nil)
-
-		if _, ok := state.Parked[parkedID]; !ok {
-			t.Error("issue was unparked despite an unchanged observed state")
-		}
-		if len(store.deletedParkedIDs) != 0 {
-			t.Errorf("DeleteParkedIssue calls = %v, want none", store.deletedParkedIDs)
-		}
-	})
-
-	t.Run("issue omitted from the returned map leaves the park", func(t *testing.T) {
-		t.Parallel()
-
-		const parkedID = "MISS-3"
-		state := NewState(1000, 1, 0, nil, AgentTotals{})
-		state.Parked[parkedID] = &ParkedEntry{Identifier: "PROJ-MISS-3", Reason: parkReasonAgentBlocked, ParkedState: "In Progress"}
-		tracker := &mockTrackerAdapter{
-			fetchStatesFn: func(_ context.Context, _ []string) (map[string]string, error) {
-				return map[string]string{}, nil
-			},
-		}
-		store := &stubStore{}
-		orchestrator := NewOrchestrator(OrchestratorParams{
-			State:           state,
-			Logger:          discardLogger(),
-			TrackerAdapter:  tracker,
-			AgentAdapter:    &mockAgentAdapter{},
-			WorkflowManager: &stubWorkflowManager{config: config.ServiceConfig{}},
-			Store:           store,
-		})
-
-		orchestrator.refreshParkedIssues(context.Background(), nil, nil)
-
-		if _, ok := state.Parked[parkedID]; !ok {
-			t.Error("issue was unparked despite being omitted from the state-read response")
-		}
-	})
-
-	t.Run("read error leaves every park in place and logs at warn", func(t *testing.T) {
-		t.Parallel()
-
-		const parkedID1, parkedID2 = "ERR-1", "ERR-2"
-		state := NewState(1000, 1, 0, nil, AgentTotals{})
-		state.Parked[parkedID1] = &ParkedEntry{Identifier: "PROJ-ERR-1", Reason: parkReasonAgentBlocked, ParkedState: "In Progress"}
-		state.Parked[parkedID2] = &ParkedEntry{Identifier: "PROJ-ERR-2", Reason: parkReasonHandoffAbsence, ParkedState: "In Progress"}
+		entry := &ParkedEntry{Identifier: "PROJ-MISS-1", Reason: parkReasonAgentBlocked, ParkedState: "In Progress", Label: "needs-human"}
+		state.Parked[parkedID] = entry
+		var labels []string
 		tracker := &mockTrackerAdapter{
 			fetchStatesFn: func(context.Context, []string) (map[string]string, error) {
-				return nil, errors.New("tracker unavailable")
+				return map[string]string{parkedID: "In Progress"}, nil
+			},
+			fetchStatesAndLabelsFn: func(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+				return map[string]domain.IssueStateAndLabels{parkedID: {State: "In Progress", Labels: labels}}, nil
 			},
 		}
-		store := &stubStore{}
-		orchestrator := NewOrchestrator(OrchestratorParams{
-			State:           state,
-			Logger:          discardLogger(),
-			TrackerAdapter:  tracker,
-			AgentAdapter:    &mockAgentAdapter{},
-			WorkflowManager: &stubWorkflowManager{config: config.ServiceConfig{}},
-			Store:           store,
-		})
+		orchestrator := newParkedOrchestrator(state, tracker)
 
-		orchestrator.refreshParkedIssues(context.Background(), nil, nil)
+		labels = []string{"needs-human"}
+		orchestrator.refreshParkedIssues(context.Background(), candidates, nil)
 
-		if _, ok := state.Parked[parkedID1]; !ok {
-			t.Error("park released after a failed non-candidate state read")
+		if state.Parked[parkedID] != entry || !entry.LabelApplied {
+			t.Fatalf("after the read carrying the label: parked = %v, LabelApplied = %v, want true, true", state.Parked[parkedID] == entry, entry.LabelApplied)
 		}
-		if _, ok := state.Parked[parkedID2]; !ok {
-			t.Error("park released after a failed non-candidate state read")
+
+		labels = nil
+		orchestrator.refreshParkedIssues(context.Background(), candidates, nil)
+
+		if _, parked := state.Parked[parkedID]; parked {
+			t.Error("park remains after a read of the confirmed issue without its label")
 		}
 	})
 }

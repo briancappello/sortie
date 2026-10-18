@@ -97,18 +97,19 @@ var contractBanTable = map[string]string{
 // registers a tracker kind. FetchIssueBlockers is a domain.BlockerReader
 // method; the rest are domain.TrackerAdapter methods.
 var contractTrackerAdapterMethods = map[string]bool{
-	"FetchCandidateIssues":          true,
-	"FetchIssueByID":                true,
-	"FetchIssuesByStates":           true,
-	"FetchIssueStatesByIDs":         true,
-	"FetchIssueStatesByIdentifiers": true,
-	"FetchIssueComments":            true,
-	"FetchIssueBlockers":            true,
-	"TransitionIssue":               true,
-	"CommentIssue":                  true,
-	"CommentIssueWithLiteral":       true,
-	"AddLabel":                      true,
-	"RemoveLabel":                   true,
+	"FetchCandidateIssues":           true,
+	"FetchIssueByID":                 true,
+	"FetchIssuesByStates":            true,
+	"FetchIssueStatesByIDs":          true,
+	"FetchIssueStatesAndLabelsByIDs": true,
+	"FetchIssueStatesByIdentifiers":  true,
+	"FetchIssueComments":             true,
+	"FetchIssueBlockers":             true,
+	"TransitionIssue":                true,
+	"CommentIssue":                   true,
+	"CommentIssueWithLiteral":        true,
+	"AddLabel":                       true,
+	"RemoveLabel":                    true,
 }
 
 // contractRule names one of the syntactic rules the checker enforces.

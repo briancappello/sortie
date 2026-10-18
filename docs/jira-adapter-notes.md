@@ -32,7 +32,7 @@ Every interpolated project key, state name, and issue key passes through a quote
 
 ## The reconciliation queries ignore query_filter on purpose
 
-`tracker.query_filter` is a raw JQL fragment the adapter neither parses nor validates. It is ANDed into the candidate and by-states queries and deliberately left out of the two batch state lookups: those issues already passed filtering at dispatch time, and re-applying the filter would make a running session invisible the moment an operator narrowed the fragment.
+`tracker.query_filter` is a raw JQL fragment the adapter neither parses nor validates. It is ANDed into the candidate and by-states queries and deliberately left out of the batch state lookups: those issues already passed filtering at dispatch time, and re-applying the filter would make a running session invisible the moment an operator narrowed the fragment.
 
 The fragment is wrapped in parentheses when it is appended, and that is load-bearing rather than tidy. Without them a fragment containing a top-level `OR` binds loosely enough to widen the query past the project and state constraints the adapter just built, and an operator would be selecting issues Sortie was never configured to touch. Parenthesization is the only containment there is, since nothing parses the fragment.
 

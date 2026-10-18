@@ -83,6 +83,10 @@ func (f *mgcTrackerFake) FetchIssueComments(context.Context, string) ([]domain.C
 	return nil, nil
 }
 
+func (f *mgcTrackerFake) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (f *mgcTrackerFake) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	f.statesCalls.Add(1)
 	if f.statesErr != nil {

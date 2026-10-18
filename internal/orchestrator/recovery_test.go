@@ -716,6 +716,10 @@ func (s *recoveryTrackerStub) SetTrackerStates(func() domain.TrackerStates) {}
 func (s *recoveryTrackerStub) FetchIssueByID(_ context.Context, _ string) (domain.Issue, error) {
 	return domain.Issue{}, nil
 }
+func (s *recoveryTrackerStub) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (s *recoveryTrackerStub) FetchIssueStatesByIDs(_ context.Context, ids []string) (map[string]string, error) {
 	s.fetchedIDs = append(s.fetchedIDs, ids...)
 	if s.err != nil {

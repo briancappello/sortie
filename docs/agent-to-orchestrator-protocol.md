@@ -390,7 +390,7 @@ The re-dispatch and re-block cycle is an expected operational pattern:
 
 An update to the issue that is neither a state change nor a removal of the confirmed parking label, for example adding a comment while leaving both the state and the label untouched, does not lift the park.
 
-Where `tracker.query_filter` excludes the parking label, the label removal in step 3 releases nothing. The orchestrator observes labels only on the issues the candidate query returns, so it never confirms the label reached the tracker, and an unconfirmed label's absence does not lift the park. Such an issue is released by moving it to a different tracker state: the orchestrator reads the state of every parked issue the candidate query omits through a separate, filter-free tracker call.
+Where `tracker.query_filter` excludes the parking label, the orchestrator still confirms the label and observes its removal. A separate, filter-free tracker call reads the state and labels of every parked issue the candidate query omits, so both gestures in step 3 release such an issue.
 
 The polling interval provides natural rate limiting for this cycle. No additional idempotency mechanism is required.
 
