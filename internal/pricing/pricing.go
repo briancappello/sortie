@@ -139,11 +139,7 @@ func ReloadTokenRates(inForce TokenRates, rawSection any, present bool) TokenRat
 			continue
 		}
 		entry, _, rejected := readTokenRateEntry(kind, raw)
-		if rejected {
-			kept, held := inForce[kind]
-			if !held {
-				continue
-			}
+		if kept, held := inForce[kind]; rejected && held {
 			entry = kept
 		}
 		if result == nil {

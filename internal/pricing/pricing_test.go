@@ -669,7 +669,8 @@ func TestReloadTokenRates(t *testing.T) {
 			TokenRates{"k": {OutputPerMtok: r1k.OutputPerMtok}}},
 		{"key missing from the section is removed", map[string]any{"x": map[string]any{"input_per_mtok": 1, "output_per_mtok": int64(2)}}, true,
 			TokenRates{"x": {InputPerMtok: new(1.0), OutputPerMtok: new(2.0)}}},
-		{"added entry with an invalid rate is left out", map[string]any{"k": k(2.0), "n": invalid}, true, fixtureRates(2)},
+		{"added entry with an invalid rate is read as at startup", map[string]any{"k": k(2.0), "n": invalid}, true,
+			TokenRates{"k": r1k, "n": {OutputPerMtok: new(1.0)}}},
 	}
 
 	for _, tt := range tests {
