@@ -1,5 +1,8 @@
+import { useId } from "react";
+
 import { useStateQuery } from "@/api/queries";
 import { useLive, useNow } from "@/app/live";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { fmtClockSec, fmtDue, parseInstant } from "@/lib/format";
 
@@ -90,16 +93,33 @@ export function LiveIndicator({ isHolding, onTogglePause }: LiveIndicatorProps) 
     now,
   });
 
+  const tipId = useId();
+
   return (
-    <button
-      type="button"
-      onClick={onTogglePause}
-      title={tip}
-      className="inline-flex h-(--size-control) cursor-pointer items-center gap-xs rounded-lg px-sm text-body-sm whitespace-nowrap transition-colors duration-(--duration-feedback) hover:bg-state-hover focus-visible:-outline-offset-1 focus-visible:outline-2 focus-visible:outline-focus-ring active:bg-state-pressed"
-    >
-      <span className="text-ink-muted">Events</span>
-      <span aria-hidden="true" className={cn("size-xs shrink-0 rounded-full", TONE_DOT[tone])} />
-      <span className={cn("font-medium", TONE_WORD[tone])}>{word}</span>
-    </button>
+    <>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              onClick={onTogglePause}
+              aria-describedby={tipId}
+              className="inline-flex h-(--size-control) cursor-pointer items-center gap-xs rounded-lg px-sm text-body-sm whitespace-nowrap transition-colors duration-(--duration-feedback) hover:bg-state-hover focus-visible:-outline-offset-1 focus-visible:outline-2 focus-visible:outline-focus-ring active:bg-state-pressed"
+            />
+          }
+        >
+          <span className="text-ink-muted">Events</span>
+          <span
+            aria-hidden="true"
+            className={cn("size-xs shrink-0 rounded-full", TONE_DOT[tone])}
+          />
+          <span className={cn("font-medium", TONE_WORD[tone])}>{word}</span>
+        </TooltipTrigger>
+        <TooltipPopup>{tip}</TooltipPopup>
+      </Tooltip>
+      <span id={tipId} className="sr-only">
+        {tip}
+      </span>
+    </>
   );
 }
