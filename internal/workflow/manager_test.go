@@ -18,37 +18,29 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
-// validWorkflow returns a minimal valid WORKFLOW.md content with the
-// given polling interval.
 func validWorkflow(intervalMS int) []byte {
 	return fmt.Appendf(nil, "---\npolling:\n  interval_ms: %d\n---\nDo the task for {{ .issue.title }}.\n", intervalMS)
 }
 
-// retentionWorkflow returns a minimal WORKFLOW.md content with the given
-// workspace.retention_days value.
 func retentionWorkflow(days int) []byte {
 	return fmt.Appendf(nil, "---\npolling:\n  interval_ms: 5000\nworkspace:\n  retention_days: %d\n---\nDo the task for {{ .issue.title }}.\n", days)
 }
 
-// turnTimeoutWorkflow returns a minimal WORKFLOW.md content with the given
-// agent.turn_timeout_ms value.
 func turnTimeoutWorkflow(ms int) []byte {
 	return fmt.Appendf(nil, "---\npolling:\n  interval_ms: 5000\nagent:\n  turn_timeout_ms: %d\n---\nDo the task for {{ .issue.title }}.\n", ms)
 }
 
-// ciWatchWindowWorkflow returns a minimal WORKFLOW.md content with a
-// reactions.ci_failure block carrying the given watch_window_ms value.
 func ciWatchWindowWorkflow(ms int) []byte {
 	return fmt.Appendf(nil, "---\npolling:\n  interval_ms: 5000\nreactions:\n  ci_failure:\n    provider: github-actions\n    watch_window_ms: %d\n---\nDo the task for {{ .issue.title }}.\n", ms)
 }
 
-// trackerEndpointWorkflow returns a minimal WORKFLOW.md content with the
-// given tracker.endpoint value spliced in unquoted, so a numeric literal
-// decodes as a YAML integer rather than a string.
+// The endpoint is spliced in unquoted so a numeric literal decodes as a YAML
+// integer rather than a string.
 func trackerEndpointWorkflow(endpoint string) []byte {
 	return fmt.Appendf(nil, "---\npolling:\n  interval_ms: 5000\ntracker:\n  kind: jira\n  endpoint: %s\n---\nDo the task for {{ .issue.title }}.\n", endpoint)
 }
@@ -57,10 +49,8 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// writeWorkflow overwrites path atomically via write-to-temp + rename,
-// matching the pattern used by many editors. On Windows the rename can
-// fail with "Access is denied" when fsnotify holds a handle on the
-// target; the helper retries a few times with a brief back-off.
+// On Windows the rename can fail with "Access is denied" while fsnotify
+// holds a handle on the target, so it is retried with a brief back-off.
 func writeWorkflow(t *testing.T, path string, content []byte) {
 	t.Helper()
 	dir := filepath.Dir(path)
@@ -79,8 +69,6 @@ func writeWorkflow(t *testing.T, path string, content []byte) {
 	t.Fatalf("rename temp to target: %v", err)
 }
 
-// pollUntil calls fn repeatedly until it returns true or a 3-second
-// deadline elapses. Returns whether the condition was met.
 func pollUntil(fn func() bool) bool {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -214,7 +202,6 @@ func TestManager_Reload(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	// Overwrite with new interval.
 	mustWriteFile(t, path, validWorkflow(9999))
 
 	if err := mgr.Reload(); err != nil {
@@ -283,6 +270,8 @@ func TestManager_ReloadFailSafe(t *testing.T) {
 		{name: "partial syntax error", before: []byte(partialsWorkflow), edit: greet("{{ if }}")},
 		{name: "partial calls an undefined name", before: []byte(partialsWorkflow), edit: greet(`{{ template "missing" . }}`)},
 		{name: "deleted partial whose entry expands to nothing", before: []byte(partialsWorkflow), remove: true, wantField: "dispatch.partials[0]"},
+		{name: "operator table file gone", before: priceTableWorkflow("prices.json"), after: priceTableWorkflow("gone.json"), wantField: "price_table.replace_file"},
+		{name: "operator table file invalid", before: priceTableWorkflow("prices.json"), after: priceTableWorkflow("invalid.json"), wantField: "price_table.replace_file"},
 	}
 
 	for _, tt := range tests {
@@ -297,6 +286,8 @@ func TestManager_ReloadFailSafe(t *testing.T) {
 			mustWriteFile(t, path, tt.before)
 			mustWriteFile(t, partial, []byte(greet("hello v1")))
 			mustWriteFile(t, filepath.Join(dir, "rule.tmpl"), []byte(`{{ template "greet" . }}`))
+			mustWriteFile(t, filepath.Join(dir, "prices.json"), []byte(operatorTableA))
+			mustWriteFile(t, filepath.Join(dir, "invalid.json"), []byte("{}"))
 			mgr, err := NewManager(path, testLogger())
 			if err != nil {
 				t.Fatalf("NewManager: %v", err)
@@ -304,7 +295,7 @@ func TestManager_ReloadFailSafe(t *testing.T) {
 			templates := func() []*prompt.Template {
 				return []*prompt.Template{mgr.PromptTemplate(), mgr.PromptTemplateByID(""), mgr.PromptTemplateByID(filepath.Join(dir, "rule.tmpl"))}
 			}
-			wantConfig, wantTemplates := mgr.Config(), templates()
+			wantConfig, wantTemplates, wantRates := mgr.Config(), templates(), mgr.Rates()
 			if tt.after != nil {
 				mustWriteFile(t, path, tt.after)
 			}
@@ -321,8 +312,8 @@ func TestManager_ReloadFailSafe(t *testing.T) {
 			if tt.wantField != "" && (!errors.As(err, &ce) || ce.Field != tt.wantField) {
 				t.Errorf("Reload() error = %v, want a *config.ConfigError with Field %q", err, tt.wantField)
 			}
-			if !reflect.DeepEqual(mgr.Config(), wantConfig) || !slices.Equal(templates(), wantTemplates) {
-				t.Error("Config() or a prompt template changed after the failed reload, want the previous ones")
+			if !reflect.DeepEqual(mgr.Config(), wantConfig) || !slices.Equal(templates(), wantTemplates) || mgr.Rates() != wantRates {
+				t.Error("Config(), a prompt template or Rates() changed after the failed reload, want the previous ones")
 			}
 			if tt.after == nil {
 				mustWriteFile(t, partial, []byte(greet("hello v2")))
@@ -333,6 +324,39 @@ func TestManager_ReloadFailSafe(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func priceTableWorkflow(replaceFile string) []byte {
+	return fmt.Appendf(nil, "---\npolling:\n  interval_ms: 5000\nprice_table:\n  replace_file: %s\n---\nPrompt.\n", replaceFile)
+}
+
+const (
+	operatorTableA  = `{"zz-model-a": {"input_cost_per_token": 0.000001}}`
+	operatorTableAB = `{"zz-model-a": {"input_cost_per_token": 0.000001}, "zz-model-b": {"input_cost_per_token": 0.000001}}`
+)
+
+func TestManager_ReloadAppliesEditedOperatorTable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path, table := filepath.Join(dir, "WORKFLOW.md"), filepath.Join(dir, "prices.json")
+	mustWriteFile(t, path, priceTableWorkflow("prices.json"))
+	mustWriteFile(t, table, []byte(operatorTableA))
+	mgr, err := NewManager(path, testLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mustWriteFile(t, table, []byte(operatorTableAB))
+
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload() = %v, want nil for an edited valid operator table", err)
+	}
+
+	usage := domain.TokenUsage{InputTokens: 1_000_000, TotalTokens: 1_000_000}
+	spend := pricing.Spend{Measured: true, Totals: usage, Parts: map[string]domain.TokenUsage{"zz-model-b": usage}}
+	if _, got := pricing.PriceSession(spend, mgr.Rates()); got != pricing.CostEstimated {
+		t.Errorf("PriceSession(a model the edited table lists) status = %q, want %q", got, pricing.CostEstimated)
 	}
 }
 

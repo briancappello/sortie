@@ -138,6 +138,7 @@ var staticKnownExtensionKeys = map[string]bool{
 	"logging":     true,
 	"worker":      true,
 	"token_rates": true,
+	"price_table": true,
 }
 
 // FrontMatterWarning represents a single advisory diagnostic from

@@ -88,11 +88,10 @@ type HandleWorkerExitParams struct {
 
 	Logger *slog.Logger
 
-	// TokenRatesSection returns the token_rates value of the configuration
-	// loaded for this exit. A reload can land between ticks, so the run is
-	// priced under the rates this configuration holds. Nil leaves
-	// [State.TokenRates] as it is.
-	TokenRatesSection func() (raw any, present bool)
+	// Rates are the rates of the configuration loaded for this exit. A reload
+	// can land between ticks, so the run is priced under these. Nil leaves
+	// [State.Rates] as it is.
+	Rates *pricing.Rates
 
 	// BeforeRemoveHook is the before_remove hook script. Empty means none.
 	BeforeRemoveHook string
@@ -500,11 +499,10 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	} else {
 		runHistory.ModelUsage = runModelUsage(entry.UsageByModel)
 	}
-	if params.TokenRatesSection != nil {
-		raw, present := params.TokenRatesSection()
-		state.TokenRates = pricing.ReloadTokenRates(state.TokenRates, raw, present)
+	if params.Rates != nil {
+		state.Rates = params.Rates
 	}
-	recordRunCost(&runHistory, state.TokenRates)
+	recordRunCost(&runHistory, state.Rates)
 	if workerResult.ReviewMetadata != nil {
 		masked := maskedReviewMetadata(*workerResult.ReviewMetadata)
 		data, marshalErr := json.Marshal(masked)
@@ -1667,7 +1665,7 @@ func runModelUsage(totals map[string]domain.TokenUsage) map[string]persistence.M
 // recordRunCost prices a run under rates and stores the result on its row.
 // The row's token columns and ModelUsage must be final, because the price is
 // fixed when the row is written.
-func recordRunCost(row *persistence.RunHistory, rates pricing.TokenRates) {
+func recordRunCost(row *persistence.RunHistory, rates *pricing.Rates) {
 	var parts map[string]domain.TokenUsage
 	if len(row.ModelUsage) > 0 {
 		parts = make(map[string]domain.TokenUsage, len(row.ModelUsage))

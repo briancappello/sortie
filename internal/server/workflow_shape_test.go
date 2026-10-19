@@ -17,7 +17,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/workflow"
 )
@@ -166,11 +165,9 @@ func newShapeHarness(t *testing.T, frontMatter string) *shapeHarness {
 	}
 	orch := orchestrator.NewOrchestrator(params)
 
-	rawRates, present := cfg.ExtensionValue("token_rates")
-	rates, _ := pricing.ParseTokenRates(rawRates, present)
 	srv := New(Params{
 		SnapshotFn: func() (orchestrator.RuntimeSnapshotResult, error) {
-			return orchestrator.RuntimeSnapshotResult{TokenRates: rates}, nil
+			return orchestrator.RuntimeSnapshotResult{Rates: mgr.Rates()}, nil
 		},
 		RefreshFn:       func() bool { return true },
 		Logger:          logger,

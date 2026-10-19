@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/pricing"
 )
@@ -11,11 +12,24 @@ import (
 func TestRecordedCostOf(t *testing.T) {
 	t.Parallel()
 
-	rates := pricing.TokenRates{"k": {
+	kindEntry := pricing.TokenRateConfig{
 		InputPerMtok: new(2.0), OutputPerMtok: new(10.0), CacheReadPerMtok: new(0.5), CacheWritePerMtok: new(4.0),
-	}}
+	}
+	cfg, err := config.NewServiceConfig(map[string]any{
+		"token_rates": map[string]any{"k": map[string]any{
+			"input_per_mtok": 2.0, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 4.0,
+		}},
+		"price_table": map[string]any{"embedded": false},
+	})
+	if err != nil {
+		t.Fatalf("config.NewServiceConfig: %v", err)
+	}
+	rates, _, err := pricing.LoadRates(cfg, pricing.LoadInput{IsKind: func(key string) bool { return key == "k" }})
+	if err != nil {
+		t.Fatalf("pricing.LoadRates: %v", err)
+	}
 	estimated := func(usd float64) persistence.ModelCost {
-		return persistence.ModelCost{EstimatedCostUSD: &usd, CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: rates.Version()}
+		return persistence.ModelCost{EstimatedCostUSD: &usd, CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: pricing.TokenRates{"k": kindEntry}.Version()}
 	}
 	spent := persistence.ModelTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000}
 	spentRun := func(kind, reported string) persistence.UnrecordedRun {

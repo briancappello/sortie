@@ -25,6 +25,7 @@ import (
 // Satisfied by [workflow.Manager] in production.
 type WorkflowManager interface {
 	Config() config.ServiceConfig
+	Rates() *pricing.Rates
 	PromptTemplate() *prompt.Template
 	PromptTemplateByID(id string) *prompt.Template
 	Reload() error
@@ -174,8 +175,8 @@ type OrchestratorParams struct {
 	ToolRegistry    *domain.ToolRegistry // may be nil
 	HostPool        *HostPool            // may be nil; defaults to local-mode pool
 
-	// TokenRates are the rates in force at startup. Nil prices no kind.
-	TokenRates pricing.TokenRates
+	// Rates are the rates in force at startup. Nil prices nothing.
+	Rates *pricing.Rates
 
 	// Router selects the destinations of every outbound event. Nil
 	// routes nothing, so no event reaches a tracker or a notifier.
@@ -394,7 +395,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		metrics = &domain.NoopMetrics{}
 	}
 
-	params.State.TokenRates = params.TokenRates
+	params.State.Rates = params.Rates
 
 	maxConc := params.State.MaxConcurrentAgents
 	exitBuf := max(maxConc*2, 64)
@@ -643,10 +644,11 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 	o.applyQueuedAheadOfExit(ctx, exitingIssueIDs)
 
 	cfg := o.workflowManager.Config()
+	rates := o.workflowManager.Rates()
 	o.updateRouter(cfg)
 	for _, result := range exits {
 		HandleWorkerExit(o.state, result, HandleWorkerExitParams{
-			TokenRatesSection:                 func() (any, bool) { return cfg.ExtensionValue("token_rates") },
+			Rates:                             rates,
 			Store:                             o.store,
 			RunEventRetry:                     o.runEventRetry,
 			MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
@@ -944,8 +946,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	// On reload failure the workflow manager retains last-known-good config.
 	cfg := o.workflowManager.Config()
 	o.updateRouter(cfg)
-	rawRates, ratesPresent := cfg.ExtensionValue("token_rates")
-	o.state.TokenRates = pricing.ReloadTokenRates(o.state.TokenRates, rawRates, ratesPresent)
+	o.state.Rates = o.workflowManager.Rates()
 
 	// Applied unconditionally, not gated on preflight success.
 	o.state.PollIntervalMS = cfg.Polling.IntervalMS
@@ -1567,7 +1568,7 @@ func (o *Orchestrator) writeIncrementalMetadata(ctx context.Context, issueID str
 		UnaccountedTurns:    entry.UnaccountedTurns,
 		UpdatedAt:           now.Format(time.RFC3339),
 	}
-	if cost, status := pricing.PriceSession(spendOfRunningEntry(entry), o.state.TokenRates); status != pricing.CostUnmeasured {
+	if cost, status := pricing.PriceSession(spendOfRunningEntry(entry), o.state.Rates); status != pricing.CostUnmeasured {
 		meta.EstimatedCostUSD = cost
 		meta.CostStatus = string(status)
 	}
@@ -2195,9 +2196,10 @@ func (o *Orchestrator) drainRunningWorkers() {
 				o.applyUnaccountedTurns(drainCtx, msg)
 			})
 			cfg := o.workflowManager.Config()
+			rates := o.workflowManager.Rates()
 			o.updateRouter(cfg)
 			HandleWorkerExit(o.state, workerExit, HandleWorkerExitParams{
-				TokenRatesSection:                 func() (any, bool) { return cfg.ExtensionValue("token_rates") },
+				Rates:                             rates,
 				Store:                             o.store,
 				MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
 				MaxConsecutiveAbsences:            cfg.Agent.MaxConsecutiveAbsences,

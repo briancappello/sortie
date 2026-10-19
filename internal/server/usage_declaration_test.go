@@ -8,7 +8,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -48,11 +47,12 @@ func TestUsageDeclaration_NoneArrivalDiscardedEndToEnd(t *testing.T) {
 		Type: domain.EventTokenUsage, Timestamp: now, Model: "inc-model", Usage: usage,
 	}, slog.Default(), nil)
 
-	fptr := func(v float64) *float64 { return &v }
-	state.TokenRates = pricing.TokenRates{
-		"kind-none": {InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
-		"kind-inc":  {InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
-	}
+	state.Rates = loadTestRates(t, map[string]any{
+		"token_rates": map[string]any{
+			"kind-none": map[string]any{"input_per_mtok": 3.0, "output_per_mtok": 15.0},
+			"kind-inc":  map[string]any{"input_per_mtok": 3.0, "output_per_mtok": 15.0},
+		},
+	}, "kind-none", "kind-inc")
 	snap := orchestrator.RuntimeSnapshot(state, now)
 
 	resp := toStateResponse(snap, sentence.Context{}, nil)

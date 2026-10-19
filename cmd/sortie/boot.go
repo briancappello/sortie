@@ -16,7 +16,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/workflow"
@@ -45,15 +44,13 @@ var workflowValidate workflow.ValidateFunc = func(cfg config.ServiceConfig) erro
 // the program constructs wires through [workflow.WithAdvisoryFunc], so a
 // workflow reaching a deprecated agent kind, an effort setting on a kind
 // that forwards none, a rule that changes the model but keeps an inherited
-// effort level, an invalid token_rates entry, or a stage chain needing more
-// runs than agent.max_sessions allows draws the same advisory on every
-// load path. It also reports each deprecated
-// notification setting the workflow relies on.
+// effort level, or a stage chain needing more runs than agent.max_sessions
+// allows draws the same advisory on every load path. It also reports each
+// deprecated notification setting the workflow relies on.
 var workflowAdvisories workflow.AdvisoryFunc = func(cfg config.ServiceConfig) []config.Advisory {
 	advisories := orchestrator.AgentKindDeprecations(cfg, registry.Agents.Meta)
 	advisories = append(advisories, orchestrator.AgentKindEffortAdvisories(cfg, registry.Agents.Meta)...)
 	advisories = append(advisories, orchestrator.DispatchRuleEffortAdvisories(cfg)...)
-	advisories = append(advisories, pricing.TokenRateAdvisories(cfg)...)
 	advisories = append(advisories, orchestrator.StageChainAdvisories(cfg)...)
 	return append(advisories, route.Advisories(cfg)...)
 }

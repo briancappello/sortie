@@ -1,9 +1,9 @@
-// Package pricing parses the token_rates workflow section, reports its
-// advisories, and estimates the USD cost of token usage under a per-kind
-// rate. [ParseTokenRates] and [EstimateCost] are the entry points;
-// [TokenRateConfig.Complete] states which entries price anything.
-// [ReloadTokenRates] re-reads the section while a service runs, and
-// [PriceRun] and [PriceSession] price a finished run and a running session.
+// Package pricing parses the token_rates workflow section and estimates the
+// USD cost of token usage. [ParseTokenRates] and [EstimateCost] are the
+// entry points for one entry; [TokenRateConfig.Complete] states which kind
+// entries price anything. [LoadRates] puts the rate layers of one workflow
+// load in force as [Rates], and [PriceRun] and [PriceSession] price a
+// finished run and a running session under them.
 //
 // The package also holds the embedded price table ([EmbeddedTable]), the
 // validation every price table passes ([ParseTable]), and the rule that
@@ -15,12 +15,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
 	"math"
 	"slices"
 
-	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -45,8 +43,8 @@ func (c TokenRateConfig) Complete() bool {
 	return c.InputPerMtok != nil && c.OutputPerMtok != nil
 }
 
-// TokenRates maps agent adapter kind strings to their token rate
-// configuration. A nil or empty map means no cost estimates are made.
+// TokenRates maps token_rates keys, agent adapter kinds or model names, to
+// their token rate configuration. A nil or empty map holds no entry.
 type TokenRates map[string]TokenRateConfig
 
 // ParseTokenRates extracts and validates token rates from the raw
@@ -88,7 +86,7 @@ func ParseTokenRates(rawSection any, present bool) (TokenRates, []string) {
 	return rates, warnings
 }
 
-// readTokenRateEntry reads one kind's raw entry for startup and reload alike.
+// readTokenRateEntry reads one raw entry for startup and reload alike.
 // rejected reports an entry that is not a map or holds an invalid rate.
 func readTokenRateEntry(kind string, raw any) (cfg TokenRateConfig, warnings []string, rejected bool) {
 	kindMap, ok := raw.(map[string]any)
@@ -113,18 +111,13 @@ func readTokenRateEntry(kind string, raw any) (cfg TokenRateConfig, warnings []s
 		}
 		warnings = append(warnings, fmt.Sprintf("token_rates.%s.%s: unrecognized key is ignored", kind, key))
 	}
-
-	if !cfg.Complete() {
-		warnings = append(warnings,
-			fmt.Sprintf("token_rates.%s: entry needs both input_per_mtok and output_per_mtok and prices nothing", kind))
-	}
 	return cfg, warnings, rejected
 }
 
-// ReloadTokenRates returns the rates a reloaded token_rates section puts in
+// reloadTokenRates returns the rates a reloaded token_rates section puts in
 // force. A malformed section or entry keeps what inForce holds for it, so a
 // bad reload never drops working rates. inForce is never mutated.
-func ReloadTokenRates(inForce TokenRates, rawSection any, present bool) TokenRates {
+func reloadTokenRates(inForce TokenRates, rawSection any, present bool) TokenRates {
 	if !present || rawSection == nil {
 		return nil
 	}
@@ -175,25 +168,6 @@ func (r TokenRates) Version() string {
 	encoded, _ := json.Marshal(entries)
 	sum := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// TokenRateAdvisories runs ParseTokenRates over cfg's "token_rates"
-// extension value and returns one [config.Advisory] per warning, in
-// warning order. It performs no I/O and no mutation.
-func TokenRateAdvisories(cfg config.ServiceConfig) []config.Advisory {
-	rawTokenRates, present := cfg.ExtensionValue("token_rates")
-	_, warnings := ParseTokenRates(rawTokenRates, present)
-
-	var advisories []config.Advisory
-	for _, w := range warnings {
-		advisories = append(advisories, config.Advisory{
-			Check:   "token_rates",
-			Text:    w,
-			Message: "skipped invalid token rate entry",
-			Attrs:   []slog.Attr{slog.String("detail", w)},
-		})
-	}
-	return advisories
 }
 
 // extractRate reads a non-negative, finite float64 from a map entry.

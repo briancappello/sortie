@@ -24,6 +24,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/workflow"
@@ -81,6 +82,8 @@ func (s *stubWorkflowManager) WorkflowAbsPath() string {
 }
 
 func (s *stubWorkflowManager) LoadStatus() workflow.LoadStatus { return workflow.LoadStatus{} }
+
+func (s *stubWorkflowManager) Rates() *pricing.Rates { return nil }
 
 func (s *stubWorkflowManager) setConfig(cfg config.ServiceConfig) {
 	s.mu.Lock()
@@ -11320,7 +11323,7 @@ func TestWriteIncrementalMetadata_LiveEstimate(t *testing.T) {
 			ctx := context.Background()
 			store := openInMemoryStore(t)
 			state := NewState(60000, 10, 0, nil, AgentTotals{})
-			state.TokenRates = fixtureRates(2)
+			state.Rates = fixtureRates(t, 2)
 			o := &Orchestrator{state: state, store: store, logger: discardLogger()}
 			entry := &RunningEntry{
 				AgentKind:         tt.kind,

@@ -1014,7 +1014,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Con
 	}
 	resp.Active = activeIssuesOf(resp, snap.ActiveOrder)
 
-	if len(snap.TokenRates) > 0 {
+	if snap.Rates.SourceAvailable() {
 		total, anySet, unpriced := activeCostTotal(snap.Running)
 		if anySet {
 			resp.ActiveEstimatedCostUSD = &total
@@ -1132,7 +1132,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	resp.Version = s.version
 	resp.StartedAt = utcOrNil(s.startedAt)
 	if words.Shape != nil {
-		resp.Config = toConfigResponse(*words.Shape, snap.TokenRates)
+		resp.Config = toConfigResponse(*words.Shape, snap.Rates)
 	}
 	if health != nil {
 		resp.Health = toStateHealthResponse(*health, words)
