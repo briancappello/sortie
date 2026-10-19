@@ -517,16 +517,7 @@ Do {{ .issue.title }}.
 `)
 }
 
-// errorAndWarningWorkflow returns a workflow with the "trackers" typo
-// (warning) and no tracker.kind (error). ValidateConfigForPromotion
-// passes because active_states is set; preflight fails on tracker.kind.
-
-// errorAndWarningWorkflow returns a workflow with the "trackers" typo
-// (warning) and no tracker.kind (error). ValidateConfigForPromotion
-// passes because active_states is set; preflight fails on tracker.kind.
-// incompleteTokenRateWorkflow returns a workflow whose only fault is a
-// token_rates entry missing input_per_mtok.
-func incompleteTokenRateWorkflow() []byte {
+func tokenRateWorkflow(frontMatter string) []byte {
 	return []byte(`---
 tracker:
   kind: file
@@ -536,10 +527,7 @@ tracker:
     - Done
 agent:
   kind: mock
-token_rates:
-  claude-code:
-    output_per_mtok: 15
----
+` + frontMatter + `---
 Do {{ .issue.title }}.
 `)
 }
@@ -560,13 +548,6 @@ Do {{ .issue.title }}.
 `)
 }
 
-// TestValidateWarningTypoTopLevelKeyText asserts that a typo top-level key
-// produces exit 0 (valid), an empty stdout (text mode), and the warning
-// written to stderr with the "warning:" prefix.
-
-// TestValidateWarningTypoTopLevelKeyText asserts that a typo top-level key
-// produces exit 0 (valid), an empty stdout (text mode), and the warning
-// written to stderr with the "warning:" prefix.
 func TestValidateWarningTypoTopLevelKeyText(t *testing.T) {
 	t.Parallel()
 
@@ -719,56 +700,84 @@ func TestValidateWarningNonPositiveHooksTimeout(t *testing.T) {
 	}
 }
 
-// TestValidateTokenRateAdvisoryWarning drives a workflow whose only
-// fault is an incomplete token_rates entry: it must exit 0 with
-// valid: true, and the warning must be listed under check
-// "token_rates", matching TokenRateAdvisories' own text for the same
-// input.
 func TestValidateTokenRateAdvisoryWarning(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	wfPath := writeCustomWorkflowFile(t, dir, incompleteTokenRateWorkflow())
+	const modelWithoutCacheWrite = `token_rates:
+  my-local-model: {input_per_mtok: 0.5, output_per_mtok: 1.5, cache_read_per_mtok: 0.05}
+`
 
-	var stdout, stderr bytes.Buffer
-	ctx := context.Background()
-
-	code := run(ctx, []string{"validate", "--format", "json", wfPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run(validate) = %d, want 0; stderr: %s", code, stderr.String())
+	tests := []struct {
+		name          string
+		frontMatter   string
+		wantExit      int
+		wantCheck     string
+		wantCount     int
+		wantInMessage string
+	}{
+		{
+			name:        "incomplete kind entry prices nothing",
+			frontMatter: "token_rates:\n  claude-code: {output_per_mtok: 15}\n",
+			wantCheck:   "token_rates", wantCount: 1,
+		},
+		{
+			name:        "each kind entry turns off per-model pricing",
+			frontMatter: "token_rates:\n  claude-code: {input_per_mtok: 3, output_per_mtok: 15}\n  codex: {input_per_mtok: 2, output_per_mtok: 8}\n",
+			wantCheck:   "token_rates.per_kind", wantCount: 2,
+		},
+		{
+			name:        "unlisted model entry leaves a rate unset",
+			frontMatter: modelWithoutCacheWrite,
+			wantCheck:   "token_rates.model_incomplete", wantCount: 1, wantInMessage: "cache_write_per_mtok",
+		},
+		{
+			name:        "operator table that cannot be read",
+			frontMatter: "price_table:\n  replace_file: missing-prices.json\n",
+			wantExit:    1, wantCheck: "price_table.replace_file", wantCount: 1,
+		},
+		{
+			name:        "both replace keys set",
+			frontMatter: "price_table:\n  replace_file: prices.json\n  replace_url: https://prices.example.com/table.json\n",
+			wantExit:    1, wantCheck: "price_table.replace_conflict", wantCount: 1,
+		},
 	}
 
-	var out validateOutput
-	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		t.Fatalf("json.Unmarshal(%q) error: %v", stdout.String(), err)
-	}
-	if !out.Valid {
-		t.Errorf("validateOutput.Valid = false, want true")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	const wantMessage = "token_rates.claude-code: entry needs both input_per_mtok and output_per_mtok and prices nothing"
-	found := false
-	for _, w := range out.Warnings {
-		if w.Check != "token_rates" {
-			continue
-		}
-		found = true
-		if w.Message != wantMessage {
-			t.Errorf("token_rates warning Message = %q, want %q", w.Message, wantMessage)
-		}
-	}
-	if !found {
-		t.Errorf("validateOutput.Warnings = %v, want a warning under check %q", out.Warnings, "token_rates")
+			wfPath := writeCustomWorkflowFile(t, t.TempDir(), tokenRateWorkflow(tt.frontMatter))
+			var stdout, stderr bytes.Buffer
+
+			code := run(context.Background(), []string{"validate", "--format", "json", wfPath}, &stdout, &stderr)
+
+			var out validateOutput
+			if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+				t.Fatalf("json.Unmarshal(%q) error: %v", stdout.String(), err)
+			}
+			diags := out.Warnings
+			if tt.wantExit != 0 {
+				diags = out.Errors
+			}
+			var matching []validateDiag
+			for _, d := range diags {
+				if d.Check == tt.wantCheck {
+					matching = append(matching, d)
+				}
+			}
+			if code != tt.wantExit || out.Valid != (tt.wantExit == 0) {
+				t.Errorf("run(validate) = %d (valid %t), want %d (valid %t); stderr: %s", code, out.Valid, tt.wantExit, tt.wantExit == 0, stderr.String())
+			}
+			if len(matching) != tt.wantCount {
+				t.Fatalf("diagnostics under %q = %+v, want %d of them in %+v", tt.wantCheck, matching, tt.wantCount, diags)
+			}
+			if tt.wantInMessage != "" && !strings.Contains(matching[0].Message, tt.wantInMessage) {
+				t.Errorf("%q message = %q, want it to name %q", tt.wantCheck, matching[0].Message, tt.wantInMessage)
+			}
+		})
 	}
 }
 
-// TestValidateErrorAndWarningsTogether asserts that a workflow with both a
-// warning (typo top-level key) and an error (missing tracker.kind) produces
-// exit 1 with both diagnostic categories in the JSON output.
-
-// TestValidateErrorAndWarningsTogether asserts that a workflow with both a
-// warning (typo top-level key) and an error (missing tracker.kind) produces
-// exit 1 with both diagnostic categories in the JSON output.
 func TestValidateErrorAndWarningsTogether(t *testing.T) {
 	t.Parallel()
 
@@ -1737,7 +1746,7 @@ var registerDeprecatedOrderFixture = sync.OnceFunc(func() {
 		registry.AgentMeta{Deprecation: &registry.AgentDeprecation{Replacement: "mock"}})
 })
 
-func TestWorkflowAdvisories_EffortAdvisoryBetweenDeprecationsAndTokenRates(t *testing.T) {
+func TestWorkflowAdvisories_EffortAdvisoryFollowsDeprecations(t *testing.T) {
 	t.Parallel()
 
 	registerDeprecatedOrderFixture()
@@ -1746,14 +1755,13 @@ func TestWorkflowAdvisories_EffortAdvisoryBetweenDeprecationsAndTokenRates(t *te
 		Dispatch: config.DispatchConfig{Default: config.DispatchSelection{AgentKind: "mock"}},
 	}
 	cfg.SetExtensionSection("mock", map[string]any{registry.EffortKey: "high"})
-	cfg.SetExtensionSection("token_rates", map[string]any{"claude-code": map[string]any{"output_per_mtok": 15}})
 
 	var got []string
 	for _, advisory := range workflowAdvisories(cfg) {
 		got = append(got, advisory.Check)
 	}
 
-	want := []string{"agent.kind.deprecated", "agent.effort.not_forwarded", "token_rates"}
+	want := []string{"agent.kind.deprecated", "agent.effort.not_forwarded"}
 	if !slices.Equal(got, want) {
 		t.Errorf("workflowAdvisories(...) checks = %v, want %v", got, want)
 	}

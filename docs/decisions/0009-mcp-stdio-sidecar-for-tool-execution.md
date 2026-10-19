@@ -144,7 +144,7 @@ Both channels draw from the same `ToolRegistry`, so the tool set is always consi
 
 ### Graceful degradation: MCP server crash
 
-If `sortie mcp-server` crashes or exits unexpectedly mid-session, the agent runtime detects the broken stdio pipe and returns a JSON-RPC error for any subsequent `tools/call` request. The worker does not detect or handle this event directly — it has no visibility into the MCP server process, which is the agent runtime's child (per decision driver #4).
+If `sortie mcp-server` crashes or exits unexpectedly mid-session, the agent runtime detects the broken stdio pipe and returns a JSON-RPC error for any subsequent `tools/call` request. The worker does not detect or handle this event directly — it has no visibility into the MCP server process, which is the agent runtime's child.
 
 This is by design, for three reasons:
 
@@ -154,13 +154,13 @@ This is by design, for three reasons:
 
 3. **Defense in depth provides resilience.** Per Section 10.4.6, the tool channel and file channel are independent. If the MCP execution channel becomes unavailable, the agent still has prompt-time tool documentation and the `.sortie/status` advisory file channel. Neither channel is a single point of failure for the other.
 
-Adding MCP-server-specific crash detection to the worker would violate the agent-agnostic principle (decision driver #1): the worker would need knowledge of the MCP server's process identity and failure semantics, coupling it to the sidecar transport choice.
+Adding MCP-server-specific crash detection to the worker would violate the agent-agnostic principle: the worker would need knowledge of the MCP server's process identity and failure semantics, coupling it to the sidecar transport choice.
 
 ### Considered Options in Detail
 
 **HTTP-based tool server.** The worker starts an HTTP server on localhost and passes the URL to the agent for tool calls. Common objections to this approach — port collisions, firewall restrictions, network latency — are individually solvable: binding to port 0 yields an OS-assigned port, localhost traffic bypasses firewall rules, and local TCP round-trip times are comparable to stdio pipe latency. The decisive disadvantages are structural:
 
-1. **Lifecycle inversion.** With the stdio sidecar, the agent runtime spawns the MCP server as its child — when the agent exits, the pipe closes and the server terminates automatically. With HTTP, the worker owns the server: it must start the server before the agent, keep it running for the session, and shut it down after the agent exits or crashes. This violates decision driver #4 (lifecycle simplicity) and requires explicit teardown on every exit path — normal completion, agent crash, orchestrator shutdown — to avoid orphaned servers.
+1. **Lifecycle inversion.** With the stdio sidecar, the agent runtime spawns the MCP server as its child — when the agent exits, the pipe closes and the server terminates automatically. With HTTP, the worker owns the server: it must start the server before the agent, keep it running for the session, and shut it down after the agent exits or crashes. This breaks lifecycle simplicity and requires explicit teardown on every exit path — normal completion, agent crash, orchestrator shutdown — to avoid orphaned servers.
 2. **Transport compatibility.** MCP defines stdio and Streamable HTTP transports. Stdio is universally supported by MCP-compatible agent runtimes: Claude Code and Copilot CLI both accept standard MCP config files with stdio server entries. HTTP-based MCP transport (SSE, Streamable HTTP) has narrower and less consistent runtime support. Choosing HTTP would limit the set of compatible agents without compensating benefit.
 3. **Session isolation overhead.** Stdio achieves session isolation structurally — each agent session gets its own pipe to its own MCP server instance. With HTTP, the worker must allocate a distinct port per concurrent session and prevent cross-session tool calls via port-to-session mapping. Solvable, but adds coordination that stdio eliminates entirely.
 
@@ -173,7 +173,7 @@ This approach bypasses MCP entirely. The standard MCP config mechanism requires 
 - Format tool results in whatever syntax the agent expects to receive.
 - Manage control flow: pause reading agent output, execute the tool, inject the result, resume reading.
 
-Each adapter becomes a bespoke tool-call interceptor, breaking the agent-agnostic goal (driver #1). The `ToolRegistry` dispatch is shared, but detection, parsing, and response framing are entirely adapter-specific.
+Each adapter becomes a bespoke tool-call interceptor, breaking the agent-agnostic goal. The `ToolRegistry` dispatch is shared, but detection, parsing, and response framing are entirely adapter-specific.
 
 Beyond the agent-agnostic violation, two further problems apply:
 

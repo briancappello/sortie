@@ -228,7 +228,7 @@ func TestStatsCostDerivation(t *testing.T) {
 	}
 	for _, want := range []string{
 		"cost (measured runs)    -   per succeeded run -",
-		"note: the cost figures skip 1 of these runs, because token_rates had no price for the coding agent behind them when they were recorded.",
+		"note: the cost figures skip 1 of these runs, because Sortie had no price for the models they used when they were recorded.",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("run(stats) stdout = %q, want to contain %q", stdout.String(), want)

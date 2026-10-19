@@ -339,7 +339,7 @@ func statsFootnotes(s runstats.Summary, chains int) []string {
 	}
 	if s.CostUnpricedRuns > 0 {
 		lines = append(lines, fmt.Sprintf(
-			"note: the cost figures skip %d of these runs, because token_rates had no price for the coding agent behind them when they were recorded.",
+			"note: the cost figures skip %d of these runs, because Sortie had no price for the models they used when they were recorded.",
 			s.CostUnpricedRuns))
 	}
 	if chains > statsChainTextRows {

@@ -65,7 +65,7 @@ export function StationHeader({ stations, tally }: StationHeaderProps) {
     .join(", ")}`;
 
   return (
-    <div className="sticky top-0 z-(--z-sticky) border-b border-line bg-canvas px-md pt-sm pb-xs max-md:hidden">
+    <div className="sticky top-(--size-header) z-(--z-sticky) border-b border-line bg-canvas px-md pt-sm pb-xs max-md:hidden">
       {/* The query threshold depends on the station count, which a static class cannot carry. */}
       <style>{`@container (max-width: ${narrowBelowPx}px) { [data-station-full] { display: none } [data-station-short] { display: inline } }`}</style>
       <div role="img" aria-label={label} className="@container relative h-16">

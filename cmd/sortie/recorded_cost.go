@@ -14,7 +14,7 @@ import (
 //
 // A measured run with no per-model rows gets one new part, so its cost has a
 // part to sit on like every run written since.
-func recordedCostOf(run persistence.UnrecordedRun, rates pricing.TokenRates) persistence.RunCostRecord {
+func recordedCostOf(run persistence.UnrecordedRun, rates *pricing.Rates) persistence.RunCostRecord {
 	parts := run.Parts
 	var newParts map[string]persistence.ModelTokens
 	if parts == nil && run.TokensMeasured && spentInClass(run) {

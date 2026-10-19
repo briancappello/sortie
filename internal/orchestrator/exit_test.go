@@ -10550,13 +10550,29 @@ func TestHandleWorkerExit_StageHopCancelsPendingReactionsAndRetry(t *testing.T) 
 	}
 }
 
-func fixtureRates(inputPerMtok float64) pricing.TokenRates {
-	return pricing.TokenRates{"k": {
-		InputPerMtok:      new(inputPerMtok),
-		OutputPerMtok:     new(10.0),
-		CacheReadPerMtok:  new(0.5),
-		CacheWritePerMtok: new(4.0),
+func fixtureRateEntries(inputPerMtok float64) map[string]any {
+	return map[string]any{"k": map[string]any{
+		"input_per_mtok": inputPerMtok, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 4.0,
 	}}
+}
+
+func fixtureRates(t *testing.T, inputPerMtok float64) *pricing.Rates {
+	t.Helper()
+	cfg, err := config.NewServiceConfig(map[string]any{"token_rates": fixtureRateEntries(inputPerMtok)})
+	if err != nil {
+		t.Fatalf("NewServiceConfig: %v", err)
+	}
+	rates, _, err := pricing.LoadRates(cfg, pricing.LoadInput{IsKind: func(string) bool { return true }})
+	if err != nil {
+		t.Fatalf("LoadRates: %v", err)
+	}
+	return rates
+}
+
+func fixtureRatesVersion(t *testing.T, inputPerMtok float64) string {
+	t.Helper()
+	rates, _ := pricing.ParseTokenRates(fixtureRateEntries(inputPerMtok), true)
+	return rates.Version()
 }
 
 var usageS = domain.TokenUsage{InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000}
@@ -10582,34 +10598,30 @@ func TestHandleWorkerExit_PricesUnderReloadedRatesAndClearsLiveEstimate(t *testi
 		t.Fatalf("UpsertSessionMetadata: %v", err)
 	}
 	state := exitState(t, "ISS-1", nil)
-	state.TokenRates = fixtureRates(2)
+	state.Rates = fixtureRates(t, 2)
 	entry := state.Running["ISS-1"]
 	entry.UsageMeasured = true
 	entry.AgentInputTokens, entry.AgentOutputTokens, entry.AgentTotalTokens = usageS.InputTokens, usageS.OutputTokens, usageS.TotalTokens
 	entry.UsageByModel = map[string]domain.TokenUsage{"m1": usageS}
-	reloaded := fixtureRates(4)
+	reloaded := fixtureRates(t, 4)
 	params := defaultExitParams(t, nil)
 	params.Store, params.Ctx = store, ctx
-	params.TokenRatesSection = func() (any, bool) {
-		return map[string]any{"k": map[string]any{
-			"input_per_mtok": 4.0, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 4.0,
-		}}, true
-	}
+	params.Rates = reloaded
 
 	HandleWorkerExit(state, WorkerResult{
 		IssueID: "ISS-1", Identifier: "ISS-1-ident", ExitKind: WorkerExitNormal, AgentAdapter: "k",
 	}, params)
 
 	run := store.appended
-	wantPart := persistence.ModelCost{EstimatedCostUSD: new(14.0), CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: reloaded.Version()}
+	wantPart := persistence.ModelCost{EstimatedCostUSD: new(14.0), CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: fixtureRatesVersion(t, 4)}
 	if !reflect.DeepEqual(run.ModelCosts, map[string]persistence.ModelCost{"m1": wantPart}) {
 		t.Errorf("appended run ModelCosts = %+v, want m1 = %+v", run.ModelCosts, wantPart)
 	}
 	if !reflect.DeepEqual(run.EstimatedCostUSD, new(14.0)) || run.CostStatus != "estimated" {
 		t.Errorf("appended run cost = (%v, %q), want (14, %q)", run.EstimatedCostUSD, run.CostStatus, "estimated")
 	}
-	if got := state.TokenRates.Version(); got != reloaded.Version() {
-		t.Errorf("State.TokenRates.Version() = %q, want %q", got, reloaded.Version())
+	if state.Rates != reloaded {
+		t.Error("State.Rates is not the rates the exit carried, want them promoted")
 	}
 	meta, found, err := store.LoadSessionMetadata(ctx, "ISS-1")
 	if err != nil || !found {

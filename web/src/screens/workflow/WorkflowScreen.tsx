@@ -1,4 +1,5 @@
 import { useStateQuery } from "@/api/queries";
+import { hasRateSource } from "@/lib/budget";
 import { fmtCount, fmtRate, fmtStamp, fmtTokens } from "@/lib/format";
 import { Pair, Pairs, Panel } from "@/components/Panel";
 import { StateBadge } from "@/components/StateBadge";
@@ -154,22 +155,23 @@ function rateText(rate: number | null, unset: string): string {
 }
 
 interface RateListProps {
-  kind: string;
+  name: string;
   rate: TokenRateResponse;
 }
 
-function RateList({ kind, rate }: RateListProps) {
-  const unsetCache = rate.input_per_mtok === null ? "not set" : "input rate (not set)";
+function RateList({ name, rate }: RateListProps) {
+  const unsetCache =
+    rate.per_kind && rate.input_per_mtok !== null ? "input rate (not set)" : "not set";
   return (
     <div className="flex flex-col gap-xs">
-      <p className="font-mono text-body-sm text-ink">{kind}</p>
+      <p className="font-mono text-body-sm text-ink">{name}</p>
       <Pairs>
         <Pair label="Input">{rateText(rate.input_per_mtok, "not set")}</Pair>
         <Pair label="Output">{rateText(rate.output_per_mtok, "not set")}</Pair>
         <Pair label="Cache read">{rateText(rate.cache_read_per_mtok, unsetCache)}</Pair>
         <Pair label="Cache write">{rateText(rate.cache_write_per_mtok, unsetCache)}</Pair>
       </Pairs>
-      {rate.complete ? undefined : (
+      {rate.complete || !rate.per_kind ? undefined : (
         <Note>
           Not priced without <Code>input_per_mtok</Code> and <Code>output_per_mtok</Code>.
         </Note>
@@ -178,16 +180,22 @@ function RateList({ kind, rate }: RateListProps) {
   );
 }
 
-function TokenRatesPanel({ config }: ConfigProps) {
+interface TokenRatesPanelProps extends ConfigProps {
+  hasSource: boolean;
+}
+
+function TokenRatesPanel({ config, hasSource }: TokenRatesPanelProps) {
   const rates = config.token_rates;
   return (
     <Panel title="Token rates">
       {rates === null ? (
-        <p className="text-body-md text-ink-body">Not set: no cost is shown.</p>
+        <p className="text-body-md text-ink-body">
+          {hasSource ? "Not set: costs come from the price table." : "Not set: no cost is shown."}
+        </p>
       ) : (
         Object.keys(rates)
           .sort()
-          .map((kind) => <RateList key={kind} kind={kind} rate={rates[kind]} />)
+          .map((name) => <RateList key={name} name={name} rate={rates[name]} />)
       )}
     </Panel>
   );
@@ -235,7 +243,7 @@ export function WorkflowScreen(): ReactNode {
         <div className="flex min-w-0 flex-col gap-xl">
           <TrackerPanel config={config} />
           <AgentPanel config={config} />
-          <TokenRatesPanel config={config} />
+          <TokenRatesPanel config={config} hasSource={hasRateSource(data)} />
         </div>
       </div>
     </div>

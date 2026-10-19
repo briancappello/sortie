@@ -45,7 +45,7 @@ Zero series are prepared at start-up for the configured models, for `<none>` and
 
 **Keep model out of metrics.** Rejected. It fails the operator need that drives this decision: dashboards and alerts cannot split spend or failures by model.
 
-**Lazy label creation.** Rejected. Every model's first increment after each restart vanishes from `rate()` and `increase()`. That means a lost run on the runtime graph and a missed first error in alerts on a healthy deployment, which violates driver 3.
+**Lazy label creation.** Rejected. Every model's first increment after each restart vanishes from `rate()` and `increase()`. That means a lost run on the runtime graph and a missed first error in alerts on a healthy deployment.
 
 **Holding the first increment until a scrape reads the zero** was also weighed and rejected. With two scrapers, or a manual read of the endpoint, the held increment goes to the wrong reader or is counted wrongly.
 

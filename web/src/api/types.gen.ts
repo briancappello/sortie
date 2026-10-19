@@ -922,6 +922,7 @@ export interface TokenRateResponse {
   cache_read_per_mtok: number | null;
   cache_write_per_mtok: number | null;
   complete: boolean;
+  per_kind: boolean;
 }
 
 export interface Tokens {

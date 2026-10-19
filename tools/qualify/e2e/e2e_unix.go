@@ -22,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/tracker/file"
@@ -130,6 +131,8 @@ func (m *workflowManager) Config() config.ServiceConfig {
 	defer m.mu.RUnlock()
 	return m.config
 }
+
+func (m *workflowManager) Rates() *pricing.Rates { return nil }
 
 func (m *workflowManager) PromptTemplate() *prompt.Template {
 	m.mu.RLock()

@@ -1203,9 +1203,10 @@ type State struct {
 
 	PollIntervalMS int
 
-	// TokenRates are the rates in force. Only the event loop writes them, and
-	// always by replacing the map, so a snapshot can share it without a lock.
-	TokenRates pricing.TokenRates
+	// Rates are the rates in force; a nil value prices nothing. Only the
+	// event loop writes them, and always by replacing the pointer, so a
+	// snapshot can share it without a lock.
+	Rates *pricing.Rates
 
 	MaxConcurrentAgents int
 
@@ -1794,9 +1795,9 @@ type RuntimeSnapshotResult struct {
 	MaxTokens   int `json:"max_tokens"`
 	MaxSessions int `json:"max_sessions"`
 
-	// TokenRates is State.TokenRates at capture. Safe to read without a lock
-	// because the map is replaced, never mutated.
-	TokenRates pricing.TokenRates `json:"-"`
+	// Rates is State.Rates at capture; a nil value prices nothing. Safe to
+	// read without a lock because the rates are replaced, never mutated.
+	Rates *pricing.Rates `json:"-"`
 
 	// AttentionAcknowledgements is a copy of State.AttentionAcknowledgements,
 	// keyed by attention item ID.
@@ -1900,6 +1901,7 @@ func stallInstants(reference time.Time, timeoutMS int) (quietAt, stallAt time.Ti
 func spendOfRunningEntry(entry *RunningEntry) pricing.Spend {
 	return pricing.Spend{
 		Kind:     entry.AgentKind,
+		Model:    cmp.Or(entry.ModelName, entry.ConfiguredModel),
 		Measured: entry.UsageMeasured,
 		Totals: domain.TokenUsage{
 			InputTokens:      entry.AgentInputTokens,
@@ -1960,7 +1962,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 		}
 		identity := maskedIdentity(issueIdentityOf(entry.Issue))
 		quietAt, stallAt := stallInstants(stallReference(entry), state.StallTimeoutMS)
-		liveCost, liveStatus := pricing.PriceSession(spendOfRunningEntry(entry), state.TokenRates)
+		liveCost, liveStatus := pricing.PriceSession(spendOfRunningEntry(entry), state.Rates)
 		snap.Running = append(snap.Running, SnapshotRunningEntry{
 			IssueID:             entry.Issue.ID,
 			Identifier:          entry.Identifier,
@@ -2067,7 +2069,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 
 	snap.MaxTokens = state.MaxTokens
 	snap.MaxSessions = state.MaxSessions
-	snap.TokenRates = state.TokenRates
+	snap.Rates = state.Rates
 	snap.AttentionAcknowledgements = maps.Clone(state.AttentionAcknowledgements)
 
 	snap.BudgetExhaustedCount = len(state.BudgetExhausted)
