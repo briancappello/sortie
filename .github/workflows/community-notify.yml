@@ -10,10 +10,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: community-notify
-  cancel-in-progress: false
-
 jobs:
   notify:
     name: Notify Discord

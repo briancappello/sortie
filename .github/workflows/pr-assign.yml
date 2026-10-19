@@ -10,7 +10,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: pr-assign
+  group: pr-assign-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
