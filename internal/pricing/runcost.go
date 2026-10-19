@@ -28,6 +28,9 @@ const (
 	// over a table.
 	SourceOperator PriceSource = "operator"
 
+	// SourceFetched is the shared price table downloaded at runtime.
+	SourceFetched PriceSource = "fetched"
+
 	// SourceEmbedded is the price table compiled into the binary.
 	SourceEmbedded PriceSource = "embedded"
 )

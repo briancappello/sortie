@@ -68,10 +68,11 @@ func (e tableEntry) hasRate() bool {
 }
 
 // ParseTable validates data as a price table and returns it. A non-nil
-// previous is the last table accepted from the source data came from, never
-// a table from another source: data must then carry rates in at least half
-// as many entries, and an entry whose rate fell to zero keeps previous's
-// entry.
+// previous is the last table accepted from the source data came from, or the
+// embedded table when data is the shared table and none has been accepted
+// yet, never a table from another source: data must then carry rates in at
+// least half as many entries, and an entry whose rate fell to zero keeps
+// previous's entry.
 func ParseTable(data []byte, previous *Table) (*Table, error) {
 	entries, err := decodeEntries(data)
 	if err != nil {

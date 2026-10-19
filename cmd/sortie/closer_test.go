@@ -139,6 +139,8 @@ agent:
 closeable-file:
   path: %s
   close_key: %s
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `, issuesPath, token)
