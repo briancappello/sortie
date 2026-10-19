@@ -5,7 +5,7 @@ import {
   statsTokensShortfall,
   statsTokensText,
 } from "@/lib/figures";
-import { Hint } from "@/components/ui/tooltip";
+import { Hint } from "@/components/ui/hint";
 import { fmtCount, fmtDuration, fmtMean, fmtPercent, plural } from "@/lib/format";
 
 import type { Report } from "@/api/types.gen";
