@@ -1,3 +1,5 @@
+import { fmtMoney } from "@/lib/format";
+
 import type {
   ConfigResponse,
   IssueDetailResponse,
@@ -19,10 +21,12 @@ export interface BudgetLine {
   limitKnown: boolean;
 }
 
-/** The budget of one issue: sessions, tokens, and the estimated cost of the spend. */
+/** The budget of one issue: sessions, tokens, money, and the estimated cost of the spend. */
 export interface BudgetFigures {
   sessions: BudgetLine;
   tokens: BudgetLine & { complete: boolean };
+  /** The estimated cost against the money limit; `complete` is false while the figure is a lower bound. */
+  money: BudgetLine & { complete: boolean };
   /** The issue's tokens as the peek shows them; null while the spend is not known. */
   uncachedTokens: number | null;
   /** Null while no rate source is available, and when the issue has no recorded run. */
@@ -35,6 +39,14 @@ function totalsCost(history: IssueHistoryResponse | null): CostFigure | null {
     : { usd: history.totals.estimated_cost_usd, status: history.totals.cost_status };
 }
 
+function moneyLine(
+  cost: CostFigure | null,
+  limit: number | null,
+  limitKnown: boolean,
+): BudgetFigures["money"] {
+  return { used: cost?.usd ?? null, limit, limitKnown, complete: cost?.status === "estimated" };
+}
+
 function uncachedTotal(history: IssueHistoryResponse | null): number | null {
   return history === null ? 0 : history.totals.uncached_tokens;
 }
@@ -42,6 +54,7 @@ function uncachedTotal(history: IssueHistoryResponse | null): number | null {
 function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefined): BudgetFigures {
   const { running, budget_exhausted: exhausted, history } = detail;
   if (detail.status === "running" && running !== null) {
+    const cost = { usd: running.issue_estimated_cost_usd, status: running.issue_cost_status };
     return {
       sessions: { used: running.used_sessions, limit: running.budget_sessions, limitKnown: true },
       tokens: {
@@ -50,10 +63,12 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
         limitKnown: true,
         complete: running.used_tokens_complete,
       },
+      money: moneyLine(cost, running.budget_usd, true),
       uncachedTokens: running.used_tokens,
-      cost: { usd: running.issue_estimated_cost_usd, status: running.issue_cost_status },
+      cost,
     };
   }
+  const totals = totalsCost(history);
   if (detail.status === "budget_exhausted" && exhausted !== null) {
     return {
       sessions: {
@@ -68,8 +83,9 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
         limitKnown: true,
         complete: exhausted.unmeasured_sessions === 0,
       },
+      money: moneyLine(totals, exhausted.budget_usd, true),
       uncachedTokens: uncachedTotal(history),
-      cost: totalsCost(history),
+      cost: totals,
     };
   }
   const isKnown = config !== undefined;
@@ -85,8 +101,9 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
       limitKnown: isKnown,
       complete: history === null ? true : history.totals.tokens_complete,
     },
+    money: moneyLine(totals, config?.agent.max_cost_usd ?? null, isKnown),
     uncachedTokens: uncachedTotal(history),
-    cost: totalsCost(history),
+    cost: totals,
   };
 }
 
@@ -109,4 +126,17 @@ export function budgetOf(
 ): BudgetFigures {
   const figures = figuresOf(detail, state?.config);
   return hasRateSource(state) ? figures : { ...figures, cost: null };
+}
+
+/**
+ * Words the issue's estimated cost against its money limit, marked "at least"
+ * while the cost is a lower bound. Gives undefined when no cost meter applies:
+ * no cost shown, no money limit, or no cost figure.
+ */
+export function moneyBudgetText({ cost, money }: BudgetFigures): string | undefined {
+  if (cost === null || money.limit === null || money.limit <= 0 || money.used === null) {
+    return undefined;
+  }
+  const text = `${fmtMoney(money.used)} of ${fmtMoney(money.limit)}`;
+  return money.complete ? text : `at least ${text}`;
 }

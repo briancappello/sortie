@@ -1,6 +1,6 @@
 import { useStateQuery } from "@/api/queries";
 import { hasRateSource } from "@/lib/budget";
-import { fmtCount, fmtRate, fmtStamp, fmtTokens } from "@/lib/format";
+import { fmtCount, fmtMoney, fmtRate, fmtStamp, fmtTokens } from "@/lib/format";
 import { Pair, Pairs, Panel } from "@/components/Panel";
 import { StateBadge } from "@/components/StateBadge";
 
@@ -126,6 +126,9 @@ function AgentPanel({ config }: ConfigProps) {
         </Pair>
         <Pair label="Token budget">
           {agent.max_tokens === null ? NONE : `${fmtTokens(agent.max_tokens)} per issue`}
+        </Pair>
+        <Pair label="Money budget">
+          {agent.max_cost_usd === null ? NONE : `${fmtMoney(agent.max_cost_usd)} per issue`}
         </Pair>
         <Pair label="Session budget">
           {agent.max_sessions === null ? NONE : `${fmtCount(agent.max_sessions)} per issue`}
