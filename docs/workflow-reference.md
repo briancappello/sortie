@@ -3580,7 +3580,7 @@ A running run keeps its newest 1,000 retained events, within 256 KiB, in memory,
 
 #### `GET /api/v1/stats`: run statistics
 
-Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and, when `token_rates` is configured, what they cost, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and what they cost as recorded with each run, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
 
 **Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
 
@@ -3758,7 +3758,7 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `duration_seconds`           | object           | `p50`, `p95`, `mean`, and `samples` over the succeeded runs. Each of them is `null` when `samples` is `0`. |
 | `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
 | `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage, and `uncached`, which is `total` less `cache_read`, floored at zero, so `uncached` plus `cache_read` equals `total` and cache writes stay in it. `null` on the `base` tier and when no run reported usage. |
-| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier, when no run is priced, and when the runs carry no recorded cost. |
+| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier, when no run that spent tokens is priced, and when the runs carry no recorded cost. |
 | `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage. `null` when `cost_usd` is, and when no succeeded run reported usage. |
 | `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |
 | `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
@@ -4340,6 +4340,7 @@ A kind entry that prices its kind (both `input_per_mtok` and `output_per_mtok` s
 - `token_rates` MUST be a map when present. Non-map values produce a warning (not a fatal error).
 - Each entry value MUST be a map. Non-map values produce a warning for that key.
 - Rate values MUST be non-negative, finite numbers. A negative, non-finite, or non-numeric value produces a warning and is treated as not configured.
+- On a reload, a `token_rates` that is not a map keeps every entry in force, and an entry that is not a map or holds a rate that is not a finite, non-negative number keeps the rates it had before the reload; an entry the reload adds is read as at startup. Every other entry applies.
 - An unrecognized key inside an entry produces a warning and is ignored.
 - A kind entry needs both `input_per_mtok` and `output_per_mtok` to price anything. A kind entry missing either one, or holding neither, prices nothing: its kind's runs are unpriced on the dashboard, the JSON API, and `sortie stats`, and the price tables do not price them either. This holds even when the incomplete entry is the only one `token_rates` configures.
 - Zero-valued rates are valid and produce `$0.00` for that token type.
@@ -4349,7 +4350,7 @@ A kind entry that prices its kind (both `input_per_mtok` and `output_per_mtok` s
 - A model entry for a model no table in force at load lists that does not set all four rates is an error under check `token_rates.model_incomplete`.
 - `price_table.replace_file` and `price_table.replace_url` MUST NOT both be set; setting both is an error under check `price_table.replace_conflict`. A `price_table.replace_file` that cannot be read or fails the price-table validation is an error under check `price_table.replace_file`, at startup, in `sortie validate`, and on reload, which keeps the previous configuration.
 
-**Reload behavior:** `token_rates` and `price_table` reload with the rest of WORKFLOW.md, and `price_table.replace_file` is read again on every load. New rates apply to the live estimate of running sessions and to every run recorded after the reload; a cost already recorded never changes. `config.token_rates` serves the rates in force from the reload on, and a reload that fails keeps the previous rates.
+**Reload behavior:** `token_rates` and `price_table` reload with the rest of WORKFLOW.md, and `price_table.replace_file` is read again on every load. New rates apply to the live estimate of running sessions and to every run recorded after the reload; a cost already recorded never changes. `config.token_rates` serves the rates in force from the reload on, and a reload that fails keeps the previous rates, and so does an entry a reload gives an invalid value (Validation rules above).
 
 ### 4.5 Adapter-Specific Pass-Through Config
 
@@ -5331,7 +5332,7 @@ A `handoff_state` or `in_progress_state` that collides with `active_states` or `
 
 These offline checks never contact Linear and never log the API key value. State-name existence against the team and credential validity are checked by the online preflight at adapter construction, not by `sortie validate`.
 
-**Configuration advisories.** A configuration advisory is recorded once, when the configuration that draws it is built or loaded, and never printed at that point. Every advisory reaches an operator through the same three surfaces: `sortie validate` reports it once as a `warning` diagnostic and never fails the run for it; the running orchestrator logs it once at the tick that first draws it, and again only after a tick whose configuration did not draw it; a dry run logs it once, before it fetches candidate issues. `sortie mcp-server` never prints an advisory. The stats report, from `sortie stats` or `GET /api/v1/stats`, is the one exception: it lists its own `token_rates` warnings, because they decide which runs it prices.
+**Configuration advisories.** A configuration advisory is recorded once, when the configuration that draws it is built or loaded, and never printed at that point. Every advisory reaches an operator through the same three surfaces: `sortie validate` reports it once as a `warning` diagnostic and never fails the run for it; the running orchestrator logs it once at the tick that first draws it, and again only after a tick whose configuration did not draw it; a dry run logs it once, before it fetches candidate issues. `sortie mcp-server` never prints an advisory.
 
 | Check                                                     | Condition                                                                                          |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |

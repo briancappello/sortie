@@ -16,7 +16,7 @@ function start_service():
   open_or_create_sqlite_db()
   run_schema_migrations()
   load_rate_layers()                                     // token_rates, the operator table, the last good fetched table beside the database, the embedded table
-  price_unrecorded_runs_once()                           // rows written before costs were recorded, under the rates in force now
+  price_unrecorded_runs_once()                           // rows written before costs were recorded, under the rates in force now; a failure is logged, startup continues, and the next start retries
   start_price_table_fetch_unless_disabled(refresh_every=24h)  // on unless price_table.fetch is false; a failure never blocks startup
 
   persisted_retries = sqlite.load_retry_entries()
