@@ -5,6 +5,7 @@ import { useStateQuery, useStatsQuery } from "@/api/queries";
 import { ServedText } from "@/components/ServedText";
 import { StatusMark } from "@/components/StatusMark";
 import { Segmented } from "@/components/ui/segmented";
+import { hasRateSource } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import { fmtClock, fmtDate } from "@/lib/format";
 import { agentLabel, isNamedRuleGroup, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
@@ -229,7 +230,7 @@ export function AnalyticsScreen() {
             </p>
           ) : (
             <div key={range} className="flex flex-col gap-xl">
-              <SummaryTiles report={report} config={config} />
+              <SummaryTiles report={report} hasCost={hasRateSource(state)} />
               <OutcomeBar summary={report.summary} />
               {(report.chain_funnels ?? []).map((funnel) => (
                 <ChainFunnel key={funnel.stages?.[0]?.rule} funnel={funnel} config={config} />
@@ -237,7 +238,7 @@ export function AnalyticsScreen() {
               <Breakdowns
                 report={report}
                 hasRules={(config?.dispatch.rules ?? []).length > 0}
-                hasRates={config?.token_rates != null}
+                hasRates={hasRateSource(state)}
               />
             </div>
           )}

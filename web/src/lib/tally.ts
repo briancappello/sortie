@@ -3,11 +3,7 @@ import { fmtCount, fmtMoney, fmtTokens, plural } from "@/lib/format";
 import type { Summary } from "@/api/types.gen";
 
 /** Words the tally line of Ended today from the stats summary of today's runs. */
-export function tallyLine(
-  summary: Summary,
-  endedCount: number,
-  tokenRatesConfigured: boolean,
-): string {
+export function tallyLine(summary: Summary, endedCount: number, hasCost: boolean): string {
   if (summary.runs === 0) {
     return "No run finished today.";
   }
@@ -24,7 +20,7 @@ export function tallyLine(
     parts.push(`${fmtCount(summary.cancelled)} cancelled`);
   }
   parts.push(tokensPart(summary));
-  if (tokenRatesConfigured) {
+  if (hasCost) {
     parts.push(costPart(summary));
   }
   return parts.join(" · ");

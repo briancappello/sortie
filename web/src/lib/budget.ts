@@ -1,4 +1,9 @@
-import type { ConfigResponse, IssueDetailResponse, IssueHistoryResponse } from "@/api/types.gen";
+import type {
+  ConfigResponse,
+  IssueDetailResponse,
+  IssueHistoryResponse,
+  StateResponse,
+} from "@/api/types.gen";
 
 /** An estimated cost and the served status that says how far to trust it. */
 export interface CostFigure {
@@ -20,7 +25,7 @@ export interface BudgetFigures {
   tokens: BudgetLine & { complete: boolean };
   /** The issue's tokens as the peek shows them; null while the spend is not known. */
   uncachedTokens: number | null;
-  /** Null while `config` or its `token_rates` is absent, and when the issue has no recorded run. */
+  /** Null while no rate source is available, and when the issue has no recorded run. */
   cost: CostFigure | null;
 }
 
@@ -86,15 +91,22 @@ function figuresOf(detail: IssueDetailResponse, config: ConfigResponse | undefin
 }
 
 /**
+ * Reports whether a rate source is available, which the state response says by
+ * carrying `cost_unpriced_running`. Every cost figure and column gates on it.
+ */
+export function hasRateSource(state: StateResponse | undefined): boolean {
+  return state?.cost_unpriced_running !== undefined;
+}
+
+/**
  * Gives the budget figures of an issue from the source its status names: the
  * running entry, the budget stop, or the recorded runs and the configured
  * limits. A figure Sortie does not know stays null, never zero.
  */
 export function budgetOf(
   detail: IssueDetailResponse,
-  config: ConfigResponse | undefined,
+  state: StateResponse | undefined,
 ): BudgetFigures {
-  const figures = figuresOf(detail, config);
-  const isPriced = config !== undefined && config.token_rates !== null;
-  return isPriced ? figures : { ...figures, cost: null };
+  const figures = figuresOf(detail, state?.config);
+  return hasRateSource(state) ? figures : { ...figures, cost: null };
 }

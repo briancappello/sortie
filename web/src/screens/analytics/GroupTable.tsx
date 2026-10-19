@@ -155,7 +155,7 @@ export interface GroupTableProps<Row extends Group> {
   rows: readonly Row[];
   /** The report's `schema_tier`. */
   tier: string;
-  /** Whether the workflow configures `token_rates`, which adds the cost column. */
+  /** Whether a rate source is available, which adds the cost column. */
   hasRates: boolean;
   /** `share` swaps the success column for the share of runs, as a breakdown by run status needs. */
   measure?: "success" | "share";

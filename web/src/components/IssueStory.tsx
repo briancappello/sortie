@@ -7,6 +7,7 @@ import { useNow } from "@/app/live";
 import { ServedText } from "@/components/ServedText";
 import { StatusMark } from "@/components/StatusMark";
 import { Button, buttonStyles } from "@/components/ui/button";
+import { hasRateSource } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import {
   costText,
@@ -455,7 +456,7 @@ export interface IssueStoryProps {
 export function IssueStory({ detail, position, progress, needsAttention }: IssueStoryProps) {
   const now = useNow();
   const { data: state } = useStateQuery();
-  const hasEstimates = (state?.config?.token_rates ?? null) !== null;
+  const hasEstimates = hasRateSource(state);
   const [wanted, setWanted] = useState(0);
   const older = useHistoryRunsQuery(detail.issue_id, {}, wanted > 0);
   const { hasNextPage, isFetching, isError, fetchNextPage } = older;

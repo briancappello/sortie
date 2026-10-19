@@ -72,13 +72,13 @@ export function HistoryScreen() {
       ) : (
         <>
           <Table isWide>
-            <HistoryTableHead config={config} />
+            <HistoryTableHead state={state} />
             {groups.map((group) => (
               <IssueGroupRows
                 key={`${filterKey}|${group.issue_id}`}
                 group={group}
                 filter={filter}
-                config={config}
+                state={state}
               />
             ))}
           </Table>
