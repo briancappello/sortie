@@ -15,7 +15,7 @@ import type {
 import type { InfiniteData, UseInfiniteQueryResult, UseQueryResult } from "@tanstack/react-query";
 
 /** The span of run history the Analytics screen reports. */
-export type AnalyticsRange = "24h" | "7d" | "all";
+export type AnalyticsRange = "24h" | "7d" | "30d" | "90d" | "all";
 
 /** The one cache of server data in a tab; a change signal, not a timer, decides when data is stale. */
 export const queryClient = new QueryClient({
@@ -54,6 +54,8 @@ export const STATS_REFETCH_FLOOR_MS = 30_000;
 const SINCE_BY_RANGE: Record<AnalyticsRange, string | undefined> = {
   "24h": "24h",
   "7d": "168h",
+  "30d": "720h",
+  "90d": "2160h",
   all: undefined,
 };
 

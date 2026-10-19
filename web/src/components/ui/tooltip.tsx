@@ -35,3 +35,32 @@ export function TooltipPopup({ children }: TooltipPopupProps) {
     </BaseTooltip.Portal>
   );
 }
+
+/** Props of {@link Hint}. */
+export interface HintProps {
+  hint: ReactNode;
+  children: ReactNode;
+}
+
+/**
+ * Renders text with a dotted underline whose tooltip carries the detail the
+ * screen leaves out. It takes keyboard focus, so the tooltip opens without a
+ * pointer too.
+ */
+export function Hint({ hint, children }: HintProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            tabIndex={0}
+            className="cursor-help underline decoration-line-strong decoration-dotted underline-offset-4 transition-colors duration-(--duration-feedback) outline-none hover:decoration-ink-body focus-visible:rounded-xs focus-visible:outline-2 focus-visible:outline-focus-ring"
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipPopup>{hint}</TooltipPopup>
+    </Tooltip>
+  );
+}
