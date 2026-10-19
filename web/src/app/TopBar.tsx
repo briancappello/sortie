@@ -97,7 +97,7 @@ function AgentsStatus() {
           ? `${running} ${running === 1 ? "agent" : "agents"} running`
           : `${running} of ${cap} ${cap === 1 ? "agent" : "agents"} running`
       }
-      className="flex items-center gap-xs whitespace-nowrap text-body-sm"
+      className="flex items-center gap-xs whitespace-nowrap text-body-sm max-lg:hidden"
     >
       <span className="text-ink-muted">Agents</span>
       <span className="font-medium text-ink tabular-nums">
@@ -163,7 +163,7 @@ export function TopBar({ className, isHolding, onTogglePause, onOpenPalette }: T
         >
           <SearchIcon className="shrink-0" />
           <span className="min-w-0 flex-1 truncate text-left">Search or run a command</span>
-          <span className="flex shrink-0 gap-xxs">
+          <span className="flex shrink-0 gap-xxs max-lg:hidden">
             <Kbd>{modifierLabel()}</Kbd>
             <Kbd>K</Kbd>
           </span>
