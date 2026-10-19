@@ -40,8 +40,8 @@ export function DialogPopup({ children, className, ...rest }: DialogPopupProps) 
           )}
           {...rest}
         >
-          <BaseDialog.Close className="sr-only">Close</BaseDialog.Close>
           {children}
+          <BaseDialog.Close className="sr-only">Close</BaseDialog.Close>
         </BaseDialog.Popup>
       </BaseDialog.Viewport>
     </BaseDialog.Portal>
