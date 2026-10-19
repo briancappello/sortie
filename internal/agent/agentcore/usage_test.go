@@ -1,6 +1,7 @@
 package agentcore
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -35,7 +36,7 @@ func TestRunUsage_NeverLowersASnapshot(t *testing.T) {
 	t.Parallel()
 
 	u := NewRunUsage()
-	u.SetRunCumulative(domain.TokenUsage{InputTokens: 100, OutputTokens: 50})
+	u.SetRunCumulative(domain.TokenUsage{InputTokens: 100, OutputTokens: 50}, nil)
 
 	got := u.SetTurnProvisional(domain.TokenUsage{InputTokens: 1, OutputTokens: 1})
 
@@ -57,7 +58,7 @@ func TestRunUsage_ClampsNegativeComponents_AllMethods(t *testing.T) {
 		call func(u *RunUsage) domain.TokenUsage
 	}{
 		{"SetTurnProvisional", func(u *RunUsage) domain.TokenUsage { return u.SetTurnProvisional(negative) }},
-		{"SetRunCumulative", func(u *RunUsage) domain.TokenUsage { return u.SetRunCumulative(negative) }},
+		{"SetRunCumulative", func(u *RunUsage) domain.TokenUsage { return u.SetRunCumulative(negative, nil) }},
 	}
 
 	for _, tt := range tests {
@@ -85,7 +86,7 @@ func TestRunUsage_TotalAlwaysInputPlusOutput_AllMethods(t *testing.T) {
 		call func(u *RunUsage) domain.TokenUsage
 	}{
 		{"SetTurnProvisional", func(u *RunUsage) domain.TokenUsage { return u.SetTurnProvisional(bogusTotal) }},
-		{"SetRunCumulative", func(u *RunUsage) domain.TokenUsage { return u.SetRunCumulative(bogusTotal) }},
+		{"SetRunCumulative", func(u *RunUsage) domain.TokenUsage { return u.SetRunCumulative(bogusTotal, nil) }},
 	}
 
 	for _, tt := range tests {
@@ -118,10 +119,10 @@ func TestRunUsage_SetRunCumulative_ReplacesSettledAndClearsProvisional(t *testin
 	t.Parallel()
 
 	u := NewRunUsage()
-	u.SetRunCumulative(domain.TokenUsage{InputTokens: 150, OutputTokens: 60})
+	u.SetRunCumulative(domain.TokenUsage{InputTokens: 150, OutputTokens: 60}, nil)
 	u.SetTurnProvisional(domain.TokenUsage{InputTokens: 9, OutputTokens: 9})
 
-	got := u.SetRunCumulative(domain.TokenUsage{InputTokens: 200, OutputTokens: 80, CacheReadTokens: 5})
+	got := u.SetRunCumulative(domain.TokenUsage{InputTokens: 200, OutputTokens: 80, CacheReadTokens: 5}, nil)
 	want := domain.TokenUsage{InputTokens: 200, OutputTokens: 80, CacheReadTokens: 5, TotalTokens: 280}
 	if got != want {
 		t.Errorf("SetRunCumulative() = %+v, want %+v (replaces settled outright)", got, want)
@@ -150,11 +151,11 @@ func TestRunUsage_MonotonicSnapshot_AcrossMixedCallSequence(t *testing.T) {
 		prev = got
 	}
 
-	checkStep(t, "SetRunCumulative(100,50)", u.SetRunCumulative(domain.TokenUsage{InputTokens: 100, OutputTokens: 50}))
+	checkStep(t, "SetRunCumulative(100,50)", u.SetRunCumulative(domain.TokenUsage{InputTokens: 100, OutputTokens: 50}, nil))
 	checkStep(t, "SetTurnProvisional(1,1) lower", u.SetTurnProvisional(domain.TokenUsage{InputTokens: 1, OutputTokens: 1}))
-	checkStep(t, "SetRunCumulative(50,200) mixed", u.SetRunCumulative(domain.TokenUsage{InputTokens: 50, OutputTokens: 200}))
+	checkStep(t, "SetRunCumulative(50,200) mixed", u.SetRunCumulative(domain.TokenUsage{InputTokens: 50, OutputTokens: 200}, nil))
 	checkStep(t, "SetTurnProvisional(300,5) mixed", u.SetTurnProvisional(domain.TokenUsage{InputTokens: 300, OutputTokens: 5}))
-	checkStep(t, "SetRunCumulative(0,0) lower", u.SetRunCumulative(domain.TokenUsage{}))
+	checkStep(t, "SetRunCumulative(0,0) lower", u.SetRunCumulative(domain.TokenUsage{}, nil))
 
 	want := domain.TokenUsage{InputTokens: 350, OutputTokens: 205}
 	want.TotalTokens = want.InputTokens + want.OutputTokens
@@ -170,16 +171,16 @@ func TestResumeBaseline_Observe_CounterReset(t *testing.T) {
 		return domain.TokenUsage{InputTokens: in, OutputTokens: out, TotalTokens: in + out, CacheReadTokens: read, CacheWriteTokens: write}
 	}
 	start, own := usage(100, 10, 1000, 500), usage(10, 2, 100, 20)
-	b := NewResumeBaseline(&start)
+	b := NewResumeBaseline(&start, nil)
 
-	b.Observe(usage(130, 25, 1400, 600), nil)
+	b.Observe(usage(130, 25, 1400, 600), nil, nil)
 
-	run, estimated := b.Observe(usage(20, 5, 300, 50), &own)
+	run, _, estimated := b.Observe(usage(20, 5, 300, 50), nil, &own)
 	if want := usage(40, 17, 500, 120); run != want || !estimated {
 		t.Errorf("Observe(reset reading, own) = %+v, %v, want %+v, true", run, estimated, want)
 	}
 
-	run, estimated = b.Observe(usage(25, 9, 350, 70), nil)
+	run, _, estimated = b.Observe(usage(25, 9, 350, 70), nil, nil)
 	if want := usage(45, 21, 550, 140); run != want || estimated {
 		t.Errorf("Observe(reading after the reset) = %+v, %v, want %+v, false", run, estimated, want)
 	}
@@ -207,12 +208,59 @@ func TestResumeBaseline_Observe_RederivedBaselineExactness(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			b := NewResumeBaseline(tt.resume)
+			b := NewResumeBaseline(tt.resume, nil)
 
-			_, estimated := b.Observe(reading, tt.own)
+			_, _, estimated := b.Observe(reading, nil, tt.own)
 
 			if estimated != tt.wantEstimated {
 				t.Errorf("Observe(reading, %v) estimated = %v, want %v", tt.own, estimated, tt.wantEstimated)
+			}
+		})
+	}
+}
+
+func TestResumeBaseline_Observe_PerModelSeed(t *testing.T) {
+	t.Parallel()
+
+	usage := func(in, out int64) domain.TokenUsage {
+		return domain.TokenUsage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
+	}
+	base := usage(10, 2)
+	reading := map[string]domain.TokenUsage{"a": usage(15, 4), "b": usage(5, 1)}
+
+	tests := []struct {
+		name       string
+		seed       map[string]domain.TokenUsage
+		wantRun    map[string]domain.TokenUsage
+		wantResume map[string]domain.TokenUsage
+	}{
+		{
+			name:       "consistent seed is subtracted per model",
+			seed:       map[string]domain.TokenUsage{"a": usage(8, 2), "b": usage(2, 0)},
+			wantRun:    map[string]domain.TokenUsage{"a": usage(7, 2), "b": usage(3, 1)},
+			wantResume: reading,
+		},
+		{
+			name:       "seed that does not add up to the combined figure claims nothing",
+			seed:       map[string]domain.TokenUsage{"a": usage(8, 2)},
+			wantResume: reading,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			b := NewResumeBaseline(&base, tt.seed)
+
+			_, run, _ := b.Observe(usage(20, 5), reading, nil)
+			_, resume := b.Resume()
+
+			if !maps.Equal(run, tt.wantRun) {
+				t.Errorf("Observe(reading) by model = %+v, want %+v", run, tt.wantRun)
+			}
+			if !maps.Equal(resume, tt.wantResume) {
+				t.Errorf("Resume() by model = %+v, want %+v", resume, tt.wantResume)
 			}
 		})
 	}

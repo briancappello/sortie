@@ -132,6 +132,14 @@ type WorkerResult struct {
 	// run resuming SessionID starts from it.
 	ResumeUsage *domain.TokenUsage
 
+	// ResumeUsageByModel is the per-model split of ResumeUsage, set by the
+	// same rule.
+	ResumeUsageByModel map[string]domain.TokenUsage
+
+	// UsageByModel is the worker mirror's per-model totals, which sum to
+	// Usage in every class.
+	UsageByModel map[string]domain.TokenUsage
+
 	// WorkspacePath is the workspace directory for this attempt, empty if
 	// preparation failed.
 	WorkspacePath string
@@ -346,6 +354,10 @@ type WorkerDeps struct {
 	// ResumeSessionID's session, passed to StartSession unchanged. Nil
 	// when ResumeSessionID is empty or that run recorded none.
 	ResumeUsage *domain.TokenUsage
+
+	// ResumeUsageByModel is the per-model split of ResumeUsage, passed to
+	// StartSession unchanged.
+	ResumeUsageByModel map[string]domain.TokenUsage
 
 	// DispatchID fences session identity to this worker attempt.
 	DispatchID string
@@ -572,10 +584,11 @@ func runBoundedTurn(
 
 // foldLocalUsage applies the clamped-delta rule to the worker's token
 // mirror: each component's delta against lastUsage, clamped to zero, is
-// added to cumulative, and lastUsage is raised to the componentwise max.
+// added to cumulative, lastUsage is raised to the componentwise max, and
+// the per-model credits are added to a copy of totals.
 // Confined to the worker goroutine; never touches orchestrator state.
-func foldLocalUsage(usage, cumulative, lastUsage domain.TokenUsage) (newCumulative, newLastUsage domain.TokenUsage) {
-	delta, newLastUsage := usageDeltaAndWatermark(usage, lastUsage)
+func foldLocalUsage(usage domain.TokenUsage, byModel map[string]domain.TokenUsage, current string, cumulative, lastUsage domain.TokenUsage, totals map[string]domain.TokenUsage) (newCumulative, newLastUsage domain.TokenUsage, newTotals map[string]domain.TokenUsage) {
+	delta, newLastUsage, credits := foldUsage(usage, byModel, current, lastUsage, totals)
 	newCumulative = domain.TokenUsage{
 		InputTokens:      cumulative.InputTokens + delta.InputTokens,
 		OutputTokens:     cumulative.OutputTokens + delta.OutputTokens,
@@ -583,7 +596,7 @@ func foldLocalUsage(usage, cumulative, lastUsage domain.TokenUsage) (newCumulati
 		CacheReadTokens:  cumulative.CacheReadTokens + delta.CacheReadTokens,
 		CacheWriteTokens: cumulative.CacheWriteTokens + delta.CacheWriteTokens,
 	}
-	return newCumulative, newLastUsage
+	return newCumulative, newLastUsage, agentcore.AddUsageByModel(totals, credits)
 }
 
 // applyUsageOffset adds offset to a measured usage. A working session
@@ -647,9 +660,15 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	var (
 		localUsage        domain.TokenUsage
 		localLastUsage    domain.TokenUsage
+		localUsageByModel = map[string]domain.TokenUsage{}
 		localModelName    string
 		localRequestCount int
 	)
+
+	// localCurrentModel is metricModel for the worker's local mirror.
+	localCurrentModel := func(carrier string) string {
+		return coalesce(carrier, localModelName, deps.AgentSettings.Model)
+	}
 
 	// admitMeasurement reports whether the run's arrival admits a figure,
 	// warning on the first rejection only.
@@ -678,7 +697,8 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			localMeasured = true
 		}
 		if hasUsage(event.Usage) {
-			localUsage, localLastUsage = foldLocalUsage(event.Usage, localUsage, localLastUsage)
+			carrier := tokenUsageModel(event)
+			localUsage, localLastUsage, localUsageByModel = foldLocalUsage(event.Usage, event.UsageByModel, localCurrentModel(carrier), localUsage, localLastUsage, localUsageByModel)
 		}
 		if event.Type == domain.EventTokenUsage {
 			localRequestCount++
@@ -716,7 +736,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		if carriesMeasurement && !admitMeasurement() {
 			carriesMeasurement = false
 		} else if hasUsage(result.Usage) {
-			localUsage, localLastUsage = foldLocalUsage(result.Usage, localUsage, localLastUsage)
+			localUsage, localLastUsage, localUsageByModel = foldLocalUsage(result.Usage, nil, localCurrentModel(""), localUsage, localLastUsage, localUsageByModel)
 		}
 		if carriesMeasurement {
 			localMeasured = true
@@ -731,6 +751,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// that ended without a reading must not hand its predecessor's figure
 	// on, because the runtime may have saved calls that figure omits.
 	resumeUsage := deps.ResumeUsage
+	resumeUsageByModel := deps.ResumeUsageByModel
 
 	var acceptedSessionID string
 
@@ -741,6 +762,8 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		result.StoppedByTokenCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errTokenCeilingStop)
 		result.SessionID = acceptedSessionID
 		result.ResumeUsage = resumeUsage
+		result.ResumeUsageByModel = resumeUsageByModel
+		result.UsageByModel = maps.Clone(localUsageByModel)
 		reported = true
 		deps.OnExit(issue.ID, result)
 	}
@@ -1053,6 +1076,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		AgentConfig:              toDomainAgentConfig(cfg, agentKind, remote),
 		ResumeSessionID:          deps.ResumeSessionID,
 		ResumeUsage:              deps.ResumeUsage,
+		ResumeUsageByModel:       deps.ResumeUsageByModel,
 		SSHHost:                  deps.SSHHost,
 		SSHStrictHostKeyChecking: deps.SSHStrictHostKeyChecking,
 		SSHEnvNames:              sshEnvNames,
@@ -1075,11 +1099,12 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			model = event.Model
 		}
 		deps.OnEvent(issue.ID, domain.AgentEvent{
-			Type:      relayType,
-			Timestamp: event.Timestamp,
-			Message:   "verifying the agent credential",
-			Usage:     event.Usage,
-			Model:     model,
+			Type:         relayType,
+			Timestamp:    event.Timestamp,
+			Message:      "verifying the agent credential",
+			Usage:        event.Usage,
+			UsageByModel: maps.Clone(event.UsageByModel),
+			Model:        model,
 		})
 	}
 
@@ -1109,6 +1134,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	foldTurnResult(verificationResult)
 
 	verificationSpend := localLastUsage
+	verificationUsageByModel := maps.Clone(localUsageByModel)
 
 	if verificationErr != nil {
 		finishWorkspace()
@@ -1206,6 +1232,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			event.RateLimits = maps.Clone(event.RateLimits)
 		}
 		event.Usage = applyUsageOffset(event.Usage, verificationSpend)
+		if event.UsageByModel != nil {
+			event.UsageByModel = agentcore.AddUsageByModel(event.UsageByModel, verificationUsageByModel)
+		}
 		if foldRelayedEvent(event) {
 			if err := publishWorkerState(turnNumber); err != nil {
 				logger.Warn("failed to write status state file on token event", slog.Any("error", err))
@@ -1223,6 +1252,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// the file would keep denying a measurement that exists.
 	handleTurnResult := func(result domain.TurnResult) {
 		resumeUsage = result.ResumeUsage
+		resumeUsageByModel = result.ResumeUsageByModel
 		result.Usage = applyUsageOffset(result.Usage, verificationSpend)
 		if foldTurnResult(result) {
 			if err := publishWorkerState(turnNumber); err != nil {

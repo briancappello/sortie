@@ -5304,12 +5304,13 @@ func TestRunWorkerAttempt_RegistersDotEnvCredentialBeforeVerifyCredential(t *tes
 
 type verificationFigureAdapter struct {
 	*mockAgentAdapter
-	figure *domain.TokenUsage
+	figure  *domain.TokenUsage
+	byModel map[string]domain.TokenUsage
 }
 
 func (a *verificationFigureAdapter) RunTurn(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
 	if isMockVerificationSession(session) {
-		return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted, ResumeUsage: a.figure}, nil
+		return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted, ResumeUsage: a.figure, ResumeUsageByModel: a.byModel}, nil
 	}
 	return a.mockAgentAdapter.RunTurn(ctx, session, params)
 }
@@ -5317,18 +5318,34 @@ func (a *verificationFigureAdapter) RunTurn(ctx context.Context, session domain.
 func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 	t.Parallel()
 
-	handedOver := &domain.TokenUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}
-	verification := &domain.TokenUsage{InputTokens: 7, OutputTokens: 1, TotalTokens: 8}
-	earlier := &domain.TokenUsage{InputTokens: 300, OutputTokens: 30, TotalTokens: 330}
-	last := &domain.TokenUsage{InputTokens: 500, OutputTokens: 50, TotalTokens: 550}
+	type figure struct {
+		usage   *domain.TokenUsage
+		byModel map[string]domain.TokenUsage
+	}
+	handedOver := figure{
+		&domain.TokenUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+		map[string]domain.TokenUsage{"model-a": {InputTokens: 100, OutputTokens: 10, TotalTokens: 110}},
+	}
+	verification := figure{usage: &domain.TokenUsage{InputTokens: 7, OutputTokens: 1, TotalTokens: 8}}
+	earlier := figure{
+		&domain.TokenUsage{InputTokens: 300, OutputTokens: 30, TotalTokens: 330},
+		map[string]domain.TokenUsage{"model-a": {InputTokens: 300, OutputTokens: 30, TotalTokens: 330}},
+	}
+	last := figure{
+		&domain.TokenUsage{InputTokens: 500, OutputTokens: 50, TotalTokens: 550},
+		map[string]domain.TokenUsage{
+			"model-a": {InputTokens: 400, OutputTokens: 40, TotalTokens: 440},
+			"model-b": {InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+		},
+	}
 
 	tests := []struct {
 		name        string
-		turnFigures []*domain.TokenUsage
-		want        *domain.TokenUsage
+		turnFigures []figure
+		want        figure
 	}{
-		{"last working turn figure is kept", []*domain.TokenUsage{earlier, last}, last},
-		{"last turn without a figure overwrites an earlier one", []*domain.TokenUsage{last, nil}, nil},
+		{"last working turn figure is kept", []figure{earlier, last}, last},
+		{"last turn without a figure overwrites an earlier one", []figure{last, {}}, figure{}},
 	}
 
 	for _, tt := range tests {
@@ -5340,11 +5357,13 @@ func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 			ec := newExitCapture()
 			turn := 0
 			adapter := &verificationFigureAdapter{
-				figure: verification,
+				figure:  verification.usage,
+				byModel: verification.byModel,
 				mockAgentAdapter: &mockAgentAdapter{
 					runTurnFn: func(_ context.Context, session domain.Session, _ domain.RunTurnParams) (domain.TurnResult, error) {
 						turn++
-						return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted, ResumeUsage: tt.turnFigures[turn-1]}, nil
+						reported := tt.turnFigures[turn-1]
+						return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted, ResumeUsage: reported.usage, ResumeUsageByModel: reported.byModel}, nil
 					},
 				},
 			}
@@ -5358,13 +5377,17 @@ func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 				OnExit:                 ec.onExit,
 				Logger:                 discardLogger(),
 				Metrics:                &domain.NoopMetrics{},
-				ResumeUsage:            handedOver,
+				ResumeUsage:            handedOver.usage,
+				ResumeUsageByModel:     handedOver.byModel,
 			})
 
-			got := ec.waitResult(t).ResumeUsage
+			result := ec.waitResult(t)
 
-			if !reflect.DeepEqual(got, tt.want) || turn != len(tt.turnFigures) {
-				t.Errorf("WorkerResult.ResumeUsage = %+v after %d working turns, want %+v after %d", got, turn, tt.want, len(tt.turnFigures))
+			if !reflect.DeepEqual(result.ResumeUsage, tt.want.usage) || turn != len(tt.turnFigures) {
+				t.Errorf("WorkerResult.ResumeUsage = %+v after %d working turns, want %+v after %d", result.ResumeUsage, turn, tt.want.usage, len(tt.turnFigures))
+			}
+			if !reflect.DeepEqual(result.ResumeUsageByModel, tt.want.byModel) {
+				t.Errorf("WorkerResult.ResumeUsageByModel = %+v, want %+v", result.ResumeUsageByModel, tt.want.byModel)
 			}
 		})
 	}
@@ -5374,7 +5397,8 @@ func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 
 		ec := newExitCapture()
 		adapter := &verificationFigureAdapter{
-			figure: verification,
+			figure:  verification.usage,
+			byModel: verification.byModel,
 			mockAgentAdapter: &mockAgentAdapter{
 				startSessionFn: func(context.Context, domain.StartSessionParams) (domain.Session, error) {
 					return domain.Session{}, errors.New("start failed")
@@ -5392,11 +5416,13 @@ func TestRunWorkerAttempt_ResumeUsage(t *testing.T) {
 			OnExit:                 ec.onExit,
 			Logger:                 discardLogger(),
 			Metrics:                &domain.NoopMetrics{},
-			ResumeUsage:            handedOver,
+			ResumeUsage:            handedOver.usage,
+			ResumeUsageByModel:     handedOver.byModel,
 		})
 
-		if got := ec.waitResult(t).ResumeUsage; !reflect.DeepEqual(got, handedOver) {
-			t.Errorf("WorkerResult.ResumeUsage = %+v, want %+v", got, handedOver)
+		result := ec.waitResult(t)
+		if !reflect.DeepEqual(result.ResumeUsage, handedOver.usage) || !reflect.DeepEqual(result.ResumeUsageByModel, handedOver.byModel) {
+			t.Errorf("WorkerResult resume figure = (%+v, %+v), want (%+v, %+v)", result.ResumeUsage, result.ResumeUsageByModel, handedOver.usage, handedOver.byModel)
 		}
 	})
 }

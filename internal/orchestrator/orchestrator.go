@@ -1308,12 +1308,14 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 		logger := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
 
 		var resumeUsage *domain.TokenUsage
+		var resumeUsageByModel map[string]domain.TokenUsage
 		if resumeSessionID != "" {
 			stored, err := o.store.LatestResumeUsage(ctx, issue.ID, resumeSessionID)
 			if err != nil {
 				logger.Warn("resume usage lookup failed", slog.Any("error", err))
 			}
 			resumeUsage = domainResumeUsage(stored)
+			resumeUsageByModel = domainResumeUsageByModel(stored)
 		}
 
 		deps := WorkerDeps{
@@ -1371,6 +1373,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			},
 			ResumeSessionID:         resumeSessionID,
 			ResumeUsage:             resumeUsage,
+			ResumeUsageByModel:      resumeUsageByModel,
 			DispatchID:              dispatchIDFromContext(ctx),
 			Logger:                  logger,
 			ToolRegistry:            o.toolRegistry,
@@ -1409,6 +1412,25 @@ func domainResumeUsage(stored *persistence.ResumeUsage) *domain.TokenUsage {
 		CacheReadTokens:  stored.CacheReadTokens,
 		CacheWriteTokens: stored.CacheWriteTokens,
 	}
+}
+
+// domainResumeUsageByModel returns the stored per-model split of the resume
+// figure, nil when stored holds none.
+func domainResumeUsageByModel(stored *persistence.ResumeUsage) map[string]domain.TokenUsage {
+	if stored == nil || stored.ByModel == nil {
+		return nil
+	}
+	byModel := make(map[string]domain.TokenUsage, len(stored.ByModel))
+	for model, tokens := range stored.ByModel {
+		byModel[model] = domain.TokenUsage{
+			InputTokens:      tokens.InputTokens,
+			OutputTokens:     tokens.OutputTokens,
+			TotalTokens:      tokens.InputTokens + tokens.OutputTokens,
+			CacheReadTokens:  tokens.CacheReadTokens,
+			CacheWriteTokens: tokens.CacheWriteTokens,
+		}
+	}
+	return byModel
 }
 
 // convertedCredentialEnv returns the credential variable names carried by

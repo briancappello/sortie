@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -1211,9 +1212,6 @@ func TestHandleAgentEvent_TurnEndPairZeroAddedDelta(t *testing.T) {
 	}
 }
 
-// TestApplyUsageDelta_RepeatedCumulative_AppliesZeroDelta verifies that
-// calling applyUsageDelta twice with the same cumulative value applies
-// a non-zero delta only on the first call.
 func TestApplyUsageDelta_RepeatedCumulative_AppliesZeroDelta(t *testing.T) {
 	t.Parallel()
 
@@ -1221,12 +1219,12 @@ func TestApplyUsageDelta_RepeatedCumulative_AppliesZeroDelta(t *testing.T) {
 	usage := domain.TokenUsage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CacheReadTokens: 10}
 	metrics := &domain.NoopMetrics{}
 
-	first := applyUsageDelta(state, entry, usage, "", metrics)
+	first := applyUsageDelta(state, entry, usage, nil, "", metrics)
 	if first != usage {
 		t.Fatalf("first applyUsageDelta() = %+v, want %+v (full value against zero baseline)", first, usage)
 	}
 
-	second := applyUsageDelta(state, entry, usage, "", metrics)
+	second := applyUsageDelta(state, entry, usage, nil, "", metrics)
 	if second != (domain.TokenUsage{}) {
 		t.Errorf("second applyUsageDelta() with identical cumulative value = %+v, want zero delta", second)
 	}
@@ -1235,6 +1233,89 @@ func TestApplyUsageDelta_RepeatedCumulative_AppliesZeroDelta(t *testing.T) {
 	}
 	if state.AgentTotals.TotalTokens != usage.TotalTokens {
 		t.Errorf("AgentTotals.TotalTokens after repeated cumulative = %d, want %d (no double count)", state.AgentTotals.TotalTokens, usage.TotalTokens)
+	}
+}
+
+func tok(input, output, cacheRead, cacheWrite int64) domain.TokenUsage {
+	return domain.TokenUsage{
+		InputTokens:      input,
+		OutputTokens:     output,
+		TotalTokens:      input + output,
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
+	}
+}
+
+func TestFoldUsage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		usage     domain.TokenUsage
+		byModel   map[string]domain.TokenUsage
+		watermark domain.TokenUsage
+		totals    map[string]domain.TokenUsage
+		want      map[string]domain.TokenUsage
+	}{
+		{
+			name:    "claims within the delta, the rest to the current model",
+			usage:   tok(100, 50, 20, 4),
+			byModel: map[string]domain.TokenUsage{"sub-a": tok(30, 10, 5, 0), "sub-b": tok(20, 5, 0, 4)},
+			want: map[string]domain.TokenUsage{
+				"sub-a": tok(30, 10, 5, 0),
+				"sub-b": tok(20, 5, 0, 4),
+				"main":  tok(50, 35, 15, 0),
+			},
+		},
+		{
+			name:    "claims over the delta are capped in ascending name order",
+			usage:   tok(50, 20, 10, 5),
+			byModel: map[string]domain.TokenUsage{"b": tok(40, 15, 8, 4), "a": tok(40, 15, 8, 0)},
+			want: map[string]domain.TokenUsage{
+				"a":    tok(40, 15, 8, 0),
+				"b":    tok(10, 5, 2, 4),
+				"main": tok(0, 0, 0, 1),
+			},
+		},
+		{
+			name:      "a claim is reduced by what the model was already credited",
+			usage:     tok(100, 40, 0, 0),
+			byModel:   map[string]domain.TokenUsage{"sub": tok(100, 40, 0, 0)},
+			watermark: tok(60, 20, 0, 0),
+			totals:    map[string]domain.TokenUsage{"sub": tok(80, 30, 0, 0)},
+			want: map[string]domain.TokenUsage{
+				"sub":  tok(20, 10, 0, 0),
+				"main": tok(20, 10, 0, 0),
+			},
+		},
+		{
+			name:      "provisional credit under the carrier then a settled figure under the same name lands exactly",
+			usage:     tok(100, 40, 0, 0),
+			byModel:   map[string]domain.TokenUsage{"main": tok(100, 40, 0, 0)},
+			watermark: tok(60, 20, 0, 0),
+			totals:    map[string]domain.TokenUsage{"main": tok(60, 20, 0, 0)},
+			want:      map[string]domain.TokenUsage{"main": tok(40, 20, 0, 0)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			delta, _, got := foldUsage(tt.usage, tt.byModel, "main", tt.watermark, tt.totals)
+
+			if !maps.Equal(got, tt.want) {
+				t.Errorf("foldUsage(%+v, %v, main, %+v, %v) credits = %v, want %v", tt.usage, tt.byModel, tt.watermark, tt.totals, got, tt.want)
+			}
+			var sum domain.TokenUsage
+			for _, credit := range got {
+				sum = agentcore.AddUsage(sum, credit)
+			}
+			if sum.InputTokens != delta.InputTokens || sum.OutputTokens != delta.OutputTokens ||
+				sum.CacheReadTokens != delta.CacheReadTokens || sum.CacheWriteTokens != delta.CacheWriteTokens {
+				t.Errorf("foldUsage(%+v, ...) credits sum = %+v, want delta %+v in every class", tt.usage, sum, delta)
+			}
+		})
 	}
 }
 
@@ -1330,14 +1411,14 @@ func TestTokenUsageComponentsSurviveEveryFold(t *testing.T) {
 
 	t.Run("agentcore.RunUsage clamp", func(t *testing.T) {
 		t.Parallel()
-		got := agentcore.NewRunUsage().SetRunCumulative(marker)
+		got := agentcore.NewRunUsage().SetRunCumulative(marker, nil)
 		assertComponentsSurvive(t, "RunUsage.SetRunCumulative", fields, marker, got)
 	})
 
 	t.Run("applyUsageDelta", func(t *testing.T) {
 		t.Parallel()
 		state, entry := newStateWithEntry("MT-REFLECT-DELTA")
-		got := applyUsageDelta(state, entry, marker, "", &domain.NoopMetrics{})
+		got := applyUsageDelta(state, entry, marker, nil, "", &domain.NoopMetrics{})
 		assertComponentsSurvive(t, "applyUsageDelta return value", fields, marker, got)
 
 		entryUsage := domain.TokenUsage{
@@ -1350,7 +1431,7 @@ func TestTokenUsageComponentsSurviveEveryFold(t *testing.T) {
 
 	t.Run("foldLocalUsage", func(t *testing.T) {
 		t.Parallel()
-		gotCumulative, gotLastUsage := foldLocalUsage(marker, domain.TokenUsage{}, domain.TokenUsage{})
+		gotCumulative, gotLastUsage, _ := foldLocalUsage(marker, nil, "", domain.TokenUsage{}, domain.TokenUsage{}, nil)
 		assertComponentsSurvive(t, "foldLocalUsage cumulative", fields, marker, gotCumulative)
 		assertComponentsSurvive(t, "foldLocalUsage watermark", fields, marker, gotLastUsage)
 	})

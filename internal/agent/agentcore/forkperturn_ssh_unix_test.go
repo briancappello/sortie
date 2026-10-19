@@ -278,7 +278,7 @@ func TestForkPerTurnSession_SSH_Exit255(t *testing.T) {
 				return string(line), nil
 			}
 			hooks.OnFinalize = func(emit func(domain.AgentEvent), _ any, _ int, _ error, _ []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
-				EmitTurnFailed(emit, "exit code 255", 0, domain.TokenUsage{})
+				EmitTurnFailed(emit, "exit code 255", 0, domain.TokenUsage{}, nil)
 				return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{Kind: domain.ErrTurnFailed, Message: "exit code 255"}
 			}
 			sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)

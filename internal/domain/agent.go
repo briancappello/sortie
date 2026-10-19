@@ -83,6 +83,11 @@ type AgentEvent struct {
 	// not that the session has consumed no tokens.
 	Usage TokenUsage
 
+	// UsageByModel is the per-model split of Usage, in the same scope and
+	// covering at most its totals. Nil when the event names the model only
+	// through Model.
+	UsageByModel map[string]TokenUsage
+
 	// Message is an adapter-normalized summary of the event payload. May
 	// be empty.
 	Message string
@@ -218,6 +223,9 @@ type StartSessionParams struct {
 	// Adapters whose runtime keeps no such figure ignore it.
 	ResumeUsage *TokenUsage
 
+	// ResumeUsageByModel is the per-model split of ResumeUsage; nil when none.
+	ResumeUsageByModel map[string]TokenUsage
+
 	// SSHHost, when non-empty, launches the agent on that host via SSH
 	// instead of as a local subprocess.
 	SSHHost string
@@ -305,6 +313,10 @@ type TurnResult struct {
 	// StartSessionParams.ResumeUsage. Nil when the runtime keeps no such
 	// figure or the adapter cannot state it exactly.
 	ResumeUsage *TokenUsage
+
+	// ResumeUsageByModel is the per-model split of ResumeUsage, handed to a
+	// later run as StartSessionParams.ResumeUsageByModel; nil when none.
+	ResumeUsageByModel map[string]TokenUsage
 }
 
 // AgentAdapter is the contract every coding-agent integration must

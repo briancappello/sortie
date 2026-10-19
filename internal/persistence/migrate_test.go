@@ -247,6 +247,18 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"resume_output_tokens", "INTEGER", false, 0},
 				{"resume_cache_read_tokens", "INTEGER", false, 0},
 				{"resume_cache_write_tokens", "INTEGER", false, 0},
+				{"resume_model_usage", "TEXT", false, 0},
+			},
+		},
+		{
+			table: "run_model_usage",
+			cols: []colSpec{
+				{"run_id", "INTEGER", true, 1},
+				{"model", "TEXT", true, 2},
+				{"input_tokens", "INTEGER", true, 0},
+				{"output_tokens", "INTEGER", true, 0},
+				{"cache_read_tokens", "INTEGER", true, 0},
+				{"cache_write_tokens", "INTEGER", true, 0},
 			},
 		},
 		{

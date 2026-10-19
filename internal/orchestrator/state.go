@@ -138,6 +138,10 @@ type RunningEntry struct {
 
 	LastReportedCacheWriteTokens int64
 
+	// UsageByModel is the run's per-model token totals, which sum to the
+	// run's token counters in every class. Written only by applyUsageDelta.
+	UsageByModel map[string]domain.TokenUsage
+
 	ModelName string
 
 	// APIRequestCount is the number of token_usage events received.

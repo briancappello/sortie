@@ -101,6 +101,8 @@ type sessionState struct {
 	// totals, each of which reports only its own spend. Never reset.
 	processSpend domain.TokenUsage
 
+	processSpendByModel map[string]domain.TokenUsage
+
 	// usageMeasured reports whether an assistant usage object or a
 	// result-event usage figure has been observed for this session.
 	// Monotone: set true once and never cleared.
@@ -109,14 +111,15 @@ type sessionState struct {
 	// Per-turn scan state owned by the ParseLine and OnFinalize hook
 	// closures. Reset at the top of each RunTurn call before delegating
 	// to forkSession.
-	restoresTotals   bool
-	turnResume       *domain.TokenUsage
-	turnMessages     map[string]domain.TokenUsage
-	lastModel        string
-	apiCallStart     time.Time
-	emittedAPITiming bool
-	inFlight         *agentcore.ToolTracker
-	work             *agentcore.WorkObserver
+	restoresTotals    bool
+	turnResume        *domain.TokenUsage
+	turnResumeByModel map[string]domain.TokenUsage
+	turnMessages      map[string]domain.TokenUsage
+	lastModel         string
+	apiCallStart      time.Time
+	emittedAPITiming  bool
+	inFlight          *agentcore.ToolTracker
+	work              *agentcore.WorkObserver
 
 	// humanInputEnds and humanInputDetail record a recognized request that
 	// only a person could answer, observed in ParseLine on a
@@ -177,11 +180,13 @@ func (s *sessionState) relayEffortReport(effort string, stderrLines []string) {
 // session total: without persistence nothing was saved to restore, and an
 // older process reports its own spend alone.
 func (s *sessionState) settleResult(event rawEvent, spend *agentcore.TurnSpend) {
-	breakdown, _ := usageFromResult(event)
+	breakdown, byModel := usageFromResult(event)
 	if !s.restoresTotals {
 		s.processSpend = agentcore.AddUsage(s.processSpend, breakdown)
-		s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, s.resume.Run()))
-		s.turnResume = s.resume.Resume()
+		s.processSpendByModel = agentcore.AddUsageByModel(s.processSpendByModel, byModel)
+		run, runByModel := s.resume.Run()
+		s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run), agentcore.AddUsageByModel(s.processSpendByModel, runByModel))
+		s.turnResume, s.turnResumeByModel = s.resume.Resume()
 		if breakdown.InputTokens > 0 || breakdown.OutputTokens > 0 {
 			spend.MarkSettled()
 		}
@@ -191,9 +196,9 @@ func (s *sessionState) settleResult(event rawEvent, spend *agentcore.TurnSpend) 
 		return
 	}
 	own := usageFromAssistant(event.Usage)
-	run, estimated := s.resume.Observe(breakdown, &own)
-	s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run))
-	s.turnResume = s.resume.Resume()
+	run, runByModel, estimated := s.resume.Observe(breakdown, byModel, &own)
+	s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run), agentcore.AddUsageByModel(s.processSpendByModel, runByModel))
+	s.turnResume, s.turnResumeByModel = s.resume.Resume()
 	spend.MarkSettled()
 	if s.passthrough.SessionPersistence && !s.credentialVerification {
 		spend.MarkSessionTotal()
@@ -261,8 +266,10 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 	}
 
 	resumeFrom := &domain.TokenUsage{}
+	var resumeFromByModel map[string]domain.TokenUsage
 	if isContinuation {
 		resumeFrom = params.ResumeUsage
+		resumeFromByModel = params.ResumeUsageByModel
 	}
 
 	state := &sessionState{
@@ -275,7 +282,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		mcpConfigPath:          params.MCPConfigPath,
 		credentialVerification: params.CredentialVerification,
 		acc:                    agentcore.NewRunUsage(),
-		resume:                 *agentcore.NewResumeBaseline(resumeFrom),
+		resume:                 *agentcore.NewResumeBaseline(resumeFrom, resumeFromByModel),
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
@@ -359,10 +366,11 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 							// id's first sighting represents a new API request.
 							if !seen {
 								tokenEvt := domain.AgentEvent{
-									Type:      domain.EventTokenUsage,
-									Timestamp: now,
-									Usage:     snapshot,
-									Model:     state.lastModel,
+									Type:         domain.EventTokenUsage,
+									Timestamp:    now,
+									Usage:        snapshot,
+									UsageByModel: state.acc.ByModel(),
+									Model:        state.lastModel,
 								}
 								if !state.apiCallStart.IsZero() {
 									dur := time.Since(state.apiCallStart).Milliseconds()
@@ -411,13 +419,16 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 
 			return nil, nil
 		},
-		GetUsage:     func() (domain.TokenUsage, bool) { return state.acc.Snapshot(), state.usageMeasured },
+		GetUsage: func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) {
+			return state.acc.Snapshot(), state.acc.ByModel(), state.usageMeasured
+		},
 		GetSessionID: func() string { return state.claudeSessionID },
 		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			usage := state.acc.Snapshot()
 
 			finalize := func(ev agentcore.TurnEvidence, meta agentcore.TurnMeta) (domain.TurnResult, *domain.AgentError) {
 				meta.ResumeUsage = state.turnResume
+				meta.ResumeUsageByModel = state.turnResumeByModel
 				result, agentErr := agentcore.FinalizeTurn(emit, state.logger(), ev, meta, *spend)
 				if agentErr == nil {
 					state.relayEffortReport(state.passthrough.Effort, stderrLines)
@@ -433,6 +444,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 				meta := agentcore.TurnMeta{
 					SessionID:     state.claudeSessionID,
 					Usage:         usage,
+					UsageByModel:  state.acc.ByModel(),
 					UsageMeasured: state.usageMeasured,
 				}
 				return finalize(evidence, meta)
@@ -471,6 +483,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 			meta := agentcore.TurnMeta{
 				SessionID:     state.claudeSessionID,
 				Usage:         usage,
+				UsageByModel:  state.acc.ByModel(),
 				UsageMeasured: state.usageMeasured,
 				APIDurationMS: turnAPIDuration,
 			}
@@ -511,6 +524,7 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 	// the run's usage across turns, so they are not reset here.
 	state.restoresTotals = false
 	state.turnResume = nil
+	state.turnResumeByModel = nil
 	state.turnMessages = make(map[string]domain.TokenUsage)
 	state.lastModel = ""
 	state.apiCallStart = time.Time{}

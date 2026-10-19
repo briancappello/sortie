@@ -16,6 +16,9 @@ type RecoveredUsage struct {
 	// resumed session accumulated earlier.
 	Run domain.TokenUsage
 
+	// ByModel is Run's per-model split, or nil when the source names none.
+	ByModel map[string]domain.TokenUsage
+
 	// Model names the model that produced Run, or is empty when the
 	// recovery's source names none. Finalize trims surrounding
 	// whitespace before reporting it.
@@ -44,6 +47,11 @@ func (u *TurnEndUsage) Snapshot() domain.TokenUsage {
 	return u.acc.Snapshot()
 }
 
+// ByModel returns a copy of the snapshot's per-model split, or nil.
+func (u *TurnEndUsage) ByModel() map[string]domain.TokenUsage {
+	return u.acc.ByModel()
+}
+
 // Measured reports whether a Finalize call has received a non-nil
 // recovered figure yet. It is false for a value from NewTurnEndUsage
 // until then, and true from that call on.
@@ -54,9 +62,9 @@ func (u *TurnEndUsage) Measured() bool {
 // Finalize ends one turn. recovered is nil when the turn produced no
 // figure. When recovered is non-nil, Finalize settles it into the
 // session's run-cumulative snapshot, latches the measured verdict, and
-// emits exactly one domain.EventTokenUsage event carrying that snapshot
-// and the trimmed model name, before delegating to [FinalizeTurn] for
-// the turn's terminal event.
+// emits exactly one domain.EventTokenUsage event carrying that snapshot,
+// its per-model figure, and the trimmed model name, before delegating to
+// [FinalizeTurn] for the turn's terminal event.
 //
 // spend is the turn's spend evidence and is handed to [FinalizeTurn].
 //
@@ -77,19 +85,21 @@ func (u *TurnEndUsage) Finalize(
 	}
 
 	if recovered != nil {
-		snapshot := u.acc.SetRunCumulative(recovered.Run)
+		snapshot := u.acc.SetRunCumulative(recovered.Run, recovered.ByModel)
 		u.measured = true
 		emit(domain.AgentEvent{
-			Type:      domain.EventTokenUsage,
-			Timestamp: time.Now().UTC(),
-			Usage:     snapshot,
-			Model:     strings.TrimSpace(recovered.Model),
+			Type:         domain.EventTokenUsage,
+			Timestamp:    time.Now().UTC(),
+			Usage:        snapshot,
+			UsageByModel: u.acc.ByModel(),
+			Model:        strings.TrimSpace(recovered.Model),
 		})
 	}
 
 	meta := TurnMeta{
 		SessionID:     sessionID,
 		Usage:         u.acc.Snapshot(),
+		UsageByModel:  u.acc.ByModel(),
 		UsageMeasured: u.measured,
 		APIDurationMS: apiDurationMS,
 	}

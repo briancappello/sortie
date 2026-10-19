@@ -61,7 +61,8 @@ type ForkPerTurnHooks struct {
 
 	// GetUsage returns the session's run-cumulative token usage snapshot
 	// together with the session's measurement verdict. usage is the
-	// run-cumulative snapshot, not a per-turn figure. measured reports
+	// run-cumulative snapshot, not a per-turn figure. byModel is its
+	// per-model split, nil when the session records none. measured reports
 	// whether the session has observed at least one usage measurement by
 	// the time of the call. Within one session, once a call returns
 	// measured true, every later call returns true. A session whose
@@ -69,7 +70,7 @@ type ForkPerTurnHooks struct {
 	// call.
 	//
 	// GetUsage is always called on RunTurn's goroutine.
-	GetUsage func() (usage domain.TokenUsage, measured bool)
+	GetUsage func() (usage domain.TokenUsage, byModel map[string]domain.TokenUsage, measured bool)
 
 	// GetSessionID returns the adapter's current session identifier.
 	// The skeleton calls this to populate TurnResult.SessionID on every
@@ -254,13 +255,13 @@ func (s *ForkPerTurnSession) RunTurn(
 	// ctx is read only to pick the message: whether the turn was
 	// cancelled is the launch record's verdict, not the context's.
 	cancelledTurn := func() (domain.TurnResult, error) {
-		usage, measured := s.hooks.GetUsage()
+		usage, byModel, measured := s.hooks.GetUsage()
 		agentErr := &domain.AgentError{Kind: domain.ErrTurnCancelled, Message: "turn cancelled"}
 		if ctx.Err() != nil {
-			EmitTurnCancelled(emit, "context cancelled", usage)
+			EmitTurnCancelled(emit, "context cancelled", usage, byModel)
 			agentErr.Err = ctx.Err()
 		} else {
-			EmitTurnCancelled(emit, "turn cancelled", usage)
+			EmitTurnCancelled(emit, "turn cancelled", usage, byModel)
 		}
 		return unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
@@ -295,7 +296,7 @@ func (s *ForkPerTurnSession) RunTurn(
 	cmd.Env = os.Environ()
 
 	if bindErr := s.target.BindWorkspace(cmd); bindErr != nil {
-		usage, measured := s.hooks.GetUsage()
+		usage, _, measured := s.hooks.GetUsage()
 		return unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			Usage:         usage,
@@ -324,7 +325,7 @@ func (s *ForkPerTurnSession) RunTurn(
 			return cancelledTurn()
 		}
 
-		usage, measured := s.hooks.GetUsage()
+		usage, _, measured := s.hooks.GetUsage()
 		startFailed := unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			Usage:         usage,
@@ -478,8 +479,8 @@ loop:
 		}
 
 		procutil.EmitWarnLines(stderrLines, s.logger)
-		usage, measured := s.hooks.GetUsage()
-		EmitTurnFailed(emit, "stdout read error: "+scanErr.Error(), 0, usage)
+		usage, byModel, measured := s.hooks.GetUsage()
+		EmitTurnFailed(emit, "stdout read error: "+scanErr.Error(), 0, usage, byModel)
 		result := unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			ExitReason:    domain.EventTurnFailed,
@@ -501,8 +502,8 @@ loop:
 
 	sshFailed := s.target.RemoteCommand != "" && sshutil.ConnectionFailed(exitCode)
 	if ConnectionFailedForRequest(sshFailed, lastParsed != nil) {
-		usage, measured := s.hooks.GetUsage()
-		EmitTurnFailed(emit, "ssh connection failed", 0, usage)
+		usage, byModel, measured := s.hooks.GetUsage()
+		EmitTurnFailed(emit, "ssh connection failed", 0, usage, byModel)
 		result := unfinished(domain.TurnResult{
 			SessionID:     s.hooks.GetSessionID(),
 			ExitReason:    domain.EventTurnFailed,
@@ -517,8 +518,8 @@ loop:
 	if earlyExit == nil {
 		if exitCode == 127 {
 			procutil.EmitWarnLines(stderrLines, s.logger)
-			usage, measured := s.hooks.GetUsage()
-			EmitTurnFailed(emit, "agent binary not found", 0, usage)
+			usage, byModel, measured := s.hooks.GetUsage()
+			EmitTurnFailed(emit, "agent binary not found", 0, usage, byModel)
 			result := unfinished(domain.TurnResult{
 				SessionID:     s.hooks.GetSessionID(),
 				ExitReason:    domain.EventTurnFailed,

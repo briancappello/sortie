@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
@@ -332,6 +333,28 @@ func TestQueryExportUsage(t *testing.T) {
 		}
 	})
 
+	t.Run("by_model_splits_by_provider_and_model", func(t *testing.T) {
+		t.Parallel()
+
+		data := []byte(`{"info":{"id":"ses_abc123"},"messages":[` +
+			`{"type":"assistant","finish":"stop","model":{"providerID":"anthropic","id":"claude-sonnet-4-5"},` +
+			`"tokens":{"input":100,"output":10,"reasoning":5,"cache":{"read":20,"write":30}}},` +
+			`{"type":"assistant","finish":"stop","model":{"providerID":"openai","id":"gpt-5"},` +
+			`"tokens":{"input":200,"output":40}},` +
+			`{"type":"assistant","finish":"stop","model":{"providerID":"anthropic","id":"claude-sonnet-4-5"},` +
+			`"tokens":{"input":10,"output":2}}]}`)
+
+		usage := parseSessionExport(data, "ses_abc123", 0)
+
+		want := map[string]domain.TokenUsage{
+			"anthropic/claude-sonnet-4-5": {InputTokens: 160, OutputTokens: 17, TotalTokens: 177, CacheReadTokens: 20, CacheWriteTokens: 30},
+			"openai/gpt-5":                {InputTokens: 200, OutputTokens: 40, TotalTokens: 240},
+		}
+		if !reflect.DeepEqual(usage.ByModel, want) {
+			t.Errorf("ByModel = %+v, want %+v", usage.ByModel, want)
+		}
+	})
+
 	t.Run("parse_session_id_mismatch_returns_zero", func(t *testing.T) {
 		t.Parallel()
 
@@ -439,7 +462,7 @@ func TestParseSessionExport(t *testing.T) {
 		t.Parallel()
 
 		usage := parseSessionExport(data, "ses_different_session", 0)
-		if usage != (exportUsage{}) {
+		if !reflect.DeepEqual(usage, exportUsage{}) {
 			t.Errorf("usage = %+v, want zero value for a mismatched session", usage)
 		}
 	})

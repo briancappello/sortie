@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,9 +86,11 @@ type geminiJournalTokens struct {
 
 // geminiFigure is one source's whole reading of this run. basis counts input
 // plus output and no reasoning, matching the wire bound's basis; measured
-// separates a real zero from the absence of a figure.
+// separates a real zero from the absence of a figure. byModel splits usage by
+// model; a record naming none adds to no entry.
 type geminiFigure struct {
 	usage    domain.TokenUsage
+	byModel  map[string]domain.TokenUsage
 	model    string
 	basis    int64
 	measured bool
@@ -113,9 +116,10 @@ type geminiReader struct {
 	// records contribute nothing.
 	offset int64
 
-	total     domain.TokenUsage
-	reasoning int64
-	model     string
+	total        domain.TokenUsage
+	totalByModel map[string]domain.TokenUsage
+	reasoning    int64
+	model        string
 
 	// blocks counts telemetry records that carried a counter block; counted
 	// counts the ones that carried a figure. The figure alone tells neither
@@ -267,6 +271,7 @@ func (r *geminiReader) Open(sessionID string) {
 
 	r.sessionID = sessionID
 	r.total = domain.TokenUsage{}
+	r.totalByModel = nil
 	r.reasoning = 0
 	r.model = ""
 	r.blocks = 0
@@ -382,7 +387,7 @@ func (r *geminiReader) waitForNextPoll(ctx context.Context) bool {
 func (r *geminiReader) answer(figure geminiFigure, source string, completeness Completeness, lowerBound int64) (agentcore.RecoveredUsage, string, bool) {
 	r.completeness = completeness
 	r.settle(figure.basis, lowerBound)
-	return agentcore.RecoveredUsage{Run: figure.usage, Model: figure.model}, source, true
+	return agentcore.RecoveredUsage{Run: figure.usage, Model: figure.model, ByModel: figure.byModel}, source, true
 }
 
 // settle moves the position the next turn is measured from and carries the part
@@ -430,6 +435,7 @@ func (r *geminiReader) clock() time.Time {
 func (r *geminiReader) telemetryFigure(lowerBound int64, blocksBefore, countedBefore int) geminiFigure {
 	return geminiFigure{
 		usage:    r.total,
+		byModel:  maps.Clone(r.totalByModel),
 		model:    r.model,
 		basis:    r.total.InputTokens + r.total.OutputTokens - r.reasoning,
 		measured: r.counted > countedBefore || (r.blocks > blocksBefore && lowerBound <= 0),
@@ -497,6 +503,7 @@ func (r *geminiReader) fold(record geminiRecord) {
 	r.total.OutputTokens += output + thoughts
 	r.total.CacheReadTokens += cached
 	r.total.TotalTokens = r.total.InputTokens + r.total.OutputTokens
+	r.totalByModel = addModelUsage(r.totalByModel, attrs.Model, geminiUsage(input, output, cached, thoughts))
 	r.reasoning += thoughts
 	r.blocks++
 	if input > 0 || output > 0 || cached > 0 || thoughts > 0 {
@@ -505,6 +512,30 @@ func (r *geminiReader) fold(record geminiRecord) {
 	if attrs.Model != "" {
 		r.model = attrs.Model
 	}
+}
+
+// geminiUsage maps one record's counters to token classes: thought tokens are
+// output, and the cached read is a subset of input.
+func geminiUsage(input, output, cached, thoughts int64) domain.TokenUsage {
+	return domain.TokenUsage{
+		InputTokens:     input,
+		OutputTokens:    output + thoughts,
+		TotalTokens:     input + output + thoughts,
+		CacheReadTokens: cached,
+	}
+}
+
+// addModelUsage adds usage to model's entry of byModel; an empty model adds
+// nothing.
+func addModelUsage(byModel map[string]domain.TokenUsage, model string, usage domain.TokenUsage) map[string]domain.TokenUsage {
+	if model == "" {
+		return byModel
+	}
+	if byModel == nil {
+		byModel = map[string]domain.TokenUsage{}
+	}
+	byModel[model] = agentcore.AddUsage(byModel[model], usage)
+	return byModel
 }
 
 // readJournal sums the token-bearing messages this session appended after the
@@ -559,6 +590,7 @@ func (r *geminiReader) readJournal(lowerBound int64) geminiFigure {
 		figure.usage.InputTokens += input
 		figure.usage.OutputTokens += output + thoughts
 		figure.usage.CacheReadTokens += cached
+		figure.byModel = addModelUsage(figure.byModel, e.model, geminiUsage(input, output, cached, thoughts))
 		figure.basis += input + output
 		if input > 0 || output > 0 || cached > 0 || thoughts > 0 {
 			figure.measured = true

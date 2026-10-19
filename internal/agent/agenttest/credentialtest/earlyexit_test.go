@@ -140,7 +140,7 @@ func (a *forkPerTurnFixtureAdapter) StartSession(_ context.Context, params domai
 	a.session = agentcore.NewForkPerTurnSession(&target, agentcore.ForkPerTurnHooks{
 		BuildArgs:    func(int, string) []string { return nil },
 		ParseLine:    parseLine,
-		GetUsage:     func() (domain.TokenUsage, bool) { return domain.TokenUsage{}, false },
+		GetUsage:     func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) { return domain.TokenUsage{}, nil, false },
 		GetSessionID: func() string { return "" },
 		OnFinalize: func(emit func(domain.AgentEvent), _ any, exitCode int, _ error, _ []string, earlyExit *domain.AgentError, _ *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			return agentcore.FinalizeTurn(emit, slog.Default(), agentcore.TurnEvidence{

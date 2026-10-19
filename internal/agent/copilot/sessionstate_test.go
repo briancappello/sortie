@@ -89,7 +89,7 @@ func TestReadSessionUsage(t *testing.T) {
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir, shutdownLine(100, 20, 5)+"\n")
 
-		current, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -110,7 +110,7 @@ func TestReadSessionUsage(t *testing.T) {
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir, shutdownLine(100, 20, 5)+"\n"+shutdownLine(300, 60, 15)+"\n")
 
-		current, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -134,7 +134,7 @@ func TestReadSessionUsage(t *testing.T) {
 				shutdownLine(100, 20, 5)+"\n"+
 				shutdownLine(300, 60, 15)+"\n")
 
-		current, _, found, err := readSessionUsage(path)
+		current, _, _, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -151,7 +151,7 @@ func TestReadSessionUsage(t *testing.T) {
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir, `{"type":"session.info","data":{}}`+"\n")
 
-		_, model, found, err := readSessionUsage(path)
+		_, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -168,7 +168,7 @@ func TestReadSessionUsage(t *testing.T) {
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir, "not valid json\n"+shutdownLine(100, 20, 5)+"\n")
 
-		current, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -198,7 +198,7 @@ func TestReadSessionUsage(t *testing.T) {
 			t.Fatalf("Close: %v", err)
 		}
 
-		_, _, _, err = readSessionUsage(path)
+		_, _, _, _, err = readSessionUsage(path)
 		if !errors.Is(err, errSessionStateCapExceeded) {
 			t.Errorf("readSessionUsage() error = %v, want wrapping errSessionStateCapExceeded", err)
 		}
@@ -210,7 +210,7 @@ func TestReadSessionUsage(t *testing.T) {
 		longLine := strings.Repeat("x", maxSessionStateLineBytes+1)
 		path := writeEventsFile(t, dir, longLine+"\n")
 
-		_, _, _, err := readSessionUsage(path)
+		_, _, _, _, err := readSessionUsage(path)
 		if !errors.Is(err, errSessionStateCapExceeded) {
 			t.Errorf("readSessionUsage() error = %v, want wrapping errSessionStateCapExceeded", err)
 		}
@@ -219,7 +219,7 @@ func TestReadSessionUsage(t *testing.T) {
 	t.Run("missing file returns an error", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		_, _, _, err := readSessionUsage(filepath.Join(dir, "does-not-exist.jsonl"))
+		_, _, _, _, err := readSessionUsage(filepath.Join(dir, "does-not-exist.jsonl"))
 		if err == nil {
 			t.Fatal("readSessionUsage(missing file) error = nil, want non-nil")
 		}
@@ -234,7 +234,7 @@ func TestReadSessionUsage(t *testing.T) {
 			`}}`
 		path := writeEventsFile(t, dir, line+"\n")
 
-		current, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -258,7 +258,7 @@ func TestReadSessionUsage(t *testing.T) {
 			`}}`
 		path := writeEventsFile(t, dir, line+"\n")
 
-		current, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -283,7 +283,7 @@ func TestReadSessionUsage(t *testing.T) {
 			`}}`
 		path := writeEventsFile(t, dir, line+"\n")
 
-		current, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}

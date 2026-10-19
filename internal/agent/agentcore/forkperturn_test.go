@@ -151,10 +151,10 @@ func noopHooks() ForkPerTurnHooks {
 		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string, _ *TurnSpend) (any, error) {
 			return nil, nil
 		},
-		GetUsage:     func() (domain.TokenUsage, bool) { return domain.TokenUsage{}, false },
+		GetUsage:     func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) { return domain.TokenUsage{}, nil, false },
 		GetSessionID: func() string { return "" },
 		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
-			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{})
+			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
 		},
 	}
@@ -230,11 +230,11 @@ var wantUsageVerdictSnapshot = domain.TokenUsage{InputTokens: 700, OutputTokens:
 // usageVerdictDouble returns a GetUsage double that reports usage and
 // measured on every call, together with a pointer to the number of times it
 // was called.
-func usageVerdictDouble(usage domain.TokenUsage, measured bool) (func() (domain.TokenUsage, bool), *int) {
+func usageVerdictDouble(usage domain.TokenUsage, measured bool) (func() (domain.TokenUsage, map[string]domain.TokenUsage, bool), *int) {
 	calls := new(int)
-	return func() (domain.TokenUsage, bool) {
+	return func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) {
 		*calls++
-		return usage, measured
+		return usage, nil, measured
 	}, calls
 }
 
@@ -356,7 +356,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		target := newTestTarget(tmpDir, script)
 		stubUsage := domain.TokenUsage{InputTokens: 500, OutputTokens: 100, TotalTokens: 600}
 		hooks := noopHooks()
-		hooks.GetUsage = func() (domain.TokenUsage, bool) { return stubUsage, true }
+		hooks.GetUsage = func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) { return stubUsage, nil, true }
 		sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -435,7 +435,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		target := newTestTarget(tmpDir, script)
 		stubUsage := domain.TokenUsage{InputTokens: 500, OutputTokens: 100, TotalTokens: 600}
 		hooks := noopHooks()
-		hooks.GetUsage = func() (domain.TokenUsage, bool) { return stubUsage, true }
+		hooks.GetUsage = func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) { return stubUsage, nil, true }
 		sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)
 
 		emit, events := sinkEvents()
@@ -692,7 +692,7 @@ func TestForkPerTurnSession(t *testing.T) {
 			if lastParsed == nil {
 				return domain.TurnResult{}, &domain.AgentError{Kind: domain.ErrTurnFailed, Message: "no result"}
 			}
-			EmitTurnCompleted(emit, "success", 0, domain.TokenUsage{})
+			EmitTurnCompleted(emit, "success", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
 		}
 		sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)
@@ -717,7 +717,7 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		hooks := noopHooks()
 		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
-			EmitTurnFailed(emit, "finalize error", 0, domain.TokenUsage{})
+			EmitTurnFailed(emit, "finalize error", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{
 				Kind:    domain.ErrTurnFailed,
 				Message: "arm7 error",
@@ -744,7 +744,7 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		hooks := noopHooks()
 		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
-			EmitTurnFailed(emit, "non-zero exit", 0, domain.TokenUsage{})
+			EmitTurnFailed(emit, "non-zero exit", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{
 				Kind:    domain.ErrPortExit,
 				Message: "exit code 1",
@@ -771,7 +771,7 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		hooks := noopHooks()
 		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
-			EmitTurnFailed(emit, "no output", 0, domain.TokenUsage{})
+			EmitTurnFailed(emit, "no output", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnFailed}, &domain.AgentError{
 				Kind:    domain.ErrTurnFailed,
 				Message: "agent exited without output",
@@ -797,7 +797,7 @@ func TestForkPerTurnSession(t *testing.T) {
 
 		hooks := noopHooks()
 		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
-			EmitTurnCompleted(emit, "implicit success", 0, domain.TokenUsage{OutputTokens: 10})
+			EmitTurnCompleted(emit, "implicit success", 0, domain.TokenUsage{OutputTokens: 10}, nil)
 			return domain.TurnResult{
 				ExitReason: domain.EventTurnCompleted,
 				Usage:      domain.TokenUsage{OutputTokens: 10},
@@ -834,7 +834,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		hooks := noopHooks()
 		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			gotStderrLines = stderrLines
-			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{})
+			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
 		}
 		sess := NewForkPerTurnSession(target, hooks, slog.New(spy), 0)
@@ -871,7 +871,7 @@ func TestForkPerTurnSession(t *testing.T) {
 		hooks := noopHooks()
 		hooks.OnFinalize = func(emit func(domain.AgentEvent), lastParsed any, exitCode int, _ error, stderrLines []string, _ *domain.AgentError, _ *TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			gotStderrLines = stderrLines
-			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{})
+			EmitTurnCompleted(emit, "ok", 0, domain.TokenUsage{}, nil)
 			return domain.TurnResult{ExitReason: domain.EventTurnCompleted}, nil
 		}
 		sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)
