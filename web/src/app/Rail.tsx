@@ -4,11 +4,16 @@ import { NavLink, useNavigate } from "react-router";
 import { useStateQuery } from "@/api/queries";
 import { BrandMark } from "@/app/BrandMark";
 import { keyTip } from "@/app/key-tips";
-import { modifierLabel } from "@/app/keys";
 import { StatusCard } from "@/app/StatusCard";
-import { CircleHelpIcon, SearchIcon, XIcon } from "@/components/icons";
-import { ThemeMenu } from "@/components/ThemeMenu";
-import { Button } from "@/components/ui/button";
+import {
+  BookOpenIcon,
+  CircleHelpIcon,
+  ExternalLinkIcon,
+  GithubIcon,
+  SearchIcon,
+  XIcon,
+} from "@/components/icons";
+import { Button, buttonStyles } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { fmtVersion, pluralVerb } from "@/lib/format";
 
@@ -31,6 +36,11 @@ export interface ScreenEntry {
 }
 
 const OVERVIEW_PATH = "/";
+
+const EXTERNAL_LINKS: { label: string; href: string; Icon: (props: IconProps) => ReactNode }[] = [
+  { label: "Documentation", href: "https://docs.sortie-ai.com", Icon: BookOpenIcon },
+  { label: "GitHub", href: "https://github.com/sortie-ai/sortie", Icon: GithubIcon },
+];
 
 function hasCriticalItem(state: StateResponse): boolean {
   return (state.attention ?? []).some(
@@ -111,7 +121,7 @@ function NavFilter({ query, firstMatch, onQueryChange }: NavFilterProps) {
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
         onKeyDown={handleKeyDown}
-        className="h-(--size-control) w-full rounded-lg border border-line bg-canvas pr-xl pl-[calc(var(--spacing-sm)+var(--size-icon)+var(--spacing-xs))] text-body-md text-ink outline-none transition-colors duration-(--duration-feedback) placeholder:text-ink-muted hover:border-line-medium focus-visible:border-line-medium focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-focus-ring"
+        className="h-(--size-control) w-full rounded-lg border border-line bg-field pr-xl pl-[calc(var(--spacing-sm)+var(--size-icon)+var(--spacing-xs))] text-body-md text-ink outline-none transition-colors duration-(--duration-feedback) placeholder:text-ink-muted hover:border-line-medium focus-visible:border-line-medium focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-focus-ring"
       />
       {query === "" ? undefined : (
         <button
@@ -130,12 +140,11 @@ function NavFilter({ query, firstMatch, onQueryChange }: NavFilterProps) {
 /** Props of {@link Rail}. */
 export interface RailProps {
   screens: ScreenEntry[];
-  onOpenPalette: () => void;
   onOpenShortcuts: () => void;
 }
 
-/** Renders the dark navigation rail: brand, screen filter, one entry per matching screen, the status card, and the foot controls. */
-export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
+/** Renders the dark navigation rail: brand, screen filter, one entry per matching screen, the status card, the documentation and repository links, and the shortcuts button. */
+export function Rail({ screens, onOpenShortcuts }: RailProps) {
   const { data } = useStateQuery();
   const [query, setQuery] = useState("");
   const shown = matching(screens, query);
@@ -190,15 +199,20 @@ export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
         <div className="mb-sm">
           <StatusCard />
         </div>
-        <Button
-          variant="ghost"
-          className="w-full justify-start font-regular"
-          onClick={onOpenPalette}
-          title={keyTip("Commands", modifierLabel(), "K")}
-        >
-          <SearchIcon />
-          Commands
-        </Button>
+        {EXTERNAL_LINKS.map(({ label, href, Icon }) => (
+          <a
+            key={href}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`${label}, opens in a new tab`}
+            className={buttonStyles("ghost", "w-full justify-start font-regular")}
+          >
+            <Icon />
+            {label}
+            <ExternalLinkIcon className="ml-auto text-ink-muted" />
+          </a>
+        ))}
         <Button
           variant="ghost"
           className="w-full justify-start font-regular"
@@ -208,7 +222,6 @@ export function Rail({ screens, onOpenPalette, onOpenShortcuts }: RailProps) {
           <CircleHelpIcon />
           Shortcuts
         </Button>
-        <ThemeMenu />
       </div>
     </aside>
   );
