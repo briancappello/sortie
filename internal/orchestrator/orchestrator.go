@@ -1923,7 +1923,9 @@ func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.Se
 			}
 			budgetEvidenceComplete = false
 			for id, entry := range prior {
-				if entry.Reason != budgetReasonToken && entry.Reason != budgetReasonMoney {
+				tokenHeld := entry.Reason == budgetReasonToken && cfg.Agent.MaxTokens > 0
+				moneyHeld := entry.Reason == budgetReasonMoney && cfg.Agent.MaxCostUSD > 0
+				if !tokenHeld && !moneyHeld {
 					continue
 				}
 				fresh[id] = entry

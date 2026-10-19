@@ -6262,6 +6262,12 @@ func TestHandleTick_MoneyBudgetRebuild(t *testing.T) {
 			wantReason: budgetReasonMoney,
 		},
 		{
+			name:       "a failed shared query drops a prior token hold once the token ceiling is disabled",
+			maxCostUSD: 0.8,
+			queryErr:   fmt.Errorf("db error"),
+			priorHold:  &BudgetExhaustedEntry{Reason: budgetReasonToken},
+		},
+		{
 			name:            "no ceiling configured resets the incomplete flags",
 			priorIncomplete: true,
 		},
