@@ -36,7 +36,7 @@ A per-issue money ceiling and an instance-wide daily and monthly money ceiling b
 
 ## Decision Outcome
 
-Chosen option: **Layered rates: the operator's rates over a fetched table over a table embedded in each release, priced per model and recorded when the run is written**, because it prices every deployment without manual rate entry, keeps prices current between releases, and still prices offline from the embedded table (drivers 1 and 2), gives every kind one figure from one rule (driver 3), and fixes each run's price once so no later change of rates moves a recorded spend (driver 5).
+Chosen option: **Layered rates: the operator's rates over a fetched table over a table embedded in each release, priced per model and recorded when the run is written**, because it prices every deployment without manual rate entry, keeps prices current between releases, and still prices offline from the embedded table, gives every kind one figure from one rule, and fixes each run's price once so no later change of rates moves a recorded spend.
 
 ### Where pricing lives
 
@@ -46,7 +46,7 @@ Pricing moves out of `internal/server` into its own package, named for pricing, 
 
 Rates come from these layers, highest precedence first:
 
-1. **The operator's rates.** An operator either sets per-model rates in `token_rates` that lie over the shared table, or names a table of their own, by file (`price_table.replace_file`) or by address (`price_table.replace_url`), that replaces the shared table entirely. An operator table uses the same format as the shared table, so one parser reads both.
+1. **The operator's rates.** Entries in `token_rates` take precedence over every table. An operator can also name a table of their own, by file (`price_table.replace_file`) or by address (`price_table.replace_url`), that replaces the shared table entirely, and `token_rates` entries then lie over that table as they lie over the shared one. An operator table uses the same format as the shared table, so one parser reads both.
 2. **A table fetched at runtime.** Fetching is on by default (`price_table.fetch` defaults to `true`). The address, `price_table.fetch_url`, defaults to the published LiteLLM `model_prices_and_context_window.json`.
 3. **A table embedded in the binary** (`price_table.embedded`, default `true`). The release build embeds a snapshot of the LiteLLM `model_prices_and_context_window.json` at a pinned upstream revision through `go:embed`, after validating it. The file is MIT-licensed outside the upstream `enterprise/` directory, and its copyright and license notice ships with the release archives.
 
@@ -62,11 +62,11 @@ The LiteLLM file wins as the shared source because it has the widest circle of c
 
 Runs are priced per model. The adapters carry token counts per model through to the run record, which needs a schema change. An agent whose stream reports a per-model breakdown has each model's counts attributed to that model. Counts no model claims go to the model current when they arrive: the one the run's events named last (`reported_model`), else `configured_model`. Counts that arrive before a run's events name any model stay under the configured model and do not move when a model is named later.
 
-An existing per-kind entry such as `token_rates.claude-code` keeps precedence over every table and prices every model of that kind alike, so an upgrade changes no figure (driver 7). It keeps its old rule that an unset cache-read or cache-write rate prices that class at `input_per_mtok`. `sortie validate` warns that such an entry disables per-model pricing for its kind. A per-model operator entry for a model that appears in some table may set any subset of rates and inherits the rest from the table; one for a model that appears in no table must set all of `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, and `cache_write_per_mtok`.
+An existing per-kind entry such as `token_rates.claude-code` keeps precedence over every table and prices every model of that kind alike, so an upgrade changes no figure. It keeps its old rule that an unset cache-read or cache-write rate prices that class at `input_per_mtok`. `sortie validate` warns that such an entry disables per-model pricing for its kind. A per-model operator entry for a model that appears in some table may set any subset of rates and inherits the rest from the table; one for a model that appears in no table should set all of `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, and `cache_write_per_mtok`. `sortie validate` warns about such an entry that leaves a rate unset rather than refusing it, because a key that named no agent kind was accepted and ignored before per-model entries existed, and refusing it would stop a deployment on upgrade. The entry prices the classes it sets, and a run that spends an unset class is recorded `partial`.
 
 ### Price at write
 
-When a run row is written, the orchestrator records its estimated cost, and for each model's share of it the price source (operator, fetched, or embedded) and the table version: the pinned upstream revision of the embedded table, or a digest of a fetched or operator table's content. History is no longer priced at read. The dashboard, the JSON API, `GET /api/v1/stats`, and `sortie stats` all read the recorded figures, so the command and the route can no longer disagree after an edit. A running session's figure is the orchestrator's live estimate under the rates in force, and the row written at the session's end fixes it.
+When a run row is written, the orchestrator records its estimated cost, and for each model's share of it the price source (operator, fetched, or embedded) and the version of the rates that priced it: the pinned upstream revision of the embedded table, a digest of a fetched or operator table's content, or a digest of `token_rates` for a share an operator entry priced. A share whose operator entry takes some of its rates from a table records both versions, the `token_rates` digest joined to the table's version by `+`, so both inputs of its price stay auditable. History is no longer priced at read. The dashboard, the JSON API, `GET /api/v1/stats`, and `sortie stats` all read the recorded figures, so the command and the route can no longer disagree after an edit. A running session's figure is the orchestrator's live estimate under the rates in force, and the row written at the session's end fixes it.
 
 Rows written before this change carry no recorded cost. The first start that applies the schema change prices them once, under the rates in force at that start, on the run's reported model, else its configured model, and records the result with its source and version. They never change after that.
 
@@ -104,7 +104,7 @@ A money ceiling bounds Sortie's estimate, computed from the input, output, cache
 
 **The layered option with fetching off by default.** It keeps a default install from contacting any address it was not configured with, but no studied tool that can fetch a price table ships that default, and it leaves prices as old as the release for every operator who never touches the setting. An operator who needs no outbound contact turns fetching off with one setting.
 
-**The runtime's own cost figure.** Claude Code reports `total_cost_usd`, OpenCode reports `cost` on each step, and the Agent Client Protocol defines a cost on `usage_update` that a given agent may or may not send. Each figure follows that runtime's price list rather than the operator's rates, and the other kinds report none. Using it where present would mix two price lists in one ceiling and make the same work cost differently by kind (driver 3). Sortie computes every figure by one rule and does not read these fields for pricing. The Claude Code `max_budget_usd` setting that Sortie passes to the CLI remains that runtime's own per-process cap and is unrelated to Sortie's ceilings.
+**The runtime's own cost figure.** Claude Code reports `total_cost_usd`, OpenCode reports `cost` on each step, and the Agent Client Protocol defines a cost on `usage_update` that a given agent may or may not send. Each figure follows that runtime's price list rather than the operator's rates, and the other kinds report none. Using it where present would mix two price lists in one ceiling and make the same work cost differently by kind. Sortie computes every figure by one rule and does not read these fields for pricing. The Claude Code `max_budget_usd` setting that Sortie passes to the CLI remains that runtime's own per-process cap and is unrelated to Sortie's ceilings.
 
 **models.dev as the shared source.** It covers more models, but it is roughly twice the size of the LiteLLM file and its consumers are mostly one runtime. It is a valid operator table only if converted to the shared format.
 
@@ -116,7 +116,7 @@ A money ceiling bounds Sortie's estimate, computed from the input, output, cache
 
 **Per-kind rates with an override keyed by configured model.** `configured_model` is often empty or an alias, and a run's real model is the reported one, so an override keyed on configuration prices the wrong model whenever the runtime picks one.
 
-**Price at read.** It needs no schema change but lets a restart, an upgrade, or a table refresh move recorded spend and start or end an instance-wide hold (driver 5).
+**Price at read.** It needs no schema change but lets a restart, an upgrade, or a table refresh move recorded spend and start or end an instance-wide hold.
 
 **Holding an unpriceable issue, or refusing every unpriceable combination in `sortie validate`.** A new model released after the binary would then stop work or fail validation until the operator adds a line. A lower bound with a warning keeps work moving; validation refuses only what no configuration line can fix.
 

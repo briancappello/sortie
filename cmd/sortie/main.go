@@ -33,7 +33,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/runstats"
 	"github.com/sortie-ai/sortie/internal/server"
@@ -336,8 +335,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return 1
 	}
 
-	// The workflow load already recorded the parse warnings as advisories.
-	startupRates, _ := pricing.ParseTokenRates(br.mgr.Config().ExtensionValue("token_rates"))
+	startupRates := br.mgr.Rates()
 	// A failed fill must not stop the start: the earlier rows read unpriced
 	// and the next start fills them again.
 	if recorded, err := store.RecordUnrecordedRunCosts(ctx, func(run persistence.UnrecordedRun) persistence.RunCostRecord {
@@ -903,7 +901,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		MergeCompletionReactionConfigured: mergeCompletionConfigured,
 		BlockerResolver:                   br.blockerResolver,
 		AbandonCh:                         abandonCh,
-		TokenRates:                        startupRates,
+		Rates:                             startupRates,
 	})
 
 	var srv *server.Server

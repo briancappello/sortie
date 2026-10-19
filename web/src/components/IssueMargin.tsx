@@ -30,7 +30,6 @@ import { safeHttpUrl } from "@/lib/links";
 
 import type {
   AttentionItemResponse,
-  ConfigResponse,
   IssueDetailResponse,
   NextOutcomeResponse,
   PendingReactionResponse,
@@ -406,12 +405,12 @@ function costShares(runs: readonly RunResponse[], chained: boolean): [string, nu
 
 interface BudgetPanelProps {
   detail: IssueDetailResponse;
-  config: ConfigResponse | undefined;
+  state: StateResponse | undefined;
   chained: boolean;
 }
 
-function BudgetPanel({ detail, config, chained }: BudgetPanelProps) {
-  const { sessions, tokens, cost } = budgetOf(detail, config);
+function BudgetPanel({ detail, state, chained }: BudgetPanelProps) {
+  const { sessions, tokens, cost } = budgetOf(detail, state);
   const note = noTokenBudgetText(tokens);
   const shares = cost === null ? [] : costShares(detail.history?.runs ?? [], chained);
 
@@ -574,7 +573,7 @@ export function IssueMargin({ detail, state, position }: IssueMarginProps) {
           state={state}
         />
       ))}
-      <BudgetPanel detail={detail} config={state?.config} chained={position !== null} />
+      <BudgetPanel detail={detail} state={state} chained={position !== null} />
       <RoutePanel detail={detail} position={position} />
       <IssuePanel detail={detail} />
     </>

@@ -234,7 +234,7 @@ interface PeekFactsProps {
 
 function PeekFacts({ detail, state, position }: PeekFactsProps) {
   const config = state?.config;
-  const { sessions, uncachedTokens, cost } = budgetOf(detail, config);
+  const { sessions, uncachedTokens, cost } = budgetOf(detail, state);
   const { running } = detail;
   const pullRequest = pullRequestOf(detail);
   const agent = agentText(detail);

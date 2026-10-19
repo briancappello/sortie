@@ -10,6 +10,7 @@ import { useAttentionActions } from "@/components/use-attention-actions";
 import { useOpenLatestSession } from "@/components/use-open-session";
 import { usePeek } from "@/components/use-peek";
 import { activeRows, filterRows } from "@/lib/active-rows";
+import { hasRateSource } from "@/lib/budget";
 import { condition } from "@/lib/condition";
 import { buildEnded } from "@/lib/ended";
 import { issueLinkOf } from "@/lib/issue-link";
@@ -279,14 +280,13 @@ function OverviewBody({ state }: OverviewBodyProps) {
   ];
   useShortcuts(bindings);
 
-  const tokenRatesConfigured = config?.token_rates != null;
   const tallyText =
     view.tally === undefined ||
     view.pages === undefined ||
     view.isHistoryUnavailable ||
     view.isFirstRun === true
       ? undefined
-      : tallyLine(view.tally.summary, endedAll.length, tokenRatesConfigured);
+      : tallyLine(view.tally.summary, endedAll.length, hasRateSource(view.state));
 
   return (
     <div className="flex flex-col gap-xl">

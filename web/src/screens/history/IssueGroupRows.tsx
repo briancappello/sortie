@@ -13,6 +13,7 @@ import {
   TableRow,
   TableSpanCell,
 } from "@/components/ui/table";
+import { hasRateSource } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import {
   NOT_MEASURED,
@@ -30,7 +31,7 @@ import { ruleLabel } from "@/lib/labels";
 import { outcomeMark, runStatus } from "@/lib/run-status";
 
 import type { HistoryFilter } from "@/api/client";
-import type { ConfigResponse, IssueGroupResponse, RunResponse } from "@/api/types.gen";
+import type { IssueGroupResponse, RunResponse, StateResponse } from "@/api/types.gen";
 import type { Mark } from "@/lib/run-status";
 
 const READ_FAILED = "Run history could not be read.";
@@ -41,20 +42,20 @@ interface Columns {
   span: number;
 }
 
-function columnsOf(config: ConfigResponse | undefined): Columns {
-  const hasRule = (config?.dispatch.rules ?? []).length > 0;
-  const hasCost = config?.token_rates != null;
+function columnsOf(state: StateResponse | undefined): Columns {
+  const hasRule = (state?.config?.dispatch.rules ?? []).length > 0;
+  const hasCost = hasRateSource(state);
   return { hasRule, hasCost, span: 6 + (hasRule ? 1 : 0) + (hasCost ? 1 : 0) };
 }
 
 /** Props of {@link HistoryTableHead}. */
 export interface HistoryTableHeadProps {
-  config: ConfigResponse | undefined;
+  state: StateResponse | undefined;
 }
 
 /** Renders the header row of the run table; its columns follow the workflow. */
-export function HistoryTableHead({ config }: HistoryTableHeadProps) {
-  const { hasRule, hasCost } = columnsOf(config);
+export function HistoryTableHead({ state }: HistoryTableHeadProps) {
+  const { hasRule, hasCost } = columnsOf(state);
   return (
     <TableHeader>
       <TableHead>Status</TableHead>
@@ -180,7 +181,7 @@ function RunRow({ run, columns }: RunRowProps) {
 export interface IssueGroupRowsProps {
   group: IssueGroupResponse;
   filter: HistoryFilter;
-  config: ConfigResponse | undefined;
+  state: StateResponse | undefined;
 }
 
 /**
@@ -189,11 +190,11 @@ export interface IssueGroupRowsProps {
  * read from the run list. Mount it with a key that changes with the filter so
  * an expansion resets then.
  */
-export function IssueGroupRows({ group, filter, config }: IssueGroupRowsProps) {
+export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const link = issueLinkOf(group.issue_identifier, location);
-  const columns = columnsOf(config);
+  const columns = columnsOf(state);
   const [isExpanded, setIsExpanded] = useState(false);
   const expansion = useHistoryRunsQuery(group.issue_id, filter, isExpanded);
 

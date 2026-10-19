@@ -7,7 +7,7 @@ import {
 } from "@/lib/figures";
 import { fmtCount, fmtDuration, fmtMean, fmtPercent, plural } from "@/lib/format";
 
-import type { ConfigResponse, Report } from "@/api/types.gen";
+import type { Report } from "@/api/types.gen";
 import type { ReactNode } from "react";
 
 interface TileProps {
@@ -62,11 +62,12 @@ function durationDetail(duration: Report["summary"]["duration_seconds"]): string
 /** Props of {@link SummaryTiles}. */
 export interface SummaryTilesProps {
   report: Report;
-  config: ConfigResponse | undefined;
+  /** Whether a rate source is available, which adds the cost tile. */
+  hasCost: boolean;
 }
 
 /** Renders the success-rate hero beside a borderless row of summary figures. */
-export function SummaryTiles({ report, config }: SummaryTilesProps) {
+export function SummaryTiles({ report, hasCost }: SummaryTilesProps) {
   const { summary, schema_tier: tier } = report;
   const hasSucceeded = summary.succeeded > 0;
   const tiles: ReactNode[] = [
@@ -109,7 +110,7 @@ export function SummaryTiles({ report, config }: SummaryTilesProps) {
       <Tile key="cache-reads" label="Cache reads" value={cacheReads} />
     ),
   );
-  if (config?.token_rates != null) {
+  if (hasCost) {
     tiles.push(
       <Tile
         key="cost"

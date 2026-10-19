@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -40,15 +39,14 @@ func TestParseTokenRates(t *testing.T) {
 			wantNil:    true,
 		},
 		{
-			name: "kind with empty map stores an incomplete entry with a needs-both warning",
+			name: "kind with empty map stores an incomplete entry without a warning",
 			extensions: map[string]any{
 				"token_rates": map[string]any{
 					"claude": map[string]any{},
 				},
 			},
-			wantNil:      false,
-			wantWarnings: 1,
-			wantRates:    TokenRates{"claude": TokenRateConfig{}},
+			wantNil:   false,
+			wantRates: TokenRates{"claude": TokenRateConfig{}},
 		},
 		{
 			name: "single kind all three rates present",
@@ -129,7 +127,7 @@ func TestParseTokenRates(t *testing.T) {
 				},
 			},
 			wantNil:      false,
-			wantWarnings: 2,
+			wantWarnings: 1,
 			wantRates: TokenRates{
 				"claude": TokenRateConfig{InputPerMtok: fptr(3.0)},
 				"bad":    TokenRateConfig{},
@@ -156,28 +154,13 @@ func TestParseTokenRates(t *testing.T) {
 				},
 			},
 			wantNil:      false,
-			wantWarnings: 2,
+			wantWarnings: 1,
 			wantRates: TokenRates{
 				"claude": TokenRateConfig{InputPerMtok: nil, OutputPerMtok: fptr(15.0)},
 			},
 		},
 		{
-			name: "empty kind alongside populated kind each report their own needs-both warning",
-			extensions: map[string]any{
-				"token_rates": map[string]any{
-					"empty":  map[string]any{},
-					"claude": map[string]any{"input_per_mtok": 3.0},
-				},
-			},
-			wantNil:      false,
-			wantWarnings: 2,
-			wantRates: TokenRates{
-				"claude": TokenRateConfig{InputPerMtok: fptr(3.0)},
-				"empty":  TokenRateConfig{},
-			},
-		},
-		{
-			name: "kind with all negative rates stores an incomplete entry with three warnings",
+			name: "kind with all negative rates stores an incomplete entry with two warnings",
 			extensions: map[string]any{
 				"token_rates": map[string]any{
 					"bad": map[string]any{
@@ -187,11 +170,10 @@ func TestParseTokenRates(t *testing.T) {
 				},
 			},
 			wantNil:      false,
-			wantWarnings: 3,
+			wantWarnings: 2,
 			wantTexts: []string{
 				"token_rates.bad.input_per_mtok: negative rate -1",
 				"token_rates.bad.output_per_mtok: negative rate -2",
-				"token_rates.bad: entry needs both input_per_mtok and output_per_mtok and prices nothing",
 			},
 			wantRates: TokenRates{"bad": TokenRateConfig{}},
 		},
@@ -204,8 +186,7 @@ func TestParseTokenRates(t *testing.T) {
 					},
 				},
 			},
-			wantNil:      false,
-			wantWarnings: 1,
+			wantNil: false,
 			wantRates: TokenRates{
 				"claude": TokenRateConfig{InputPerMtok: fptr(0.0)},
 			},
@@ -248,7 +229,7 @@ func TestParseTokenRates(t *testing.T) {
 				},
 			},
 			wantNil:      false,
-			wantWarnings: 2,
+			wantWarnings: 1,
 			wantRates: TokenRates{
 				"claude": TokenRateConfig{InputPerMtok: fptr(5.0)},
 			},
@@ -262,8 +243,7 @@ func TestParseTokenRates(t *testing.T) {
 					},
 				},
 			},
-			wantNil:      false,
-			wantWarnings: 1,
+			wantNil: false,
 			wantRates: TokenRates{
 				"claude": TokenRateConfig{
 					InputPerMtok:     nil,
@@ -334,20 +314,11 @@ func TestParseTokenRates_IncompleteEntryPricesNothing(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		raw         map[string]any
-		wantWarning string
+		name string
+		raw  map[string]any
 	}{
-		{
-			name:        "only output_per_mtok present",
-			raw:         map[string]any{"claude-code": map[string]any{"output_per_mtok": 15.0}},
-			wantWarning: "token_rates.claude-code: entry needs both input_per_mtok and output_per_mtok and prices nothing",
-		},
-		{
-			name:        "entry present but empty",
-			raw:         map[string]any{"claude-code": map[string]any{}},
-			wantWarning: "token_rates.claude-code: entry needs both input_per_mtok and output_per_mtok and prices nothing",
-		},
+		{"only output_per_mtok present", map[string]any{"claude-code": map[string]any{"output_per_mtok": 15.0}}},
+		{"entry present but empty", map[string]any{"claude-code": map[string]any{}}},
 	}
 
 	for _, tt := range tests {
@@ -355,8 +326,8 @@ func TestParseTokenRates_IncompleteEntryPricesNothing(t *testing.T) {
 			t.Parallel()
 
 			rates, warnings := ParseTokenRates(tt.raw, true)
-			if len(warnings) != 1 || warnings[0] != tt.wantWarning {
-				t.Errorf("ParseTokenRates warnings = %v, want [%q]", warnings, tt.wantWarning)
+			if len(warnings) != 0 {
+				t.Errorf("ParseTokenRates warnings = %v, want none", warnings)
 			}
 
 			cfg, ok := rates["claude-code"]
@@ -437,12 +408,12 @@ func TestParseTokenRates_WarningsOrderedByAscendingKind(t *testing.T) {
 	t.Parallel()
 
 	raw := map[string]any{
-		"zeta":  map[string]any{"output_per_mtok": 1.0},
-		"alpha": map[string]any{"output_per_mtok": 1.0},
+		"zeta":  map[string]any{"input_per_mtok": -1.0},
+		"alpha": map[string]any{"input_per_mtok": -1.0},
 	}
 	want := []string{
-		"token_rates.alpha: entry needs both input_per_mtok and output_per_mtok and prices nothing",
-		"token_rates.zeta: entry needs both input_per_mtok and output_per_mtok and prices nothing",
+		"token_rates.alpha.input_per_mtok: negative rate -1",
+		"token_rates.zeta.input_per_mtok: negative rate -1",
 	}
 
 	for range 5 {
@@ -581,66 +552,6 @@ func TestEstimateCost(t *testing.T) {
 	}
 }
 
-func TestTokenRateAdvisories(t *testing.T) {
-	t.Parallel()
-
-	t.Run("no token_rates extension yields no advisories", func(t *testing.T) {
-		t.Parallel()
-
-		var cfg config.ServiceConfig
-		got := TokenRateAdvisories(cfg)
-		if len(got) != 0 {
-			t.Errorf("TokenRateAdvisories = %v, want none", got)
-		}
-	})
-
-	t.Run("one advisory per warning, in order, under the token_rates check", func(t *testing.T) {
-		t.Parallel()
-
-		var cfg config.ServiceConfig
-		cfg.SetExtensionSection("token_rates", map[string]any{
-			"zeta":  map[string]any{"output_per_mtok": 1.0},
-			"alpha": map[string]any{"output_per_mtok": 1.0},
-		})
-
-		got := TokenRateAdvisories(cfg)
-		wantTexts := []string{
-			"token_rates.alpha: entry needs both input_per_mtok and output_per_mtok and prices nothing",
-			"token_rates.zeta: entry needs both input_per_mtok and output_per_mtok and prices nothing",
-		}
-		if len(got) != len(wantTexts) {
-			t.Fatalf("TokenRateAdvisories returned %d advisories, want %d: %+v", len(got), len(wantTexts), got)
-		}
-		for i, adv := range got {
-			if adv.Check != "token_rates" {
-				t.Errorf("advisory %d Check = %q, want %q", i, adv.Check, "token_rates")
-			}
-			if adv.Text != wantTexts[i] {
-				t.Errorf("advisory %d Text = %q, want %q", i, adv.Text, wantTexts[i])
-			}
-			if adv.Message != "skipped invalid token rate entry" {
-				t.Errorf("advisory %d Message = %q, want %q", i, adv.Message, "skipped invalid token rate entry")
-			}
-			if len(adv.Attrs) != 1 || adv.Attrs[0].Key != "detail" || adv.Attrs[0].Value.String() != wantTexts[i] {
-				t.Errorf("advisory %d Attrs = %+v, want one detail attribute holding the warning", i, adv.Attrs)
-			}
-		}
-	})
-
-	t.Run("a complete entry produces no advisory", func(t *testing.T) {
-		t.Parallel()
-
-		var cfg config.ServiceConfig
-		cfg.SetExtensionSection("token_rates", map[string]any{
-			"claude-code": map[string]any{"input_per_mtok": 3.0, "output_per_mtok": 15.0},
-		})
-
-		if got := TokenRateAdvisories(cfg); len(got) != 0 {
-			t.Errorf("TokenRateAdvisories = %v, want none for a complete entry", got)
-		}
-	})
-}
-
 func TestReloadTokenRates(t *testing.T) {
 	t.Parallel()
 
@@ -679,13 +590,13 @@ func TestReloadTokenRates(t *testing.T) {
 
 			inForce := fixtureRates(2)
 
-			got := ReloadTokenRates(inForce, tt.raw, tt.present)
+			got := reloadTokenRates(inForce, tt.raw, tt.present)
 
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("ReloadTokenRates(%v, %v) = %s, want %s", tt.raw, tt.present, asJSON(t, got), asJSON(t, tt.want))
+				t.Errorf("reloadTokenRates(%v, %v) = %s, want %s", tt.raw, tt.present, asJSON(t, got), asJSON(t, tt.want))
 			}
 			if !reflect.DeepEqual(inForce, fixtureRates(2)) {
-				t.Errorf("ReloadTokenRates mutated inForce: %s", asJSON(t, inForce))
+				t.Errorf("reloadTokenRates mutated inForce: %s", asJSON(t, inForce))
 			}
 		})
 	}

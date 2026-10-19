@@ -14,6 +14,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 )
 
@@ -101,6 +102,7 @@ type Manager struct {
 	currentConfig        config.ServiceConfig
 	currentPrompt        *prompt.Template
 	currentTemplateIndex map[string]*prompt.Template
+	currentRates         *pricing.Rates
 	lastLoadErr          error
 	loadStatus           LoadStatus
 	loadNotifier         func()
@@ -131,7 +133,7 @@ func NewManager(path string, logger *slog.Logger, opts ...ManagerOption) (*Manag
 		o(m)
 	}
 
-	cfg, tmpl, index, err := m.loadPipeline()
+	cfg, tmpl, index, rates, err := m.loadPipeline()
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +147,7 @@ func NewManager(path string, logger *slog.Logger, opts ...ManagerOption) (*Manag
 	m.currentConfig = cfg
 	m.currentPrompt = tmpl
 	m.currentTemplateIndex = index
+	m.currentRates = rates
 	m.mu.Lock()
 	m.recordLoadLocked(nil)
 	m.mu.Unlock()
@@ -158,6 +161,16 @@ func (m *Manager) Config() config.ServiceConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentConfig
+}
+
+// Rates returns the [pricing.Rates] promoted with the current
+// configuration. If the most recent reload failed, this returns the rates
+// of the last successful load; it is never nil after [NewManager]
+// succeeds. Safe for concurrent use.
+func (m *Manager) Rates() *pricing.Rates {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentRates
 }
 
 // PromptTemplate returns the current compiled prompt template. If the
@@ -282,7 +295,7 @@ func (m *Manager) notifyLoad() {
 // is retained and the error is returned. This supports the orchestrator's
 // defensive re-validation before dispatch. Safe for concurrent use.
 func (m *Manager) Reload() error {
-	cfg, tmpl, index, err := m.loadPipeline()
+	cfg, tmpl, index, rates, err := m.loadPipeline()
 	if err != nil {
 		m.mu.Lock()
 		m.lastLoadErr = err
@@ -305,6 +318,7 @@ func (m *Manager) Reload() error {
 	m.currentConfig = cfg
 	m.currentPrompt = tmpl
 	m.currentTemplateIndex = index
+	m.currentRates = rates
 	m.lastLoadErr = nil
 	m.recordLoadLocked(nil)
 	m.mu.Unlock()
@@ -398,7 +412,7 @@ func (m *Manager) watch(ctx context.Context) {
 
 func (m *Manager) reload() {
 	logger := m.currentLogger()
-	cfg, tmpl, index, err := m.loadPipeline()
+	cfg, tmpl, index, rates, err := m.loadPipeline()
 	if err != nil {
 		logger.Error("workflow reload failed", slog.Any("error", err), slog.String("path", m.path))
 		m.mu.Lock()
@@ -426,6 +440,7 @@ func (m *Manager) reload() {
 	m.currentConfig = cfg
 	m.currentPrompt = tmpl
 	m.currentTemplateIndex = index
+	m.currentRates = rates
 	m.lastLoadErr = nil
 	m.recordLoadLocked(nil)
 	m.mu.Unlock()
@@ -436,18 +451,18 @@ func (m *Manager) reload() {
 // loadPipeline runs the full Load -> NewServiceConfig -> dispatch
 // build -> partials -> Parse pipeline. Returns the parsed service config, the
 // body template, and the per-template index keyed by resolved
-// absolute path (empty key holds the body template). On any error
-// the caller retains the previous values and surfaces the error via
-// [Manager.LastLoadError].
-func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[string]*prompt.Template, error) {
+// absolute path (empty key holds the body template), and the price rates.
+// On any error the caller retains the previous values and surfaces the
+// error via [Manager.LastLoadError].
+func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[string]*prompt.Template, *pricing.Rates, error) {
 	wf, err := Load(m.path)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	cfg, err := config.NewServiceConfig(wf.Config, config.WithRetiredAgents(m.retiredAgents))
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	probe := m.agentKindProbe
@@ -460,33 +475,46 @@ func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[st
 
 	dispatchCfg, err := config.BuildDispatchConfig(wf.Config, filepath.Dir(m.path), probe, cfg.Agent.Kind)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 	cfg.SetDispatch(dispatchCfg)
 	if err := config.ValidateNextRequiresHandoff(dispatchCfg, cfg.Tracker.HandoffState); err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	partials, err := loadPartials(dispatchCfg.Partials)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	tmpl, err := prompt.ParseWithPartials(wf.PromptTemplate, m.path, wf.FrontMatterLines, partials)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	index, err := loadPerRuleTemplates(dispatchCfg, tmpl, partials)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
+	}
+
+	m.mu.RLock()
+	inForce := m.currentRates
+	m.mu.RUnlock()
+	rates, rateAdvisories, err := pricing.LoadRates(cfg, pricing.LoadInput{
+		WorkflowDir: filepath.Dir(m.path),
+		IsKind:      probe,
+		InForce:     inForce,
+	})
+	if err != nil {
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	if m.advisoryFunc != nil {
 		cfg.AddAdvisories(m.advisoryFunc(cfg)...)
 	}
+	cfg.AddAdvisories(rateAdvisories...)
 
-	return cfg, tmpl, index, nil
+	return cfg, tmpl, index, rates, nil
 }
 
 // loadPartials reads and compiles every partial of the dispatch config.

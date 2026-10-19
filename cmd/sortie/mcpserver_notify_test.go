@@ -22,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/workflow"
@@ -243,6 +244,7 @@ type notifyE2EWorkflowManager struct {
 var _ orchestrator.WorkflowManager = (*notifyE2EWorkflowManager)(nil)
 
 func (m *notifyE2EWorkflowManager) Config() config.ServiceConfig     { return m.config }
+func (m *notifyE2EWorkflowManager) Rates() *pricing.Rates            { return nil }
 func (m *notifyE2EWorkflowManager) PromptTemplate() *prompt.Template { return m.template }
 
 func (m *notifyE2EWorkflowManager) PromptTemplateByID(id string) *prompt.Template {

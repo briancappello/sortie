@@ -970,7 +970,7 @@ func buildPollingConfig(m map[string]any) (PollingConfig, error) {
 
 func buildWorkspaceConfig(m map[string]any, envKeys map[string]bool) (WorkspaceConfig, error) {
 	rootRaw := extractString(m, "root")
-	root, err := expandPath(rootRaw, !envKeys["workspace.root"])
+	root, err := ExpandPath(rootRaw, !envKeys["workspace.root"])
 	if err != nil {
 		return WorkspaceConfig{}, &ConfigError{
 			Field:   "workspace.root",
@@ -1038,7 +1038,7 @@ func buildDBPath(raw map[string]any, envKeys map[string]bool) (string, error) {
 	if s == "" {
 		return "", nil
 	}
-	expanded, err := expandPath(s, !envKeys["db_path"])
+	expanded, err := ExpandPath(s, !envKeys["db_path"])
 	if err != nil {
 		return "", &ConfigError{
 			Field:   "db_path",
@@ -1671,7 +1671,9 @@ func resolveEnvRef(s string) string {
 	return s
 }
 
-func expandPath(p string, expandEnv bool) (string, error) {
+// ExpandPath expands a leading "~" to the home directory and, when expandEnv
+// is set, environment variable references in p. An empty p yields "".
+func ExpandPath(p string, expandEnv bool) (string, error) {
 	if p == "" {
 		return "", nil
 	}

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/pricing"
@@ -1536,49 +1537,56 @@ func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 	}
 }
 
+func loadTestRates(t *testing.T, raw map[string]any, kinds ...string) *pricing.Rates {
+	t.Helper()
+
+	cfg, err := config.NewServiceConfig(raw)
+	if err != nil {
+		t.Fatalf("config.NewServiceConfig: %v", err)
+	}
+	rates, _, err := pricing.LoadRates(cfg, pricing.LoadInput{IsKind: func(key string) bool { return slices.Contains(kinds, key) }})
+	if err != nil {
+		t.Fatalf("pricing.LoadRates: %v", err)
+	}
+	return rates
+}
+
 func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 	t.Parallel()
 
 	fptr := func(v float64) *float64 { return &v }
-	rates := pricing.TokenRates{
-		"claude": pricing.TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
+
+	tests := []struct {
+		name       string
+		raw        map[string]any
+		wantServed bool
+	}{
+		{name: "zero served with defaults", wantServed: true},
+		{name: "omitted when no rate source is available", raw: map[string]any{"price_table": map[string]any{"embedded": false}}},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	t.Run("zero count with rates configured is present as zero", func(t *testing.T) {
-		t.Parallel()
+			snap := orchestrator.RuntimeSnapshotResult{
+				GeneratedAt: time.Now().UTC(),
+				Rates:       loadTestRates(t, tt.raw),
+				Running: []orchestrator.SnapshotRunningEntry{
+					{IssueID: "b", Identifier: "MT-B", EstimatedCostUSD: fptr(3.0), CostStatus: "estimated"},
+				},
+			}
 
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			TokenRates:  rates,
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "b", Identifier: "MT-B", EstimatedCostUSD: fptr(3.0), CostStatus: "estimated"},
-			},
-		}
+			got := jsonObject(t, toStateResponse(snap, sentence.Context{}, nil))
 
-		got := toStateResponse(snap, sentence.Context{}, nil)
-
-		assertJSONKeys(t, got, map[string]any{"cost_unpriced_running": 0})
-	})
-
-	t.Run("no rates configured omits the field from JSON", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "b", Identifier: "MT-B", AgentKind: "claude", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
-
-		got := toStateResponse(snap, sentence.Context{}, nil)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-		if strings.Contains(string(data), "cost_unpriced_running") {
-			t.Errorf("JSON = %s, want cost_unpriced_running omitted when no token rate is configured", data)
-		}
-	})
+			unpriced, served := got["cost_unpriced_running"]
+			if served != tt.wantServed || served && unpriced != float64(0) {
+				t.Errorf("cost_unpriced_running = %v (present=%t), want 0 (present=%t)", unpriced, served, tt.wantServed)
+			}
+			if _, served := got["active_estimated_cost_usd"]; served != tt.wantServed {
+				t.Errorf("active_estimated_cost_usd present = %t, want %t", served, tt.wantServed)
+			}
+		})
+	}
 }
 
 func TestToServedRunningEntry(t *testing.T) {
