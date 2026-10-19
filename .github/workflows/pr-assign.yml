@@ -6,7 +6,6 @@ on:
     types: [opened, reopened]
 
 permissions:
-  issues: write
   pull-requests: write
 
 concurrency:
@@ -23,7 +22,7 @@ jobs:
 
     steps:
       - name: Auto-assign PR
-        run: gh pr edit "$PR" --repo "$REPO" --add-assignee "$ASSIGNEE"
+        run: gh api --method POST "repos/$REPO/issues/$PR/assignees" -f "assignees[]=$ASSIGNEE"
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
