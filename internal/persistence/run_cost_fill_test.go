@@ -31,6 +31,9 @@ func readCostState(t *testing.T, s *Store) costState {
 		}
 		state.Runs[id] = ModelCost{EstimatedCostUSD: floatPtr(cost), CostStatus: status.String}
 	}
+	if err := runs.Err(); err != nil {
+		t.Fatalf("iterate run costs: %v", err)
+	}
 
 	parts, err := s.db.QueryContext(context.Background(),
 		`SELECT run_id, model, estimated_cost_usd, cost_status, price_source, price_table_version FROM run_model_usage`)
@@ -50,6 +53,9 @@ func readCostState(t *testing.T, s *Store) costState {
 			state.Parts[id] = map[string]ModelCost{}
 		}
 		state.Parts[id][model] = ModelCost{EstimatedCostUSD: floatPtr(cost), CostStatus: status.String, PriceSource: source, PriceTableVersion: version}
+	}
+	if err := parts.Err(); err != nil {
+		t.Fatalf("iterate part costs: %v", err)
 	}
 	return state
 }
