@@ -40,6 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Removing the parking label from a parked issue now releases it on the next poll even when `tracker.query_filter` excludes issues that carry the label; before, only moving the issue to another state did. An issue whose label was removed before you upgrade stays parked until you move it to another state, or add the label back, wait for the next poll, and remove it again. ([#1406](https://github.com/sortie-ai/sortie/issues/1406))
 
+- `sortie_tokens_total` now counts a run's tokens under each model the run used instead of counting all of them under one model. ([#1409](https://github.com/sortie-ai/sortie/issues/1409))
+
 ## [1.28.1] - 2026-10-18
 
 ### Security
