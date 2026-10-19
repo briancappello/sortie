@@ -17,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
@@ -86,6 +87,12 @@ type HandleWorkerExitParams struct {
 	Ctx context.Context
 
 	Logger *slog.Logger
+
+	// TokenRatesSection returns the token_rates value of the configuration
+	// loaded for this exit. A reload can land between ticks, so the run is
+	// priced under the rates this configuration holds. Nil leaves
+	// [State.TokenRates] as it is.
+	TokenRatesSection func() (raw any, present bool)
 
 	// BeforeRemoveHook is the before_remove hook script. Empty means none.
 	BeforeRemoveHook string
@@ -493,6 +500,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	} else {
 		runHistory.ModelUsage = runModelUsage(entry.UsageByModel)
 	}
+	if params.TokenRatesSection != nil {
+		raw, present := params.TokenRatesSection()
+		state.TokenRates = pricing.ReloadTokenRates(state.TokenRates, raw, present)
+	}
+	recordRunCost(&runHistory, state.TokenRates)
 	if workerResult.ReviewMetadata != nil {
 		masked := maskedReviewMetadata(*workerResult.ReviewMetadata)
 		data, marshalErr := json.Marshal(masked)
@@ -521,8 +533,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		// below: once that row exists, a session_metadata row still keyed to
 		// this dispatch would add the run's spend a second time. These are
 		// separate writes; a clear that fails while the append succeeds
-		// leaves that double count as an accepted risk.
+		// leaves that double count as an accepted risk. The live estimate is
+		// cleared for the same reason.
 		DispatchID:          "",
+		EstimatedCostUSD:    nil,
+		CostStatus:          "",
 		InputTokens:         entry.AgentInputTokens,
 		OutputTokens:        entry.AgentOutputTokens,
 		TotalTokens:         entry.AgentTotalTokens,
@@ -1647,6 +1662,52 @@ func runModelUsage(totals map[string]domain.TokenUsage) map[string]persistence.M
 		}
 	}
 	return parts
+}
+
+// recordRunCost prices a run under rates and stores the result on its row.
+// The row's token columns and ModelUsage must be final, because the price is
+// fixed when the row is written.
+func recordRunCost(row *persistence.RunHistory, rates pricing.TokenRates) {
+	var parts map[string]domain.TokenUsage
+	if len(row.ModelUsage) > 0 {
+		parts = make(map[string]domain.TokenUsage, len(row.ModelUsage))
+		for model, tokens := range row.ModelUsage {
+			parts[model] = domain.TokenUsage{
+				InputTokens:      tokens.InputTokens,
+				OutputTokens:     tokens.OutputTokens,
+				CacheReadTokens:  tokens.CacheReadTokens,
+				CacheWriteTokens: tokens.CacheWriteTokens,
+			}
+		}
+	}
+	price := pricing.PriceRun(pricing.Spend{
+		Kind:     row.AgentAdapter,
+		Measured: row.TokensMeasured,
+		Totals: domain.TokenUsage{
+			InputTokens:      row.InputTokens,
+			OutputTokens:     row.OutputTokens,
+			TotalTokens:      row.TotalTokens,
+			CacheReadTokens:  row.CacheReadTokens,
+			CacheWriteTokens: row.CacheWriteTokens,
+		},
+		Parts:            parts,
+		UnaccountedTurns: row.UnaccountedTurns,
+	}, rates)
+
+	row.EstimatedCostUSD = price.CostUSD
+	row.CostStatus = string(price.Status)
+	if len(price.Parts) == 0 {
+		return
+	}
+	row.ModelCosts = make(map[string]persistence.ModelCost, len(price.Parts))
+	for model, part := range price.Parts {
+		row.ModelCosts[model] = persistence.ModelCost{
+			EstimatedCostUSD:  part.CostUSD,
+			CostStatus:        string(part.Status),
+			PriceSource:       string(part.Source),
+			PriceTableVersion: part.TableVersion,
+		}
+	}
 }
 
 func errorStringPtr(err error) *string {

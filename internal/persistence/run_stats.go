@@ -39,6 +39,10 @@ type RunHistoryCapabilities struct {
 	// HasAgentBlocked is outside [RunHistoryCapabilities.Full];
 	// [RunHistoryCapabilities.FunnelBreakdown] depends on it.
 	HasAgentBlocked bool // migration 037: agent_blocked
+
+	// HasRecordedCost is outside [RunHistoryCapabilities.Full];
+	// [RunHistoryCapabilities.RecordedCost] depends on it.
+	HasRecordedCost bool
 }
 
 // Full reports whether the database carries every optional run_history
@@ -79,6 +83,13 @@ func (c RunHistoryCapabilities) OriginBreakdown() bool {
 // OriginBreakdown plus the blocked-run column.
 func (c RunHistoryCapabilities) FunnelBreakdown() bool {
 	return c.OriginBreakdown() && c.HasAgentBlocked
+}
+
+// RecordedCost reports whether the stats report can read the recorded cost.
+// It requires FunnelBreakdown too, so a partly migrated database reports no
+// cost rather than a partial one.
+func (c RunHistoryCapabilities) RecordedCost() bool {
+	return c.FunnelBreakdown() && c.HasRecordedCost
 }
 
 // RunStatsRow is the narrow run_history projection the aggregate read
@@ -132,6 +143,12 @@ type RunStatsRow struct {
 	// [HandoffAbsenceErrorPrefix].
 	AgentBlocked    bool
 	HandoffWithheld bool
+
+	// EstimatedCostUSD is nil when the column is NULL or
+	// [RunHistoryCapabilities.RecordedCost] reports false. CostStatus is empty
+	// for a NULL status and under the same condition.
+	EstimatedCostUSD *float64
+	CostStatus       string
 }
 
 // runStatsColumnsFull is the column list when Full reports true and
@@ -197,6 +214,7 @@ func (s *Store) RunHistoryCapabilities(ctx context.Context) (RunHistoryCapabilit
 		HasTrigger:       columns["trigger"] && columns["reaction_kind"],
 		HasFirstAfterHop: columns["first_after_hop"],
 		HasAgentBlocked:  columns["agent_blocked"],
+		HasRecordedCost:  columns["estimated_cost_usd"] && columns["cost_status"],
 	}, nil
 }
 
@@ -226,6 +244,7 @@ func (s *Store) ScanRunHistoryRange(
 	triggers := caps.TriggerBreakdown()
 	origins := caps.OriginBreakdown()
 	funnels := caps.FunnelBreakdown()
+	recordedCost := caps.RecordedCost()
 	query := runStatsColumnsBase
 	switch {
 	case full && caps.HasCacheWriteTokens:
@@ -250,6 +269,9 @@ func (s *Store) ScanRunHistoryRange(
 		query += `, agent_blocked,
 		CASE WHEN status = 'failed' AND substr(error, 1, ?) = ? THEN 1 ELSE 0 END`
 		args = append(args, len(HandoffAbsenceErrorPrefix), HandoffAbsenceErrorPrefix)
+	}
+	if recordedCost {
+		query += ", estimated_cost_usd, cost_status"
 	}
 	query += "\nFROM run_history"
 
@@ -276,7 +298,8 @@ func (s *Store) ScanRunHistoryRange(
 
 	for rows.Next() {
 		var row RunStatsRow
-		var reviewMeta, displayID, trigger, reactionKind sql.NullString
+		var reviewMeta, displayID, trigger, reactionKind, costStatus sql.NullString
+		var cost sql.NullFloat64
 		var dest []any
 		switch {
 		case full && caps.HasCacheWriteTokens:
@@ -310,6 +333,9 @@ func (s *Store) ScanRunHistoryRange(
 		if funnels {
 			dest = append(dest, &row.AgentBlocked, &row.HandoffWithheld)
 		}
+		if recordedCost {
+			dest = append(dest, &cost, &costStatus)
+		}
 		if err := rows.Scan(dest...); err != nil {
 			return fmt.Errorf("scan run history range: %w", err)
 		}
@@ -321,6 +347,10 @@ func (s *Store) ScanRunHistoryRange(
 			row.Trigger = new(trigger.String)
 		}
 		row.ReactionKind = reactionKind.String
+		if cost.Valid {
+			row.EstimatedCostUSD = new(cost.Float64)
+		}
+		row.CostStatus = costStatus.String
 
 		if err := visit(row); err != nil {
 			return err

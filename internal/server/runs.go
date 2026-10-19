@@ -13,7 +13,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -244,7 +243,7 @@ func parseRunsQuery(values url.Values) (RunHistoryQuery, error) {
 // toRunResponse converts a run to its wire format, masking the free-text
 // members at serve time so a value registered as a secret after the run is
 // masked too. chains are the dispatch chains of the configuration in effect.
-func toRunResponse(e RunHistoryEntry, rates pricing.TokenRates, chains [][]string) runResponse {
+func toRunResponse(e RunHistoryEntry, chains [][]string) runResponse {
 	resp := runResponse{
 		RunID:                e.ID,
 		IssueID:              e.IssueID,
@@ -291,7 +290,7 @@ func toRunResponse(e RunHistoryEntry, rates pricing.TokenRates, chains [][]strin
 		}
 		resp.UncachedTokens = new(domain.TokenUsage{TotalTokens: e.Tokens.TotalTokens, CacheReadTokens: e.Tokens.CacheReadTokens}.Uncached())
 	}
-	resp.EstimatedCostUSD, resp.CostStatus = runCostOf(e, rates)
+	resp.EstimatedCostUSD, resp.CostStatus = servedCost(e.EstimatedCostUSD, e.CostStatus)
 
 	if e.OriginRecorded {
 		resp.Trigger = copyText(e.Trigger)
@@ -332,10 +331,10 @@ func toSelfReviewResponse(metadata *string) *selfReviewResponse {
 	}
 }
 
-func toRunResponses(rows []RunHistoryEntry, rates pricing.TokenRates, chains [][]string) []runResponse {
+func toRunResponses(rows []RunHistoryEntry, chains [][]string) []runResponse {
 	runs := make([]runResponse, len(rows))
 	for i, row := range rows {
-		runs[i] = toRunResponse(row, rates, chains)
+		runs[i] = toRunResponse(row, chains)
 	}
 	return runs
 }
@@ -409,7 +408,7 @@ func distinctIssueIDs(rows []RunHistoryEntry) []string {
 // historyTotalsOf converts an issue's totals to their wire format. A token
 // sum that is zero while the spend is incomplete serves null, because the
 // zero would stand in for spend Sortie does not know.
-func historyTotalsOf(t IssueRunTotals, rates pricing.TokenRates) historyTotalsResponse {
+func historyTotalsOf(t IssueRunTotals) historyTotalsResponse {
 	complete := t.Usage.UnmeasuredSessions == 0 && t.Usage.UnaccountedTurns == 0
 	known := func(sum int64) *int64 {
 		if sum == 0 && !complete {
@@ -424,7 +423,7 @@ func historyTotalsOf(t IssueRunTotals, rates pricing.TokenRates) historyTotalsRe
 		CacheReadTokens:  known(t.Tokens.CacheReadTokens),
 		CacheWriteTokens: known(t.Tokens.CacheWriteTokens),
 	}
-	cost, status := issueCostFromKinds(t.Usage.ByKind, tokens.TotalTokens, complete, sessionCostPart{}, rates)
+	cost, status := issueCost(&t.Usage, tokens.TotalTokens, complete, sessionCostPart{})
 	return historyTotalsResponse{
 		RunCount:         t.Usage.Sessions,
 		UnmeasuredRuns:   t.Usage.UnmeasuredSessions,
@@ -520,7 +519,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		s.historyReadFailed(w, r, err)
 		return
 	}
-	runs := toRunResponses(rows, s.tokenRates, chains)
+	runs := toRunResponses(rows, chains)
 	attachIssueOutcomes(runs, outcomes)
 	attachRunPRLoops(runs, rows, loops)
 	writeJSON(w, s.logger, http.StatusOK, runsResponse{Runs: runs, NextCursor: next})

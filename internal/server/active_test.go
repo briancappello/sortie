@@ -106,7 +106,7 @@ func TestActiveIssueServesOneEntryWithTheDecidingRowsFacts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := toStateResponse(tt.snap, nil, sentence.Context{}, nil)
+			got := toStateResponse(tt.snap, sentence.Context{}, nil)
 
 			if want := listedIssueCount(t, got); len(got.Active) != want {
 				t.Fatalf("len(Active) = %d, want %d distinct issues", len(got.Active), want)
@@ -139,7 +139,7 @@ func TestActiveIssueKeepsItsPlaceWhenItMovesFromRunningToRetrying(t *testing.T) 
 		}
 	}
 	servedOrder := func() []string {
-		resp := toStateResponse(orchestrator.RuntimeSnapshot(state, base), nil, sentence.Context{}, nil)
+		resp := toStateResponse(orchestrator.RuntimeSnapshot(state, base), sentence.Context{}, nil)
 		var order []string
 		for _, entry := range resp.Active {
 			order = append(order, entry.IssueID)

@@ -2,26 +2,10 @@ package server
 
 import (
 	"fmt"
-	"maps"
 	"math"
-	"slices"
 
-	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 )
-
-// runningEntryCost prices usage under kind's configured rate. priced is
-// true only when rates holds an entry for kind and EstimateCost returns
-// a non-nil figure for it.
-func runningEntryCost(kind string, usage domain.TokenUsage, rates pricing.TokenRates) (cost *float64, priced bool) {
-	rc, ok := rates[kind]
-	if !ok {
-		return nil, false
-	}
-	c := pricing.EstimateCost(usage, &rc)
-	return c, c != nil
-}
 
 // Cost states served on running rows. An estimate is exact only in the
 // estimated state; partial is a lower bound.
@@ -32,36 +16,18 @@ const (
 	costStatusPartial    = "partial"
 )
 
-// sessionCostOf prices the running session of e under rates and names the
-// state of that estimate. It prices through [runningEntryCost] with the
-// figures [activeCostTotal] uses, so a row agrees with the aggregate keys.
-func sessionCostOf(e orchestrator.SnapshotRunningEntry, rates pricing.TokenRates) (cost *float64, status string) {
-	if !e.UsageMeasured {
-		return nil, costStatusUnmeasured
+// servedCost returns a recorded or live figure as it is served. An empty
+// status is a run recorded without a price, which reads as unpriced rather
+// than as a guessed cost.
+func servedCost(cost *float64, status string) (*float64, string) {
+	if status == "" {
+		return nil, costStatusUnpriced
 	}
-	usage := domain.TokenUsage{
-		InputTokens:      e.AgentInputTokens,
-		OutputTokens:     e.AgentOutputTokens,
-		CacheReadTokens:  e.CacheReadTokens,
-		CacheWriteTokens: e.CacheWriteTokens,
-	}
-	if c, priced := runningEntryCost(e.AgentKind, usage, rates); priced {
-		return c, costStatusEstimated
-	}
-	return nil, costStatusUnpriced
+	return cost, status
 }
 
-// issueCostOf sums the estimates of the priced parts of e's issue: each
-// completed kind and the running session, whose estimate arrives as
-// sessionCost and sessionStatus. See [issueCostFromKinds] for the closing
-// decision.
-func issueCostOf(e orchestrator.SnapshotRunningEntry, usedTokens *int64, usedComplete bool, sessionCost *float64, sessionStatus string, rates pricing.TokenRates) (cost *float64, status string) {
-	var byKind map[string]domain.TokenUsage
-	if e.IssueUsage != nil {
-		byKind = e.IssueUsage.ByKind
-	}
-	session := sessionCostPart{cost: sessionCost, status: sessionStatus, spent: e.AgentTotalTokens > 0}
-	return issueCostFromKinds(byKind, usedTokens, usedComplete, session, rates)
+func liveCostOf(e orchestrator.SnapshotRunningEntry) (cost *float64, status string) {
+	return servedCost(e.EstimatedCostUSD, e.CostStatus)
 }
 
 // sessionCostPart is the running session's share of an issue's cost. The
@@ -72,87 +38,70 @@ type sessionCostPart struct {
 	spent  bool
 }
 
-// issueCostFromKinds sums the estimates of the priced parts of an issue:
-// each completed kind in byKind and the running session. The result is
-// estimated only when usedComplete says the priced parts cover the whole
-// spend, and partial when it is a lower bound. A part that spent nothing
-// prices nothing, so a running session at zero tokens neither makes an
-// unpriced issue partial nor a fully priced one unpriced.
-func issueCostFromKinds(byKind map[string]domain.TokenUsage, usedTokens *int64, usedComplete bool, session sessionCostPart, rates pricing.TokenRates) (cost *float64, status string) {
+func sessionPartOf(e orchestrator.SnapshotRunningEntry) sessionCostPart {
+	cost, status := liveCostOf(e)
+	spent := e.AgentInputTokens != 0 || e.AgentOutputTokens != 0 || e.AgentTotalTokens != 0 ||
+		e.CacheReadTokens != 0 || e.CacheWriteTokens != 0
+	return sessionCostPart{cost: cost, status: status, spent: spent}
+}
+
+// issueCost folds the recorded cost of an issue's completed sessions and its
+// running session into one cost and state. The result is estimated only when
+// usedComplete says the priced parts cover the whole spend, and partial when
+// it is a lower bound. A part that spent nothing prices nothing, so a running
+// session at zero tokens neither makes an unpriced issue partial nor a fully
+// priced one unpriced.
+func issueCost(completed *orchestrator.SnapshotIssueUsage, usedTokens *int64, usedComplete bool, session sessionCostPart) (cost *float64, status string) {
 	if usedTokens == nil {
 		return nil, costStatusUnmeasured
 	}
 
-	var total float64
-	var pricedAny, unpricedAny bool
-	for _, kind := range slices.Sorted(maps.Keys(byKind)) {
-		if c, priced := runningEntryCost(kind, byKind[kind], rates); priced {
-			total += *c
-			pricedAny = true
-		} else {
-			unpricedAny = true
-		}
+	var recorded orchestrator.SnapshotIssueUsage
+	if completed != nil {
+		recorded = *completed
 	}
+	total := recorded.RecordedCostUSD
+	priced := recorded.PricedSessions > 0
+	partial := recorded.PartialSessions > 0
+	unpriced := recorded.UnpricedSessions > 0
 
 	switch session.status {
-	case costStatusEstimated:
-		total += *session.cost
-		pricedAny = pricedAny || session.spent
+	case costStatusEstimated, costStatusPartial:
+		if session.cost != nil {
+			total += *session.cost
+		}
+		priced = priced || session.spent
+		partial = partial || session.status == costStatusPartial
 	case costStatusUnpriced:
-		unpricedAny = unpricedAny || session.spent
+		unpriced = unpriced || session.spent
 	}
 
 	switch {
-	case usedComplete && !unpricedAny:
+	case usedComplete && !unpriced && !partial:
 		return &total, costStatusEstimated
-	case pricedAny:
+	case priced:
 		return &total, costStatusPartial
-	case unpricedAny:
+	case unpriced:
 		return nil, costStatusUnpriced
 	default:
 		return nil, costStatusUnmeasured
 	}
 }
 
-// runCostOf prices a finished run under rates and names the state of that
-// estimate. A run that spent nothing is a free estimate without a rate,
-// because its figure is final.
-func runCostOf(e RunHistoryEntry, rates pricing.TokenRates) (cost *float64, status string) {
-	if !e.TokensMeasured {
-		return nil, costStatusUnmeasured
-	}
-	if e.Tokens == (domain.TokenUsage{}) {
-		return new(0.0), costStatusEstimated
-	}
-	c, priced := runningEntryCost(e.AgentKind, e.Tokens, rates)
-	if !priced {
-		return nil, costStatusUnpriced
-	}
-	if e.UnaccountedTurns > 0 {
-		return c, costStatusPartial
-	}
-	return c, costStatusEstimated
-}
-
-// activeCostTotal sums the estimated USD cost of running, measured
-// sessions with a configured rate, and counts the measured sessions
-// left out for want of one. anySet is false when no session priced,
-// distinguishing that from a priced total of zero.
-func activeCostTotal(running []orchestrator.SnapshotRunningEntry, tokenRates pricing.TokenRates) (total float64, anySet bool, unpriced int) {
+// activeCostTotal sums the live estimates of the running sessions priced
+// estimated or partial, and counts the sessions priced unpriced. anySet is
+// false when no session priced, distinguishing that from a priced total of
+// zero.
+func activeCostTotal(running []orchestrator.SnapshotRunningEntry) (total float64, anySet bool, unpriced int) {
 	for _, e := range running {
-		if !e.UsageMeasured {
-			continue
-		}
-		usage := domain.TokenUsage{
-			InputTokens:      e.AgentInputTokens,
-			OutputTokens:     e.AgentOutputTokens,
-			CacheReadTokens:  e.CacheReadTokens,
-			CacheWriteTokens: e.CacheWriteTokens,
-		}
-		if c, priced := runningEntryCost(e.AgentKind, usage, tokenRates); priced {
-			total += *c
-			anySet = true
-		} else {
+		cost, status := liveCostOf(e)
+		switch status {
+		case costStatusEstimated, costStatusPartial:
+			if cost != nil {
+				total += *cost
+				anySet = true
+			}
+		case costStatusUnpriced:
 			unpriced++
 		}
 	}

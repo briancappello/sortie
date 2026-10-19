@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -11295,4 +11296,50 @@ func (s *stubStore) LatestResumeUsage(context.Context, string, string) (*persist
 
 func (s *stubStore) ListStageHops(context.Context) ([]persistence.StageHop, error) {
 	return nil, nil
+}
+
+func TestWriteIncrementalMetadata_LiveEstimate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		kind       string
+		measured   bool
+		wantCost   *float64
+		wantStatus string
+	}{
+		{name: "priced kind", kind: "k", measured: true, wantCost: new(12.0), wantStatus: "estimated"},
+		{name: "kind without rates", kind: "u", measured: true, wantStatus: "unpriced"},
+		{name: "unmeasured session", kind: "k"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			store := openInMemoryStore(t)
+			state := NewState(60000, 10, 0, nil, AgentTotals{})
+			state.TokenRates = fixtureRates(2)
+			o := &Orchestrator{state: state, store: store, logger: discardLogger()}
+			entry := &RunningEntry{
+				AgentKind:         tt.kind,
+				UsageMeasured:     tt.measured,
+				AgentInputTokens:  usageS.InputTokens,
+				AgentOutputTokens: usageS.OutputTokens,
+				AgentTotalTokens:  usageS.TotalTokens,
+			}
+
+			o.writeIncrementalMetadata(ctx, "id-1", entry, time.Now().UTC())
+
+			meta, found, err := store.LoadSessionMetadata(ctx, "id-1")
+			if err != nil || !found {
+				t.Fatalf("LoadSessionMetadata(%q) = found %v, err %v, want found", "id-1", found, err)
+			}
+			if !reflect.DeepEqual(meta.EstimatedCostUSD, tt.wantCost) || meta.CostStatus != tt.wantStatus {
+				t.Errorf("session_metadata cost for kind %q = (%v, %q), want (%v, %q)",
+					tt.kind, meta.EstimatedCostUSD, meta.CostStatus, tt.wantCost, tt.wantStatus)
+			}
+		})
+	}
 }

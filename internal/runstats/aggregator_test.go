@@ -20,19 +20,16 @@ var fullCaps = persistence.RunHistoryCapabilities{
 	HasTokens:           true,
 	HasTokenMeasurement: true,
 	HasAgentBlocked:     true,
+	HasRecordedCost:     true,
 }
+
+var recordedCaps = withTriggerBreakdown(fullCaps)
 
 var fixedNow = time.Date(2026, 8, 7, 9, 15, 0, 0, time.UTC)
 
-func inputOnlyPricer(usdPerMtok map[string]float64) Pricer {
-	return func(agentKind string, usage domain.TokenUsage) *float64 {
-		rate, ok := usdPerMtok[agentKind]
-		if !ok {
-			return nil
-		}
-		cost := float64(usage.InputTokens) / 1_000_000 * rate
-		return &cost
-	}
+func withCost(row persistence.RunStatsRow, usd *float64, costStatus string) persistence.RunStatsRow {
+	row.EstimatedCostUSD, row.CostStatus = usd, costStatus
+	return row
 }
 
 func rangeFloats(lo, hi int) []float64 {
@@ -163,22 +160,22 @@ func TestStatsSummaryFormulas(t *testing.T) {
 	t.Run("duration and turns normalize on succeeded rows; cost per succeeded run divides all spend", func(t *testing.T) {
 		t.Parallel()
 
-		agg := New(fullCaps, inputOnlyPricer(map[string]float64{"mock": 10}))
+		agg := New(recordedCaps)
 
 		addRows(t, agg,
-			persistence.RunStatsRow{
+			withCost(persistence.RunStatsRow{
 				Status: "succeeded", AgentAdapter: "mock", TurnsCompleted: 4,
 				StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:10:00Z",
 				InputTokens: 1_000_000, TokensMeasured: true,
-			},
-			persistence.RunStatsRow{
+			}, new(10.0), "estimated"),
+			withCost(persistence.RunStatsRow{
 				Status: "failed", AgentAdapter: "mock", TurnsCompleted: 8,
 				StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T01:00:00Z",
 				InputTokens: 500_000, TokensMeasured: true,
-			},
+			}, new(5.0), "estimated"),
 		)
 
-		report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+		report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 		if report.Summary.Duration.Samples != 1 {
 			t.Fatalf("Summary.Duration.Samples = %d, want 1 (succeeded rows only)", report.Summary.Duration.Samples)
@@ -202,7 +199,7 @@ func TestStatsSummaryFormulas(t *testing.T) {
 func TestStatsGroupDisclosure(t *testing.T) {
 	t.Parallel()
 
-	agg := New(fullCaps, inputOnlyPricer(map[string]float64{"mock": 10}))
+	agg := New(recordedCaps)
 
 	addRows(t, agg, persistence.RunStatsRow{
 		Status:         "ci_failed",
@@ -210,8 +207,8 @@ func TestStatsGroupDisclosure(t *testing.T) {
 		CompletedAt:    "2026-01-01T00:00:00Z",
 		TokensMeasured: true,
 	})
-	for _, adapter := range []string{"mock", "unrated"} {
-		addRows(t, agg, persistence.RunStatsRow{
+	reviewRun := func(adapter string) persistence.RunStatsRow {
+		return persistence.RunStatsRow{
 			Status:         "succeeded",
 			AgentAdapter:   adapter,
 			RuleName:       "review",
@@ -221,10 +218,14 @@ func TestStatsGroupDisclosure(t *testing.T) {
 			InputTokens:    1_000_000,
 			TotalTokens:    1_000_000,
 			TokensMeasured: true,
-		})
+		}
 	}
+	addRows(t, agg,
+		withCost(reviewRun("mock"), new(10.0), "estimated"),
+		withCost(reviewRun("unrated"), nil, "unpriced"),
+	)
 
-	report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+	report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 	adapterGroup := findGroup(t, report.ByAdapter, "<none>")
 	if adapterGroup.Duration.Samples != 1 {
@@ -237,7 +238,7 @@ func TestStatsGroupDisclosure(t *testing.T) {
 		t.Errorf("<none> adapter group Tokens = %v, want Total 0", adapterGroup.Tokens)
 	}
 	if adapterGroup.CostUSD != nil {
-		t.Errorf("<none> adapter group CostUSD = %v, want nil (no rate entry for an empty agent_adapter)", *adapterGroup.CostUSD)
+		t.Errorf("<none> adapter group CostUSD = %v, want nil (a ci_failed row is not priced)", *adapterGroup.CostUSD)
 	}
 
 	ruleGroup := findGroup(t, report.ByRule, "<none>")
@@ -267,37 +268,10 @@ func TestStatsGroupDisclosure(t *testing.T) {
 	}
 }
 
-func TestPricerReceivesEveryTokenCounter(t *testing.T) {
-	t.Parallel()
-
-	var got domain.TokenUsage
-	agg := New(fullCaps, func(_ string, usage domain.TokenUsage) *float64 {
-		got = usage
-		return nil
-	})
-	addRows(t, agg, persistence.RunStatsRow{
-		Status:           "succeeded",
-		AgentAdapter:     "mock",
-		StartedAt:        "2026-01-01T00:00:00Z",
-		CompletedAt:      "2026-01-01T00:01:00Z",
-		InputTokens:      100,
-		OutputTokens:     20,
-		TotalTokens:      120,
-		CacheReadTokens:  30,
-		CacheWriteTokens: 10,
-		TokensMeasured:   true,
-	})
-
-	want := domain.TokenUsage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120, CacheReadTokens: 30, CacheWriteTokens: 10}
-	if got != want {
-		t.Errorf("Pricer usage = %+v, want %+v", got, want)
-	}
-}
-
 func TestStatsSelfReview(t *testing.T) {
 	t.Parallel()
 
-	agg := New(fullCaps, nil)
+	agg := New(fullCaps)
 	addRows(t, agg,
 		persistence.RunStatsRow{
 			Status: "succeeded", StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:01:00Z",
@@ -317,7 +291,7 @@ func TestStatsSelfReview(t *testing.T) {
 		},
 	)
 
-	report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+	report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 	sr := report.SelfReview
 	if sr == nil {
@@ -354,14 +328,14 @@ func TestStatsSelfReview(t *testing.T) {
 func TestStatsStatusOrdering(t *testing.T) {
 	t.Parallel()
 
-	agg := New(fullCaps, nil)
+	agg := New(fullCaps)
 	for _, status := range []string{"weird_status", "succeeded", "succeeded", "failed", "cancelled"} {
 		addRows(t, agg, persistence.RunStatsRow{
 			Status: status, StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:01:00Z",
 		})
 	}
 
-	report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+	report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 	// Runs tie at 1 for the last three; ties break ascending by name.
 	want := []string{"succeeded", "cancelled", "failed", "weird_status"}
@@ -401,10 +375,10 @@ func TestStatsOutcomeCounts(t *testing.T) {
 			t.Parallel()
 
 			for _, caps := range []persistence.RunHistoryCapabilities{{}, fullCaps} {
-				agg := New(caps, nil)
+				agg := New(caps)
 				addRows(t, agg, persistence.RunStatsRow{Status: tt.status})
 
-				s := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil).Summary
+				s := agg.Report(fixedNow, "/wf", "/db", nil, nil).Summary
 
 				got := [4]int{s.Succeeded, s.Failed, s.Stopped, s.Cancelled}
 				if got != tt.want || s.Runs != 1 {
@@ -418,10 +392,10 @@ func TestStatsOutcomeCounts(t *testing.T) {
 func TestStatsAggregatorReport_UntilBound(t *testing.T) {
 	t.Parallel()
 
-	agg := New(fullCaps, nil)
+	agg := New(fullCaps)
 	until := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 
-	report := agg.Report(fixedNow, "/wf", "/db", nil, &until, nil)
+	report := agg.Report(fixedNow, "/wf", "/db", nil, &until)
 
 	want := "2026-08-01T00:00:00Z"
 	if report.Until == nil || *report.Until != want {
@@ -512,17 +486,17 @@ func TestDegradedSchemaWarning(t *testing.T) {
 func TestStatsByModel(t *testing.T) {
 	t.Parallel()
 
-	agg := New(withModelBreakdown(fullCaps), inputOnlyPricer(map[string]float64{"claude-code": 10}))
+	agg := New(recordedCaps)
 	addRows(t, agg,
-		modelRow("claude-code", "model-a", "succeeded", 1_000_000),
-		modelRow("claude-code", "model-a", "failed", 0),
-		modelRow("codex", "model-b", "succeeded", 1_000_000),
-		modelRow("claude-code", "", "succeeded", 1_000_000),
+		withCost(modelRow("claude-code", "model-a", "succeeded", 1_000_000), new(10.0), "estimated"),
+		withCost(modelRow("claude-code", "model-a", "failed", 0), new(0.0), "estimated"),
+		withCost(modelRow("codex", "model-b", "succeeded", 1_000_000), nil, "unpriced"),
+		withCost(modelRow("claude-code", "", "succeeded", 1_000_000), new(10.0), "estimated"),
 		reportedModelRow("", "model-a"),
 		reportedModelRow("model-b", "model-a"),
 	)
 
-	report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+	report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 	if got := sumRuns(report.ByModel); got != report.Summary.Runs {
 		t.Errorf("by_model run counts sum to %d, want the report's runs: %d", got, report.Summary.Runs)
@@ -533,7 +507,7 @@ func TestStatsByModel(t *testing.T) {
 			modelA.Runs, modelA.Succeeded, modelB.Runs, none.Runs)
 	}
 	if modelA.CostUSD == nil || *modelA.CostUSD != 10 || modelB.CostUSD != nil {
-		t.Errorf("model-a, model-b CostUSD = %v, %v, want 10 (priced by its kind's rate) and nil (its kind has no rate)", modelA.CostUSD, modelB.CostUSD)
+		t.Errorf("model-a, model-b CostUSD = %v, %v, want 10 (the recorded cost) and nil (recorded unpriced)", modelA.CostUSD, modelB.CostUSD)
 	}
 }
 
@@ -555,10 +529,10 @@ func TestStatsByTrigger(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			agg := New(tt.caps, nil)
+			agg := New(tt.caps)
 			addRows(t, agg, triggerRow("A", new("ci_fix")), triggerRow("A", nil), triggerRow("B", new("")), triggerRow("C", new("ci_fix")))
 
-			report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 			var got []string
 			for _, g := range report.ByTrigger {
@@ -607,7 +581,7 @@ func TestStatsByOrigin(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			agg := New(tt.caps, nil)
+			agg := New(tt.caps)
 			addRows(t, agg,
 				originRow(new(""), "", "", false),
 				originRow(new(""), "", "specify", true),
@@ -618,7 +592,7 @@ func TestStatsByOrigin(t *testing.T) {
 				originRow(new(""), "", "specify", false),
 			)
 
-			report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 			if report.ByOrigin == nil {
 				t.Fatalf("Report(%+v).ByOrigin = nil, want a non-nil list", tt.caps)
@@ -647,7 +621,7 @@ func TestStatsByChain(t *testing.T) {
 	caps.HasStageChains = true
 	last := chainRow("chain-a", "", "plan", "ceiling", "failed")
 	last.DisplayID = "owner/repo#1"
-	agg := New(caps, nil)
+	agg := New(caps)
 	addRows(t, agg,
 		chainRow("chain-a", "specify", "", "advanced", "succeeded"),
 		chainRow("chain-b", "solo", "", "", "succeeded"),
@@ -659,7 +633,7 @@ func TestStatsByChain(t *testing.T) {
 		last,
 	)
 
-	report := agg.Report(fixedNow, "/wf", "/db", nil, nil, nil)
+	report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 	if len(report.ByChain) != 2 {
 		t.Fatalf("by_chain = %+v, want chain-a and chain-b only: a row without a chain and a chain without a hop stay out", report.ByChain)
@@ -681,6 +655,9 @@ func TestStatsByChain(t *testing.T) {
 func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	t.Parallel()
 
+	const costAlso = " The report also leaves out cost until then."
+	const costOnly = "this database was written before sortie recorded the cost of each run, so the report leaves out cost. Run sortie once with this workflow to add it."
+
 	modelCaps := withModelBreakdown(fullCaps)
 	chainCaps := modelCaps
 	chainCaps.HasStageChains = true
@@ -689,46 +666,102 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	originlessCaps.HasFirstAfterHop = false
 	unblockedCaps := triggerCaps
 	unblockedCaps.HasAgentBlocked = false
-	callerWarnings := []string{"token_rates: first", "token_rates: second"}
+	uncostedCaps := triggerCaps
+	uncostedCaps.HasRecordedCost = false
 
 	tests := []struct {
 		name    string
 		caps    persistence.RunHistoryCapabilities
 		stages  Stages
-		extra   []string
 		want    []string
 		funnels bool
 	}{
-		{name: "every breakdown supported and no caller warnings", caps: triggerCaps, want: []string{}},
+		{name: "every breakdown supported", caps: triggerCaps, want: []string{}},
 		{name: "chains configured and every breakdown supported", caps: triggerCaps, stages: threeStageChain, want: []string{}, funnels: true},
-		{name: "funnel breakdown missing while chains exist", caps: unblockedCaps, stages: threeStageChain, extra: callerWarnings, want: append([]string{funnelBreakdownWarning}, callerWarnings...)},
-		{name: "funnel breakdown missing without chains", caps: unblockedCaps, extra: callerWarnings, want: callerWarnings},
-		{name: "trigger breakdown missing", caps: chainCaps, extra: callerWarnings, want: append([]string{triggerBreakdownWarning}, callerWarnings...)},
-		{name: "origin breakdown missing", caps: originlessCaps, extra: callerWarnings, want: append([]string{originBreakdownWarning}, callerWarnings...)},
-		{name: "chain breakdown missing", caps: modelCaps, extra: callerWarnings, want: append([]string{chainBreakdownWarning}, callerWarnings...)},
-		{name: "model breakdown missing", caps: fullCaps, extra: callerWarnings, want: append([]string{modelBreakdownWarning}, callerWarnings...)},
-		{name: "schema not full", caps: persistence.RunHistoryCapabilities{}, extra: callerWarnings, want: append([]string{degradedSchemaWarning(persistence.RunHistoryCapabilities{})}, callerWarnings...)},
+		{name: "funnel breakdown missing while chains exist", caps: unblockedCaps, stages: threeStageChain, want: []string{funnelBreakdownWarning + costAlso}},
+		{name: "funnel breakdown missing without chains", caps: unblockedCaps, want: []string{costOnly}},
+		{name: "trigger breakdown missing", caps: chainCaps, want: []string{triggerBreakdownWarning + costAlso}},
+		{name: "origin breakdown missing", caps: originlessCaps, want: []string{originBreakdownWarning + costAlso}},
+		{name: "chain breakdown missing", caps: modelCaps, want: []string{chainBreakdownWarning + costAlso}},
+		{name: "model breakdown missing", caps: fullCaps, want: []string{modelBreakdownWarning + costAlso}},
+		{name: "cost columns missing", caps: uncostedCaps, want: []string{costOnly}},
+		{name: "schema not full", caps: persistence.RunHistoryCapabilities{}, want: []string{degradedSchemaWarning(persistence.RunHistoryCapabilities{})}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			agg := New(tt.caps, nil)
+			agg := New(tt.caps)
 			agg.SetStages(tt.stages)
 
-			report := agg.Report(fixedNow, "/wf", "/db", nil, nil, tt.extra)
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
 
 			got := report.Warnings
 			if got == nil {
-				t.Fatalf("Report(caps=%+v, warnings=%v).Warnings = nil, want a non-nil list", tt.caps, tt.extra)
+				t.Fatalf("Report(caps=%+v).Warnings = nil, want a non-nil list", tt.caps)
 			}
 			if !slices.Equal(got, tt.want) {
-				t.Errorf("Report(caps=%+v, warnings=%v).Warnings = %q, want %q", tt.caps, tt.extra, got, tt.want)
+				t.Errorf("Report(caps=%+v).Warnings = %q, want %q", tt.caps, got, tt.want)
 			}
 			if report.ChainFunnels == nil || (len(report.ChainFunnels) > 0) != tt.funnels {
 				t.Errorf("Report(caps=%+v, chains=%v).ChainFunnels = %+v, want a non-nil list, non-empty %t", tt.caps, tt.stages.Chains, report.ChainFunnels, tt.funnels)
 			}
 		})
 	}
+}
+
+func TestStatsRecordedCost(t *testing.T) {
+	t.Parallel()
+
+	row := func(status string, input int64, usd *float64, costStatus string) persistence.RunStatsRow {
+		return withCost(modelRow("claude-code", "model-a", status, input), usd, costStatus)
+	}
+	priced := row("succeeded", 1_000_000, new(15.0), "estimated")
+	zero := row("failed", 0, new(0.0), "estimated")
+	unpriced := row("failed", 1_000_000, nil, "unpriced")
+	nullStatus := row("failed", 1_000_000, nil, "")
+	cacheWriteOnly := row("failed", 0, nil, "unpriced")
+	cacheWriteOnly.CacheWriteTokens = 1
+	uncosted := recordedCaps
+	uncosted.HasRecordedCost = false
+
+	tests := []struct {
+		name         string
+		caps         persistence.RunHistoryCapabilities
+		rows         []persistence.RunStatsRow
+		wantCost     *float64
+		wantUnpriced int
+	}{
+		{"priced, spent nothing, unpriced", recordedCaps, []persistence.RunStatsRow{priced, zero, unpriced}, new(15.0), 1},
+		{"spent nothing and unpriced", recordedCaps, []persistence.RunStatsRow{zero, unpriced}, nil, 1},
+		{"spend with a NULL status", recordedCaps, []persistence.RunStatsRow{nullStatus}, nil, 1},
+		{"spend in the cache-write counter only", recordedCaps, []persistence.RunStatsRow{cacheWriteOnly}, nil, 1},
+		{"ci_failed beside a priced run", recordedCaps, []persistence.RunStatsRow{priced, row("ci_failed", 1_000_000, nil, "")}, new(15.0), 0},
+		{"ci_failed alone", recordedCaps, []persistence.RunStatsRow{row("ci_failed", 1_000_000, new(0.0), "estimated")}, nil, 0},
+		{"cost columns missing", uncosted, []persistence.RunStatsRow{priced, unpriced}, nil, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agg := New(tt.caps)
+			addRows(t, agg, tt.rows...)
+
+			s := agg.Report(fixedNow, "/wf", "/db", nil, nil).Summary
+
+			if !reflect.DeepEqual(s.CostUSD, tt.wantCost) || s.CostUnpricedRuns != tt.wantUnpriced {
+				t.Errorf("Summary cost_usd, cost_unpriced_runs over %q = %v, %d, want %v, %d",
+					tt.name, derefCost(s.CostUSD), s.CostUnpricedRuns, derefCost(tt.wantCost), tt.wantUnpriced)
+			}
+		})
+	}
+}
+
+func derefCost(usd *float64) any {
+	if usd == nil {
+		return nil
+	}
+	return *usd
 }

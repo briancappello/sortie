@@ -63,4 +63,4 @@ self review
 note: 1 of these runs took no measurable time. A run that a CI result closed out carries the same start and finish time.
 note: the duration figures skip 1 of these runs, whose recorded start and finish times were unusable.
 note: the token and cost figures skip 1 of these runs, because the coding agent behind them reported no token usage.
-note: the cost figures skip 1 of these runs, because token_rates has no price for the coding agent behind them.
+note: the cost figures skip 1 of these runs, because token_rates had no price for the coding agent behind them when they were recorded.

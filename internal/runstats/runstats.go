@@ -8,12 +8,6 @@
 // same figures.
 package runstats
 
-import "github.com/sortie-ai/sortie/internal/domain"
-
-// Pricer returns the estimated USD cost of usage under the token rate the
-// workflow configures for agentKind, or nil when no configured rate prices it.
-type Pricer func(agentKind string, usage domain.TokenUsage) *float64
-
 // Report is the "sortie stats --format json" envelope. Every slice
 // field, by_trigger, by_origin, and chain_funnels included, is never nil; every pointer field is null
 // when the figure it carries is unavailable.
@@ -36,17 +30,13 @@ type Report struct {
 	ByTrigger    []Group      `json:"by_trigger"`
 	ByOrigin     []Group      `json:"by_origin"`
 	SelfReview   *SelfReview  `json:"self_review"`
-
-	// RatesConfigured lets the text renderer tell "no token_rates" from
-	// "no run was priced"; it stays out of the JSON report.
-	RatesConfigured bool `json:"-"`
 }
 
 // Summary reports the report-wide figures. MeanTurnsSucceeded,
 // Tokens, CostUSD, and CostPerSucceededRunUSD are null on the base
 // schema tier; CostUSD and CostPerSucceededRunUSD are also null when
-// no priced run exists in range. Succeeded, Failed, Stopped, and Cancelled
-// add up to Runs.
+// no run that spent tokens is priced in range. Succeeded, Failed, Stopped,
+// and Cancelled add up to Runs.
 type Summary struct {
 	Runs                   int      `json:"runs"`
 	Issues                 int      `json:"issues"`
@@ -94,8 +84,8 @@ type Tokens struct {
 // run. In by_status, Succeeded and SuccessRate are structural rather
 // than informative: the "succeeded" row necessarily reports Succeeded
 // equal to Runs. CostUnpricedRuns counts the group's measured runs, other
-// than ci_failed, whose agent kind no configured rate prices; it is 0 on
-// the base tier and while no rates are configured, and CostUSD leaves
+// than ci_failed, that spent tokens and recorded no cost; it is 0 on the
+// base tier and on a database that records no cost, and CostUSD leaves
 // those runs out.
 type Group struct {
 	Name                   string   `json:"name"`

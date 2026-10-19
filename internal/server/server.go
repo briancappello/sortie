@@ -16,7 +16,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server/ui"
 )
 
@@ -113,6 +112,10 @@ type RunHistoryEntry struct {
 	TokensMeasured bool
 	// UnaccountedTurns counts turns whose usage the agent never reported.
 	UnaccountedTurns int
+	// EstimatedCostUSD and CostStatus are the cost recorded when the run
+	// finished. CostStatus is empty when the run was recorded without one.
+	EstimatedCostUSD *float64
+	CostStatus       string
 	// StagePreviousOutcome is the outcome of the run that led to this one.
 	StagePreviousOutcome string
 	// ReviewMetadata is the self-review JSON as recorded; nil when
@@ -345,11 +348,6 @@ type Params struct {
 	// the stream reads every run from the store only.
 	RunEventsAfterFn RunEventsAfterFunc
 
-	// TokenRates maps agent adapter kind strings to per-token USD
-	// rates for cost estimation in the JSON API. When nil or empty,
-	// the API reports raw token counts without cost estimates.
-	TokenRates pricing.TokenRates
-
 	// Stats computes the run statistics report. Called on each
 	// GET /api/v1/stats; nil answers 503.
 	Stats StatsFunc
@@ -379,7 +377,6 @@ type Server struct {
 	runHistory       RunHistoryReader
 	runEventsFn      RunEventsFunc
 	runEventsAfterFn RunEventsAfterFunc
-	tokenRates       pricing.TokenRates
 	stats            StatsFunc
 
 	changes *changeFeed
@@ -426,7 +423,6 @@ func New(params Params) *Server {
 		runHistory:       params.RunHistory,
 		runEventsFn:      params.RunEventsFn,
 		runEventsAfterFn: params.RunEventsAfterFn,
-		tokenRates:       params.TokenRates,
 		stats:            params.Stats,
 		changes:          newChangeFeed(),
 		timing: streamTiming{

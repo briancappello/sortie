@@ -50,10 +50,10 @@ func (e *RunEventsError) Unwrap() error {
 
 const runEventsSavepoint = "run_events"
 
-// AppendRunHistoryWithEvents appends run, its [RunHistory.ModelUsage],
-// and events under *run.DispatchID in one transaction, then prunes under
-// limits. A *[RunEventsError] means the row was stored and the events
-// were not; any other error means neither was.
+// AppendRunHistoryWithEvents appends run, its [RunHistory.ModelUsage] with
+// the [RunHistory.ModelCosts] pricing it, and events under *run.DispatchID in
+// one transaction, then prunes under limits. A *[RunEventsError] means the
+// row was stored and the events were not; any other error means neither was.
 func (s *Store) AppendRunHistoryWithEvents(ctx context.Context, run RunHistory, events []RunEvent, limits RunEventLimits) (RunHistory, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -66,7 +66,7 @@ func (s *Store) AppendRunHistoryWithEvents(ctx context.Context, run RunHistory, 
 		return RunHistory{}, err
 	}
 
-	if err := insertRunModelUsage(ctx, tx, row.ID, run.ModelUsage); err != nil {
+	if err := insertRunModelUsage(ctx, tx, row.ID, run.ModelUsage, run.ModelCosts); err != nil {
 		return RunHistory{}, err
 	}
 
