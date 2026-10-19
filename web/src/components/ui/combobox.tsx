@@ -26,7 +26,7 @@ export type ComboboxInputProps = Omit<BaseCombobox.Input.Props, "className">;
 /** Renders the search field with its icon and a bottom hairline. */
 export function ComboboxInput(props: ComboboxInputProps) {
   return (
-    <div className="flex items-center gap-xs border-b border-line bg-field px-md text-ink-muted focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-focus-ring">
+    <div className="flex items-center gap-xs border-b border-line bg-field px-md text-ink-muted">
       <SearchIcon />
       <BaseCombobox.Input
         className="h-10 w-full min-w-0 bg-transparent text-body-md text-ink outline-none placeholder:text-ink-muted"

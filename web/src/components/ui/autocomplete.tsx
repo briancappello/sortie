@@ -38,7 +38,7 @@ export type AutocompleteInputProps = Omit<BaseAutocomplete.Input.Props, "classNa
 /** Renders the search field with its icon and a bottom hairline. */
 export function AutocompleteInput(props: AutocompleteInputProps) {
   return (
-    <BaseAutocomplete.InputGroup className="flex items-center gap-xs border-b border-line bg-field px-md text-ink-muted focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-focus-ring">
+    <BaseAutocomplete.InputGroup className="flex items-center gap-xs border-b border-line bg-field px-md text-ink-muted">
       <SearchIcon />
       <BaseAutocomplete.Input
         className="h-10 w-full min-w-0 bg-transparent text-body-md text-ink outline-none placeholder:text-ink-muted"

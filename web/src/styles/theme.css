@@ -14,7 +14,7 @@
   --color-surface: #f9f9f9;
   --color-surface-raised: #edeeee;
   --color-surface-sunken: #d9dadb;
-  --color-field: #ffffff;
+  --color-field: #f9f9f9;
   --color-surface-inverse: #252628;
   --color-on-dark: #edeeee;
   --color-line: rgb(26 28 29 / 0.12);
@@ -119,6 +119,7 @@
   --size-chip: 24px;
   --size-kbd: 20px;
   --size-nav-item: 36px;
+  --size-header: 56px;
 
   --radius: 4px;
   --radius-lg: 8px;

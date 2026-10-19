@@ -2,6 +2,12 @@
 @import "./theme.css";
 
 @layer base {
+  html {
+    @media (min-width: 48rem) {
+      scroll-padding-top: var(--size-header);
+    }
+  }
+
   body {
     background: var(--color-canvas);
     color: var(--color-ink);
