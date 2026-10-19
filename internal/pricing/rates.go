@@ -288,7 +288,7 @@ func (r *Rates) advisories(parseWarnings []string) []config.Advisory {
 		}
 		if unset := unsetRateKeys(r.entries[key]); len(unset) > 0 {
 			advisories = append(advisories, tokenRatesAdvisory("token_rates.model_incomplete", "token rate entry for an unlisted model is incomplete",
-				fmt.Sprintf("token_rates.%s: no price table lists this model, so the entry must set input_per_mtok, output_per_mtok, cache_read_per_mtok, and cache_write_per_mtok; not set: %s",
+				fmt.Sprintf("token_rates.%s: no price table lists this model, so the entry should set input_per_mtok, output_per_mtok, cache_read_per_mtok, and cache_write_per_mtok; it prices only the classes it sets; not set: %s",
 					key, strings.Join(unset, ", "))))
 		}
 	}
