@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
 )
 
 const listedTable = `{
@@ -31,7 +33,7 @@ func writeFiles(t *testing.T, files map[string]string) string {
 
 func operatorTable() map[string]any { return map[string]any{"replace_file": "prices.json"} }
 
-func noTables() map[string]any { return map[string]any{"embedded": false} }
+func noTables() map[string]any { return map[string]any{"embedded": false, "fetch": false} }
 
 func perMtok(input, output float64) map[string]any {
 	return map[string]any{"input_per_mtok": input, "output_per_mtok": output}
@@ -93,6 +95,11 @@ func TestLoadRates(t *testing.T) {
 		{
 			name: "embedded disabled with no other source",
 			ext:  map[string]any{"price_table": noTables()},
+		},
+		{
+			name:           "embedded disabled with the download on is configured but has no table yet",
+			ext:            map[string]any{"price_table": map[string]any{"embedded": false}},
+			wantConfigured: true,
 		},
 		{
 			name:           "embedded disabled beside a kind entry",
@@ -252,5 +259,120 @@ func TestLoadRates_ReloadKeepsOperatorTableOfUnchangedContent(t *testing.T) {
 
 	if again.layers[0].table != first.layers[0].table || first.layers[0].table.AsOf().IsZero() {
 		t.Errorf("LoadRates() on unchanged content replaced the operator table or lost its as-of time %v", first.layers[0].table.AsOf())
+	}
+}
+
+func TestRatesDownloads(t *testing.T) {
+	const customURL, operatorURL = "https://prices.test/shared.json", "https://prices.test/operator.json"
+	shared := Download{Role: DownloadShared, URL: DefaultFetchURL}
+
+	tests := []struct {
+		name  string
+		ext   map[string]any
+		env   string
+		wants []Download
+	}{
+		{name: "fetch absent", ext: map[string]any{}, wants: []Download{shared}},
+		{name: "fetch absent, override false", ext: map[string]any{}, env: "false"},
+		{name: "fetch true, override false", ext: map[string]any{"price_table": map[string]any{"fetch": true}}, env: "false"},
+		{name: "fetch false, override true", ext: map[string]any{"price_table": map[string]any{"fetch": false}}, env: "true", wants: []Download{shared}},
+		{
+			name:  "replace_url with fetch false",
+			ext:   map[string]any{"price_table": map[string]any{"fetch": false, "replace_url": operatorURL}},
+			wants: []Download{{Role: DownloadOperator, URL: operatorURL}},
+		},
+		{
+			name:  "replace_url beside a custom fetch_url lists the shared download first",
+			ext:   map[string]any{"price_table": map[string]any{"fetch_url": customURL, "replace_url": operatorURL}},
+			wants: []Download{{Role: DownloadShared, URL: customURL}, {Role: DownloadOperator, URL: operatorURL}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SORTIE_PRICE_TABLE_FETCH", tt.env)
+
+			rates, _, err := loadRates(t, tt.ext, LoadInput{IsKind: kindsOf()})
+			if err != nil {
+				t.Fatalf("LoadRates(%v) = %v, want nil", tt.ext, err)
+			}
+
+			if got := rates.Downloads(); !slices.Equal(got, tt.wants) {
+				t.Errorf("LoadRates(%v).Downloads() with SORTIE_PRICE_TABLE_FETCH=%q = %v, want %v", tt.ext, tt.env, got, tt.wants)
+			}
+		})
+	}
+}
+
+func TestRatesWithDownloaded(t *testing.T) {
+	t.Parallel()
+
+	const embeddedModel = "claude-sonnet-4-5-20250929"
+	parse := func(data string) *Table {
+		table, err := ParseTable([]byte(data), nil)
+		if err != nil {
+			t.Fatalf("ParseTable(%q) = %v, want nil", data, err)
+		}
+		return table
+	}
+	operator := parse(listedTable)
+	shared := parse(`{"shared-model": {"litellm_provider": "acme", "input_cost_per_token": 0.000001}}`)
+	embedded, err := EmbeddedTable()
+	if err != nil {
+		t.Fatalf("EmbeddedTable() = %v, want nil", err)
+	}
+
+	type priced struct {
+		source  PriceSource
+		version string
+	}
+	tests := []struct {
+		name       string
+		downloaded func(Download) *Table
+		want       map[string]priced
+	}{
+		{
+			name: "operator download landed",
+			downloaded: func(dl Download) *Table {
+				if dl.Role == DownloadOperator {
+					return operator
+				}
+				return shared
+			},
+			want: map[string]priced{"listed-model": {SourceOperator, operator.Version()}, "shared-model": {}, embeddedModel: {}},
+		},
+		{
+			name: "operator download pending",
+			downloaded: func(dl Download) *Table {
+				if dl.Role == DownloadShared {
+					return shared
+				}
+				return nil
+			},
+			want: map[string]priced{"listed-model": {}, "shared-model": {SourceFetched, shared.Version()}, embeddedModel: {SourceEmbedded, embedded.Version()}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ext := map[string]any{"price_table": map[string]any{"replace_url": "https://prices.test/operator.json"}}
+			rates, _, err := loadRates(t, ext, LoadInput{IsKind: kindsOf()})
+			if err != nil {
+				t.Fatalf("LoadRates(%v) = %v, want nil", ext, err)
+			}
+			one := domain.TokenUsage{InputTokens: 1, TotalTokens: 1}
+			spend := Spend{Measured: true, Totals: domain.TokenUsage{InputTokens: 3, TotalTokens: 3}, Parts: map[string]domain.TokenUsage{"listed-model": one, "shared-model": one, embeddedModel: one}}
+
+			got := map[string]priced{}
+			for model, part := range PriceRun(spend, rates.WithDownloaded(tt.downloaded)).Parts {
+				got[model] = priced{part.Source, part.TableVersion}
+			}
+
+			if !maps.Equal(got, tt.want) {
+				t.Errorf("PriceRun(%v) after WithDownloaded = %v, want %v", spend.Parts, got, tt.want)
+			}
+		})
 	}
 }

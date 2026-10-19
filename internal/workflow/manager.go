@@ -98,6 +98,13 @@ type Manager struct {
 	retiredAgents  config.RetiredAgentLookup
 	advisoryFunc   AdvisoryFunc
 
+	// promoteMu serializes every writer of currentRates, from the read of
+	// the rates in force through the swap, so a landed table never replaces
+	// the rates of a newer configuration and a reload never drops a landed
+	// table. Lock order: promoteMu, then mu, then the downloader's own lock.
+	promoteMu  sync.Mutex
+	downloader *pricing.Downloader // guarded by promoteMu
+
 	mu                   sync.RWMutex
 	currentConfig        config.ServiceConfig
 	currentPrompt        *prompt.Template
@@ -295,22 +302,27 @@ func (m *Manager) notifyLoad() {
 // is retained and the error is returned. This supports the orchestrator's
 // defensive re-validation before dispatch. Safe for concurrent use.
 func (m *Manager) Reload() error {
+	_, err := m.load()
+	return err
+}
+
+// load runs one reload under the promotion mutex and records its outcome.
+// rejected reports that the validation callback, not the load, returned err.
+// The mutex is released before the caller logs or notifies.
+func (m *Manager) load() (rejected bool, err error) {
+	m.promoteMu.Lock()
+	defer m.promoteMu.Unlock()
+
 	cfg, tmpl, index, rates, err := m.loadPipeline()
 	if err != nil {
-		m.mu.Lock()
-		m.lastLoadErr = err
-		m.recordLoadLocked(err)
-		m.mu.Unlock()
-		return err
+		m.recordFailure(err)
+		return false, err
 	}
 
 	if m.validateFunc != nil {
 		if err := m.validateFunc(cfg); err != nil {
-			m.mu.Lock()
-			m.lastLoadErr = err
-			m.recordLoadLocked(err)
-			m.mu.Unlock()
-			return err
+			m.recordFailure(err)
+			return true, err
 		}
 	}
 
@@ -322,7 +334,60 @@ func (m *Manager) Reload() error {
 	m.lastLoadErr = nil
 	m.recordLoadLocked(nil)
 	m.mu.Unlock()
-	return nil
+
+	if m.downloader != nil {
+		m.downloader.Want(rates.Downloads())
+	}
+	return false, nil
+}
+
+func (m *Manager) recordFailure(err error) {
+	m.mu.Lock()
+	m.lastLoadErr = err
+	m.recordLoadLocked(err)
+	m.mu.Unlock()
+}
+
+// SetDownloader attaches the downloader whose tables the rates take from now
+// on, puts its kept tables in force for the current configuration, and tells
+// it which downloads to keep fresh. It MUST be called at most once, before
+// the downloader's Run starts, and never blocks on the network.
+func (m *Manager) SetDownloader(d *pricing.Downloader) {
+	m.promoteMu.Lock()
+	defer m.promoteMu.Unlock()
+	m.downloader = d
+	d.Want(m.promoteDownloaded().Downloads())
+}
+
+// RefreshRates puts the tables the downloader holds in force for the current
+// configuration. It does nothing before [Manager.SetDownloader]. It never
+// re-reads the workflow file or a replace_file table and never changes the
+// configuration, the prompt, the load status, or the load notifier. Safe for
+// concurrent use.
+func (m *Manager) RefreshRates() {
+	m.promoteMu.Lock()
+	defer m.promoteMu.Unlock()
+	if m.downloader == nil {
+		return
+	}
+	m.promoteDownloaded()
+}
+
+// promoteDownloaded swaps in the current rates with the downloader's tables
+// and returns them. The caller MUST hold promoteMu and have set the
+// downloader. The tables are looked up outside mu because a first lookup
+// reads a file.
+func (m *Manager) promoteDownloaded() *pricing.Rates {
+	m.mu.RLock()
+	rates := m.currentRates
+	m.mu.RUnlock()
+
+	rates = rates.WithDownloaded(m.downloader.Table)
+
+	m.mu.Lock()
+	m.currentRates = rates
+	m.mu.Unlock()
+	return rates
 }
 
 // Start begins watching the workflow file for changes. It spawns a
@@ -412,39 +477,16 @@ func (m *Manager) watch(ctx context.Context) {
 
 func (m *Manager) reload() {
 	logger := m.currentLogger()
-	cfg, tmpl, index, rates, err := m.loadPipeline()
-	if err != nil {
+	rejected, err := m.load()
+	switch {
+	case rejected:
+		logger.Error("workflow reload rejected by validation",
+			slog.Any("error", err), slog.String("path", m.path))
+	case err != nil:
 		logger.Error("workflow reload failed", slog.Any("error", err), slog.String("path", m.path))
-		m.mu.Lock()
-		m.lastLoadErr = err
-		m.recordLoadLocked(err)
-		m.mu.Unlock()
-		m.notifyLoad()
-		return
+	default:
+		logger.Info("workflow reloaded", slog.String("path", m.path))
 	}
-
-	if m.validateFunc != nil {
-		if err := m.validateFunc(cfg); err != nil {
-			logger.Error("workflow reload rejected by validation",
-				slog.Any("error", err), slog.String("path", m.path))
-			m.mu.Lock()
-			m.lastLoadErr = err
-			m.recordLoadLocked(err)
-			m.mu.Unlock()
-			m.notifyLoad()
-			return
-		}
-	}
-
-	m.mu.Lock()
-	m.currentConfig = cfg
-	m.currentPrompt = tmpl
-	m.currentTemplateIndex = index
-	m.currentRates = rates
-	m.lastLoadErr = nil
-	m.recordLoadLocked(nil)
-	m.mu.Unlock()
-	logger.Info("workflow reloaded", slog.String("path", m.path))
 	m.notifyLoad()
 }
 
@@ -500,10 +542,15 @@ func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[st
 	m.mu.RLock()
 	inForce := m.currentRates
 	m.mu.RUnlock()
+	var downloaded func(pricing.Download) *pricing.Table
+	if m.downloader != nil {
+		downloaded = m.downloader.Table
+	}
 	rates, rateAdvisories, err := pricing.LoadRates(cfg, pricing.LoadInput{
 		WorkflowDir: filepath.Dir(m.path),
 		IsKind:      probe,
 		InForce:     inForce,
+		Downloaded:  downloaded,
 	})
 	if err != nil {
 		return config.ServiceConfig{}, nil, nil, nil, err

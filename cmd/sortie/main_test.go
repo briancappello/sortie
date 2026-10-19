@@ -62,6 +62,8 @@ agent:
   kind: mock
 file:
   path: issues.json
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `)
@@ -310,6 +312,8 @@ polling:
 
 workspace:
   root: %s
+price_table:
+  fetch: false
 ---
 
 Fix the following issue.
@@ -677,6 +681,8 @@ file:
   path: issues.json
 logging:
   level: %s
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `, level)
@@ -971,6 +977,8 @@ file:
   path: issues.json
 logging:
   format: %s
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `, format)
@@ -1290,6 +1298,8 @@ workspace:
 reactions:
   auto_merge:
     provider: nonexistent-scm
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1326,6 +1336,8 @@ reactions:
     provider: github
   auto_merge:
     provider: nonexistent-scm
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1367,6 +1379,8 @@ reactions:
     provider: github
     max_retries: 2
     escalation: label
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1410,6 +1424,8 @@ reactions:
     provider: github
     max_retries: 2
     escalation: label
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1600,6 +1616,8 @@ reactions:
     provider: nonexistent-scm
     review_label: ""
     fix_label: "sortie:fix"
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1638,6 +1656,8 @@ reactions:
     provider: nonexistent-scm
     review_label: ""
     fix_label: "sortie:fix"
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1839,6 +1859,8 @@ reactions:
     provider: github
     review_label: "sortie:review"
     fix_label: ""
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.

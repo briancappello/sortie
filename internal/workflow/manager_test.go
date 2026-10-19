@@ -3,9 +3,13 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -357,6 +361,135 @@ func TestManager_ReloadAppliesEditedOperatorTable(t *testing.T) {
 	spend := pricing.Spend{Measured: true, Totals: usage, Parts: map[string]domain.TokenUsage{"zz-model-b": usage}}
 	if _, got := pricing.PriceSession(spend, mgr.Rates()); got != pricing.CostEstimated {
 		t.Errorf("PriceSession(a model the edited table lists) status = %q, want %q", got, pricing.CostEstimated)
+	}
+}
+
+const repricedModel = "claude-sonnet-4-5-20250929"
+
+func repricedTable(t *testing.T) []byte {
+	t.Helper()
+
+	embedded, err := pricing.EmbeddedTable()
+	if err != nil {
+		t.Fatalf("EmbeddedTable() = %v, want nil", err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(embedded.Encode(), &doc); err != nil {
+		t.Fatalf("decoding the embedded table: %v", err)
+	}
+	doc[repricedModel] = json.RawMessage(`{"litellm_provider": "anthropic", "input_cost_per_token": 0.00001, "output_cost_per_token": 0.00005}`)
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encoding the repriced table: %v", err)
+	}
+	return body
+}
+
+type heldDownload struct {
+	mgr     *Manager
+	release chan struct{}
+	landed  chan struct{}
+}
+
+func startHeldDownload(t *testing.T, body []byte) heldDownload {
+	t.Helper()
+
+	held := heldDownload{release: make(chan struct{}), landed: make(chan struct{}, 1)}
+	entered := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-held.release:
+			_, _ = w.Write(body)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "WORKFLOW.md")
+	mustWriteFile(t, path, fmt.Appendf(nil, "---\nprice_table:\n  fetch_url: %s\n---\nPrompt.\n", srv.URL))
+	mgr, err := NewManager(path, testLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	downloader := pricing.NewDownloader(filepath.Join(dir, "sortie.db"), testLogger())
+	mgr.SetDownloader(downloader)
+	held.mgr = mgr
+
+	var running sync.WaitGroup
+	running.Go(func() {
+		downloader.Run(t.Context(), func() {
+			mgr.RefreshRates()
+			held.landed <- struct{}{}
+		})
+	})
+	t.Cleanup(running.Wait)
+	<-entered
+	return held
+}
+
+func priceRepricedModel(mgr *Manager) pricing.Price {
+	usage := domain.TokenUsage{InputTokens: 1_000_000, TotalTokens: 1_000_000}
+	return pricing.PriceRun(pricing.Spend{Measured: true, Totals: usage, Parts: map[string]domain.TokenUsage{repricedModel: usage}}, mgr.Rates())
+}
+
+func assertPricedFrom(t *testing.T, price pricing.Price, source pricing.PriceSource, version string) {
+	t.Helper()
+
+	if part := price.Parts[repricedModel]; price.Status != pricing.CostEstimated || part.Source != source || part.TableVersion != version {
+		t.Errorf("PriceRun(%s) status, source, version = %q, %q, %q, want %q, %q, %q",
+			repricedModel, price.Status, part.Source, part.TableVersion, pricing.CostEstimated, source, version)
+	}
+}
+
+func TestManager_StalledDownloadBlocksNothing(t *testing.T) {
+	t.Parallel()
+
+	held := startHeldDownload(t, repricedTable(t))
+	embedded, err := pricing.EmbeddedTable()
+	if err != nil {
+		t.Fatalf("EmbeddedTable() = %v, want nil", err)
+	}
+
+	if err := held.mgr.Reload(); err != nil {
+		t.Fatalf("Reload() with a download in flight = %v, want nil", err)
+	}
+	held.mgr.RefreshRates()
+
+	assertPricedFrom(t, priceRepricedModel(held.mgr), pricing.SourceEmbedded, embedded.Version())
+}
+
+func TestManager_LandedTableLeavesRecordedCostsAlone(t *testing.T) {
+	t.Parallel()
+
+	body := repricedTable(t)
+	landedTable, err := pricing.ParseTable(body, nil)
+	if err != nil {
+		t.Fatalf("ParseTable(repriced table) = %v, want nil", err)
+	}
+	embedded, err := pricing.EmbeddedTable()
+	if err != nil {
+		t.Fatalf("EmbeddedTable() = %v, want nil", err)
+	}
+	held := startHeldDownload(t, body)
+	recorded := priceRepricedModel(held.mgr)
+	recordedCost := *recorded.CostUSD
+
+	close(held.release)
+	<-held.landed
+	later := priceRepricedModel(held.mgr)
+
+	assertPricedFrom(t, recorded, pricing.SourceEmbedded, embedded.Version())
+	if *recorded.CostUSD != recordedCost {
+		t.Errorf("recorded cost after the landing = %v, want %v", *recorded.CostUSD, recordedCost)
+	}
+	assertPricedFrom(t, later, pricing.SourceFetched, landedTable.Version())
+	if math.Abs(*later.CostUSD-10) > 1e-6 {
+		t.Errorf("PriceRun(%s) cost after the landing = %v, want 10", repricedModel, *later.CostUSD)
 	}
 }
 

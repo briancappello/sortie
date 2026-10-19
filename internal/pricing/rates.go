@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -13,7 +14,11 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 )
 
-const priceTableReplaceFileCheck = "price_table.replace_file"
+const (
+	priceTableReplaceFileCheck = "price_table.replace_file"
+	priceTableFetchURLCheck    = "price_table.fetch_url"
+	priceTableReplaceURLCheck  = "price_table.replace_url"
+)
 
 // Rates is the rate layers one workflow load put in force. It never changes
 // after [LoadRates] returns it and is safe for concurrent use. A nil *Rates
@@ -27,6 +32,8 @@ type Rates struct {
 	folded     map[string][]string   // fold of a model entry key -> the model entry keys with that fold
 	version    string
 	configured bool
+	settings   priceTableSettings
+	fileTable  *Table // the replace_file table, nil when none is configured
 }
 
 // tableLayer is one price table in force and the source its rates are
@@ -47,6 +54,11 @@ type LoadInput struct {
 
 	// InForce is the rates of the last successful load, nil on the first.
 	InForce *Rates
+
+	// Downloaded returns the table last accepted for a download, nil when
+	// there is none. A nil Downloaded lets no downloaded table into the
+	// layers. It MUST NOT send a request.
+	Downloaded func(Download) *Table
 }
 
 // Entry is one token_rates entry as in force.
@@ -95,8 +107,22 @@ func (r *Rates) Entries() []Entry {
 // priceTableSettings is the price_table section after its defaults.
 type priceTableSettings struct {
 	embedded    bool
+	fetch       bool
+	fetchURL    string
 	replaceFile string
 	replaceURL  string
+}
+
+// downloads lists the tables the settings name, the shared one first.
+func (s priceTableSettings) downloads() []Download {
+	var downloads []Download
+	if s.fetch {
+		downloads = append(downloads, Download{Role: DownloadShared, URL: s.fetchURL})
+	}
+	if s.replaceURL != "" {
+		downloads = append(downloads, Download{Role: DownloadOperator, URL: s.replaceURL})
+	}
+	return downloads
 }
 
 // LoadRates puts the rate layers of cfg in force and returns them with the
@@ -105,13 +131,26 @@ type priceTableSettings struct {
 // failure falls back to another table.
 //
 // The operator table file, when set, is read once per call. LoadRates does
-// no other I/O and no network access.
+// no other I/O and no network access: a downloaded table reaches the layers
+// only through in.Downloaded.
 func LoadRates(cfg config.ServiceConfig, in LoadInput) (*Rates, []config.Advisory, error) {
 	settings, err := readPriceTableSettings(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	layers, err := loadLayers(settings, in)
+	var fileTable *Table
+	if settings.replaceFile != "" {
+		if fileTable, err = loadOperatorTable(settings.replaceFile, in); err != nil {
+			return nil, nil, err
+		}
+	}
+	layers, err := assemble(settings, fileTable, in.Downloaded)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The advisory must not depend on a downloaded table, so that validate
+	// and the running service agree.
+	advisoryLayers, err := assemble(settings, fileTable, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -128,7 +167,9 @@ func LoadRates(cfg config.ServiceConfig, in LoadInput) (*Rates, []config.Advisor
 		models:     make(TokenRates),
 		layers:     layers,
 		version:    entries.Version(),
-		configured: len(entries) > 0 || settings.replaceFile != "" || settings.embedded,
+		configured: len(entries) > 0 || settings.replaceFile != "" || settings.replaceURL != "" || settings.embedded || settings.fetch,
+		settings:   settings,
+		fileTable:  fileTable,
 	}
 	for key, rates := range entries {
 		if in.IsKind(key) {
@@ -138,11 +179,38 @@ func LoadRates(cfg config.ServiceConfig, in LoadInput) (*Rates, []config.Advisor
 		r.models[key] = rates
 	}
 	r.indexModels()
-	return r, r.advisories(warnings), nil
+	return r, r.advisories(warnings, advisoryLayers), nil
+}
+
+// Downloads lists the tables the configuration names, the shared one first.
+// It depends on the configuration alone and is nil for a nil *Rates.
+func (r *Rates) Downloads() []Download {
+	if r == nil {
+		return nil
+	}
+	return r.settings.downloads()
+}
+
+// WithDownloaded returns rates equal to r whose table layers are assembled
+// from downloaded, and does no file read and no request. It returns nil for a
+// nil r.
+func (r *Rates) WithDownloaded(downloaded func(Download) *Table) *Rates {
+	if r == nil {
+		return nil
+	}
+	layers, err := assemble(r.settings, r.fileTable, downloaded)
+	if err != nil {
+		// The embedded table loaded when r was built, so it cannot fail here.
+		return r
+	}
+	c := *r
+	c.layers = layers
+	c.indexModels()
+	return &c
 }
 
 func readPriceTableSettings(cfg config.ServiceConfig) (priceTableSettings, error) {
-	settings := priceTableSettings{embedded: true}
+	settings := priceTableSettings{embedded: true, fetch: true, fetchURL: DefaultFetchURL}
 	raw, _ := cfg.ExtensionValue("price_table")
 	if raw == nil {
 		return settings, nil
@@ -155,6 +223,17 @@ func readPriceTableSettings(cfg config.ServiceConfig) (priceTableSettings, error
 	if v, set := section["embedded"]; set && v != nil {
 		if settings.embedded, ok = v.(bool); !ok {
 			return settings, &config.ConfigError{Field: "price_table.embedded", Message: fmt.Sprintf("expected boolean, got %T", v)}
+		}
+	}
+	if v, set := section["fetch"]; set && v != nil {
+		if settings.fetch, ok = v.(bool); !ok {
+			return settings, &config.ConfigError{Field: "price_table.fetch", Message: fmt.Sprintf("expected boolean, got %T", v)}
+		}
+	}
+	var fetchURL string
+	if v, set := section["fetch_url"]; set && v != nil {
+		if fetchURL, ok = v.(string); !ok {
+			return settings, &config.ConfigError{Field: priceTableFetchURLCheck, Message: fmt.Sprintf("expected string, got %T", v)}
 		}
 	}
 	if v, set := section["replace_file"]; set && v != nil {
@@ -172,13 +251,24 @@ func readPriceTableSettings(cfg config.ServiceConfig) (priceTableSettings, error
 		}
 	}
 
-	if settings.replaceFile == "" && cfg.ExtensionEnvRefPaths("price_table")["replace_file"] {
-		return settings, &config.ConfigError{
-			Field:   priceTableReplaceFileCheck,
-			Message: "resolved to empty (check environment variable)",
-			Check:   priceTableReplaceFileCheck,
+	envRefs := cfg.ExtensionEnvRefPaths("price_table")
+	for _, empty := range []struct {
+		key, check string
+		value      string
+	}{
+		{key: "replace_file", check: priceTableReplaceFileCheck, value: settings.replaceFile},
+		{key: "fetch_url", check: priceTableFetchURLCheck, value: fetchURL},
+		{key: "replace_url", check: priceTableReplaceURLCheck, value: settings.replaceURL},
+	} {
+		if empty.value == "" && envRefs[empty.key] {
+			return settings, &config.ConfigError{
+				Field:   empty.check,
+				Message: "resolved to empty (check environment variable)",
+				Check:   empty.check,
+			}
 		}
 	}
+	settings.fetchURL = cmp.Or(fetchURL, DefaultFetchURL)
 	if settings.replaceFile != "" && settings.replaceURL != "" {
 		return settings, &config.ConfigError{
 			Field:   "price_table",
@@ -189,22 +279,31 @@ func readPriceTableSettings(cfg config.ServiceConfig) (priceTableSettings, error
 	return settings, nil
 }
 
-func loadLayers(settings priceTableSettings, in LoadInput) ([]tableLayer, error) {
+// assemble orders the table layers the settings put in force, highest
+// precedence first. A nil downloaded lets no downloaded table in.
+func assemble(settings priceTableSettings, fileTable *Table, downloaded func(Download) *Table) ([]tableLayer, error) {
 	if settings.replaceFile != "" {
-		table, err := loadOperatorTable(settings.replaceFile, in)
+		return []tableLayer{{table: fileTable, source: SourceOperator}}, nil
+	}
+	if settings.replaceURL != "" && downloaded != nil {
+		if table := downloaded(Download{Role: DownloadOperator, URL: settings.replaceURL}); table != nil {
+			return []tableLayer{{table: table, source: SourceOperator}}, nil
+		}
+	}
+	var layers []tableLayer
+	if settings.fetch && downloaded != nil {
+		if table := downloaded(Download{Role: DownloadShared, URL: settings.fetchURL}); table != nil {
+			layers = append(layers, tableLayer{table: table, source: SourceFetched})
+		}
+	}
+	if settings.embedded {
+		table, err := EmbeddedTable()
 		if err != nil {
 			return nil, err
 		}
-		return []tableLayer{{table: table, source: SourceOperator}}, nil
+		layers = append(layers, tableLayer{table: table, source: SourceEmbedded})
 	}
-	if !settings.embedded {
-		return nil, nil
-	}
-	table, err := EmbeddedTable()
-	if err != nil {
-		return nil, err
-	}
-	return []tableLayer{{table: table, source: SourceEmbedded}}, nil
+	return layers, nil
 }
 
 func loadOperatorTable(replaceFile string, in LoadInput) (*Table, error) {
@@ -233,18 +332,14 @@ func replaceFileError(message string) *config.ConfigError {
 	return &config.ConfigError{Field: priceTableReplaceFileCheck, Message: message, Check: priceTableReplaceFileCheck}
 }
 
-// operatorTable returns the operator table in force when it has the given
-// version, so its as-of time survives a reload of unchanged content.
+// operatorTable returns the replace_file table in force when it has the given
+// version, so its as-of time survives a reload of unchanged content. A
+// downloaded table never lends its download time to a file.
 func (r *Rates) operatorTable(version string) *Table {
-	if r == nil {
+	if r == nil || r.fileTable == nil || r.fileTable.Version() != version {
 		return nil
 	}
-	for _, layer := range r.layers {
-		if layer.source == SourceOperator && layer.table.Version() == version {
-			return layer.table
-		}
-	}
-	return nil
+	return r.fileTable
 }
 
 func (r *Rates) indexModels() {
@@ -263,7 +358,7 @@ func (r *Rates) indexModels() {
 	}
 }
 
-func (r *Rates) advisories(parseWarnings []string) []config.Advisory {
+func (r *Rates) advisories(parseWarnings []string, layers []tableLayer) []config.Advisory {
 	var advisories []config.Advisory
 	for _, w := range parseWarnings {
 		advisories = append(advisories, tokenRatesAdvisory("token_rates", "skipped invalid token rate entry", w))
@@ -283,7 +378,7 @@ func (r *Rates) advisories(parseWarnings []string) []config.Advisory {
 		}
 	}
 	for _, key := range keys {
-		if r.kinds[key] || r.listedByLayer(key) {
+		if r.kinds[key] || listedByLayers(layers, key) {
 			continue
 		}
 		if unset := unsetRateKeys(r.entries[key]); len(unset) > 0 {
@@ -304,8 +399,8 @@ func tokenRatesAdvisory(check, message, text string) config.Advisory {
 	}
 }
 
-func (r *Rates) listedByLayer(model string) bool {
-	for _, layer := range r.layers {
+func listedByLayers(layers []tableLayer, model string) bool {
+	for _, layer := range layers {
 		if _, ok := layer.table.Lookup(model); ok {
 			return true
 		}

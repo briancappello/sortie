@@ -33,6 +33,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/runstats"
 	"github.com/sortie-ai/sortie/internal/server"
@@ -334,6 +335,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		br.logger.Error("failed to migrate database", slog.Any("error", err))
 		return 1
 	}
+
+	downloader := pricing.NewDownloader(dbPath, br.logger)
+	br.mgr.SetDownloader(downloader)
 
 	startupRates := br.mgr.Rates()
 	// A failed fill must not stop the start: the earlier rows read unpriced
@@ -957,6 +961,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	if startupDone != nil {
 		startupDone()
 	}
+	go downloader.Run(ctx, br.mgr.RefreshRates)
 	o.Run(ctx)
 
 	if srv != nil {
