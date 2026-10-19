@@ -57,6 +57,11 @@ func TestPriceRun(t *testing.T) {
 			want:  Price{CostUSD: new(0.0), Status: CostEstimated},
 		},
 		{
+			name:  "run that spent nothing with an unaccounted turn",
+			spend: Spend{Kind: "u", Measured: true, UnaccountedTurns: 1},
+			want:  Price{CostUSD: new(0.0), Status: CostPartial},
+		},
+		{
 			name:  "run that spent only total_tokens",
 			spend: Spend{Kind: "k", Measured: true, Totals: onlyTotal},
 			want:  Price{Status: CostUnpriced},

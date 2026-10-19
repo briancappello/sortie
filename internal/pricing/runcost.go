@@ -77,9 +77,13 @@ func PriceRun(s Spend, rates TokenRates) Price {
 	if !s.Measured {
 		return Price{Status: CostUnmeasured}
 	}
+	status := CostEstimated
+	if s.UnaccountedTurns > 0 {
+		status = CostPartial
+	}
 	if !hasSpent(s.Totals) {
 		zero := 0.0
-		return Price{CostUSD: &zero, Status: CostEstimated}
+		return Price{CostUSD: &zero, Status: status}
 	}
 	if !hasSpentInClass(s.Totals) {
 		return Price{Status: CostUnpriced}
@@ -93,10 +97,6 @@ func PriceRun(s Spend, rates TokenRates) Price {
 		}
 	}
 
-	status := CostEstimated
-	if s.UnaccountedTurns > 0 {
-		status = CostPartial
-	}
 	version := rates.Version()
 	return Price{
 		CostUSD: EstimateCost(s.Totals, &entry),
