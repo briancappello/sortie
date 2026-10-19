@@ -40,7 +40,7 @@ The registered kind declares `turn_end` arrival and `per_model` attribution: the
 
 There is a third source worth knowing about even though the adapter does not read it. This CLI can export OpenTelemetry, and its spans carry the per-request input and output token counts that the JSON stream does not. An operator who exports the relevant variables into Sortie's environment gets them in the subprocess too, since it inherits that environment, and ends up with a token breakdown the adapter itself cannot see. That is the answer to give when someone needs per-request accounting today rather than a change here.
 
-The model name is the shutdown record's `modelMetrics` key whose token count grew the most since the previous record, breaking a tie by whichever trimmed name sorts first. A record naming no model, or one where no key grew, leaves the field blank rather than falling back to the operator-configured `copilot-cli.model` passthrough value, which is the model requested rather than the model the runtime reported using.
+The model name is the shutdown record's `modelMetrics` key whose token count grew the most since the previous record, breaking a tie by whichever trimmed name sorts first. A record naming no model, or one where no key grew, leaves the field blank rather than falling back to the operator-configured `copilot-cli.model` passthrough value, which is the model requested rather than the model the runtime reported using. The usage event also carries the newest shutdown record's `modelMetrics` per model, under the shared resume baseline seeded from the source of the combined seed.
 
 ## Approvals
 

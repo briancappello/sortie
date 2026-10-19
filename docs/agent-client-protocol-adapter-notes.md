@@ -53,7 +53,7 @@ If the start carried a source the handshake does not confirm, or lacked the one 
 
 A source accepts or refuses a record by whether it has every field the source's mapping needs, never by the runtime's version. The first drain that yields no record lowers `tokenCounts` to `gap` for the rest of the session. A session with no applicable source, which includes every remote launch, is unmeasured, and the token ceiling is inactive.
 
-The source for `gemini-cli`, under `usagesource`, reads the runtime's OpenTelemetry output first and its session journal as a backstop. It maps `input_token_count` to input (the cache read is already inside it), `output_token_count` plus `thoughts_token_count` to output, and `cached_content_token_count` to the cache-read subset. It discards the runtime's own total and `tool_token_count`.
+The source for `gemini-cli`, under `usagesource`, reads the runtime's OpenTelemetry output first and its session journal as a backstop. It maps `input_token_count` to input (the cache read is already inside it), `output_token_count` plus `thoughts_token_count` to output, and `cached_content_token_count` to the cache-read subset. It discards the runtime's own total and `tool_token_count`. The figure carries a per-model split by each record's or kept journal message's model.
 
 The wait for a record is bounded and ends early once the record reaches the wire's lower bound. The telemetry is batched behind a five-second tick that no configuration shortens. A turn that reached the model but ended without its own prompt result still gets one bounded wait, with no lower bound to end it early, and what it recovers does not change the turn's disposition.
 

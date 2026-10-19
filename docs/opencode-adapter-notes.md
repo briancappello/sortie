@@ -71,7 +71,7 @@ The hosted free-tier model refuses any request whose tool set lacks its shell to
 
 Step-scoped token counts on the stream are not a running total. Between the tool step and the final text step of one turn the numbers move in both directions, so summing them across steps is wrong and taking the last one is wrong too.
 
-The kind declares `turn_end` arrival and `per_model` attribution. After the subprocess exits, `queryExportUsage` runs a sanitized session export and reports the figure through the shared turn-end report, with the model of the last kept message. The export also runs over SSH, so remote launches are measured too, unlike `copilot-cli`. The export is sanitized so tool output never reaches a log.
+The kind declares `turn_end` arrival and `per_model` attribution. After the subprocess exits, `queryExportUsage` runs a sanitized session export and reports the figure through the shared turn-end report, with the model of the last kept message. The export also runs over SSH, so remote launches are measured too, unlike `copilot-cli`. The export is sanitized so tool output never reaches a log. The figure also carries a per-model split, each kept message counting under its provider and model.
 
 The adapter sums per-message figures and ignores the export's session aggregate, for two reasons. The aggregate covers the whole session, including earlier runs, while Sortie reports per run. And its total also includes cache and reasoning tokens, so it is not input plus output. The adapter selects assistant messages by session ID and, on a resumed session, by creation time at or after the run start.
 
