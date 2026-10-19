@@ -533,6 +533,7 @@ agent:
 | `max_concurrent_agents_by_state` | map of `state → positive integer` | No                                  | `{}` (empty)    | **Yes** — affects subsequent dispatch      | Per-state concurrency limits. State keys are normalized to lowercase for lookup. An entry outside the integer range, positive or negative, fails config load; other non-positive or non-numeric entries are silently ignored.                                       |
 | `max_sessions`                   | integer                           | No                                  | `0` (unlimited) | **Yes** — affects future retry evaluations | Maximum completed worker sessions per issue before the orchestrator stops re-dispatching. Counted from run history. `0` disables the budget (unlimited). Must be non-negative. The separate `max_consecutive_absences` governs the consecutive-absence ceiling. Reaching the ceiling also posts one comment on the issue naming the session budget and `agent.max_sessions` as the setting that raises it. |
 | `max_tokens`                     | integer                           | No                                  | `0` (unlimited) | **Yes** — stops a run already in flight and affects future retry evaluations | Cumulative per-issue token ceiling, counted in tokens without prompt-cache reads (`total_tokens` less `cache_read_tokens`, floored at zero for each run; cache writes count). The orchestrator sums those tokens across the issue's run history, adds the running session's own, and stops re-dispatching once the sum reaches the limit; reaching the ceiling also stops a run already in flight, on the event loop, as soon as a usage figure carries the sum there. A run whose coding agent reported no token usage contributes nothing to the sum, and a turn whose spend was never fully reported contributes less than it cost; either one makes the ceiling report that it could not be fully evaluated (a warning is logged and the dispatch proceeds). `0` disables the budget (unlimited). Must be non-negative. Reaching the ceiling also posts one comment on the issue naming the token budget and `agent.max_tokens` as the setting that raises it, stating whether a session was stopped in flight. A kind whose usage-reporting declaration resolves to no token usage never reaches this ceiling at all: `sortie validate` reports that combination under the check `agent.kind.no_usage_reporting`, naming the kind, and every dispatch of such a run logs it. The declaration belongs to the kind, not to the runtime the kind reaches, so a transport kind that declares figures do arrive, driving a runtime that reports none, leaves the ceiling equally unreachable and draws neither of those two signals; each such run instead logs once as it ends, naming the kind and the ceiling it could not be bound by. `token_warning_percent`, below, warns before this ceiling stops a run. |
+| `max_cost_usd`                   | number                            | No                                  | `0` (unlimited) | **Yes** – stops a run already in flight and affects future retry evaluations | Per-issue ceiling in US dollars on the issue's estimated cost: the cost recorded with each of the issue's finished runs plus the running session's live estimate, each priced under the rates in force ([Section 4.4](#44-token_rates--cost-estimation)). The figure is Sortie's estimate, not your provider's bill, and can differ from a cost your runtime reports. Once the figure reaches the ceiling, Sortie stops re-dispatching the issue and holds it, and stops a run already in flight on the event loop as soon as a usage figure carries the figure there. The hold records the reason `money_budget`, fires `budget.held`, and posts the budget-hold comment, which names the money budget and `agent.max_cost_usd` as the setting that raises it and states the estimated cost against the ceiling; a run stopped in flight is recorded `budget_stopped` with the error `money ceiling reached`. An issue past more than one ceiling records `money_budget` first, then `token_budget`, then `session_budget`. A run that Sortie cannot fully price (a model no rate layer prices, or a token class with no rate) or whose usage was not fully reported leaves the figure a lower bound; the ceiling counts only what it priced, a warning is logged, and the dispatch proceeds. The ceiling stops a run at the next usage figure after the spend, so a run can pass it by what the agent spends before that report: about one usage event for a kind whose `usage_arrival` is `incremental`, a whole turn for `turn_end`. Leave headroom below the amount you cannot afford to exceed. A per-kind `token_rates` entry that sets no `cache_read_per_mtok` prices cache reads at the input rate and overstates the figure; set the cache-read rate or use a model entry. `0` disables the ceiling (unlimited). Must be a non-negative, finite number, written as an integer, a decimal, or a quoted string of one. Overridable through `SORTIE_AGENT_MAX_COST_USD`. While the ceiling is above `0`, the `cost_budget` tool result of a running session also carries `used_usd` (the issue's estimated cost), `budget_usd`, `remaining_usd` (`0` once the ceiling is reached), and `used_usd_complete` (`false` when `used_usd` is a lower bound); with the ceiling at `0` the result carries none of them. The ceiling never takes effect for a kind whose usage-reporting declaration resolves to no token usage, which `sortie validate` reports under the check `agent.max_cost_usd.no_usage_reporting`, and it holds no issue while no rate source is available, which it reports under `agent.max_cost_usd.no_rate_source`; both are warnings and dispatch continues ([Section 8](#8-dispatch-preflight-validation)). `agent.token_warning_percent` stays a token threshold and does not apply to the money ceiling. |
 | `token_warning_percent`          | integer                           | No                                  | `0` (off)       | **Yes** — an unwarned run in flight is evaluated against the new value from its next usage figure; future dispatches use it from the start | Token warning threshold, as a percentage of `agent.max_tokens`, `0` to `99`. The threshold in tokens is that percentage of the ceiling, rounded up; it is never validated against `agent.max_tokens`, so lowering the ceiling can never make this field reject a reload. Evaluated on the event loop against the same live per-issue figure the ceiling reads, ahead of the ceiling's own evaluation. Once a run's figure reaches the threshold, one warning is logged for that run and the running session's `cost_budget` tool result reports the condition, so the agent can wrap up or hand off before the ceiling stops the run. `0` disables the threshold; it also has no effect while `agent.max_tokens` is `0`, which `sortie validate` reports under the check `ineffective_setting`. Overridable through `SORTIE_AGENT_TOKEN_WARNING_PERCENT`. |
 | `max_consecutive_absences`       | integer                           | No                                  | `3`             | **Yes** — affects future worker exits, retry evaluations, and poll-tick park sweeps | Bounds how many runs in a row may be observed to have produced no evidence of work before the issue is parked. Any run that produces evidence of work resets the count to zero. `0` and negative values are rejected as a configuration error. The separate `max_sessions` governs the total per-issue session budget. |
 
@@ -1569,7 +1570,7 @@ The catalog is closed. Validation accepts exactly these names and rejects any ot
 | `session.failed` | A worker exits with an error, or its handoff is withheld by the handoff-evidence policy. | `warning` |
 | `escalation.ci_failure`, `escalation.review_comments`, `escalation.bot_review`, `escalation.merge_conflicts`, `escalation.auto_merge`, `escalation.merge_completion` | The matching reaction ([Section 2.9](#29-reactions--reaction-based-feedback-loops)) hands its subject to a person, under any `escalation` value. | `warning` |
 | `auto_merge.merged` | The auto-merge reaction merges a pull request, or its merge call finds the pull request already merged. | `info` |
-| `budget.held` | An issue is held out of dispatch by `agent.max_sessions` or `agent.max_tokens`. | `warning` |
+| `budget.held` | An issue is held out of dispatch by `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd`. | `warning` |
 | `stage.advanced` | A stage hop is made: the issue moves to the next stage, even when removing an old stage label failed ([Stage chains](#stage-chains)). | `info` |
 | `stage.not_advanced` | A stage hop is due and not made, because the label add failed or the hop ceiling is reached. The event carries the reason, `failed` or `ceiling`. | `warning` |
 | `agent.message` | The agent calls `notify_operator`. | Set by the agent. |
@@ -1655,7 +1656,7 @@ The old form keeps working. Each deprecated form the configuration relies on dra
 | `tracker.comments.on_failure: true`, or `SORTIE_TRACKER_COMMENTS_ON_FAILURE` | List `session.failed`, then remove the key. |
 | `reactions.<kind>.escalation: comment` on an active reaction | Set `escalation: none` and list `escalation.<kind>` in a `tracker_comment` entry. |
 | The auto-merge success comment, with the auto-merge reaction active, a tracker configured, and no `tracker_comment` entry | Add an entry that lists `auto_merge.merged`. |
-| The budget-hold comment, with `agent.max_sessions` or `agent.max_tokens` above `0`, a tracker configured, and no `tracker_comment` entry | Add an entry that lists `budget.held`. |
+| The budget-hold comment, with `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd` above `0`, a tracker configured, and no `tracker_comment` entry | Add an entry that lists `budget.held`. |
 | A `webhook` or `slack` entry without `events` | Add `events: [agent.message]`. |
 
 #### Delivery
@@ -1762,6 +1763,7 @@ Each variable maps to exactly one config field. The naming convention is `SORTIE
 | `SORTIE_AGENT_MAX_RETRY_BACKOFF_MS`  | `agent.max_retry_backoff_ms`  | int    |       |
 | `SORTIE_AGENT_MAX_SESSIONS`          | `agent.max_sessions`          | int    |       |
 | `SORTIE_AGENT_MAX_TOKENS`            | `agent.max_tokens`            | int    |       |
+| `SORTIE_AGENT_MAX_COST_USD`          | `agent.max_cost_usd`          | number |       |
 | `SORTIE_AGENT_TOKEN_WARNING_PERCENT` | `agent.token_warning_percent` | int    |       |
 | `SORTIE_AGENT_MAX_CONSECUTIVE_ABSENCES` | `agent.max_consecutive_absences` | int |    |
 
@@ -1786,8 +1788,11 @@ All environment variable values are strings. The override layer coerces them to 
 | ------------ | ------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `string`     | Used as-is.                                                                           | N/A                                         |
 | `int`        | `strconv.Atoi` after trimming whitespace.                                             | `*ConfigError` naming the `SORTIE_*` env var |
+| `number`     | `strconv.ParseFloat` after trimming whitespace; accepts an integer or a decimal.      | `*ConfigError` naming the `SORTIE_*` env var |
 | `bool`       | `"true"`, `"1"` → `true`; `"false"`, `"0"` → `false` (case-insensitive).            | `*ConfigError` naming the `SORTIE_*` env var |
 | `csv`        | `strings.Split(val, ",")` then trim each element; empty elements discarded.           | N/A                                         |
+
+A `number` value of `NaN`, an infinity, or below `0` passes coercion and fails the field's own check ([Section 9.3](#93-environment-variable-errors)).
 
 **CSV encoding for list fields** (`active_states`, `terminal_states`):
 
@@ -2060,6 +2065,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "used_tokens": 55000,
       "used_tokens_complete": true,
       "budget_tokens": 500000,
+      "budget_usd": null,
       "estimated_cost_usd": 0.014595,
       "cost_status": "estimated",
       "issue_estimated_cost_usd": 0.235095,
@@ -2116,6 +2122,9 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "budget_sessions": 3,
       "used_tokens": null,
       "budget_tokens": null,
+      "used_usd": null,
+      "used_usd_complete": null,
+      "budget_usd": null,
       "unmeasured_sessions": null,
       "stopped_in_flight": null,
       "exhausted_at": "2026-02-24T20:12:00Z",
@@ -2478,7 +2487,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
     "polling": {"interval_ms": 30000},
     "agent": {
       "kind": "claude-code", "usage_arrival": "incremental", "max_turns": 20, "stall_timeout_ms": 300000,
-      "max_retry_backoff_ms": 300000, "max_sessions": 6, "max_tokens": null,
+      "max_retry_backoff_ms": 300000, "max_sessions": 6, "max_tokens": null, "max_cost_usd": null,
       "max_concurrent_agents": 6, "max_concurrent_agents_by_state": {}
     },
     "worker": {"ssh_hosts": [], "max_concurrent_agents_per_host": null},
@@ -2567,12 +2576,13 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `used_tokens`             | integer or `null` | `issue_tokens_completed` plus this session's `uncached_tokens`, each counted as `0` when `null`: the figure the token ceiling compares with `agent.max_tokens`, which leaves out cache reads and advances with each usage figure of the session. `null` when that sum is `0` and `used_tokens_complete` is `false`, so unknown spend never reads as zero. |
 | `used_tokens_complete`    | boolean           | True exactly when `used_tokens` is the issue's whole spend: the completed sessions were read, none is unmeasured, none recorded an unaccounted turn, this session is measured, and it has recorded no unaccounted turn. When `false`, `used_tokens` is a lower bound. It ignores `tokens_pending`, which keeps telling a consumer that the figure excludes a turn in flight. |
 | `budget_tokens`           | integer or `null` | `agent.max_tokens` as of the latest poll tick. `null` means no token ceiling (`agent.max_tokens` is `0`), never `0`. The token headroom is `budget_tokens` minus `used_tokens`; there is no value when either is `null`, and it turns negative when a run overshoots, because the ceiling stops a run at the first usage figure at or past it. |
+| `budget_usd`              | number or `null`  | `agent.max_cost_usd` as of the latest poll tick. `null` means no money ceiling (`agent.max_cost_usd` is `0`), never `0`. The ceiling compares it with the issue's estimated cost, the figure `issue_estimated_cost_usd` serves, which is a lower bound unless `issue_cost_status` is `estimated`. |
 | `estimated_cost_usd`      | number or `null` | The live estimated USD cost of this session, from its tokens per model under the rates in force ([Section 4.4](#44-token_rates--cost-estimation)). Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
 | `cost_status`             | string            | `estimated`, which a zero rate also gives; `partial` when the estimate is a lower bound because a model or a token class the session spent has no rate beside priced spend; `unpriced` when the session is measured and no rate prices any of its spend, which is every measured session when no rate source is available; `unmeasured` when `tokens_measured` is `false`. |
 | `issue_estimated_cost_usd` | number or `null` | The estimated USD cost of the whole issue: the sum of the estimates of its priced parts: the cost recorded with each completed session's run, and this session's live estimate under the rates in force. Non-`null` exactly when `issue_cost_status` is `estimated` or `partial`. |
 | `issue_cost_status`       | string            | `estimated` when the estimate covers the issue's whole spend; `partial` when it is a lower bound, because a part that spent tokens is left out; `unpriced` when no priced part spent tokens and a part that did has no rate; `unmeasured` when `used_tokens` is `null`, and when no part is priced or unpriced. A session measured at zero tokens leaves nothing out, so a missing rate for its model does not make a complete, otherwise priced issue `partial`. |
 
-A limit key (`budget_tokens`, `budget_sessions`) is always present: `null` means no limit is configured. A usage key (`used_tokens`, `issue_tokens_completed`, `used_sessions`, `unmeasured_sessions`) set to `null` means unknown. `used_tokens` is `null` only when `issue_cost_status` is `unmeasured`, and `issue_cost_status` is `estimated` only when `used_tokens_complete` is `true`. While a rate source is available, the top-level `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated` or `partial`, and `cost_unpriced_running` counts the rows whose `cost_status` is `unpriced`.
+A limit key (`budget_tokens`, `budget_sessions`, `budget_usd`) is always present: `null` means no limit is configured. A usage key (`used_tokens`, `issue_tokens_completed`, `used_sessions`, `unmeasured_sessions`) set to `null` means unknown. `used_tokens` is `null` only when `issue_cost_status` is `unmeasured`, and `issue_cost_status` is `estimated` only when `used_tokens_complete` is `true`. While a rate source is available, the top-level `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated` or `partial`, and `cost_unpriced_running` counts the rows whose `cost_status` is `unpriced`.
 
 **Retry and budget-exhausted identity fields:**
 
@@ -2588,7 +2598,7 @@ Each row of `retrying` and each record of `budget_exhausted` carries these flat 
 
 A retry row carries the read of the issue the retry was scheduled with. Sortie stores the read with the retry and restores it at startup, so a restart serves the title, link, display identifier, type, labels, and state it served before. A retry restored from a row stored by an earlier release holds no read; it takes one from the next poll tick whose candidates list its issue, or from its next fire. A retry restored from a row stored before the type, labels, and state were recorded holds a title and link and no labels; it takes the type, labels, and state of the same next read and keeps its title and link. A title or link already held is never replaced. A `budget_exhausted` record carries the read of the poll tick that last rebuilt the set, or of the retry the hold was found on until the next tick. A retry that a pending reaction schedules carries the reaction's issue facts, so its `state` is the handoff target after that reaction's handoff, and so does a `budget_exhausted` record made from that retry.
 
-Each record of `budget_exhausted` also carries `stopped_in_flight`, an integer or `null`: the number of the issue's completed sessions that the token ceiling stopped mid-run. `stopped_in_flight` and `unmeasured_sessions` are `null` exactly when the token ceiling was not evaluated for the issue. `used_tokens` leaves cache reads out, like the running row's. It is `null` when the ceiling was not evaluated, and also when its sum is `0` while `unmeasured_sessions` or an unaccounted turn leaves spend out. The record's own `budget_tokens` and `budget_sessions` serve `null` when the ceiling is not set, as do the same keys on a running row.
+Each record of `budget_exhausted` also carries `stopped_in_flight`, an integer or `null`: the number of the issue's completed sessions that a budget ceiling stopped mid-run. `stopped_in_flight` and `unmeasured_sessions` are `null` exactly when no ceiling read the issue's usage. `used_tokens` leaves cache reads out, like the running row's. It is `null` when no ceiling read the issue's usage, and also when its sum is `0` while `unmeasured_sessions` or an unaccounted turn leaves spend out. The record also carries `used_usd`, `used_usd_complete`, and `budget_usd`. `used_usd` is the issue's estimated cost from the cost recorded with its completed runs, and is `null`, with `used_usd_complete`, when the money ceiling did not read the issue. `used_usd_complete` is `false` exactly when `used_usd` is a lower bound, because a run that spent tokens is unpriced or priced only in part. The record's own `budget_tokens`, `budget_sessions`, and `budget_usd` serve `null` when the ceiling is not set, as do the same keys on a running row.
 
 A `budget_exhausted` record also carries `dispatched_at`, `agent_kind`, `configured_model`, and `stage_position` as the retry fields below describe them, plus `rule_name` and `stage_lineage`. All describe the dispatch the hold blocks, which is the run that would start next. A hold set on a retry takes them from that retry. A hold found at a poll tick keeps the ones a prior record held and otherwise takes them from the stage the issue waits to enter after a stage hop, or failing that from the issue's latest agent run. A record with no such context, because the read failed or the issue has no agent run, omits `rule_name`, `agent_kind`, and `configured_model` and serves `null` for `dispatched_at`, `stage_lineage`, and `stage_position`; the next poll tick reads again.
 
@@ -2827,10 +2837,11 @@ A preflight that fails because the workflow file did not load yields no `preflig
 
 | Member | Kind | Value |
 | ------ | ---- | ----- |
-| `reason` | `parked`, `budget_held` | The row's `reason`: `agent_blocked` or `handoff_absence`; `token_budget` or `session_budget`. |
+| `reason` | `parked`, `budget_held` | The row's `reason`: `agent_blocked` or `handoff_absence`; `money_budget`, `token_budget`, or `session_budget`. |
 | `label` | `parked` | The row's `label`. |
 | `used_sessions`, `budget_sessions` | `budget_held` with `session_budget` | The row's values. |
 | `used_tokens`, `used_tokens_complete`, `budget_tokens` | `budget_held` with `token_budget` | The row's `used_tokens` and `budget_tokens`. `used_tokens_complete` is `false` exactly when `used_tokens` is a lower bound. |
+| `used_usd`, `used_usd_complete`, `budget_usd` | `budget_held` with `money_budget` | The row's values. `used_usd_complete` is `false` exactly when `used_usd` is a lower bound. |
 | `reaction_kind`, `config_key`, `pull_request`, `escalation_trigger` | `reaction_escalated` | The row's `kind`, `config_key`, `pull_request`, and `escalation_trigger`, in the shapes the row serves. |
 | `used_attempts`, `max_attempts` | `reaction_escalated` | The row's values, each omitted when `null`. |
 | `last_check` | `reaction_escalated` | The row's `last_check`, omitted when `null`. |
@@ -2842,7 +2853,7 @@ A preflight that fails because the workflow file did not load yields no `preflig
 | `kind`                   | Parts |
 | ------------------------ | ----- |
 | `parked`                 | The issue ID; the park time truncated to whole seconds in RFC 3339, or `""` when the stored time cannot be read. |
-| `budget_held`            | The issue ID; the `reason`; the ceiling the reason names as a decimal number, `budget_tokens` for `token_budget` and `budget_sessions` for `session_budget`. |
+| `budget_held`            | The issue ID; the `reason`; the ceiling the reason names as a decimal number, `budget_usd` for `money_budget`, `budget_tokens` for `token_budget`, and `budget_sessions` for `session_budget`. A `money_budget` ceiling is written in its shortest decimal form, with no exponent and no trailing zeros, so `5`, `5.0`, and `5.00` all give `5`. |
 | `reaction_escalated`     | The issue ID; the row's `kind`; `escalated_at` in RFC 3339 with nanoseconds. |
 | `workflow_reload_failed` | `failing_since` in RFC 3339 with nanoseconds. |
 | `preflight_failed`       | `failing_since` in RFC 3339 with nanoseconds. |
@@ -2858,7 +2869,7 @@ Items are ordered by `severity` (`critical` before `warning`), then by `since` (
 | `kind` | `reason_text` |
 | ------ | ------------- |
 | `parked` | `Parked: the agent needs a person` for `agent_blocked`; `Parked: no evidence of work` for `handoff_absence`. |
-| `budget_held` | `Token budget reached` for `token_budget`; `Session budget reached` for `session_budget`. |
+| `budget_held` | `Money budget reached` for `money_budget`; `Token budget reached` for `token_budget`; `Session budget reached` for `session_budget`. |
 | `reaction_escalated` | `CI escalated on #<number>`, `Review comments escalated on #<number>`, `Bot review escalated on #<number>`, `Merge conflict escalated on #<number>`, `Auto-merge escalated on #<number>`, or `Merge completion escalated on #<number>`, by reaction kind. |
 | `workflow_reload_failed` | `<file> failed to load`. |
 | `preflight_failed` | `Dispatch preflight failed`. |
@@ -2924,6 +2935,7 @@ A session whose `usage_arrival` is `none` contributes nothing to the token total
 | `agent.max_retry_backoff_ms` | integer | `agent.max_retry_backoff_ms`. |
 | `agent.max_sessions` | integer or `null` | `agent.max_sessions` when positive. `null` means no session budget. A running row's `budget_sessions` is the value as of the latest poll tick, so for at most one poll interval after a reload this member can lead it. Show a row's own `budget_sessions` on that row and this member where the workflow is described. |
 | `agent.max_tokens` | integer or `null` | `agent.max_tokens` when positive. `null` means no token ceiling. The same display rule applies against a running row's `budget_tokens`. |
+| `agent.max_cost_usd` | number or `null` | `agent.max_cost_usd` when positive. `null` means no money ceiling. The same display rule applies against a running row's `budget_usd`. |
 | `agent.max_concurrent_agents` | integer | `agent.max_concurrent_agents`. |
 | `agent.max_concurrent_agents_by_state` | object | The per-state caps, keyed by lowercase state with positive values. `{}` when none. |
 | `worker.ssh_hosts` | array of strings | The configured SSH hosts, each once, in the order written. `[]` in local mode. The launch mode is remote exactly when this list is non-empty, because with hosts configured every dispatch takes one. |
@@ -3077,6 +3089,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     "used_tokens": 55000,
     "used_tokens_complete": true,
     "budget_tokens": 500000,
+    "budget_usd": null,
     "estimated_cost_usd": 0.014595,
     "cost_status": "estimated",
     "issue_estimated_cost_usd": 0.235095,
@@ -3236,7 +3249,7 @@ The rules are the same for every pair:
 - A pair never names a reaction that `config` lacks or a stage the workflow's rules do not hold, and uses stage wording only when the workflow has stage chains.
 - A pair calls the pull request it watches "the pull request", and names it by number only when the issue's pending reactions watch more than one pull request.
 - The condition of a watched reaction is worded as what a check finds, and carries the time left in which a check can still lead to the outcome, measured from `generated_at`. A reaction with no time left yields no pair.
-- An outcome that starts a session says so when the session budget or the token budget would stop it, and names the hold. An outcome that a configured triage command replaces says that the triage command runs, and an outcome that a spent fix count replaces says that Sortie escalates.
+- An outcome that starts a session says so when the money budget, the token budget, or the session budget would stop it, in that precedence, and names the hold. It names the money budget by its setting, `agent.max_cost_usd`, never by an amount. The exit pairs of a running session list the stop at the money budget before the stop at the token budget. An outcome that a configured triage command replaces says that the triage command runs, and an outcome that a spent fix count replaces says that Sortie escalates.
 - The list is not exhaustive. It leaves out what the configuration does not decide: a stop the agent requests, a person's tracker or pull request edit other than a label command, a failed tracker, forge, or store call, a withheld handoff and the park it leads to, and a wait for a free agent slot.
 - A pair that fails to render is left out of the list, and Sortie logs the failure.
 
@@ -4155,7 +4168,7 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_worker_duration_seconds`                | Histogram | `exit_type`                 | Worker session wall-clock time.                                |
 | `sortie_build_info`                             | Gauge     | `version`, `go_version`     | Always `1`; carries build metadata as labels.                  |
 | `sortie_ssh_host_usage`                         | Gauge     | `host`                      | Current session count per SSH host.                            |
-| `sortie_budget_exhaustions_total`               | Counter   | `reason`                    | Issue entries into the per-issue budget-exhausted set (`token_budget`, `session_budget`). |
+| `sortie_budget_exhaustions_total`               | Counter   | `reason`                    | Issue entries into the per-issue budget-exhausted set (`money_budget`, `token_budget`, `session_budget`). |
 | `sortie_budget_exhausted_issues`                | Gauge     | `reason`                    | Issues currently held out of dispatch by a per-issue budget ceiling.                     |
 
 The `model` label is the model the agent reported, otherwise the configured `model`, otherwise `<none>`, the placeholder `sortie stats` uses for the same case. Token samples count as usage arrives, so usage recorded before a run's first model report counts under the configured model or `<none>` and is not moved when the model arrives, a run whose runtime switches model splits its tokens between the models, and when the agent reports how many tokens each model spent, each model's share of a sample counts under that model while usage the agent reports without a per-model count counts under the run's model. Runtime and exit samples are recorded when the session ends, so they carry the model `sortie stats` groups the run under.
@@ -5225,6 +5238,7 @@ Sortie watches `WORKFLOW.md` for filesystem changes and automatically re-reads a
 | `agent.max_concurrent_agents_by_state` | **Immediate** — affects subsequent dispatch decisions.                                         |
 | `agent.max_sessions`                   | **Immediate** — affects future retry timer evaluations.                                        |
 | `agent.max_tokens`                     | **Immediate** — the poll tick carries the new ceiling to the event loop, and the first usage figure after it stops a run already over the ceiling; also affects future retry timer evaluations. |
+| `agent.max_cost_usd`                   | **Immediate** – the poll tick carries the new ceiling to the event loop, and the first usage figure after it stops a run already over the ceiling; also affects future retry timer evaluations. |
 | `agent.token_warning_percent`          | **Immediate** — the poll tick carries the new threshold to the event loop; an unwarned run in flight is evaluated against it from its next usage figure, a warned run never warns again, and a run dispatched after the tick is evaluated against it from dispatch. |
 | `agent.max_consecutive_absences`       | **Immediate** — affects future worker exits, retry timer evaluations, and poll-tick park sweeps. |
 | `db_path`                              | **No effect** — requires restart. In-memory config updated, but database connection unchanged. |
@@ -5353,11 +5367,20 @@ These offline checks never contact Linear and never log the API key value. State
 | `tracker.comments.on_failure.deprecated`                    | `tracker.comments.on_failure` resolves to `true`, from the file or from `SORTIE_TRACKER_COMMENTS_ON_FAILURE`. |
 | `reactions.<key>.escalation.deprecated`                     | A reaction among `ci_failure`, `review_comments`, `bot_review`, `merge_conflicts`, `auto_merge`, and `merge_completion` names a provider and sets `escalation: comment`. |
 | `notifications.tracker_comment.implicit_auto_merge`         | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `reactions.auto_merge` names a provider. |
-| `notifications.tracker_comment.implicit_budget_hold`        | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `agent.max_sessions` or `agent.max_tokens` is above `0`. |
+| `notifications.tracker_comment.implicit_budget_hold`        | `tracker.kind` is set, no `notifications` entry has kind `tracker_comment`, and `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd` is above `0`. |
 | `notifications[<i>].events.missing`                         | A `notifications` entry other than `tracker_comment` omits `events`. |
 | `token_rates`                                               | `token_rates` or one of its entries is not a map, an entry has an empty key, a rate is not a finite, non-negative number, an entry holds a key other than its four `*_per_mtok` rates, or a kind entry lacks `input_per_mtok` or `output_per_mtok`. |
 | `token_rates.per_kind`                                      | A `token_rates` entry is keyed by an agent kind. It prices every model of that kind alike, so it turns off per-model pricing for the kind. |
 | `token_rates.model_incomplete`                              | A `token_rates` entry keyed by a model that the price table the configuration selects (your own table, else the embedded table) does not list leaves one of `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, and `cache_write_per_mtok` unset. The text names the unset rates, and the entry prices the classes it sets. |
+
+**Money ceiling warnings.** Two preflight warnings apply while `agent.max_cost_usd` is above `0`, and neither fires with it at `0`. Both are warnings: `sortie validate` prints them and exits `0`, and neither changes `valid`. The running service logs them and keeps dispatching, including after a live reload that sets or raises the ceiling. Under either condition the ceiling holds no issue whose figure stays unmeasured or unpriced.
+
+| Check | Condition |
+| ----- | --------- |
+| `agent.max_cost_usd.no_usage_reporting` | A kind the configuration reaches reports no token usage for the sessions the configuration produces, so its sessions never carry the issue to the ceiling. The message names the kind and the setting. It is reported for the top-level settings of each kind and for each rule's resolved settings block. |
+| `agent.max_cost_usd.no_rate_source` | No price source is configured: `price_table.embedded` and `price_table.fetch` are off, and no `token_rates` entry or operator price table is set, so no run can be priced. |
+
+A model that no configured layer prices draws no preflight warning; its runs are recorded `unpriced`, the issue's figure becomes a lower bound, and the service logs that the figure is incomplete.
 
 ---
 
@@ -5384,6 +5407,9 @@ These errors are raised during typed config construction from the parsed front m
 | `config: agent.stall_timeout_ms: invalid integer value: <val>`                  | Same as above.                                                           | Same fix.                                                                                                                            |
 | `config: <field>: value is outside the range an integer setting accepts, -9223372036854775808 to 9223372036854775807` | An integer too large or too small for Sortie to hold, in any integer field. | Use a value within the range. The field's own limits still apply.                                                                   |
 | `config: agent.max_sessions: must be non-negative`                              | Negative value for `max_sessions`.                                       | Use `0` (unlimited) or a positive integer.                                                                                           |
+| `config: agent.max_cost_usd: invalid number value: <val>`                       | Value for `max_cost_usd` that is not a number. | Use an integer or decimal (e.g., `5` or `2.5`) or a quoted string of one (e.g., `"2.5"`). |
+| `config: agent.max_cost_usd: must be a finite number`                           | `NaN` or an infinity for `max_cost_usd`.                                 | Use `0` (unlimited) or a positive number.                                                                                            |
+| `config: agent.max_cost_usd: must be non-negative`                              | Negative value for `max_cost_usd`.                                       | Use `0` (unlimited) or a positive number.                                                                                            |
 | `config: agent.max_tokens: must be non-negative`                                | Negative value for `max_tokens`.                                         | Use `0` (unlimited) or a positive integer.                                                                                           |
 | `config: agent.token_warning_percent: must be between 0 and 99`                 | Value for `token_warning_percent` below `0` or above `99`.               | Use an integer from `0` (off) to `99`.                                                                                               |
 | `config: agent.max_consecutive_absences: must be greater than 0`                | `0` or a negative value for `max_consecutive_absences`.                  | Use a positive integer, or remove the key to take the default of `3`.                                                                |
@@ -5493,6 +5519,7 @@ These errors are raised when `SORTIE_*` environment variables or `.env` file val
 | `config: polling.interval_ms: invalid integer value: <val> (from SORTIE_POLLING_INTERVAL_MS)`                  | Non-integer value in an integer env var.                  | Set the env var to a plain integer (e.g., `30000`). Remove units or decimals.    |
 | `config: agent.<field>: invalid integer value: <val> (from SORTIE_AGENT_<FIELD>)`                              | Same, for any agent integer field.                        | Same fix as above.                                                               |
 | `config: <section>.<field>: value is outside the range an integer setting accepts, -9223372036854775808 to 9223372036854775807 (from SORTIE_<SECTION>_<FIELD>)` | An integer too large or too small for Sortie to hold, in an integer env var. | Set the env var to a value within the range.                                     |
+| `config: agent.max_cost_usd: invalid number value: <val> (from SORTIE_AGENT_MAX_COST_USD)`                     | Value in `SORTIE_AGENT_MAX_COST_USD` that is not a number. | Set the env var to an integer or decimal (e.g., `5` or `2.5`).                  |
 | `config: tracker.comments.<field>: invalid boolean value: <val> (expected true/false/1/0) (from SORTIE_TRACKER_COMMENTS_<FIELD>)` | Invalid boolean in a comments env var.                    | Use `true`, `false`, `1`, or `0` (case-insensitive).                             |
 | `config: dotenv <path>:<line>: missing '=' in line`                                                            | `.env` file line has no `=` separator.                    | Ensure each non-comment line in the `.env` file is `KEY=VALUE`.                  |
 | `config: dotenv <path>:<line>: invalid key "<key>"`                                                            | `.env` file key contains invalid characters.              | Keys MUST match `[A-Za-z_][A-Za-z0-9_]*`.                                       |
@@ -5568,6 +5595,7 @@ A flat reference of every configuration field, for quick lookup. The "Env Overri
 | `agent.max_concurrent_agents_by_state`  | `map[string]int` | `{}`                         | —                                        | Keys lowercased; dynamic reload                                                        |
 | `agent.max_sessions`                    | integer          | `0`                          | `SORTIE_AGENT_MAX_SESSIONS`              | Unlimited; dynamic reload                                                              |
 | `agent.max_tokens`                      | integer          | `0`                          | `SORTIE_AGENT_MAX_TOKENS`                | Unlimited; dynamic reload                                                              |
+| `agent.max_cost_usd`                    | number           | `0`                          | `SORTIE_AGENT_MAX_COST_USD`              | Unlimited; non-negative and finite; dynamic reload                                     |
 | `agent.token_warning_percent`           | integer          | `0`                          | `SORTIE_AGENT_TOKEN_WARNING_PERCENT`     | Off; `0` to `99`; dynamic reload                                                       |
 | `agent.max_consecutive_absences`        | integer          | `3`                          | `SORTIE_AGENT_MAX_CONSECUTIVE_ABSENCES`  | `0` and negative rejected; dynamic reload                                              |
 | `db_path`                               | path             | `.sortie.db`                 | `SORTIE_DB_PATH`                         | Restart required; `$VAR` skipped for env-sourced values                                |

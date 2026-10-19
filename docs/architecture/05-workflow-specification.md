@@ -225,6 +225,19 @@ Fields:
   - Changes are re-applied at runtime: a lowered ceiling reaches a run already in flight from the next poll tick onward, and it affects future retry timer evaluations.
   - Reaching the ceiling also posts one comment on the issue naming the token budget and `agent.max_tokens` as the setting that raises it, stating whether a session was stopped in flight.
   - `token_warning_percent`, below, warns before this ceiling stops a run.
+- `max_cost_usd` (number)
+  - Default: `0` (unlimited; no money ceiling enforced).
+  - Per-issue ceiling in US dollars on the issue's estimated cost: the recorded `estimated_cost_usd` of the issue's completed `run_history` entries plus the running session's live estimate (Section 13.5). A recorded cost never changes after its row is written, so a `token_rates` edit moves only the live estimate and the runs written afterward. The figure is Sortie's estimate under the layered price rates, not the provider's bill, and can differ from a cost the agent's runtime reports.
+  - Accepts a YAML integer, a YAML float, or a string a decimal parse accepts. A value that is not a number, a NaN, an infinity, or a negative number is a configuration error at parse time; a failed reload keeps the previous configuration. `0` or an absent key disables the ceiling.
+  - The ceiling is enforced on the three lanes `max_tokens` uses: the retry handler and the poll tick's rebuild block a re-dispatch, and the event loop stops a run already in flight as soon as a usage figure carries the issue's cost to the ceiling. The dispatch lanes read the issue's usage once and evaluate both the token and the money axis from that read (Section 8.4). Money is compared in whole micro-dollars, so a float sum that equals the ceiling reaches it.
+  - The figure is complete only when every run that spent tokens is priced in full. A run recorded `unpriced` or `unmeasured` contributes nothing, a run recorded `partial` contributes what was priced, and the figure is then a lower bound that every surface marks as incomplete. A figure below the ceiling that is incomplete allows the dispatch and logs a warning naming the issue, the figure, the ceiling, and the counts of unmeasured, partial, and unpriced runs. A failed usage query fails open on both dispatch lanes, as the token axis does.
+  - When one evaluation finds more than one ceiling reached, the reported and recorded reason follows the order `money_budget`, `token_budget`, `session_budget`. The block itself is identical whichever ceiling triggered it.
+  - A stop lands at the next usage figure the agent reports: about one usage event for an agent kind that reports usage incrementally, and a whole turn for a kind that reports at turn end. The run can therefore pass the ceiling by what the agent spends before that report, and operators leave headroom. A run recorded `budget_stopped` carries the error `money ceiling reached: used <amount> of <ceiling>`.
+  - Two preflight warnings apply while the ceiling is above `0`, and neither blocks dispatch: `agent.max_cost_usd.no_usage_reporting` when an agent kind the configuration reaches reports no token usage, so the ceiling cannot be reached for it, and `agent.max_cost_usd.no_rate_source` when no price source is configured, so no run can be priced (Section 6.3). The service keeps dispatching under either configuration, including after a live reload; the ceiling holds no issue whose figure stays unmeasured or unpriced.
+  - Overridable through `SORTIE_AGENT_MAX_COST_USD`. `0` disables the ceiling.
+  - Changes are re-applied at runtime: a lowered ceiling reaches a run already in flight from its next usage figure onward, and it affects future retry timer evaluations and poll tick rebuilds.
+  - Reaching the ceiling also posts one comment on the issue naming the money budget and `agent.max_cost_usd` as the setting that raises it, stating the issue's estimated cost against the ceiling (prefixed `at least` when the figure is a lower bound) and whether a session was stopped in flight.
+  - There is no money counterpart of `token_warning_percent`; that threshold applies to `max_tokens` only.
 - `token_warning_percent` (integer)
   - Default: `0` (off).
   - Must be between `0` and `99`; rejected as a configuration error at parse time otherwise. It is never validated against `agent.max_tokens`, so lowering the ceiling can never make this field reject a reload.
@@ -625,7 +638,7 @@ Per-entry fields:
 | `session.failed` | A worker exited with an error, or its handoff was withheld by the evidence verdict |
 | `escalation.ci_failure`, `escalation.review_comments`, `escalation.bot_review`, `escalation.merge_conflicts`, `escalation.auto_merge`, `escalation.merge_completion` | The matching reaction (Section 5.3.8) handed its subject to a person, under any `escalation` value |
 | `auto_merge.merged` | The auto-merge reaction merged a pull request, or its merge call found the pull request already merged |
-| `budget.held` | An issue was held out of dispatch by `agent.max_sessions` or `agent.max_tokens` |
+| `budget.held` | An issue was held out of dispatch by `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd` |
 | `stage.advanced` | A stage hop was made: the issue moved to the next stage, whether or not every old stage label was removed |
 | `stage.not_advanced` | A stage hop was due and not made, because the next stage's label could not be added or the hop ceiling was reached; the event carries the reason |
 | `agent.message` | The agent called `notify_operator` |
@@ -691,7 +704,7 @@ Validation and resolution:
 - `tracker.comments.on_dispatch`, `on_completion`, or `on_failure` resolves to `true`, from the file or from its environment override.
 - A reaction with a non-empty `provider` among `ci_failure`, `review_comments`, `bot_review`, `merge_conflicts`, `auto_merge`, and `merge_completion` sets `escalation: comment`.
 - `tracker.kind` is configured, no `tracker_comment` entry exists, and `reactions.auto_merge.provider` is non-empty: the auto-merge success comment posts only through the implicit subscription.
-- `tracker.kind` is configured, no `tracker_comment` entry exists, and `agent.max_sessions` or `agent.max_tokens` is above `0`: the budget-hold comment posts only through the implicit subscription.
+- `tracker.kind` is configured, no `tracker_comment` entry exists, and `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd` is above `0`: the budget-hold comment posts only through the implicit subscription.
 - An entry that is not `tracker_comment` omits `events`.
 
 No removal date or removal version is set for any deprecated form.

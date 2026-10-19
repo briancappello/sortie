@@ -713,7 +713,7 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
     })
     fail_worker(exit_kind_at_ending(worker_ctx, cancelled_at_ending), phase_err, review_metadata=review_metadata)
 
-  if phase_cut AND cancellation_cause(worker_ctx) == token_ceiling_stop:
+  if phase_cut AND cancellation_cause(worker_ctx) == ceiling_stop:
     agent_adapter.stop_session(session)
     run_hook_best_effort("after_run", workspace.path, {
       SORTIE_SELF_REVIEW_STATUS: self_review_status,
@@ -744,11 +744,14 @@ on_worker_exit(issue_id, reason, worker_result, state):
 
   // A stop request the run's own cancellation confirms gets its own
   // status, distinct from a stall, terminal-state, or shutdown cancel.
-  if reason == cancelled AND worker_result.stopped_by_token_ceiling AND running_entry.token_ceiling_stop_request is not null:
+  if reason == cancelled AND worker_result.stopped_by_ceiling AND running_entry.ceiling_stop_request is not null:
     status = "budget_stopped"
-    // uncached_tokens: the entry's total tokens less its cache-read tokens, floored at zero
-    run_error = token_ceiling_stop_error(running_entry.issue_tokens_completed + uncached_tokens(running_entry), running_entry.token_ceiling_stop_request.budget_tokens)
-    report_token_ceiling_stop(log, metrics, running_entry.token_ceiling_stop_request)
+    if running_entry.ceiling_stop_request.reason == token_budget:
+      // uncached_tokens: the entry's total tokens less its cache-read tokens, floored at zero
+      run_error = token_ceiling_stop_error(running_entry.issue_tokens_completed + uncached_tokens(running_entry), running_entry.ceiling_stop_request.budget_tokens)
+    else:  // money_budget
+      run_error = money_ceiling_stop_error(issue_cost(running_entry), running_entry.ceiling_stop_request.budget_usd)
+    report_ceiling_stop(log, metrics, running_entry.ceiling_stop_request)
 
   handoff_path = false
   evidence_withheld = false
