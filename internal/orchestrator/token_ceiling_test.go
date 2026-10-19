@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
@@ -561,34 +560,6 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 			t.Errorf("request (UsedTokens, SessionTokens) = (%d, %d), want (1000, 400)", request.UsedTokens, request.SessionTokens)
 		}
 	})
-}
-
-func TestRuntimeSnapshot_IssueUsageByKind(t *testing.T) {
-	t.Parallel()
-
-	state := NewState(5000, 4, 1000, nil, AgentTotals{})
-	state.Running["ISS-KIND"] = &RunningEntry{
-		Identifier: "ISS-KIND-ident",
-		Issue:      domain.Issue{ID: "ISS-KIND"},
-		StartedAt:  time.Now().UTC(),
-		IssueUsage: &persistence.IssueTokenUsage{
-			Sessions:    3,
-			TotalTokens: 420,
-			ByKind: map[string]persistence.KindTokenUsage{
-				"claude-code": {FreshInputTokens: 100, CacheReadTokens: 300, CacheWriteTokens: 7, OutputTokens: 20},
-			},
-		},
-	}
-
-	snap := RuntimeSnapshot(state, time.Now())
-
-	if len(snap.Running) != 1 || snap.Running[0].IssueUsage == nil {
-		t.Fatalf("RuntimeSnapshot().Running = %+v, want one row carrying IssueUsage", snap.Running)
-	}
-	want := domain.TokenUsage{InputTokens: 407, OutputTokens: 20, CacheReadTokens: 300, CacheWriteTokens: 7}
-	if got := snap.Running[0].IssueUsage.ByKind["claude-code"]; got != want {
-		t.Errorf("IssueUsage.ByKind[claude-code] = %+v, want %+v (input spans fresh and both cache classes, total left zero)", got, want)
-	}
 }
 
 func lineWith(t *testing.T, rendered, msg string) string {

@@ -11,20 +11,8 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
-
-func pricedRates() pricing.TokenRates {
-	return pricing.TokenRates{"claude-code": {InputPerMtok: new(3.0), OutputPerMtok: new(15.0)}}
-}
-
-func costOrNil(p *float64) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
 
 func TestRunsQueryBoundary(t *testing.T) {
 	t.Parallel()
@@ -155,70 +143,10 @@ func TestRunsMaskRegisteredValues(t *testing.T) {
 	}
 }
 
-func TestRunCostOf(t *testing.T) {
-	t.Parallel()
-
-	spend := domain.TokenUsage{InputTokens: 1_000_000, OutputTokens: 100_000, TotalTokens: 1_100_000}
-
-	tests := []struct {
-		name       string
-		entry      RunHistoryEntry
-		wantCost   *float64
-		wantStatus string
-	}{
-		{
-			name:       "unmeasured",
-			entry:      RunHistoryEntry{AgentKind: "claude-code"},
-			wantStatus: costStatusUnmeasured,
-		},
-		{
-			name:       "measured zero without a rate",
-			entry:      RunHistoryEntry{TokensMeasured: true},
-			wantCost:   new(0.0),
-			wantStatus: costStatusEstimated,
-		},
-		{
-			name:       "priced",
-			entry:      RunHistoryEntry{AgentKind: "claude-code", TokensMeasured: true, Tokens: spend},
-			wantCost:   new(4.5),
-			wantStatus: costStatusEstimated,
-		},
-		{
-			name:       "priced with an unaccounted turn",
-			entry:      RunHistoryEntry{AgentKind: "claude-code", TokensMeasured: true, Tokens: spend, UnaccountedTurns: 1},
-			wantCost:   new(4.5),
-			wantStatus: costStatusPartial,
-		},
-		{
-			name:       "measured spend of an unpriced kind",
-			entry:      RunHistoryEntry{AgentKind: "other", TokensMeasured: true, Tokens: spend},
-			wantStatus: costStatusUnpriced,
-		},
-		{
-			name:       "zero classes beside a total of an unpriced kind",
-			entry:      RunHistoryEntry{AgentKind: "other", TokensMeasured: true, Tokens: domain.TokenUsage{TotalTokens: 500}},
-			wantStatus: costStatusUnpriced,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			gotCost, gotStatus := runCostOf(tt.entry, pricedRates())
-
-			if !reflect.DeepEqual(gotCost, tt.wantCost) || gotStatus != tt.wantStatus {
-				t.Errorf("runCostOf(%+v) = %v, %q, want %v, %q", tt.entry, costOrNil(gotCost), gotStatus, costOrNil(tt.wantCost), tt.wantStatus)
-			}
-		})
-	}
-}
-
 func TestHistoryTotalsOf(t *testing.T) {
 	t.Parallel()
 
 	spend := domain.TokenUsage{InputTokens: 1_000_000, OutputTokens: 100_000, TotalTokens: 1_100_000}
-	byKind := map[string]domain.TokenUsage{"claude-code": spend}
 	partialTokens := tokenInfo{
 		InputTokens: new(int64(1_000_000)), OutputTokens: new(int64(100_000)), TotalTokens: new(int64(1_100_000)),
 	}
@@ -231,7 +159,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 		{
 			name: "every run measured and priced",
 			in: IssueRunTotals{
-				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, TotalTokens: 1_100_000, UncachedTokens: 850_000, ByKind: byKind},
+				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, TotalTokens: 1_100_000, UncachedTokens: 850_000, RecordedCostUSD: 27, PricedSessions: 2},
 				Tokens: domain.TokenUsage{InputTokens: 1_000_000, OutputTokens: 100_000, CacheReadTokens: 300_000},
 			},
 			want: historyTotalsResponse{
@@ -242,14 +170,14 @@ func TestHistoryTotalsOf(t *testing.T) {
 				},
 				UncachedTokens:   new(int64(850_000)),
 				TokensComplete:   true,
-				EstimatedCostUSD: new(4.5),
+				EstimatedCostUSD: new(27.0),
 				CostStatus:       costStatusEstimated,
 			},
 		},
 		{
 			name: "unmeasured run beside priced spend",
 			in: IssueRunTotals{
-				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 3, UnmeasuredSessions: 1, TotalTokens: 1_100_000, UncachedTokens: 1_100_000, ByKind: byKind},
+				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 3, UnmeasuredSessions: 1, TotalTokens: 1_100_000, UncachedTokens: 1_100_000, RecordedCostUSD: 27, PricedSessions: 2},
 				Tokens: spend,
 			},
 			want: historyTotalsResponse{
@@ -257,21 +185,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 				UnmeasuredRuns:   1,
 				Tokens:           partialTokens,
 				UncachedTokens:   new(int64(1_100_000)),
-				EstimatedCostUSD: new(4.5),
-				CostStatus:       costStatusPartial,
-			},
-		},
-		{
-			name: "unaccounted turn beside priced spend",
-			in: IssueRunTotals{
-				Usage:  orchestrator.SnapshotIssueUsage{Sessions: 2, UnaccountedTurns: 1, TotalTokens: 1_100_000, UncachedTokens: 1_100_000, ByKind: byKind},
-				Tokens: spend,
-			},
-			want: historyTotalsResponse{
-				RunCount:         2,
-				Tokens:           partialTokens,
-				UncachedTokens:   new(int64(1_100_000)),
-				EstimatedCostUSD: new(4.5),
+				EstimatedCostUSD: new(27.0),
 				CostStatus:       costStatusPartial,
 			},
 		},
@@ -286,7 +200,7 @@ func TestHistoryTotalsOf(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := historyTotalsOf(tt.in, pricedRates())
+			got := historyTotalsOf(tt.in)
 
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("historyTotalsOf(%+v) = %v, want %v", tt.in, jsonObject(t, got), jsonObject(t, tt.want))

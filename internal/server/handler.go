@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
 )
@@ -612,8 +611,9 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 }
 
 // toServedRunningEntry converts a running row for both endpoints, adding
-// the issue-level figures that depend on the snapshot's limits and on rates.
-func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator.RuntimeSnapshotResult, rates pricing.TokenRates) runningEntryResponse {
+// the issue-level figures that depend on the snapshot's limits and on the
+// cost recorded for the issue's completed sessions.
+func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator.RuntimeSnapshotResult) runningEntryResponse {
 	resp := toRunningEntryResponse(e, snap.GeneratedAt)
 
 	var completed int64
@@ -647,8 +647,8 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 		resp.BudgetSessions = new(snap.MaxSessions)
 	}
 
-	resp.EstimatedCostUSD, resp.CostStatus = sessionCostOf(e, rates)
-	resp.IssueEstimatedCostUSD, resp.IssueCostStatus = issueCostOf(e, resp.UsedTokens, resp.UsedTokensComplete, resp.EstimatedCostUSD, resp.CostStatus, rates)
+	resp.EstimatedCostUSD, resp.CostStatus = liveCostOf(e)
+	resp.IssueEstimatedCostUSD, resp.IssueCostStatus = issueCost(e.IssueUsage, resp.UsedTokens, resp.UsedTokensComplete, sessionPartOf(e))
 	return resp
 }
 
@@ -946,10 +946,10 @@ func heldUsedTokens(e orchestrator.SnapshotBudgetEntry) *int64 {
 	return e.UsedTokens
 }
 
-func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates pricing.TokenRates, words sentence.Context, health *orchestrator.SnapshotHealth) stateResponse {
+func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Context, health *orchestrator.SnapshotHealth) stateResponse {
 	running := make([]runningEntryResponse, 0, len(snap.Running))
 	for _, e := range snap.Running {
-		row := toServedRunningEntry(e, snap, tokenRates)
+		row := toServedRunningEntry(e, snap)
 		setRunningSentences(&row, e, words)
 		running = append(running, row)
 	}
@@ -1014,8 +1014,8 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, tokenRates pricing
 	}
 	resp.Active = activeIssuesOf(resp, snap.ActiveOrder)
 
-	if len(tokenRates) > 0 {
-		total, anySet, unpriced := activeCostTotal(snap.Running, tokenRates)
+	if len(snap.TokenRates) > 0 {
+		total, anySet, unpriced := activeCostTotal(snap.Running)
 		if anySet {
 			resp.ActiveEstimatedCostUSD = &total
 		}
@@ -1128,11 +1128,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	words := s.sentenceContext(snap)
-	resp := toStateResponse(snap, s.tokenRates, words, health)
+	resp := toStateResponse(snap, words, health)
 	resp.Version = s.version
 	resp.StartedAt = utcOrNil(s.startedAt)
 	if words.Shape != nil {
-		resp.Config = toConfigResponse(*words.Shape, s.tokenRates)
+		resp.Config = toConfigResponse(*words.Shape, snap.TokenRates)
 	}
 	if health != nil {
 		resp.Health = toStateHealthResponse(*health, words)
@@ -1173,7 +1173,7 @@ func (s *Server) handleIssueDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	words := s.sentenceContext(snap)
-	detail := buildIssueDetail(identifier, "", snap, s.tokenRates, words)
+	detail := buildIssueDetail(identifier, "", snap, words)
 	notFoundIn := "current state"
 	if s.runHistory != nil {
 		notFoundIn = "current state or run history"
@@ -1227,7 +1227,7 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 			return nil, true
 		}
 		issueID = newest[0].IssueID
-		detail = buildIssueDetail(identifier, issueID, snap, s.tokenRates, words)
+		detail = buildIssueDetail(identifier, issueID, snap, words)
 	}
 
 	page, err := s.runHistory.QueryRuns(ctx, RunHistoryQuery{IssueID: issueID, Limit: issueHistoryPageSize + 1})
@@ -1267,7 +1267,7 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 	if words.Shape != nil {
 		chains = words.Shape.Dispatch.Chains
 	}
-	detail.History = issueHistoryOf(page, totals, s.tokenRates, chains)
+	detail.History = issueHistoryOf(page, totals, chains)
 	attachIssueOutcomes(detail.History.Runs, outcomes)
 	if hasOutcome {
 		detail.History.IssueOutcome = toIssueOutcomeResponse(outcome, newest.Identifier, newest.DisplayID)
@@ -1297,12 +1297,12 @@ func historyOnlyDetail(issueID string, newest RunHistoryEntry) *issueDetailRespo
 
 // issueHistoryOf builds the history member from an issue's newest runs, read
 // one past issueHistoryPageSize so a longer history names its continuation.
-func issueHistoryOf(page []RunHistoryEntry, totals IssueRunTotals, rates pricing.TokenRates, chains [][]string) *issueHistoryResponse {
+func issueHistoryOf(page []RunHistoryEntry, totals IssueRunTotals, chains [][]string) *issueHistoryResponse {
 	rows, next := cutPage(page, issueHistoryPageSize)
 	return &issueHistoryResponse{
-		Runs:       toRunResponses(rows, rates, chains),
+		Runs:       toRunResponses(rows, chains),
 		NextCursor: next,
-		Totals:     historyTotalsOf(totals, rates),
+		Totals:     historyTotalsOf(totals),
 		Hops:       hopRowsOf(rows),
 		LastStage:  lastStageOf(rows, chains),
 	}
@@ -1612,7 +1612,7 @@ func (s *Server) crossOriginForbidden(w http.ResponseWriter, r *http.Request) {
 // entry holds it. An entry belongs to the issue when its identifier equals
 // identifier, or when issueID is non-empty and the entry carries it, which
 // finds an issue the tracker has since renamed.
-func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, rates pricing.TokenRates, words sentence.Context) *issueDetailResponse {
+func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnapshotResult, words sentence.Context) *issueDetailResponse {
 	matches := func(gotIdentifier, gotIssueID string) bool {
 		return gotIdentifier == identifier || (issueID != "" && gotIssueID == issueID)
 	}
@@ -1627,7 +1627,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.Running {
 		if matches(e.Identifier, e.IssueID) {
 			situation.Running = &e
-			runEntry = new(toServedRunningEntry(e, snap, rates))
+			runEntry = new(toServedRunningEntry(e, snap))
 			setRunningSentences(runEntry, e, words)
 			break
 		}

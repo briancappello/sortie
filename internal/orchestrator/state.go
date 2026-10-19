@@ -15,6 +15,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
@@ -1202,6 +1203,10 @@ type State struct {
 
 	PollIntervalMS int
 
+	// TokenRates are the rates in force. Only the event loop writes them, and
+	// always by replacing the map, so a snapshot can share it without a lock.
+	TokenRates pricing.TokenRates
+
 	MaxConcurrentAgents int
 
 	// MaxConcurrentByState holds per-state concurrency caps, keys
@@ -1473,17 +1478,19 @@ func RunningCountByState(running map[string]*RunningEntry, state string) int {
 }
 
 // SnapshotIssueUsage is a running issue's completed-session usage,
-// value-copied by [RuntimeSnapshot]. Each ByKind value is shaped for cost
-// estimation: InputTokens spans fresh input and both cache classes, and
-// TotalTokens is left zero because pricing never reads it. UncachedTokens is
-// the figure compared with the token budget.
+// value-copied by [RuntimeSnapshot]. UncachedTokens is the figure compared
+// with the token budget. The recorded aggregates carry the cost the completed
+// sessions were priced at when they finished.
 type SnapshotIssueUsage struct {
-	Sessions           int                          `json:"sessions"`
-	TotalTokens        int64                        `json:"total_tokens"`
-	UncachedTokens     int64                        `json:"uncached_tokens"`
-	UnmeasuredSessions int                          `json:"unmeasured_sessions"`
-	UnaccountedTurns   int                          `json:"unaccounted_turns"`
-	ByKind             map[string]domain.TokenUsage `json:"by_kind"`
+	Sessions           int     `json:"sessions"`
+	TotalTokens        int64   `json:"total_tokens"`
+	UncachedTokens     int64   `json:"uncached_tokens"`
+	UnmeasuredSessions int     `json:"unmeasured_sessions"`
+	UnaccountedTurns   int     `json:"unaccounted_turns"`
+	RecordedCostUSD    float64 `json:"recorded_cost_usd"`
+	PricedSessions     int     `json:"priced_sessions"`
+	PartialSessions    int     `json:"partial_sessions"`
+	UnpricedSessions   int     `json:"unpriced_sessions"`
 }
 
 // SnapshotStagePosition is where a row's rule stands on its stage chain.
@@ -1577,6 +1584,8 @@ type SnapshotRunningEntry struct {
 	ConfiguredModel     string                    `json:"configured_model,omitempty"`
 	ConfiguredEffort    string                    `json:"configured_effort,omitempty"`
 	UsageMeasured       bool                      `json:"tokens_measured"`
+	EstimatedCostUSD    *float64                  `json:"estimated_cost_usd"`
+	CostStatus          string                    `json:"cost_status"`
 	UsageArrival        registry.UsageArrival     `json:"usage_arrival"`
 	UsageAttribution    registry.UsageAttribution `json:"usage_attribution"`
 	TokensPending       bool                      `json:"tokens_pending"`
@@ -1785,6 +1794,10 @@ type RuntimeSnapshotResult struct {
 	MaxTokens   int `json:"max_tokens"`
 	MaxSessions int `json:"max_sessions"`
 
+	// TokenRates is State.TokenRates at capture. Safe to read without a lock
+	// because the map is replaced, never mutated.
+	TokenRates pricing.TokenRates `json:"-"`
+
 	// AttentionAcknowledgements is a copy of State.AttentionAcknowledgements,
 	// keyed by attention item ID.
 	AttentionAcknowledgements map[string]time.Time `json:"-"`
@@ -1845,20 +1858,11 @@ func turnHasEnded(turnCount int, lastEvent domain.AgentEventType) bool {
 }
 
 // SnapshotIssueUsageOf copies a running entry's usage read into the shape the
-// snapshot serves, sharing no map with state. A nil read stays nil so the
-// absence of a successful read is not served as zero usage.
+// snapshot serves. A nil read stays nil so the absence of a successful read is
+// not served as zero usage.
 func SnapshotIssueUsageOf(usage *persistence.IssueTokenUsage) *SnapshotIssueUsage {
 	if usage == nil {
 		return nil
-	}
-	byKind := make(map[string]domain.TokenUsage, len(usage.ByKind))
-	for kind, spent := range usage.ByKind {
-		byKind[kind] = domain.TokenUsage{
-			InputTokens:      spent.FreshInputTokens + spent.CacheReadTokens + spent.CacheWriteTokens,
-			OutputTokens:     spent.OutputTokens,
-			CacheReadTokens:  spent.CacheReadTokens,
-			CacheWriteTokens: spent.CacheWriteTokens,
-		}
 	}
 	return &SnapshotIssueUsage{
 		Sessions:           usage.Sessions,
@@ -1866,7 +1870,10 @@ func SnapshotIssueUsageOf(usage *persistence.IssueTokenUsage) *SnapshotIssueUsag
 		UncachedTokens:     usage.UncachedTokens,
 		UnmeasuredSessions: usage.UnmeasuredSessions,
 		UnaccountedTurns:   usage.UnaccountedTurns,
-		ByKind:             byKind,
+		RecordedCostUSD:    usage.RecordedCostUSD,
+		PricedSessions:     usage.PricedSessions,
+		PartialSessions:    usage.PartialSessions,
+		UnpricedSessions:   usage.UnpricedSessions,
 	}
 }
 
@@ -1888,6 +1895,22 @@ func stallInstants(reference time.Time, timeoutMS int) (quietAt, stallAt time.Ti
 	}
 	timeout := time.Duration(timeoutMS) * time.Millisecond
 	return reference.Add(timeout / 2), reference.Add(timeout)
+}
+
+func spendOfRunningEntry(entry *RunningEntry) pricing.Spend {
+	return pricing.Spend{
+		Kind:     entry.AgentKind,
+		Measured: entry.UsageMeasured,
+		Totals: domain.TokenUsage{
+			InputTokens:      entry.AgentInputTokens,
+			OutputTokens:     entry.AgentOutputTokens,
+			TotalTokens:      entry.AgentTotalTokens,
+			CacheReadTokens:  entry.CacheReadTokens,
+			CacheWriteTokens: entry.CacheWriteTokens,
+		},
+		Parts:            entry.UsageByModel,
+		UnaccountedTurns: entry.UnaccountedTurns,
+	}
 }
 
 // RuntimeSnapshot captures a point-in-time view of the orchestrator's
@@ -1937,6 +1960,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 		}
 		identity := maskedIdentity(issueIdentityOf(entry.Issue))
 		quietAt, stallAt := stallInstants(stallReference(entry), state.StallTimeoutMS)
+		liveCost, liveStatus := pricing.PriceSession(spendOfRunningEntry(entry), state.TokenRates)
 		snap.Running = append(snap.Running, SnapshotRunningEntry{
 			IssueID:             entry.Issue.ID,
 			Identifier:          entry.Identifier,
@@ -1978,6 +2002,8 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			ConfiguredModel:     entry.ConfiguredModel,
 			ConfiguredEffort:    entry.ConfiguredEffort,
 			UsageMeasured:       entry.UsageMeasured,
+			EstimatedCostUSD:    liveCost,
+			CostStatus:          string(liveStatus),
 			UsageArrival:        entry.UsageArrival,
 			UsageAttribution:    entry.UsageAttribution,
 			TokensPending: entry.UsageArrival == registry.UsageArrivalTurnEnd &&
@@ -2041,6 +2067,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 
 	snap.MaxTokens = state.MaxTokens
 	snap.MaxSessions = state.MaxSessions
+	snap.TokenRates = state.TokenRates
 	snap.AttentionAcknowledgements = maps.Clone(state.AttentionAcknowledgements)
 
 	snap.BudgetExhaustedCount = len(state.BudgetExhausted)

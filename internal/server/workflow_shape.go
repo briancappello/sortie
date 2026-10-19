@@ -23,7 +23,7 @@ type tokenRateResponse struct {
 	Complete          bool     `json:"complete"`
 }
 
-// toConfigResponse joins the shape with the rates the process started with.
+// toConfigResponse joins the shape with the rates in force.
 // The rates serialize as null when none are configured.
 func toConfigResponse(shape orchestrator.WorkflowShape, rates pricing.TokenRates) *configResponse {
 	resp := &configResponse{WorkflowShape: shape}

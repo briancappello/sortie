@@ -22,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/workspace"
@@ -10546,5 +10547,75 @@ func TestHandleWorkerExit_StageHopCancelsPendingReactionsAndRetry(t *testing.T) 
 	}
 	if !slices.Contains(f.store.deletedRetryIDs, hopExitIssueID) {
 		t.Errorf("DeleteRetryEntry ids = %v, want %q: the persisted retry row goes with the hop", f.store.deletedRetryIDs, hopExitIssueID)
+	}
+}
+
+func fixtureRates(inputPerMtok float64) pricing.TokenRates {
+	return pricing.TokenRates{"k": {
+		InputPerMtok:      new(inputPerMtok),
+		OutputPerMtok:     new(10.0),
+		CacheReadPerMtok:  new(0.5),
+		CacheWritePerMtok: new(4.0),
+	}}
+}
+
+var usageS = domain.TokenUsage{InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000}
+
+type appendCapturingStore struct {
+	*persistence.Store
+	appended persistence.RunHistory
+}
+
+func (s *appendCapturingStore) AppendRunHistoryWithEvents(ctx context.Context, run persistence.RunHistory, events []persistence.RunEvent, limits persistence.RunEventLimits) (persistence.RunHistory, error) {
+	s.appended = run
+	return s.Store.AppendRunHistoryWithEvents(ctx, run, events, limits)
+}
+
+func TestHandleWorkerExit_PricesUnderReloadedRatesAndClearsLiveEstimate(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &appendCapturingStore{Store: openInMemoryStore(t)}
+	if err := store.UpsertSessionMetadata(ctx, persistence.SessionMetadata{
+		IssueID: "ISS-1", EstimatedCostUSD: new(12.0), CostStatus: "estimated", UpdatedAt: baseTime.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("UpsertSessionMetadata: %v", err)
+	}
+	state := exitState(t, "ISS-1", nil)
+	state.TokenRates = fixtureRates(2)
+	entry := state.Running["ISS-1"]
+	entry.UsageMeasured = true
+	entry.AgentInputTokens, entry.AgentOutputTokens, entry.AgentTotalTokens = usageS.InputTokens, usageS.OutputTokens, usageS.TotalTokens
+	entry.UsageByModel = map[string]domain.TokenUsage{"m1": usageS}
+	reloaded := fixtureRates(4)
+	params := defaultExitParams(t, nil)
+	params.Store, params.Ctx = store, ctx
+	params.TokenRatesSection = func() (any, bool) {
+		return map[string]any{"k": map[string]any{
+			"input_per_mtok": 4.0, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 4.0,
+		}}, true
+	}
+
+	HandleWorkerExit(state, WorkerResult{
+		IssueID: "ISS-1", Identifier: "ISS-1-ident", ExitKind: WorkerExitNormal, AgentAdapter: "k",
+	}, params)
+
+	run := store.appended
+	wantPart := persistence.ModelCost{EstimatedCostUSD: new(14.0), CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: reloaded.Version()}
+	if !reflect.DeepEqual(run.ModelCosts, map[string]persistence.ModelCost{"m1": wantPart}) {
+		t.Errorf("appended run ModelCosts = %+v, want m1 = %+v", run.ModelCosts, wantPart)
+	}
+	if !reflect.DeepEqual(run.EstimatedCostUSD, new(14.0)) || run.CostStatus != "estimated" {
+		t.Errorf("appended run cost = (%v, %q), want (14, %q)", run.EstimatedCostUSD, run.CostStatus, "estimated")
+	}
+	if got := state.TokenRates.Version(); got != reloaded.Version() {
+		t.Errorf("State.TokenRates.Version() = %q, want %q", got, reloaded.Version())
+	}
+	meta, found, err := store.LoadSessionMetadata(ctx, "ISS-1")
+	if err != nil || !found {
+		t.Fatalf("LoadSessionMetadata(%q) = found %v, err %v, want found", "ISS-1", found, err)
+	}
+	if meta.EstimatedCostUSD != nil || meta.CostStatus != "" {
+		t.Errorf("session_metadata cost after exit = (%v, %q), want (nil, %q)", meta.EstimatedCostUSD, meta.CostStatus, "")
 	}
 }

@@ -490,6 +490,7 @@ func handleCIFailure(
 		Trigger:        new(""),
 		DispatchID:     new(""),
 	}
+	recordRunCost(&ciRunHistory, state.TokenRates)
 	if _, err := params.Store.AppendRunHistory(ctx, ciRunHistory); err != nil {
 		log.Error("failed to persist CI failure run history",
 			slog.Any("error", err),

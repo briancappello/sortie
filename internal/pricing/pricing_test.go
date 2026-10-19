@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -638,4 +639,90 @@ func TestTokenRateAdvisories(t *testing.T) {
 			t.Errorf("TokenRateAdvisories = %v, want none for a complete entry", got)
 		}
 	})
+}
+
+func TestReloadTokenRates(t *testing.T) {
+	t.Parallel()
+
+	k := func(input any) map[string]any {
+		return map[string]any{"input_per_mtok": input, "output_per_mtok": 10.0, "cache_read_per_mtok": 0.5, "cache_write_per_mtok": 4.0}
+	}
+	invalid := map[string]any{"input_per_mtok": -1.0, "output_per_mtok": 1.0}
+	r1k := fixtureRates(2)["k"]
+
+	tests := []struct {
+		name    string
+		raw     any
+		present bool
+		want    TokenRates
+	}{
+		{"non-map section keeps the rates in force", "oops", true, fixtureRates(2)},
+		{"removed section yields nil", nil, false, nil},
+		{"valid change replaces the entry", map[string]any{"k": k(4.0)}, true, fixtureRates(4)},
+		{"entry that is not a map keeps the entry", map[string]any{"k": "oops"}, true, fixtureRates(2)},
+		{"negative rate keeps the entry", map[string]any{"k": k(-1.0)}, true, fixtureRates(2)},
+		{"non-finite rate keeps the entry", map[string]any{"k": k(math.Inf(1))}, true, fixtureRates(2)},
+		{"non-numeric rate keeps the entry", map[string]any{"k": k("4")}, true, fixtureRates(2)},
+		{"unrecognized key is ignored", map[string]any{"k": map[string]any{"input_per_mtok": 2.0, "output_per_mtok": 10.0, "bogus": 1.0}}, true,
+			TokenRates{"k": {InputPerMtok: r1k.InputPerMtok, OutputPerMtok: r1k.OutputPerMtok}}},
+		{"incomplete entry applies as parsed", map[string]any{"k": map[string]any{"output_per_mtok": 10.0}}, true,
+			TokenRates{"k": {OutputPerMtok: r1k.OutputPerMtok}}},
+		{"key missing from the section is removed", map[string]any{"x": map[string]any{"input_per_mtok": 1, "output_per_mtok": int64(2)}}, true,
+			TokenRates{"x": {InputPerMtok: new(1.0), OutputPerMtok: new(2.0)}}},
+		{"added entry with an invalid rate is read as at startup", map[string]any{"k": k(2.0), "n": invalid}, true,
+			TokenRates{"k": r1k, "n": {OutputPerMtok: new(1.0)}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			inForce := fixtureRates(2)
+
+			got := ReloadTokenRates(inForce, tt.raw, tt.present)
+
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("ReloadTokenRates(%v, %v) = %s, want %s", tt.raw, tt.present, asJSON(t, got), asJSON(t, tt.want))
+			}
+			if !reflect.DeepEqual(inForce, fixtureRates(2)) {
+				t.Errorf("ReloadTokenRates mutated inForce: %s", asJSON(t, inForce))
+			}
+		})
+	}
+}
+
+func TestTokenRatesVersion(t *testing.T) {
+	t.Parallel()
+
+	parse := func(input, output, cacheRead any) TokenRates {
+		rates, _ := ParseTokenRates(map[string]any{"k": map[string]any{"input_per_mtok": input, "output_per_mtok": output, "cache_read_per_mtok": cacheRead}}, true)
+		return rates
+	}
+
+	tests := []struct {
+		name      string
+		a, b      TokenRates
+		wantEqual bool
+	}{
+		{"integer and float spellings", parse(3, 15, 0.3), parse(3.0, int64(15), 0.3), true},
+		{"input differs", parse(3, 15, 0.3), parse(4, 15, 0.3), false},
+		{"cache read differs", parse(3, 15, 0.3), parse(3, 15, 0.4), false},
+		{"unset cache read differs from zero", parse(3, 15, nil), parse(3, 15, 0), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			a, b := tt.a.Version(), tt.b.Version()
+
+			if (a == b) != tt.wantEqual || !strings.HasPrefix(a, "sha256:") {
+				t.Errorf("Version() of %s and %s = %q, %q, want sha256 digests, equal %t", asJSON(t, tt.a), asJSON(t, tt.b), a, b, tt.wantEqual)
+			}
+		})
+	}
+
+	if got := TokenRates(nil).Version(); got != "" {
+		t.Errorf("Version() of nil rates = %q, want empty", got)
+	}
 }

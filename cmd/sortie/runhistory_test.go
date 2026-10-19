@@ -11,10 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server"
 )
 
@@ -26,8 +24,6 @@ type runsHarness struct {
 	store *persistence.Store
 	url   string
 }
-
-var claudeRates = pricing.TokenRateConfig{InputPerMtok: new(3.0), OutputPerMtok: new(15.0), CacheReadPerMtok: new(0.3), CacheWritePerMtok: new(3.75)}
 
 func newRunsHarness(t *testing.T, snap orchestrator.RuntimeSnapshotResult) *runsHarness {
 	t.Helper()
@@ -42,7 +38,6 @@ func newRunsHarness(t *testing.T, snap orchestrator.RuntimeSnapshotResult) *runs
 	srv := server.New(server.Params{
 		SnapshotFn: func() (orchestrator.RuntimeSnapshotResult, error) { return snap, nil },
 		RefreshFn:  func() bool { return true },
-		TokenRates: pricing.TokenRates{"claude-code": claudeRates},
 		RunHistory: runHistoryReader{store: store},
 	})
 	ts := httptest.NewServer(srv.Mux())
@@ -276,14 +271,14 @@ func TestRunHistoryServesIssueOutcome(t *testing.T) {
 func TestRunHistoryServesCostAndOrigin(t *testing.T) {
 	t.Parallel()
 
-	cost := pricing.EstimateCost(domain.TokenUsage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 200, CacheWriteTokens: 100}, &claudeRates)
 	tokens := func(input, output, total, cacheRead, cacheWrite any) map[string]any {
 		return map[string]any{"input_tokens": input, "output_tokens": output, "total_tokens": total, "cache_read_tokens": cacheRead, "cache_write_tokens": cacheWrite}
 	}
 	measured := runRow("i-0", "OTHER-0")
+	measured.EstimatedCostUSD, measured.CostStatus = new(0.010035), "estimated"
 	measured.Trigger, measured.ReactionKind, measured.InputTokens, measured.OutputTokens, measured.TotalTokens, measured.CacheReadTokens, measured.CacheWriteTokens = new("ci_fix"), "ci", 1000, 500, 1500, 200, 100
 	unmeasured := runRow("i-0", "OTHER-0")
-	unmeasured.TokensMeasured = false
+	unmeasured.TokensMeasured, unmeasured.CostStatus = false, "unmeasured"
 
 	h := newRunsHarness(t, orchestrator.RuntimeSnapshotResult{})
 	h.append(t, measured)
@@ -295,7 +290,7 @@ func TestRunHistoryServesCostAndOrigin(t *testing.T) {
 
 	wants := []map[string]any{
 		{"tokens": tokens(nil, nil, nil, nil, nil), "estimated_cost_usd": nil, "cost_status": "unmeasured", "trigger": nil, "reaction_kind": "", "reaction_config_key": ""},
-		{"tokens": tokens(1000.0, 500.0, 1500.0, 200.0, 100.0), "estimated_cost_usd": *cost, "cost_status": "estimated", "trigger": "ci_fix", "reaction_kind": "ci", "reaction_config_key": "ci_failure"},
+		{"tokens": tokens(1000.0, 500.0, 1500.0, 200.0, 100.0), "estimated_cost_usd": 0.010035, "cost_status": "estimated", "trigger": "ci_fix", "reaction_kind": "ci", "reaction_config_key": "ci_failure"},
 	}
 	for i, want := range wants {
 		for member, wantValue := range want {

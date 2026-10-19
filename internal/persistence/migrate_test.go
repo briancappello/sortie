@@ -248,6 +248,8 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"resume_cache_read_tokens", "INTEGER", false, 0},
 				{"resume_cache_write_tokens", "INTEGER", false, 0},
 				{"resume_model_usage", "TEXT", false, 0},
+				{"estimated_cost_usd", "REAL", false, 0},
+				{"cost_status", "TEXT", false, 0},
 			},
 		},
 		{
@@ -259,6 +261,10 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"output_tokens", "INTEGER", true, 0},
 				{"cache_read_tokens", "INTEGER", true, 0},
 				{"cache_write_tokens", "INTEGER", true, 0},
+				{"estimated_cost_usd", "REAL", false, 0},
+				{"cost_status", "TEXT", false, 0},
+				{"price_source", "TEXT", true, 0},
+				{"price_table_version", "TEXT", true, 0},
 			},
 		},
 		{
@@ -336,6 +342,8 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"dispatch_id", "TEXT", true, 0},
 				{"cache_write_tokens", "INTEGER", true, 0},
 				{"unaccounted_turns", "INTEGER", true, 0},
+				{"estimated_cost_usd", "REAL", false, 0},
+				{"cost_status", "TEXT", true, 0},
 			},
 		},
 		{

@@ -173,6 +173,8 @@ func runHistoryEntry(r persistence.RunHistory) server.RunHistoryEntry {
 		},
 		TokensMeasured:       r.TokensMeasured,
 		UnaccountedTurns:     r.UnaccountedTurns,
+		EstimatedCostUSD:     r.EstimatedCostUSD,
+		CostStatus:           r.CostStatus,
 		StagePreviousOutcome: r.StagePreviousOutcome,
 		ReviewMetadata:       r.ReviewMetadata,
 		OriginRecorded:       r.OriginRecorded,

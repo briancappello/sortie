@@ -116,17 +116,11 @@ func percentile(sorted []float64, p float64) float64 {
 	return sorted[idx]
 }
 
-// priceOf returns the estimated USD cost for row under price, or nil
-// when price has no rate for row's agent adapter.
-func priceOf(row persistence.RunStatsRow, price Pricer) *float64 {
-	usage := domain.TokenUsage{
-		InputTokens:      row.InputTokens,
-		OutputTokens:     row.OutputTokens,
-		TotalTokens:      row.TotalTokens,
-		CacheReadTokens:  row.CacheReadTokens,
-		CacheWriteTokens: row.CacheWriteTokens,
-	}
-	return price(row.AgentAdapter, usage)
+// spentTokens reports whether row used any token, in any counter. A row that
+// spent nothing is neither priced nor unpriced.
+func spentTokens(row persistence.RunStatsRow) bool {
+	return row.InputTokens != 0 || row.OutputTokens != 0 || row.TotalTokens != 0 ||
+		row.CacheReadTokens != 0 || row.CacheWriteTokens != 0
 }
 
 // selfReviewAccum accumulates the self-review folding state across
@@ -344,15 +338,21 @@ const originBreakdownWarning = "this database was written before sortie recorded
 	"so the report leaves out the breakdown by run origin. " +
 	"Run sortie once with this workflow to add it."
 
+const costBreakdownWarning = "this database was written before sortie recorded the cost of each run, " +
+	"so the report leaves out cost. " +
+	"Run sortie once with this workflow to add it."
+
+// costAlsoOmittedNotice closes the warning of an earlier missing group on a
+// database that also lacks the cost columns.
+const costAlsoOmittedNotice = "The report also leaves out cost until then."
+
 // Aggregator folds a stream of [persistence.RunStatsRow] values, via
 // [Aggregator.Add], into the totals and per-dimension groups
 // [Aggregator.Report] renders into a [Report]. It is not safe for concurrent
 // use; a caller builds one per report.
 type Aggregator struct {
-	caps            persistence.RunHistoryCapabilities
-	price           Pricer
-	ratesConfigured bool
-	tierLabel       string
+	caps      persistence.RunHistoryCapabilities
+	tierLabel string
 
 	total totalAccum
 
@@ -372,27 +372,24 @@ type Aggregator struct {
 	selfReview selfReviewAccum
 }
 
-// New constructs an [Aggregator] for caps and price. A nil price means the
-// workflow configures no token_rates entry: no run is priced, none counts as
-// unpriced, and [Report.RatesConfigured] is false.
-func New(caps persistence.RunHistoryCapabilities, price Pricer) *Aggregator {
+// New constructs an [Aggregator] for caps. It reads each run's cost as
+// recorded and prices nothing.
+func New(caps persistence.RunHistoryCapabilities) *Aggregator {
 	return &Aggregator{
-		caps:            caps,
-		price:           price,
-		ratesConfigured: price != nil,
-		tierLabel:       tier(caps),
-		byStatus:        make(map[string]*groupAccum),
-		byAdapter:       make(map[string]*groupAccum),
-		byRule:          make(map[string]*groupAccum),
-		byTemplate:      make(map[string]*groupAccum),
-		byModel:         make(map[string]*groupAccum),
-		byChain:         make(map[string]*groupAccum),
-		byTrigger:       make(map[string]*groupAccum),
-		byOrigin:        make(map[string]*groupAccum),
-		chains:          make(map[string]*chainAccum),
-		passes:          make(map[passKey]*passAccum),
-		issueIDs:        make(map[string]struct{}),
-		selfReview:      selfReviewAccum{byVerdict: make(map[string]int)},
+		caps:       caps,
+		tierLabel:  tier(caps),
+		byStatus:   make(map[string]*groupAccum),
+		byAdapter:  make(map[string]*groupAccum),
+		byRule:     make(map[string]*groupAccum),
+		byTemplate: make(map[string]*groupAccum),
+		byModel:    make(map[string]*groupAccum),
+		byChain:    make(map[string]*groupAccum),
+		byTrigger:  make(map[string]*groupAccum),
+		byOrigin:   make(map[string]*groupAccum),
+		chains:     make(map[string]*chainAccum),
+		passes:     make(map[passKey]*passAccum),
+		issueIDs:   make(map[string]struct{}),
+		selfReview: selfReviewAccum{byVerdict: make(map[string]int)},
 	}
 }
 
@@ -484,20 +481,19 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 				a.total.succeededMeasured++
 			}
 
-			// A ci_failed row records a CI verdict and carries no agent
-			// kind, so it has no rate to look up and is not an unpriced run.
-			if a.ratesConfigured && row.Status != "ci_failed" {
-				cost := priceOf(row, a.price)
-				if cost == nil {
+			// A ci_failed row records a CI verdict and no agent session, so it
+			// is not an unpriced run.
+			if a.caps.RecordedCost() && row.Status != "ci_failed" && spentTokens(row) {
+				if row.EstimatedCostUSD == nil {
 					a.total.costUnpricedRuns++
 					for _, g := range bumped {
 						g.costUnpricedRuns++
 					}
 				} else {
-					a.total.costUSD += *cost
+					a.total.costUSD += *row.EstimatedCostUSD
 					a.total.pricedRuns++
 					for _, g := range bumped {
-						g.costUSD += *cost
+						g.costUSD += *row.EstimatedCostUSD
 						g.pricedRuns++
 					}
 				}
@@ -570,14 +566,12 @@ func (a *Aggregator) chainReport() []ChainGroup {
 }
 
 // Report computes every derived figure exactly once from a's folded
-// state and returns the complete [Report]. Its Warnings field opens with the
-// warning for the capabilities a was built with, if any, and continues with
-// warnings appended in order after it.
+// state and returns the complete [Report]. Its Warnings field holds the one
+// warning for the capabilities a was built with, if any.
 func (a *Aggregator) Report(
 	generatedAt time.Time,
 	workflowPath, dbPath string,
 	since, until *time.Time,
-	warnings []string,
 ) Report {
 	full := a.caps.Full()
 
@@ -586,7 +580,7 @@ func (a *Aggregator) Report(
 		WorkflowPath: workflowPath,
 		DBPath:       dbPath,
 		SchemaTier:   a.tierLabel,
-		Warnings:     a.composeWarnings(warnings),
+		Warnings:     a.composeWarnings(),
 		Summary:      a.summary(full),
 		ByStatus:     a.groupSlice(a.byStatus, full),
 		ByAdapter:    a.groupSlice(a.byAdapter, full),
@@ -597,8 +591,6 @@ func (a *Aggregator) Report(
 		ChainFunnels: a.funnelReport(generatedAt, until),
 		ByTrigger:    []Group{},
 		ByOrigin:     []Group{},
-
-		RatesConfigured: a.ratesConfigured,
 	}
 	if since != nil {
 		rpt.Since = new(since.UTC().Format(time.RFC3339))
@@ -628,24 +620,35 @@ func (a *Aggregator) Report(
 }
 
 // composeWarnings returns the non-nil warning list: the one warning that
-// names what a's capabilities leave out, if any, followed by extra.
-func (a *Aggregator) composeWarnings(extra []string) []string {
+// names what a's capabilities leave out, if any. A database that lacks the
+// cost columns together with an earlier group gets cost named on that
+// group's warning, so the list never holds two.
+func (a *Aggregator) composeWarnings() []string {
 	list := []string{}
 	switch {
 	case !a.caps.Full():
 		list = append(list, degradedSchemaWarning(a.caps))
 	case !a.caps.ModelBreakdown():
-		list = append(list, modelBreakdownWarning)
+		list = append(list, a.withCostNotice(modelBreakdownWarning))
 	case !a.caps.ChainBreakdown():
-		list = append(list, chainBreakdownWarning)
+		list = append(list, a.withCostNotice(chainBreakdownWarning))
 	case !a.caps.TriggerBreakdown():
-		list = append(list, triggerBreakdownWarning)
+		list = append(list, a.withCostNotice(triggerBreakdownWarning))
 	case !a.caps.OriginBreakdown():
-		list = append(list, originBreakdownWarning)
+		list = append(list, a.withCostNotice(originBreakdownWarning))
 	case len(a.stages.Chains) > 0 && !a.caps.FunnelBreakdown():
-		list = append(list, funnelBreakdownWarning)
+		list = append(list, a.withCostNotice(funnelBreakdownWarning))
+	case !a.caps.RecordedCost():
+		list = append(list, costBreakdownWarning)
 	}
-	return append(list, extra...)
+	return list
+}
+
+func (a *Aggregator) withCostNotice(warning string) string {
+	if a.caps.RecordedCost() {
+		return warning
+	}
+	return warning + " " + costAlsoOmittedNotice
 }
 
 // summary computes the report-wide [Summary].

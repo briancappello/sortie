@@ -2,6 +2,8 @@
 // advisories, and estimates the USD cost of token usage under a per-kind
 // rate. [ParseTokenRates] and [EstimateCost] are the entry points;
 // [TokenRateConfig.Complete] states which entries price anything.
+// [ReloadTokenRates] re-reads the section while a service runs, and
+// [PriceRun] and [PriceSession] price a finished run and a running session.
 //
 // The package also holds the embedded price table ([EmbeddedTable]), the
 // validation every price table passes ([ParseTable]), and the rule that
@@ -9,6 +11,9 @@
 package pricing
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -72,47 +77,8 @@ func ParseTokenRates(rawSection any, present bool) (TokenRates, []string) {
 			continue
 		}
 
-		var cfg TokenRateConfig
-		kindMap, ok := val.(map[string]any)
-		if !ok {
-			warnings = append(warnings, fmt.Sprintf("token_rates.%s: expected map, got %T", kind, val))
-			rates[kind] = cfg
-			continue
-		}
-
-		if v, w := extractRate(kindMap, "input_per_mtok", kind); w != "" {
-			warnings = append(warnings, w)
-		} else {
-			cfg.InputPerMtok = v
-		}
-		if v, w := extractRate(kindMap, "output_per_mtok", kind); w != "" {
-			warnings = append(warnings, w)
-		} else {
-			cfg.OutputPerMtok = v
-		}
-		if v, w := extractRate(kindMap, "cache_read_per_mtok", kind); w != "" {
-			warnings = append(warnings, w)
-		} else {
-			cfg.CacheReadPerMtok = v
-		}
-		if v, w := extractRate(kindMap, "cache_write_per_mtok", kind); w != "" {
-			warnings = append(warnings, w)
-		} else {
-			cfg.CacheWritePerMtok = v
-		}
-
-		for _, key := range slices.Sorted(maps.Keys(kindMap)) {
-			if slices.Contains(rateKeys, key) {
-				continue
-			}
-			warnings = append(warnings, fmt.Sprintf("token_rates.%s.%s: unrecognized key is ignored", kind, key))
-		}
-
-		if !cfg.Complete() {
-			warnings = append(warnings,
-				fmt.Sprintf("token_rates.%s: entry needs both input_per_mtok and output_per_mtok and prices nothing", kind))
-		}
-
+		cfg, entryWarnings, _ := readTokenRateEntry(kind, val)
+		warnings = append(warnings, entryWarnings...)
 		rates[kind] = cfg
 	}
 
@@ -120,6 +86,95 @@ func ParseTokenRates(rawSection any, present bool) (TokenRates, []string) {
 		return nil, warnings
 	}
 	return rates, warnings
+}
+
+// readTokenRateEntry reads one kind's raw entry for startup and reload alike.
+// rejected reports an entry that is not a map or holds an invalid rate.
+func readTokenRateEntry(kind string, raw any) (cfg TokenRateConfig, warnings []string, rejected bool) {
+	kindMap, ok := raw.(map[string]any)
+	if !ok {
+		return cfg, []string{fmt.Sprintf("token_rates.%s: expected map, got %T", kind, raw)}, true
+	}
+
+	rateTargets := [...]**float64{&cfg.InputPerMtok, &cfg.OutputPerMtok, &cfg.CacheReadPerMtok, &cfg.CacheWritePerMtok}
+	for i, key := range rateKeys {
+		rate, warning := extractRate(kindMap, key, kind)
+		if warning != "" {
+			warnings = append(warnings, warning)
+			rejected = true
+			continue
+		}
+		*rateTargets[i] = rate
+	}
+
+	for _, key := range slices.Sorted(maps.Keys(kindMap)) {
+		if slices.Contains(rateKeys, key) {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("token_rates.%s.%s: unrecognized key is ignored", kind, key))
+	}
+
+	if !cfg.Complete() {
+		warnings = append(warnings,
+			fmt.Sprintf("token_rates.%s: entry needs both input_per_mtok and output_per_mtok and prices nothing", kind))
+	}
+	return cfg, warnings, rejected
+}
+
+// ReloadTokenRates returns the rates a reloaded token_rates section puts in
+// force. A malformed section or entry keeps what inForce holds for it, so a
+// bad reload never drops working rates. inForce is never mutated.
+func ReloadTokenRates(inForce TokenRates, rawSection any, present bool) TokenRates {
+	if !present || rawSection == nil {
+		return nil
+	}
+	topMap, ok := rawSection.(map[string]any)
+	if !ok {
+		return inForce
+	}
+
+	var result TokenRates
+	for kind, raw := range topMap {
+		if kind == "" {
+			continue
+		}
+		entry, _, rejected := readTokenRateEntry(kind, raw)
+		if kept, held := inForce[kind]; rejected && held {
+			entry = kept
+		}
+		if result == nil {
+			result = make(TokenRates, len(topMap))
+		}
+		result[kind] = entry
+	}
+	return result
+}
+
+// tokenRateDigestEntry fixes the member order of the canonical encoding
+// that Version hashes.
+type tokenRateDigestEntry struct {
+	InputPerMtok      *float64 `json:"input_per_mtok"`
+	OutputPerMtok     *float64 `json:"output_per_mtok"`
+	CacheReadPerMtok  *float64 `json:"cache_read_per_mtok"`
+	CacheWritePerMtok *float64 `json:"cache_write_per_mtok"`
+}
+
+// Version returns "sha256:" and the lowercase hex SHA-256 of the canonical
+// JSON encoding of the rates, or "" for nil or empty rates. The encoding
+// depends on the parsed values only, so comments, whitespace, key order, and
+// number spelling in WORKFLOW.md never change it. Incomplete entries count.
+func (r TokenRates) Version() string {
+	if len(r) == 0 {
+		return ""
+	}
+	entries := make(map[string]tokenRateDigestEntry, len(r))
+	for kind, cfg := range r {
+		entries[kind] = tokenRateDigestEntry(cfg)
+	}
+	// Rates passed extractRate, so they are finite and Marshal cannot fail.
+	encoded, _ := json.Marshal(entries)
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // TokenRateAdvisories runs ParseTokenRates over cfg's "token_rates"

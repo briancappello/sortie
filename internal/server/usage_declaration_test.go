@@ -48,14 +48,14 @@ func TestUsageDeclaration_NoneArrivalDiscardedEndToEnd(t *testing.T) {
 		Type: domain.EventTokenUsage, Timestamp: now, Model: "inc-model", Usage: usage,
 	}, slog.Default(), nil)
 
-	snap := orchestrator.RuntimeSnapshot(state, now)
-
 	fptr := func(v float64) *float64 { return &v }
-	rates := pricing.TokenRates{
+	state.TokenRates = pricing.TokenRates{
 		"kind-none": {InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 		"kind-inc":  {InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
 	}
-	resp := toStateResponse(snap, rates, sentence.Context{}, nil)
+	snap := orchestrator.RuntimeSnapshot(state, now)
+
+	resp := toStateResponse(snap, sentence.Context{}, nil)
 
 	var noneResp, incResp runningEntryResponse
 	var foundNoneResp, foundIncResp bool

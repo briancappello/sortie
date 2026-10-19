@@ -17,11 +17,6 @@ func tokenRun(i int, issueID string, totalTokens int64) RunHistory {
 	return run
 }
 
-func sameScalars(a, b IssueTokenUsage) bool {
-	a.ByKind, b.ByKind = nil, nil
-	return reflect.DeepEqual(a, b)
-}
-
 func queryAllRuns(t *testing.T, s *Store, limit int) []RunHistory {
 	t.Helper()
 	rows, err := s.QueryRunHistory(context.Background(), RunHistoryFilter{Limit: limit})
@@ -350,7 +345,7 @@ func TestTokenUsageByIssue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("TokenUsageByIssue(ISS-NONE) unexpected error: %v", err)
 		}
-		if !sameScalars(usage, IssueTokenUsage{}) || usage.ByKind != nil {
+		if usage != (IssueTokenUsage{}) {
 			t.Errorf("TokenUsageByIssue(ISS-NONE) = %+v, want zero value", usage)
 		}
 	})
@@ -409,21 +404,20 @@ func TestTokenUsageByIssue(t *testing.T) {
 		}
 	})
 
-	t.Run("class sums and per-kind spend count measured rows only", func(t *testing.T) {
+	t.Run("class sums count measured rows only", func(t *testing.T) {
 		t.Parallel()
 		s := openTestStore(t)
 		migrateOrFatal(t, s)
 
-		const issueID = "ISS-KINDS"
+		const issueID = "ISS-CLASSES"
 		rows := []RunHistory{
-			{AgentAdapter: "claude", InputTokens: 100, CacheReadTokens: 30, CacheWriteTokens: 20, OutputTokens: 10, TotalTokens: 160, TokensMeasured: true},
-			{AgentAdapter: "claude", InputTokens: 10, CacheReadTokens: 40, OutputTokens: 5, TotalTokens: 55, TokensMeasured: true},
-			{AgentAdapter: "codex", InputTokens: 500, CacheReadTokens: 7, CacheWriteTokens: 3, OutputTokens: 50},
-			{AgentAdapter: "", TokensMeasured: true},
+			{InputTokens: 100, CacheReadTokens: 30, CacheWriteTokens: 20, OutputTokens: 10, TotalTokens: 160, TokensMeasured: true},
+			{InputTokens: 10, CacheReadTokens: 40, OutputTokens: 5, TotalTokens: 55, TokensMeasured: true},
+			{InputTokens: 500, CacheReadTokens: 7, CacheWriteTokens: 3, OutputTokens: 50},
+			{TokensMeasured: true},
 		}
 		for i, row := range rows {
 			run := tokenRun(i+1, issueID, row.TotalTokens)
-			run.AgentAdapter = row.AgentAdapter
 			run.InputTokens, run.OutputTokens = row.InputTokens, row.OutputTokens
 			run.CacheReadTokens, run.CacheWriteTokens = row.CacheReadTokens, row.CacheWriteTokens
 			run.TokensMeasured = row.TokensMeasured
@@ -435,18 +429,50 @@ func TestTokenUsageByIssue(t *testing.T) {
 			t.Fatalf("TokenUsageByIssue(%s) unexpected error: %v", issueID, err)
 		}
 
-		wantByKind := map[string]KindTokenUsage{
-			"claude": {FreshInputTokens: 50, CacheReadTokens: 70, CacheWriteTokens: 20, OutputTokens: 15},
-		}
-		if !reflect.DeepEqual(usage.ByKind, wantByKind) {
-			t.Errorf("TokenUsageByIssue(%s).ByKind = %+v, want %+v", issueID, usage.ByKind, wantByKind)
-		}
 		wantTotals := IssueTokenUsage{
 			TotalTokens: 215, UncachedTokens: 145, Sessions: 4, UnmeasuredSessions: 1,
 			InputTokens: 110, OutputTokens: 15, CacheReadTokens: 70, CacheWriteTokens: 20,
+			UnpricedSessions: 3,
 		}
-		if !sameScalars(usage, wantTotals) {
+		if usage != wantTotals {
 			t.Errorf("TokenUsageByIssue(%s) = %+v, want totals %+v", issueID, usage, wantTotals)
+		}
+	})
+
+	t.Run("recorded cost aggregates count only rows that spent tokens", func(t *testing.T) {
+		t.Parallel()
+		s := openTestStore(t)
+		migrateOrFatal(t, s)
+
+		cost := func(v float64) *float64 { return &v }
+		rows := []struct {
+			cost   *float64
+			status string
+			tokens int64
+		}{
+			{cost(15), "estimated", 100},
+			{cost(0), "estimated", 0},
+			{cost(12), "partial", 100},
+			{nil, "unpriced", 100},
+			{nil, "", 100},
+			{nil, "", 0},
+		}
+		for i, row := range rows {
+			run := tokenRun(i+1, "ISS-COST", row.tokens)
+			run.TokensMeasured = true
+			run.EstimatedCostUSD, run.CostStatus = row.cost, row.status
+			appendOrFatal(t, s, run)
+		}
+
+		usage, err := s.TokenUsageByIssue(context.Background(), "ISS-COST")
+		if err != nil {
+			t.Fatalf("TokenUsageByIssue(ISS-COST) unexpected error: %v", err)
+		}
+
+		got := []float64{usage.RecordedCostUSD, float64(usage.PricedSessions), float64(usage.PartialSessions), float64(usage.UnpricedSessions)}
+		want := []float64{27, 2, 1, 2}
+		if !slices.Equal(got, want) {
+			t.Errorf("TokenUsageByIssue(ISS-COST) (RecordedCostUSD, PricedSessions, PartialSessions, UnpricedSessions) = %v, want %v", got, want)
 		}
 	})
 }
@@ -650,10 +676,11 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 	}
 	wantByIssue := want
 	wantByIssue.CacheReadTokens = 2450
-	if !sameScalars(byIssue, wantByIssue) {
+	wantByIssue.UnpricedSessions = 3
+	if byIssue != wantByIssue {
 		t.Errorf("TokenUsageByIssue(%s) = %+v, want %+v", issueID, byIssue, wantByIssue)
 	}
-	if !sameScalars(budgetUsage, want) {
+	if budgetUsage != want {
 		t.Errorf("QueryTokenBudgetUsage()[%s] = %+v, want %+v", issueID, budgetUsage, want)
 	}
 }

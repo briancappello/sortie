@@ -14,9 +14,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
-	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
-	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/runstats"
 	"github.com/sortie-ai/sortie/internal/server"
 	"github.com/sortie-ai/sortie/internal/workflow"
@@ -32,28 +30,10 @@ var statsNow = time.Now
 // breakdown, and a report without --since reads every run on record.
 const statsChainTextRows = 20
 
-// statsPricer adapts the workflow's token rates to a [runstats.Pricer]. It
-// returns nil when rates holds no entry, which tells the aggregator that no
-// token_rates are configured.
-func statsPricer(rates pricing.TokenRates) runstats.Pricer {
-	if len(rates) == 0 {
-		return nil
-	}
-	return func(agentKind string, usage domain.TokenUsage) *float64 {
-		entry, ok := rates[agentKind]
-		if !ok {
-			return nil
-		}
-		return pricing.EstimateCost(usage, &entry)
-	}
-}
-
-// statsSource is what a stats report is read from and priced with.
+// statsSource is what a stats report is read from.
 type statsSource struct {
 	dbPath       string
 	workflowPath string
-	rates        pricing.TokenRates
-	rateWarnings []string
 
 	// stages supplies the stage chains chain_funnels reads; nil serves an
 	// empty chain_funnels.
@@ -75,7 +55,7 @@ func (src statsSource) report(ctx context.Context, since, until *time.Time, gene
 		return runstats.Report{}, err
 	}
 
-	agg := runstats.New(caps, statsPricer(src.rates))
+	agg := runstats.New(caps)
 	if src.stages != nil {
 		stages := src.stages()
 		if len(stages.Chains) > 0 && caps.FunnelBreakdown() {
@@ -90,7 +70,7 @@ func (src statsSource) report(ctx context.Context, since, until *time.Time, gene
 	if err := store.ScanRunHistoryRange(ctx, caps, since, until, agg.Add); err != nil {
 		return runstats.Report{}, err
 	}
-	return agg.Report(generatedAt, src.workflowPath, src.dbPath, since, until, src.rateWarnings), nil
+	return agg.Report(generatedAt, src.workflowPath, src.dbPath, since, until), nil
 }
 
 // dispatchStages joins the dispatch section to the stages chain_funnels
@@ -359,7 +339,7 @@ func statsFootnotes(s runstats.Summary, chains int) []string {
 	}
 	if s.CostUnpricedRuns > 0 {
 		lines = append(lines, fmt.Sprintf(
-			"note: the cost figures skip %d of these runs, because token_rates has no price for the coding agent behind them.",
+			"note: the cost figures skip %d of these runs, because token_rates had no price for the coding agent behind them when they were recorded.",
 			s.CostUnpricedRuns))
 	}
 	if chains > statsChainTextRows {
@@ -419,14 +399,10 @@ func renderStatsText(stdout, stderr io.Writer, report runstats.Report) {
 		fmt.Fprintf(stdout, "turns (succeeded)       %s\n", //nolint:errcheck // stdout write failure is unrecoverable
 			formatFloatDash(report.Summary.MeanTurnsSucceeded, "%.1f"))
 		fmt.Fprintf(stdout, "tokens (measured runs)  %s\n", formatStatsTokens(report.Summary.Tokens)) //nolint:errcheck // stdout write failure is unrecoverable
-		switch {
-		case report.Summary.CostUSD != nil:
+		if report.Summary.CostUSD != nil {
 			fmt.Fprintf(stdout, "cost (measured runs)    %s   per succeeded run %s\n", //nolint:errcheck // stdout write failure is unrecoverable
 				server.FormatCost(*report.Summary.CostUSD), formatCostDash(report.Summary.CostPerSucceededRunUSD))
-		case !report.RatesConfigured && report.Summary.Tokens != nil:
-			fmt.Fprintln(stdout, //nolint:errcheck // stdout write failure is unrecoverable
-				"cost                    not estimated; set token_rates in the workflow to price these runs")
-		default:
+		} else {
 			fmt.Fprintln(stdout, "cost (measured runs)    -   per succeeded run -") //nolint:errcheck // stdout write failure is unrecoverable
 		}
 	}
@@ -562,13 +538,10 @@ func runStats(ctx context.Context, args []string, stdout io.Writer, stderr io.Wr
 	}
 
 	dbPath := resolveDBPath(cfg.DBPath, filepath.Dir(path))
-	rates, rateWarnings := pricing.ParseTokenRates(cfg.ExtensionValue("token_rates"))
 
 	src := statsSource{
 		dbPath:       dbPath,
 		workflowPath: path,
-		rates:        rates,
-		rateWarnings: rateWarnings,
 		stages:       func() runstats.Stages { return dispatchStages(dispatch) },
 	}
 	report, err := src.report(ctx, since, until, now)

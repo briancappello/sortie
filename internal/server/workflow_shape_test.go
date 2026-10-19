@@ -169,10 +169,11 @@ func newShapeHarness(t *testing.T, frontMatter string) *shapeHarness {
 	rawRates, present := cfg.ExtensionValue("token_rates")
 	rates, _ := pricing.ParseTokenRates(rawRates, present)
 	srv := New(Params{
-		SnapshotFn:      func() (orchestrator.RuntimeSnapshotResult, error) { return orchestrator.RuntimeSnapshotResult{}, nil },
+		SnapshotFn: func() (orchestrator.RuntimeSnapshotResult, error) {
+			return orchestrator.RuntimeSnapshotResult{TokenRates: rates}, nil
+		},
 		RefreshFn:       func() bool { return true },
 		Logger:          logger,
-		TokenRates:      rates,
 		WorkflowShapeFn: orch.WorkflowShape,
 	})
 	ts := httptest.NewServer(srv.Mux())

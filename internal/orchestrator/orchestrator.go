@@ -16,6 +16,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/workflow"
 )
@@ -172,6 +173,9 @@ type OrchestratorParams struct {
 	Metrics         domain.Metrics       // may be nil; defaults to NoopMetrics
 	ToolRegistry    *domain.ToolRegistry // may be nil
 	HostPool        *HostPool            // may be nil; defaults to local-mode pool
+
+	// TokenRates are the rates in force at startup. Nil prices no kind.
+	TokenRates pricing.TokenRates
 
 	// Router selects the destinations of every outbound event. Nil
 	// routes nothing, so no event reaches a tracker or a notifier.
@@ -389,6 +393,8 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 	if metrics == nil {
 		metrics = &domain.NoopMetrics{}
 	}
+
+	params.State.TokenRates = params.TokenRates
 
 	maxConc := params.State.MaxConcurrentAgents
 	exitBuf := max(maxConc*2, 64)
@@ -640,6 +646,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 	o.updateRouter(cfg)
 	for _, result := range exits {
 		HandleWorkerExit(o.state, result, HandleWorkerExitParams{
+			TokenRatesSection:                 func() (any, bool) { return cfg.ExtensionValue("token_rates") },
 			Store:                             o.store,
 			RunEventRetry:                     o.runEventRetry,
 			MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
@@ -937,6 +944,8 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	// On reload failure the workflow manager retains last-known-good config.
 	cfg := o.workflowManager.Config()
 	o.updateRouter(cfg)
+	rawRates, ratesPresent := cfg.ExtensionValue("token_rates")
+	o.state.TokenRates = pricing.ReloadTokenRates(o.state.TokenRates, rawRates, ratesPresent)
 
 	// Applied unconditionally, not gated on preflight success.
 	o.state.PollIntervalMS = cfg.Polling.IntervalMS
@@ -1531,10 +1540,10 @@ func (o *Orchestrator) maybeWriteIncrementalMetadata(ctx context.Context, issueI
 	o.writeIncrementalMetadata(ctx, issueID, entry, now)
 }
 
-// writeIncrementalMetadata upserts a running session's token totals and
-// unaccounted-turn count under its dispatch ID, then restarts the throttle
-// and clears any owed write. A failed upsert is logged and leaves both
-// untouched. Must run on the single-writer event loop.
+// writeIncrementalMetadata upserts a running session's token totals,
+// unaccounted-turn count, and live cost estimate under its dispatch ID, then
+// restarts the throttle and clears any owed write. A failed upsert is logged
+// and leaves both untouched. Must run on the single-writer event loop.
 func (o *Orchestrator) writeIncrementalMetadata(ctx context.Context, issueID string, entry *RunningEntry, now time.Time) {
 	// An unmeasured count is stored as zero so a reader cannot find a figure
 	// contradicting the qualifier beside it.
@@ -1557,6 +1566,10 @@ func (o *Orchestrator) writeIncrementalMetadata(ctx context.Context, issueID str
 		APIRequestsMeasured: requestsMeasured,
 		UnaccountedTurns:    entry.UnaccountedTurns,
 		UpdatedAt:           now.Format(time.RFC3339),
+	}
+	if cost, status := pricing.PriceSession(spendOfRunningEntry(entry), o.state.TokenRates); status != pricing.CostUnmeasured {
+		meta.EstimatedCostUSD = cost
+		meta.CostStatus = string(status)
 	}
 	if entry.AgentPID != "" {
 		meta.AgentPID = &entry.AgentPID
@@ -2184,6 +2197,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 			cfg := o.workflowManager.Config()
 			o.updateRouter(cfg)
 			HandleWorkerExit(o.state, workerExit, HandleWorkerExitParams{
+				TokenRatesSection:                 func() (any, bool) { return cfg.ExtensionValue("token_rates") },
 				Store:                             o.store,
 				MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
 				MaxConsecutiveAbsences:            cfg.Agent.MaxConsecutiveAbsences,
