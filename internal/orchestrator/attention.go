@@ -80,8 +80,11 @@ func parkedCause(row SnapshotParkedEntry) AttentionCause {
 
 func budgetCause(row SnapshotBudgetEntry) AttentionCause {
 	ceiling := strconv.Itoa(row.BudgetSessions)
-	if row.Reason == budgetReasonToken {
+	switch row.Reason {
+	case budgetReasonToken:
 		ceiling = strconv.FormatInt(row.BudgetTokens, 10)
+	case budgetReasonMoney:
+		ceiling = strconv.FormatFloat(row.BudgetUSD, 'f', -1, 64)
 	}
 	since := row.ExhaustedAt.UTC()
 	return AttentionCause{

@@ -139,8 +139,8 @@ type stubStore struct {
 	// is zero.
 	tokenUnaccountedIDs []string
 
-	// tokenExhaustedUsage overrides the fixed 1000-token usage
-	// for a tokenExhaustedIDs member, for a test controlling every field.
+	// tokenExhaustedUsage reports this usage for a candidate, for a test
+	// controlling every field, including the cost aggregates.
 	tokenExhaustedUsage map[string]persistence.IssueTokenUsage
 
 	upsertSessionMetadataErr error
@@ -314,9 +314,6 @@ func (s *stubStore) ResetHandoffAbsenceSequence(_ context.Context, issueID strin
 	return nil
 }
 
-// QueryTokenBudgetUsage reports a tokenExhaustedIDs member at the fixed
-// 1000 threshold every test here configures; absent candidates read as
-// zero spend.
 func (s *stubStore) QueryTokenBudgetUsage(_ context.Context, candidateIDs []string) (map[string]persistence.IssueTokenUsage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -325,12 +322,12 @@ func (s *stubStore) QueryTokenBudgetUsage(_ context.Context, candidateIDs []stri
 	}
 	usage := make(map[string]persistence.IssueTokenUsage, len(candidateIDs))
 	for _, id := range candidateIDs {
+		if custom, ok := s.tokenExhaustedUsage[id]; ok {
+			usage[id] = custom
+			continue
+		}
 		switch {
 		case slices.Contains(s.tokenExhaustedIDs, id):
-			if custom, ok := s.tokenExhaustedUsage[id]; ok {
-				usage[id] = custom
-				continue
-			}
 			usage[id] = persistence.IssueTokenUsage{TotalTokens: 1000, UncachedTokens: 1000}
 		case slices.Contains(s.tokenIncompleteIDs, id):
 			usage[id] = persistence.IssueTokenUsage{TotalTokens: 0, UnmeasuredSessions: 1}
@@ -1409,11 +1406,11 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 		o, store, spy, logBuf := budgetCeilingExemptionFixture(t)
 		var cancelCalls atomic.Int32
 		o.state.Running["X"] = &RunningEntry{
-			Identifier:             "X-ident",
-			Issue:                  domain.Issue{ID: "X", Identifier: "X-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { cancelCalls.Add(1) },
+			Identifier:           "X-ident",
+			Issue:                domain.Issue{ID: "X", Identifier: "X-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { cancelCalls.Add(1) },
 		}
 		o.state.Claimed["X"] = struct{}{}
 		o.agentEventCh <- budgetCeilingCrossingEvent("X")
@@ -1433,7 +1430,7 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			t.Error(`log contains "run stopped by token ceiling", want no such record`)
 		}
 		if cancelCalls.Load() != 0 {
-			t.Errorf("TokenCeilingCancelFunc called %d times, want 0", cancelCalls.Load())
+			t.Errorf("CeilingCancelFunc called %d times, want 0", cancelCalls.Load())
 		}
 		if len(store.runHistories) != 1 {
 			t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
@@ -1453,11 +1450,11 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 		o, store, spy, logBuf := budgetCeilingExemptionFixture(t)
 		var cancelCalls atomic.Int32
 		o.state.Running["X"] = &RunningEntry{
-			Identifier:             "X-ident",
-			Issue:                  domain.Issue{ID: "X", Identifier: "X-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { cancelCalls.Add(1) },
+			Identifier:           "X-ident",
+			Issue:                domain.Issue{ID: "X", Identifier: "X-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { cancelCalls.Add(1) },
 		}
 		o.state.Claimed["X"] = struct{}{}
 		o.agentEventCh <- budgetCeilingCrossingEvent("X")
@@ -1477,7 +1474,7 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			t.Error(`log contains "run stopped by token ceiling", want no such record`)
 		}
 		if cancelCalls.Load() != 0 {
-			t.Errorf("TokenCeilingCancelFunc called %d times, want 0", cancelCalls.Load())
+			t.Errorf("CeilingCancelFunc called %d times, want 0", cancelCalls.Load())
 		}
 		if len(store.runHistories) != 1 {
 			t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
@@ -1502,11 +1499,11 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			StartedAt:  time.Now().UTC(),
 		}
 		o.state.Running["Y"] = &RunningEntry{
-			Identifier:             "Y-ident",
-			Issue:                  domain.Issue{ID: "Y", Identifier: "Y-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { yCancels.Add(1) },
+			Identifier:           "Y-ident",
+			Issue:                domain.Issue{ID: "Y", Identifier: "Y-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { yCancels.Add(1) },
 		}
 		o.state.Claimed["X"] = struct{}{}
 		o.state.Claimed["Y"] = struct{}{}
@@ -1532,7 +1529,7 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			t.Error(`log contains "run stopped by token ceiling", want no such record`)
 		}
 		if yCancels.Load() != 0 {
-			t.Errorf("Y's TokenCeilingCancelFunc called %d times, want 0", yCancels.Load())
+			t.Errorf("Y's CeilingCancelFunc called %d times, want 0", yCancels.Load())
 		}
 		if len(store.runHistories) != 2 {
 			t.Fatalf("AppendRunHistory called %d times, want 2", len(store.runHistories))
@@ -1556,18 +1553,18 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 		o, _, spy, logBuf := budgetCeilingExemptionFixture(t)
 		var xCancels, yCancels atomic.Int32
 		o.state.Running["X"] = &RunningEntry{
-			Identifier:             "X-ident",
-			Issue:                  domain.Issue{ID: "X", Identifier: "X-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { xCancels.Add(1) },
+			Identifier:           "X-ident",
+			Issue:                domain.Issue{ID: "X", Identifier: "X-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { xCancels.Add(1) },
 		}
 		o.state.Running["Y"] = &RunningEntry{
-			Identifier:             "Y-ident",
-			Issue:                  domain.Issue{ID: "Y", Identifier: "Y-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { yCancels.Add(1) },
+			Identifier:           "Y-ident",
+			Issue:                domain.Issue{ID: "Y", Identifier: "Y-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { yCancels.Add(1) },
 		}
 		o.agentEventCh <- budgetCeilingCrossingEvent("Y")
 		o.agentEventCh <- budgetCeilingCrossingEvent("X")
@@ -1581,16 +1578,16 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			t.Fatalf(`log contains "run stopped by token ceiling", want no such record: %s`, logBuf.String())
 		}
 		if yCancels.Load() != 1 {
-			t.Errorf("Y's TokenCeilingCancelFunc called %d times, want 1", yCancels.Load())
+			t.Errorf("Y's CeilingCancelFunc called %d times, want 1", yCancels.Load())
 		}
 		if xCancels.Load() != 0 {
-			t.Errorf("X's TokenCeilingCancelFunc called %d times, want 0", xCancels.Load())
+			t.Errorf("X's CeilingCancelFunc called %d times, want 0", xCancels.Load())
 		}
-		if o.state.Running["Y"].TokenCeilingStopRequest == nil {
-			t.Error("Y's TokenCeilingStopRequest = nil, want non-nil")
+		if o.state.Running["Y"].CeilingStopRequest == nil {
+			t.Error("Y's CeilingStopRequest = nil, want non-nil")
 		}
-		if o.state.Running["X"].TokenCeilingStopRequest != nil {
-			t.Error("X's TokenCeilingStopRequest is non-nil, want nil")
+		if o.state.Running["X"].CeilingStopRequest != nil {
+			t.Error("X's CeilingStopRequest is non-nil, want nil")
 		}
 	})
 
@@ -1613,7 +1610,7 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			state.Running[issueX].IssueTokensCompleted = 90
 			state.Running[issueY] = queuedOrderingIssueEntry(issueY)
 			state.Running[issueY].IssueTokensCompleted = 90
-			state.Running[issueY].TokenCeilingCancelFunc = func() { yCancels.Add(1) }
+			state.Running[issueY].CeilingCancelFunc = func() { yCancels.Add(1) }
 
 			tracker := &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}}
 			o := budgetOrchestratorWithMetrics(state, wm, store, tracker, discardLogger(), spy)
@@ -1621,9 +1618,9 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			// X's row is the trial's first run_history row, appended after
 			// applyQueuedAheadOfExit has already applied (and, for Y,
 			// ceiling-enforced) every message queued ahead of X's exit. The
-			// hook observes Y's TokenCeilingCancelFunc and the budget-stop counter at
+			// hook observes Y's CeilingCancelFunc and the budget-stop counter at
 			// that moment, from the loop goroutine, before Y's own exit or
-			// the shutdown drain can call Y's TokenCeilingCancelFunc again. The send
+			// the shutdown drain can call Y's CeilingCancelFunc again. The send
 			// never blocks, so Y's later row cannot stall the loop.
 			type observedRow struct {
 				yCancels        int32
@@ -1666,7 +1663,7 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			<-done
 
 			if row.yCancels != 1 {
-				t.Fatalf("trial %d: Y's TokenCeilingCancelFunc called %d times by the time X's row was upserted, want 1", trial, row.yCancels)
+				t.Fatalf("trial %d: Y's CeilingCancelFunc called %d times by the time X's row was upserted, want 1", trial, row.yCancels)
 			}
 			// The counter fires only once Y's own exit confirms the ceiling ended it.
 			if row.stoppedByBudget != 0 {
@@ -6214,6 +6211,103 @@ func TestHandleTick_TokenBudgetRebuild(t *testing.T) {
 	})
 }
 
+func TestHandleTick_MoneyBudgetRebuild(t *testing.T) {
+	t.Parallel()
+
+	issue := domain.Issue{ID: "iss-usd", Identifier: "TEST-USD", Title: "title", State: "To Do"}
+	first, second := 0.7, 0.1
+	atCeiling := persistence.IssueTokenUsage{RecordedCostUSD: first + second, PricedSessions: 2, Sessions: 2}
+
+	tests := []struct {
+		name            string
+		maxTokens       int
+		maxCostUSD      float64
+		usage           persistence.IssueTokenUsage
+		queryErr        error
+		priorHold       *BudgetExhaustedEntry
+		priorIncomplete bool
+		wantReason      string
+		wantIncomplete  bool
+	}{
+		{
+			name:       "recorded costs summing to the ceiling hold the issue under the money reason",
+			maxCostUSD: 0.8,
+			usage:      atCeiling,
+			wantReason: budgetReasonMoney,
+		},
+		{
+			name:       "recorded costs one cent below the ceiling hold nothing",
+			maxCostUSD: 0.8,
+			usage:      persistence.IssueTokenUsage{RecordedCostUSD: 0.79, PricedSessions: 2, Sessions: 2},
+		},
+		{
+			name:       "past the money and token ceilings the reason is money",
+			maxTokens:  1000,
+			maxCostUSD: 0.8,
+			usage:      persistence.IssueTokenUsage{TotalTokens: 1500, UncachedTokens: 1500, RecordedCostUSD: first + second, PricedSessions: 2, Sessions: 2},
+			wantReason: budgetReasonMoney,
+		},
+		{
+			name:           "an unpriced run beside a priced run below the ceiling holds nothing and is flagged incomplete",
+			maxCostUSD:     0.8,
+			usage:          persistence.IssueTokenUsage{RecordedCostUSD: 0.5, PricedSessions: 1, UnpricedSessions: 1, Sessions: 2},
+			wantIncomplete: true,
+		},
+		{
+			name:       "a failed shared query folds the prior money hold forward",
+			maxTokens:  1000,
+			maxCostUSD: 0.8,
+			queryErr:   fmt.Errorf("db error"),
+			priorHold:  &BudgetExhaustedEntry{Reason: budgetReasonMoney},
+			wantReason: budgetReasonMoney,
+		},
+		{
+			name:            "no ceiling configured resets the incomplete flags",
+			priorIncomplete: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wm := budgetTickConfigTokens(0, tt.maxTokens)
+			wm.config.Agent.MaxCostUSD = tt.maxCostUSD
+			store := &stubStore{
+				tokenExhaustedUsage: map[string]persistence.IssueTokenUsage{issue.ID: tt.usage},
+				tokenExhaustedErr:   tt.queryErr,
+			}
+			state := NewState(60000, 10, 0, nil, AgentTotals{})
+			if tt.priorHold != nil {
+				state.BudgetExhausted[issue.ID] = tt.priorHold
+			}
+			if tt.priorIncomplete {
+				state.MoneyBudgetIncomplete[issue.ID] = struct{}{}
+			}
+			tracker := &candidateTrackerAdapter{
+				mockTrackerAdapter: &mockTrackerAdapter{},
+				fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return []domain.Issue{issue}, nil },
+			}
+
+			budgetOrchestrator(state, wm, store, tracker).handleTick(context.Background())
+			state.TrackerOpsWg.Wait()
+
+			entry := state.BudgetExhausted[issue.ID]
+			switch {
+			case tt.wantReason == "" && entry != nil:
+				t.Errorf("BudgetExhausted[%s] = %+v, want absent", issue.ID, entry)
+			case tt.wantReason != "" && (entry == nil || entry.Reason != tt.wantReason):
+				t.Fatalf("BudgetExhausted[%s] = %+v, want reason %q", issue.ID, entry, tt.wantReason)
+			case entry != nil && tt.queryErr == nil:
+				requireUsedUSD(t, entry, 0.8, true)
+			}
+			if _, incomplete := state.MoneyBudgetIncomplete[issue.ID]; incomplete != tt.wantIncomplete {
+				t.Errorf("MoneyBudgetIncomplete[%s] present = %v, want %v", issue.ID, incomplete, tt.wantIncomplete)
+			}
+		})
+	}
+}
+
 func TestHandleTick_TokenWarningThreshold(t *testing.T) {
 	t.Parallel()
 
@@ -7088,13 +7182,13 @@ func tokenWarningApplyEventOrchestrator(t *testing.T, maxTokens, warningThreshol
 // TestApplyAgentEvent_TokenWarningOrderedBeforeCeilingStop covers a figure
 // that crosses both the warning threshold and the ceiling in the same
 // event: the warning record must land before enforceInFlightTokenCeiling
-// invokes TokenCeilingCancelFunc for that figure.
+// invokes CeilingCancelFunc for that figure.
 func TestApplyAgentEvent_TokenWarningOrderedBeforeCeilingStop(t *testing.T) {
 	t.Parallel()
 
 	o, entry := tokenWarningApplyEventOrchestrator(t, 100, 80)
 	var warnedBeforeCancel bool
-	entry.TokenCeilingCancelFunc = func() { warnedBeforeCancel = entry.TokenWarningReached }
+	entry.CeilingCancelFunc = func() { warnedBeforeCancel = entry.TokenWarningReached }
 
 	msg := agentEventMsg{IssueID: "id-apply", Event: domain.AgentEvent{Type: domain.EventTokenUsage, Usage: domain.TokenUsage{TotalTokens: 150}}}
 	o.applyAgentEvent(context.Background(), msg, true)
@@ -7102,11 +7196,11 @@ func TestApplyAgentEvent_TokenWarningOrderedBeforeCeilingStop(t *testing.T) {
 	if !entry.TokenWarningReached {
 		t.Fatal("entry.TokenWarningReached = false, want true (150 crosses the 80 threshold)")
 	}
-	if entry.TokenCeilingStopRequest == nil {
-		t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil (150 also crosses the 100 ceiling)")
+	if entry.CeilingStopRequest == nil {
+		t.Fatal("entry.CeilingStopRequest = nil, want non-nil (150 also crosses the 100 ceiling)")
 	}
 	if !warnedBeforeCancel {
-		t.Error("TokenCeilingCancelFunc observed TokenWarningReached = false, want the warning recorded before the ceiling cancels the run")
+		t.Error("CeilingCancelFunc observed TokenWarningReached = false, want the warning recorded before the ceiling cancels the run")
 	}
 }
 
@@ -7125,8 +7219,8 @@ func TestApplyAgentEvent_EnforceCeilingFalseSuppressesTokenWarning(t *testing.T)
 	if entry.TokenWarningReached {
 		t.Error("entry.TokenWarningReached = true, want false: enforceCeiling false must suppress the warning evaluation")
 	}
-	if entry.TokenCeilingStopRequest != nil {
-		t.Error("entry.TokenCeilingStopRequest = non-nil, want nil: enforceCeiling false must suppress the ceiling evaluation")
+	if entry.CeilingStopRequest != nil {
+		t.Error("entry.CeilingStopRequest = non-nil, want nil: enforceCeiling false must suppress the ceiling evaluation")
 	}
 }
 

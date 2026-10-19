@@ -3079,7 +3079,7 @@ func TestExitKindAtEnding(t *testing.T) {
 	t.Parallel()
 
 	ceilingCtx, cancelCeiling := context.WithCancelCause(context.Background())
-	cancelCeiling(errTokenCeilingStop)
+	cancelCeiling(errCeilingStop)
 
 	tests := []struct {
 		name              string
@@ -8322,7 +8322,7 @@ func TestRunWorkerAttempt_PostTurnRefreshUsesRunContext(t *testing.T) {
 	ctx := withRunContext(workerCtx, runCtx)
 
 	tracker := &mockTrackerAdapter{fetchStatesFn: func(refreshCtx context.Context, ids []string) (map[string]string, error) {
-		cancelWorker(errTokenCeilingStop)
+		cancelWorker(errCeilingStop)
 		if refreshCtx.Err() != nil {
 			return nil, refreshCtx.Err()
 		}
@@ -8334,8 +8334,8 @@ func TestRunWorkerAttempt_PostTurnRefreshUsesRunContext(t *testing.T) {
 	if result.ExitKind != WorkerExitNormal {
 		t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
 	}
-	if result.StoppedByTokenCeiling {
-		t.Error("StoppedByTokenCeiling = true, want false")
+	if result.StoppedByCeiling {
+		t.Error("StoppedByCeiling = true, want false")
 	}
 }
 
@@ -8352,7 +8352,7 @@ func TestRunWorkerAttempt_TurnFailureStaysFailureDespiteCeilingDuringTeardown(t 
 			return domain.TurnResult{}, turnErr
 		},
 		stopSessionFn: func(_ context.Context, _ domain.Session) error {
-			cancel(errTokenCeilingStop)
+			cancel(errCeilingStop)
 			return nil
 		},
 	}
@@ -8362,8 +8362,8 @@ func TestRunWorkerAttempt_TurnFailureStaysFailureDespiteCeilingDuringTeardown(t 
 	if result.ExitKind != WorkerExitError {
 		t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitError)
 	}
-	if result.StoppedByTokenCeiling {
-		t.Error("StoppedByTokenCeiling = true, want false: the turn failed on its own before the teardown's cancellation")
+	if result.StoppedByCeiling {
+		t.Error("StoppedByCeiling = true, want false: the turn failed on its own before the teardown's cancellation")
 	}
 	if !errors.Is(result.Error, turnErr) {
 		t.Errorf("Error = %v, want it to wrap %v", result.Error, turnErr)
@@ -8382,7 +8382,7 @@ func TestRunWorkerAttempt_CancellationCausePriority(t *testing.T) {
 
 	tracker := &mockTrackerAdapter{fetchStatesFn: func(_ context.Context, _ []string) (map[string]string, error) {
 		cancelRun()
-		cancelCeiling(errTokenCeilingStop)
+		cancelCeiling(errCeilingStop)
 		return nil, errors.New("refresh failed")
 	}}
 
@@ -8391,8 +8391,8 @@ func TestRunWorkerAttempt_CancellationCausePriority(t *testing.T) {
 	if result.ExitKind != WorkerExitCancelled {
 		t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitCancelled)
 	}
-	if result.StoppedByTokenCeiling {
-		t.Error("StoppedByTokenCeiling = true, want false: the run context was cancelled before the stop request")
+	if result.StoppedByCeiling {
+		t.Error("StoppedByCeiling = true, want false: the run context was cancelled before the stop request")
 	}
 }
 
@@ -8406,9 +8406,9 @@ func TestRunWorkerAttempt_SelfReviewCeilingAttribution(t *testing.T) {
 		wantExitKind       WorkerExitKind
 		wantAttributed     bool
 	}{
-		{name: "ceiling during the last coding turn keeps the phase from starting", cancelDuringCoding: true, cancelCause: errTokenCeilingStop, wantExitKind: WorkerExitCancelled, wantAttributed: true},
+		{name: "ceiling during the last coding turn keeps the phase from starting", cancelDuringCoding: true, cancelCause: errCeilingStop, wantExitKind: WorkerExitCancelled, wantAttributed: true},
 		{name: "a non-ceiling cancellation cuts the review turn short and exits normal", cancelCause: errors.New("shutdown"), wantExitKind: WorkerExitNormal},
-		{name: "the ceiling cancellation cuts the review turn short and records an attributed cancellation", cancelCause: errTokenCeilingStop, wantExitKind: WorkerExitCancelled, wantAttributed: true},
+		{name: "the ceiling cancellation cuts the review turn short and records an attributed cancellation", cancelCause: errCeilingStop, wantExitKind: WorkerExitCancelled, wantAttributed: true},
 	}
 
 	for _, tt := range tests {
@@ -8438,8 +8438,8 @@ func TestRunWorkerAttempt_SelfReviewCeilingAttribution(t *testing.T) {
 			if result.ExitKind != tt.wantExitKind {
 				t.Fatalf("ExitKind = %q, want %q", result.ExitKind, tt.wantExitKind)
 			}
-			if result.StoppedByTokenCeiling != tt.wantAttributed {
-				t.Errorf("StoppedByTokenCeiling = %v, want %v", result.StoppedByTokenCeiling, tt.wantAttributed)
+			if result.StoppedByCeiling != tt.wantAttributed {
+				t.Errorf("StoppedByCeiling = %v, want %v", result.StoppedByCeiling, tt.wantAttributed)
 			}
 			if tt.wantAttributed && !tt.cancelDuringCoding && result.ReviewMetadata == nil {
 				t.Error("ReviewMetadata = nil, want the phase's partial record to survive the ceiling exit")
@@ -8462,7 +8462,7 @@ func TestRunWorkerAttempt_SelfReviewPassVerdictThenCeilingStopExitsNormal(t *tes
 		runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
 			if isSelfReviewTurnPrompt(params.Prompt) {
 				writeVerdictFile(t, wsPath(), domain.ReviewVerdict{Verdict: "pass", Summary: "looks good"})
-				cancel(errTokenCeilingStop)
+				cancel(errCeilingStop)
 			}
 			return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
 		},
@@ -8473,8 +8473,8 @@ func TestRunWorkerAttempt_SelfReviewPassVerdictThenCeilingStopExitsNormal(t *tes
 	if result.ExitKind != WorkerExitNormal {
 		t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
 	}
-	if result.StoppedByTokenCeiling {
-		t.Error("StoppedByTokenCeiling = true, want false: the phase ended on its own before the stop request was read")
+	if result.StoppedByCeiling {
+		t.Error("StoppedByCeiling = true, want false: the phase ended on its own before the stop request was read")
 	}
 	if result.ReviewMetadata == nil || result.ReviewMetadata.FinalVerdict != "pass" {
 		t.Errorf("ReviewMetadata.FinalVerdict = %v, want %q", result.ReviewMetadata, "pass")

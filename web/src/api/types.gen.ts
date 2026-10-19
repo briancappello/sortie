@@ -63,6 +63,9 @@ export interface AttentionEvidenceResponse {
   used_tokens?: number;
   used_tokens_complete?: boolean;
   budget_tokens?: number;
+  used_usd?: number;
+  used_usd_complete?: boolean;
+  budget_usd?: number;
   reaction_kind?: string;
   config_key?: string;
   pull_request?: PullRequestResponse;
@@ -107,6 +110,9 @@ export interface BudgetExhaustedResponse {
   budget_sessions: number | null;
   used_tokens: number | null;
   budget_tokens: number | null;
+  used_usd: number | null;
+  used_usd_complete: boolean | null;
+  budget_usd: number | null;
   unmeasured_sessions: number | null;
   stopped_in_flight: number | null;
   exhausted_at: string;
@@ -625,6 +631,7 @@ export interface RunningEntryResponse {
   used_tokens: number | null;
   used_tokens_complete: boolean;
   budget_tokens: number | null;
+  budget_usd: number | null;
   estimated_cost_usd: number | null;
   cost_status: string;
   issue_estimated_cost_usd: number | null;
@@ -676,6 +683,7 @@ export interface ShapeAgent {
   max_retry_backoff_ms: number;
   max_sessions: number | null;
   max_tokens: number | null;
+  max_cost_usd: number | null;
   max_concurrent_agents: number;
   max_concurrent_agents_by_state: Record<string, number> | null;
 }

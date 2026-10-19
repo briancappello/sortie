@@ -10,6 +10,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/maputil"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -99,6 +100,10 @@ type PreflightParams struct {
 		Get(kind string) (registry.AgentConstructor, error)
 		Meta(kind string) (registry.AgentMeta, bool)
 	}
+
+	// RatesFunc returns the price rates in force. A nil func reads as no
+	// rates.
+	RatesFunc func() *pricing.Rates
 }
 
 // ValidateDispatchConfig runs all dispatch preflight checks.
@@ -301,6 +306,14 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 
 	errs = append(errs, stageCollisions(cfg)...)
 
+	if cfg.Agent.MaxCostUSD > 0 && !ratesInForce(params).SourceConfigured() {
+		warns = append(warns, PreflightWarning{
+			Check: "agent.max_cost_usd.no_rate_source",
+			Message: "agent.max_cost_usd is set but no price source is configured: price_table.embedded and price_table.fetch are off " +
+				"and no token_rates entry or operator price table is set, so no run can be priced",
+		})
+	}
+
 	// Workspace root must exist and be writable.
 	if cfg.Workspace.Root != "" {
 		if err := checkWorkspaceRootWritable(cfg.Workspace.Root); err != nil {
@@ -312,6 +325,15 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 	}
 
 	return PreflightResult{Errors: errs, Warnings: warns}
+}
+
+// ratesInForce returns the rates params carries; a nil RatesFunc reads as
+// no rates.
+func ratesInForce(params PreflightParams) *pricing.Rates {
+	if params.RatesFunc == nil {
+		return nil
+	}
+	return params.RatesFunc()
 }
 
 // agentKindOrigin identifies the front-matter field that first

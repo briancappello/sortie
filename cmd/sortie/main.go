@@ -385,6 +385,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	)
 	state.TokenWarningThreshold = br.cfg.Agent.TokenWarningThreshold()
 	state.MaxSessions = br.cfg.Agent.MaxSessions
+	state.MaxCostUSD = br.cfg.Agent.MaxCostUSD
 	orchestrator.PopulateRetries(state, pendingRetries, br.logger)
 
 	parkedRows, err := store.ListParkedIssues(ctx)
@@ -856,6 +857,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			Project:               br.cfg.Tracker.Project,
 			DBPath:                dbPath,
 			MaxTokens:             br.cfg.Agent.MaxTokens,
+			MaxCostUSD:            br.cfg.Agent.MaxCostUSD,
 			MaxSessions:           br.cfg.Agent.MaxSessions,
 			TokenWarningThreshold: br.mgr.Config().Agent.TokenWarningThreshold(),
 			Notifications:         br.mgr.Config().Notifications.Backends,

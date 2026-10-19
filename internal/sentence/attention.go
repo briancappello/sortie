@@ -50,6 +50,9 @@ type AttentionEvidence struct {
 	UsedTokens         *int64
 	UsedTokensComplete *bool
 	BudgetTokens       *int64
+	UsedUSD            *float64
+	UsedUSDComplete    *bool
+	BudgetUSD          *float64
 	ReactionKind       string
 	ConfigKey          string
 	PullRequest        *orchestrator.SnapshotPullRequest
@@ -75,6 +78,7 @@ const (
 const (
 	parkReasonHandoffAbsence = "handoff_absence"
 	budgetReasonTokens       = "token_budget"
+	budgetReasonMoney        = "money_budget"
 	checkVerdictFailing      = "failing"
 	checkVerdictPending      = "pending"
 )
@@ -161,12 +165,13 @@ func budgetItem(cause orchestrator.AttentionCause) AttentionItem {
 	evidence := AttentionEvidence{Reason: e.Reason}
 	var template string
 	var data map[string]any
-	if e.Reason == budgetReasonTokens {
+	stopped := 0
+	if e.StoppedInFlight != nil {
+		stopped = *e.StoppedInFlight
+	}
+	switch e.Reason {
+	case budgetReasonTokens:
 		used, atLeast := heldTokenSpend(e)
-		stopped := 0
-		if e.StoppedInFlight != nil {
-			stopped = *e.StoppedInFlight
-		}
 		template = "attn_budget_tokens"
 		data = map[string]any{
 			"Used":    used,
@@ -177,7 +182,23 @@ func budgetItem(cause orchestrator.AttentionCause) AttentionItem {
 		evidence.UsedTokens = e.UsedTokens
 		evidence.UsedTokensComplete = new(!atLeast)
 		evidence.BudgetTokens = new(e.BudgetTokens)
-	} else {
+	case budgetReasonMoney:
+		var used float64
+		if e.UsedUSD != nil {
+			used = *e.UsedUSD
+		}
+		complete := e.UsedUSDComplete != nil && *e.UsedUSDComplete
+		template = "attn_budget_money"
+		data = map[string]any{
+			"Used":    used,
+			"AtLeast": !complete,
+			"Budget":  e.BudgetUSD,
+			"Stopped": stopped,
+		}
+		evidence.UsedUSD = e.UsedUSD
+		evidence.UsedUSDComplete = e.UsedUSDComplete
+		evidence.BudgetUSD = new(e.BudgetUSD)
+	default:
 		template = "attn_budget_sessions"
 		data = map[string]any{
 			"UsedSessions":   e.UsedSessions,

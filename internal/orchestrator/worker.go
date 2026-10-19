@@ -105,9 +105,9 @@ type WorkerResult struct {
 	// returned when the worker exits on it; else nil.
 	StartupError error
 
-	// StoppedByTokenCeiling is true when the worker context's cancellation
-	// cause is the in-flight token ceiling's own stop request.
-	StoppedByTokenCeiling bool
+	// StoppedByCeiling is true when the worker context's cancellation
+	// cause is a budget ceiling's own in-flight stop request.
+	StoppedByCeiling bool
 
 	// TurnsCompleted is the number of turns that received a TurnResult
 	// before exit.
@@ -516,7 +516,7 @@ func exitKindAtEnding(ctx context.Context, cancelledAtEnding bool) WorkerExitKin
 	if ctx.Err() == nil {
 		return WorkerExitError
 	}
-	if errors.Is(context.Cause(ctx), errTokenCeilingStop) {
+	if errors.Is(context.Cause(ctx), errCeilingStop) {
 		return WorkerExitError
 	}
 	return WorkerExitCancelled
@@ -759,7 +759,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	var cancelledAtEnding bool
 
 	report := func(result WorkerResult) {
-		result.StoppedByTokenCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errTokenCeilingStop)
+		result.StoppedByCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errCeilingStop)
 		result.SessionID = acceptedSessionID
 		result.ResumeUsage = resumeUsage
 		result.ResumeUsageByModel = resumeUsageByModel
@@ -1638,7 +1638,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	// A ceiling stop that cut the phase short, or kept it from starting,
 	// exits as a ceiling stop; any other cancellation falls through below.
-	if phaseCut && errors.Is(context.Cause(ctx), errTokenCeilingStop) {
+	if phaseCut && errors.Is(context.Cause(ctx), errCeilingStop) {
 		stopSessionBestEffort(ctx, deps.AgentAdapter, session, cfg, logger)
 		if deps.Posture.RunsSetupHooks() {
 			workspace.Finish(ctx, workspace.FinishParams{

@@ -51,8 +51,10 @@ const (
 )
 
 // Dispatch-gate reason values recorded in [BudgetExhaustedEntry.Reason].
-// Token budget takes precedence over the session budget.
+// Money budget takes precedence over the token budget, which takes
+// precedence over the session budget.
 const (
+	budgetReasonMoney   = "money_budget"
 	budgetReasonToken   = "token_budget"
 	budgetReasonSession = "session_budget"
 )
@@ -60,7 +62,7 @@ const (
 // knownBudgetReasons lists every dispatch-gate budget reason in the order
 // the gauge reports them. A reason added above must be added here too, so
 // the gauge recompute reports a value for it on every pass.
-var knownBudgetReasons = []string{budgetReasonSession, budgetReasonToken}
+var knownBudgetReasons = []string{budgetReasonSession, budgetReasonToken, budgetReasonMoney}
 
 // AgentTotals holds cumulative token and runtime counters across all ended
 // agent sessions, persisted to SQLite and restored on startup.
@@ -168,9 +170,9 @@ type RunningEntry struct {
 	// nested under it. Nil only in test fixtures that bypass [DispatchIssue].
 	CancelFunc context.CancelFunc
 
-	// TokenCeilingCancelFunc cancels the worker context with cause
-	// [errTokenCeilingStop]. Nil only in test fixtures that bypass [DispatchIssue].
-	TokenCeilingCancelFunc context.CancelFunc
+	// CeilingCancelFunc cancels the worker context with cause
+	// [errCeilingStop]. Nil only in test fixtures that bypass [DispatchIssue].
+	CeilingCancelFunc context.CancelFunc
 
 	// PendingCleanup is set by reconciliation on a terminal-state
 	// observation; [HandleWorkerExit] performs the cleanup after the
@@ -290,13 +292,17 @@ type RunningEntry struct {
 	// Written only on the event loop.
 	UnaccountedTurns int
 
-	// TokenCeilingStopRequest is set once the ceiling decides to stop this
+	// CeilingStopRequest is set once the ceiling decides to stop this
 	// run. Non-nil alone does not mean the ceiling ended it; decided at exit.
-	TokenCeilingStopRequest *TokenCeilingStopRequest
+	CeilingStopRequest *CeilingStopRequest
 
 	// TokenCeilingQueryWarned latches once the ceiling's confirming read
 	// has failed and been reported for this run.
 	TokenCeilingQueryWarned bool
+
+	// MoneyCeilingQueryWarned latches once the money ceiling's confirming
+	// read has failed and been reported for this run.
+	MoneyCeilingQueryWarned bool
 
 	// WorkerDone is the Done() channel of the worker context
 	// [DispatchIssue] creates. Nil only in test fixtures that bypass
@@ -923,14 +929,17 @@ type BudgetExhaustedEntry struct {
 	Identifier         string // human-readable ticket key; empty when the candidate carried none
 	DisplayID          string // qualified form of Identifier; empty when Identifier is display-ready
 	IssueIdentity      IssueIdentity
-	Reason             string // budgetReasonSession or budgetReasonToken
-	UsedSessions       int    // completed sessions counted from run history
-	BudgetSessions     int    // configured agent.max_sessions; 0 means unlimited
-	UsedTokens         *int64 // uncached tokens; nil when the token ceiling was not evaluated for this issue
-	BudgetTokens       int64  // configured agent.max_tokens; 0 means unlimited
-	UnmeasuredSessions *int   // nil exactly when UsedTokens is nil; else runs whose spend is unknown
-	StoppedInFlight    *int   // nil exactly when UsedTokens is nil; else sessions the token ceiling stopped mid-run
-	UnaccountedTurns   int    // taken from the read that set UsedTokens; 0 while UsedTokens is nil
+	Reason             string   // budgetReasonSession, budgetReasonToken, or budgetReasonMoney
+	UsedSessions       int      // completed sessions counted from run history
+	BudgetSessions     int      // configured agent.max_sessions; 0 means unlimited
+	UsedTokens         *int64   // uncached tokens; nil when no ceiling read this issue's usage
+	BudgetTokens       int64    // configured agent.max_tokens; 0 means unlimited
+	UnmeasuredSessions *int     // nil exactly when UsedTokens is nil; else runs whose spend is unknown
+	StoppedInFlight    *int     // nil exactly when UsedTokens is nil; else sessions a budget ceiling stopped mid-run
+	UnaccountedTurns   int      // taken from the read that set UsedTokens; 0 while UsedTokens is nil
+	UsedUSD            *float64 // estimated cost in USD; nil when the money axis did not read this issue
+	UsedUSDComplete    *bool    // nil exactly when UsedUSD is nil
+	BudgetUSD          float64  // configured agent.max_cost_usd; 0 means unlimited
 	ExhaustedAt        time.Time
 
 	// RuleName, StageLineage, AgentKind, and ConfiguredModel describe the
@@ -951,6 +960,15 @@ func (e *BudgetExhaustedEntry) setTokenUsage(usage persistence.IssueTokenUsage) 
 	e.UnmeasuredSessions = &unmeasured
 	e.StoppedInFlight = &stopped
 	e.UnaccountedTurns = usage.UnaccountedTurns
+}
+
+// clonePointer returns a pointer to a copy of *p, or nil for a nil p.
+func clonePointer[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	value := *p
+	return &value
 }
 
 // SpendIncomplete reports whether a token sum carrying the given counts
@@ -1219,6 +1237,11 @@ type State struct {
 	// only on the event-loop goroutine.
 	MaxTokens int
 
+	// MaxCostUSD mirrors config.Agent.MaxCostUSD for the money ceiling,
+	// refreshed on every poll tick. 0 means unlimited. Written only on the
+	// event-loop goroutine.
+	MaxCostUSD float64
+
 	// MaxSessions mirrors config.Agent.MaxSessions, refreshed on every poll
 	// tick. 0 means unlimited. Written only on the event-loop goroutine.
 	MaxSessions int
@@ -1394,6 +1417,12 @@ type State struct {
 	// not be fully evaluated. Rebuilt wholesale each tick when the token
 	// budget is enabled, cleared when not. Owned by the event loop.
 	TokenBudgetIncomplete map[string]struct{}
+
+	// MoneyBudgetIncomplete is the set of issue IDs whose per-issue
+	// estimated cost is below max_cost_usd but only a lower bound. Rebuilt
+	// wholesale each tick when the money ceiling is enabled, cleared when
+	// not. Owned by the event loop.
+	MoneyBudgetIncomplete map[string]struct{}
 }
 
 // continuationCtxKey is the context key for reaction continuation data
@@ -1459,6 +1488,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		PendingReactions:          make(map[string]*PendingReaction),
 		AutoMergeAuthLogged:       make(map[string]struct{}),
 		TokenBudgetIncomplete:     make(map[string]struct{}),
+		MoneyBudgetIncomplete:     make(map[string]struct{}),
 	}
 }
 
@@ -1688,6 +1718,9 @@ type SnapshotBudgetEntry struct {
 	UnmeasuredSessions *int      `json:"unmeasured_sessions"`
 	StoppedInFlight    *int      `json:"stopped_in_flight"`
 	UnaccountedTurns   int       `json:"unaccounted_turns"`
+	UsedUSD            *float64  `json:"used_usd"`
+	UsedUSDComplete    *bool     `json:"used_usd_complete"`
+	BudgetUSD          float64   `json:"budget_usd"`
 	ExhaustedAt        time.Time `json:"exhausted_at"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
@@ -1790,10 +1823,11 @@ type RuntimeSnapshotResult struct {
 	// It shares nothing with State.
 	ActiveOrder map[string]time.Time `json:"-"`
 
-	// MaxTokens and MaxSessions are the token ceiling and session budget in
-	// force at capture; 0 means no limit.
-	MaxTokens   int `json:"max_tokens"`
-	MaxSessions int `json:"max_sessions"`
+	// MaxTokens, MaxCostUSD, and MaxSessions are the token ceiling, money
+	// ceiling, and session budget in force at capture; 0 means no limit.
+	MaxTokens   int     `json:"max_tokens"`
+	MaxCostUSD  float64 `json:"max_cost_usd"`
+	MaxSessions int     `json:"max_sessions"`
 
 	// Rates is State.Rates at capture; a nil value prices nothing. Safe to
 	// read without a lock because the rates are replaced, never mutated.
@@ -2068,6 +2102,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 	}
 
 	snap.MaxTokens = state.MaxTokens
+	snap.MaxCostUSD = state.MaxCostUSD
 	snap.MaxSessions = state.MaxSessions
 	snap.Rates = state.Rates
 	snap.AttentionAcknowledgements = maps.Clone(state.AttentionAcknowledgements)
@@ -2093,6 +2128,9 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			UnmeasuredSessions: entry.UnmeasuredSessions,
 			StoppedInFlight:    entry.StoppedInFlight,
 			UnaccountedTurns:   entry.UnaccountedTurns,
+			UsedUSD:            clonePointer(entry.UsedUSD),
+			UsedUSDComplete:    clonePointer(entry.UsedUSDComplete),
+			BudgetUSD:          entry.BudgetUSD,
 			ExhaustedAt:        entry.ExhaustedAt,
 			RuleName:           entry.RuleName,
 			StageLineage:       entry.StageLineage,

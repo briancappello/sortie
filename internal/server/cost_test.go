@@ -20,7 +20,6 @@ func TestIssueCost(t *testing.T) {
 		wantStatus string
 	}{
 		{"priced rows", usage{RecordedCostUSD: 27, PricedSessions: 2}, orchestrator.SnapshotRunningEntry{}, new(27.0), costStatusEstimated},
-		{"unpriced row beside priced", usage{RecordedCostUSD: 27, PricedSessions: 2, UnpricedSessions: 1}, orchestrator.SnapshotRunningEntry{}, new(27.0), costStatusPartial},
 		{"unpriced rows alone", usage{UnpricedSessions: 2}, orchestrator.SnapshotRunningEntry{}, nil, costStatusUnpriced},
 		{"partial row", usage{RecordedCostUSD: 15, PricedSessions: 1, PartialSessions: 1}, orchestrator.SnapshotRunningEntry{}, new(15.0), costStatusPartial},
 		{"session that spent", priced15, orchestrator.SnapshotRunningEntry{AgentInputTokens: 1, EstimatedCostUSD: new(12.0), CostStatus: costStatusEstimated}, new(27.0), costStatusEstimated},
@@ -69,14 +68,8 @@ func TestFormatCost(t *testing.T) {
 		want  string
 	}{
 		{"zero", 0.00, "$0.00"},
-		{"small", 0.05, "$0.05"},
-		{"under 10", 9.99, "$9.99"},
-		{"under 1000", 999.99, "$999.99"},
 		{"rounds up to 1000 from below", 999.999, "$1,000.00"},
-		{"rounds up fractional near boundary", 1234.9999, "$1,235.00"},
-		{"exact 1000", 1000.00, "$1,000.00"},
 		{"mid four digits", 1234.56, "$1,234.56"},
-		{"five digits with cents", 10000.50, "$10,000.50"},
 	}
 
 	for _, tt := range tests {

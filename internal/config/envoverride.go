@@ -82,6 +82,7 @@ var envOverrides = []envOverride{
 	{"SORTIE_AGENT_MAX_RETRY_BACKOFF_MS", "agent", "max_retry_backoff_ms", coerceEnvInt},
 	{"SORTIE_AGENT_MAX_SESSIONS", "agent", "max_sessions", coerceEnvInt},
 	{"SORTIE_AGENT_MAX_TOKENS", "agent", "max_tokens", coerceEnvInt},
+	{"SORTIE_AGENT_MAX_COST_USD", "agent", "max_cost_usd", coerceEnvFloat},
 	{"SORTIE_AGENT_TOKEN_WARNING_PERCENT", "agent", "token_warning_percent", coerceEnvInt},
 	{"SORTIE_AGENT_MAX_CONSECUTIVE_ABSENCES", "agent", "max_consecutive_absences", coerceEnvInt},
 	{"SORTIE_AGENT_STOP_GRACE_MS", "agent", "stop_grace_ms", coerceEnvInt},
@@ -256,6 +257,14 @@ func coerceEnvInt(s string) (any, error) {
 		return nil, fmt.Errorf("invalid integer value: %s", s)
 	}
 	return n, nil
+}
+
+func coerceEnvFloat(s string) (any, error) {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid number value: %s", s)
+	}
+	return f, nil
 }
 
 func coerceCSVList(s string) (any, error) {

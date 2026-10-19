@@ -402,11 +402,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 	// Distinct from a stall, terminal-state, or shutdown cancel: attribute
 	// the stop to the budget.
-	request := entry.TokenCeilingStopRequest
-	if workerResult.ExitKind == WorkerExitCancelled && workerResult.StoppedByTokenCeiling && request != nil {
+	request := entry.CeilingStopRequest
+	if workerResult.ExitKind == WorkerExitCancelled && workerResult.StoppedByCeiling && request != nil {
 		status = "budget_stopped"
-		runError = tokenCeilingStopError(entry.issueUncachedTokens(), request.BudgetTokens)
-		reportTokenCeilingStop(log, metrics, request)
+		runError = ceilingStopError(state, entry, request)
+		reportCeilingStop(log, metrics, request)
 	}
 
 	// A needs-a-person ending gets its own status only when the worker's own

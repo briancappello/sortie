@@ -1395,7 +1395,7 @@ func TestHandleWorkerExit_TokenCeilingStoppedRecordsBudgetStoppedStatus(t *testi
 	// whichever one is current.
 	state.MaxTokens = 900
 	entry := state.Running["ISSUE-CEIL"]
-	entry.TokenCeilingStopRequest = &TokenCeilingStopRequest{BudgetTokens: 500, UsedTokens: 550, SumSource: tokenSumConfirmedRead}
+	entry.CeilingStopRequest = &CeilingStopRequest{BudgetTokens: 500, UsedTokens: 550, SumSource: tokenSumConfirmedRead}
 	entry.IssueTokensCompleted = 300
 	entry.AgentTotalTokens = 250
 
@@ -1404,12 +1404,12 @@ func TestHandleWorkerExit_TokenCeilingStoppedRecordsBudgetStoppedStatus(t *testi
 	params.Logger = logger
 
 	HandleWorkerExit(state, WorkerResult{
-		IssueID:               "ISSUE-CEIL",
-		Identifier:            "ISSUE-CEIL-ident",
-		ExitKind:              WorkerExitCancelled,
-		StoppedByTokenCeiling: true,
-		AgentAdapter:          "mock",
-		WorkspacePath:         "/tmp/ws",
+		IssueID:          "ISSUE-CEIL",
+		Identifier:       "ISSUE-CEIL-ident",
+		ExitKind:         WorkerExitCancelled,
+		StoppedByCeiling: true,
+		AgentAdapter:     "mock",
+		WorkspacePath:    "/tmp/ws",
 	}, params)
 
 	if len(store.runHistories) != 1 {
@@ -1439,12 +1439,12 @@ func TestHandleWorkerExit_TokenCeilingStoppedRecordsBudgetStoppedStatus(t *testi
 	}
 }
 
-func TestReportTokenCeilingStop_SessionSpendAloneOmitsIncompleteSpendCounts(t *testing.T) {
+func TestReportCeilingStop_SessionSpendAloneOmitsIncompleteSpendCounts(t *testing.T) {
 	t.Parallel()
 
 	lb, logger := textLogger()
 
-	reportTokenCeilingStop(logger, &spyMetrics{}, &TokenCeilingStopRequest{BudgetTokens: 500, UsedTokens: 600, SumSource: tokenSumSessionSpendAlone})
+	reportCeilingStop(logger, &spyMetrics{}, &CeilingStopRequest{BudgetTokens: 500, UsedTokens: 600, SumSource: tokenSumSessionSpendAlone})
 
 	line := lineWith(t, lb.String(), "run stopped by token ceiling")
 	if !strings.Contains(line, "sum_source=session_spend_alone") {
@@ -1483,19 +1483,19 @@ func TestHandleWorkerExit_CancelledWithStopRequestButNotAttributedStaysCancelled
 	store := &mockExitStore{}
 	spy := &spyMetrics{}
 	state := exitState(t, "ISSUE-RACE2", nil)
-	state.Running["ISSUE-RACE2"].TokenCeilingStopRequest = &TokenCeilingStopRequest{BudgetTokens: 500}
+	state.Running["ISSUE-RACE2"].CeilingStopRequest = &CeilingStopRequest{BudgetTokens: 500}
 
 	params := defaultExitParams(t, store)
 	params.Metrics = spy
 
 	HandleWorkerExit(state, WorkerResult{
-		IssueID:               "ISSUE-RACE2",
-		Identifier:            "ISSUE-RACE2-ident",
-		ExitKind:              WorkerExitCancelled,
-		StoppedByTokenCeiling: false,
-		Error:                 errors.New("stall timeout"),
-		AgentAdapter:          "mock",
-		WorkspacePath:         "/tmp/ws",
+		IssueID:          "ISSUE-RACE2",
+		Identifier:       "ISSUE-RACE2-ident",
+		ExitKind:         WorkerExitCancelled,
+		StoppedByCeiling: false,
+		Error:            errors.New("stall timeout"),
+		AgentAdapter:     "mock",
+		WorkspacePath:    "/tmp/ws",
 	}, params)
 
 	if len(store.runHistories) != 1 {
@@ -1510,7 +1510,7 @@ func TestHandleWorkerExit_CancelledWithStopRequestButNotAttributedStaysCancelled
 }
 
 // TestHandleWorkerExit_TokenCeilingLatchIgnoredOnNonCancelledExit: a
-// recorded TokenCeilingStopRequest does not produce "budget_stopped" on
+// recorded CeilingStopRequest does not produce "budget_stopped" on
 // a non-cancelled exit, since the run may finish on its own in the window
 // between the request and the worker noticing it.
 func TestHandleWorkerExit_TokenCeilingLatchIgnoredOnNonCancelledExit(t *testing.T) {
@@ -1520,7 +1520,7 @@ func TestHandleWorkerExit_TokenCeilingLatchIgnoredOnNonCancelledExit(t *testing.
 	state := exitState(t, "ISSUE-RACE", nil)
 	state.MaxTokens = 500
 	entry := state.Running["ISSUE-RACE"]
-	entry.TokenCeilingStopRequest = &TokenCeilingStopRequest{BudgetTokens: 500}
+	entry.CeilingStopRequest = &CeilingStopRequest{BudgetTokens: 500}
 	entry.IssueTokensCompleted = 300
 	entry.AgentTotalTokens = 250
 

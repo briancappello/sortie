@@ -11,11 +11,10 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
-// stubTrackerRegistry implements the TrackerRegistry interface in
-// PreflightParams with configurable Get and Meta behavior.
 type stubTrackerRegistry struct {
 	getFunc  func(string) (registry.TrackerConstructor, error)
 	metaFunc func(string) (registry.TrackerMeta, bool)
@@ -29,8 +28,6 @@ func (s *stubTrackerRegistry) Meta(kind string) (registry.TrackerMeta, bool) {
 	return s.metaFunc(kind)
 }
 
-// stubAgentRegistry implements the AgentRegistry interface in
-// PreflightParams with configurable Get and Meta behavior.
 type stubAgentRegistry struct {
 	getFunc  func(string) (registry.AgentConstructor, error)
 	metaFunc func(string) (registry.AgentMeta, bool)
@@ -44,8 +41,6 @@ func (s *stubAgentRegistry) Meta(kind string) (registry.AgentMeta, bool) {
 	return s.metaFunc(kind)
 }
 
-// validPreflightParams returns a PreflightParams where all checks
-// pass. Tests override individual fields to inject failures.
 func validPreflightParams() PreflightParams {
 	return PreflightParams{
 		ReloadWorkflow: func() error { return nil },
@@ -75,8 +70,6 @@ func validPreflightParams() PreflightParams {
 	}
 }
 
-// hasCheck reports whether the result contains an error with the
-// given check name.
 func hasCheck(t *testing.T, result PreflightResult, check string) bool {
 	t.Helper()
 	for _, e := range result.Errors {
@@ -87,8 +80,6 @@ func hasCheck(t *testing.T, result PreflightResult, check string) bool {
 	return false
 }
 
-// requireCheck fails the test if the result does not contain an
-// error with the given check name.
 func requireCheck(t *testing.T, result PreflightResult, check string) {
 	t.Helper()
 	if !hasCheck(t, result, check) {
@@ -96,8 +87,6 @@ func requireCheck(t *testing.T, result PreflightResult, check string) {
 	}
 }
 
-// requireNoCheck fails the test if the result contains an error
-// with the given check name.
 func requireNoCheck(t *testing.T, result PreflightResult, check string) {
 	t.Helper()
 	if hasCheck(t, result, check) {
@@ -105,8 +94,6 @@ func requireNoCheck(t *testing.T, result PreflightResult, check string) {
 	}
 }
 
-// hasWarnCheck reports whether the result contains a warning with the
-// given check name.
 func hasWarnCheck(t *testing.T, result PreflightResult, check string) bool {
 	t.Helper()
 	for _, w := range result.Warnings {
@@ -1288,12 +1275,15 @@ func TestValidateDispatchConfig_UsageReportingWarnings(t *testing.T) {
 	completeEntry := map[string]any{"input_per_mtok": 3.0, "output_per_mtok": 15.0}
 
 	tests := []struct {
-		name      string
-		maxTokens int
-		rates     map[string]any
-		meta      func(string) (registry.AgentMeta, bool)
-		check     string
-		wantWarn  bool
+		name            string
+		maxTokens       int
+		maxCostUSD      float64
+		rates           map[string]any
+		priceRates      *pricing.Rates
+		meta            func(string) (registry.AgentMeta, bool)
+		check           string
+		wantWarn        bool
+		noKindInMessage bool
 	}{
 		{
 			name:      "agent.max_tokens set against a kind resolving to no usage warns",
@@ -1333,6 +1323,44 @@ func TestValidateDispatchConfig_UsageReportingWarnings(t *testing.T) {
 			meta:  noneMeta,
 			check: "agent.kind.no_cost_estimate",
 		},
+		{
+			name:       "agent.max_cost_usd set against a kind resolving to no usage warns",
+			maxCostUSD: 5,
+			meta:       noneMeta,
+			check:      "agent.max_cost_usd.no_usage_reporting",
+			wantWarn:   true,
+		},
+		{
+			name:       "a reporting kind with agent.max_cost_usd set draws no usage warning",
+			maxCostUSD: 5,
+			meta:       reportingMeta,
+			check:      "agent.max_cost_usd.no_usage_reporting",
+		},
+		{
+			name:  "a kind resolving to no usage draws no money warning with the ceiling at zero",
+			meta:  noneMeta,
+			check: "agent.max_cost_usd.no_usage_reporting",
+		},
+		{
+			name:            "agent.max_cost_usd set with no price source warns",
+			maxCostUSD:      5,
+			meta:            reportingMeta,
+			check:           "agent.max_cost_usd.no_rate_source",
+			wantWarn:        true,
+			noKindInMessage: true,
+		},
+		{
+			name:       "agent.max_cost_usd set with a price source draws no rate warning",
+			maxCostUSD: 5,
+			priceRates: fixtureRates(t, 10),
+			meta:       reportingMeta,
+			check:      "agent.max_cost_usd.no_rate_source",
+		},
+		{
+			name:  "no price source draws no rate warning with the ceiling at zero",
+			meta:  reportingMeta,
+			check: "agent.max_cost_usd.no_rate_source",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1343,12 +1371,15 @@ func TestValidateDispatchConfig_UsageReportingWarnings(t *testing.T) {
 			params.ConfigFunc = func() config.ServiceConfig {
 				cfg := config.ServiceConfig{
 					Tracker: config.TrackerConfig{Kind: "test-tracker", APIKey: "secret"},
-					Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent", MaxTokens: tt.maxTokens},
+					Agent:   config.AgentConfig{Kind: "test-agent", Command: "/usr/bin/agent", MaxTokens: tt.maxTokens, MaxCostUSD: tt.maxCostUSD},
 				}
 				if tt.rates != nil {
 					cfg.SetExtensionSection("token_rates", tt.rates)
 				}
 				return cfg
+			}
+			if tt.priceRates != nil {
+				params.RatesFunc = func() *pricing.Rates { return tt.priceRates }
 			}
 			params.AgentRegistry = &stubAgentRegistry{
 				getFunc:  func(string) (registry.AgentConstructor, error) { return nil, nil },
@@ -1362,7 +1393,10 @@ func TestValidateDispatchConfig_UsageReportingWarnings(t *testing.T) {
 				return
 			}
 			requireWarnCheck(t, result, tt.check)
-			if !strings.Contains(warnMessageForCheck(t, result, tt.check), "test-agent") {
+			if !result.OK() {
+				t.Errorf("ValidateDispatchConfig().OK() = false after a %q warning, want true; errors: %v", tt.check, result.Errors)
+			}
+			if !tt.noKindInMessage && !strings.Contains(warnMessageForCheck(t, result, tt.check), "test-agent") {
 				t.Errorf("warning %q does not name the agent kind %q", tt.check, "test-agent")
 			}
 		})

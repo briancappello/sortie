@@ -219,6 +219,9 @@
         "budget_tokens": {
           "type": "integer"
         },
+        "budget_usd": {
+          "type": "number"
+        },
         "config_key": {
           "type": "string"
         },
@@ -259,6 +262,12 @@
           "type": "integer"
         },
         "used_tokens_complete": {
+          "type": "boolean"
+        },
+        "used_usd": {
+          "type": "number"
+        },
+        "used_usd_complete": {
           "type": "boolean"
         }
       },
@@ -362,6 +371,16 @@
           "anyOf": [
             {
               "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "budget_usd": {
+          "anyOf": [
+            {
+              "type": "number"
             },
             {
               "type": "null"
@@ -477,6 +496,26 @@
               "type": "null"
             }
           ]
+        },
+        "used_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "used_usd_complete": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -488,6 +527,9 @@
         "budget_sessions",
         "used_tokens",
         "budget_tokens",
+        "used_usd",
+        "used_usd_complete",
+        "budget_usd",
         "unmeasured_sessions",
         "stopped_in_flight",
         "exhausted_at",
@@ -2862,6 +2904,16 @@
             }
           ]
         },
+        "budget_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "configured_effort": {
           "type": "string"
         },
@@ -3203,6 +3255,7 @@
         "used_tokens",
         "used_tokens_complete",
         "budget_tokens",
+        "budget_usd",
         "estimated_cost_usd",
         "cost_status",
         "issue_estimated_cost_usd",
@@ -3392,6 +3445,16 @@
             }
           ]
         },
+        "max_cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "max_retry_backoff_ms": {
           "type": "integer"
         },
@@ -3440,6 +3503,7 @@
         "max_retry_backoff_ms",
         "max_sessions",
         "max_tokens",
+        "max_cost_usd",
         "max_concurrent_agents",
         "max_concurrent_agents_by_state"
       ],

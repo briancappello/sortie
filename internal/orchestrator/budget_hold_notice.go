@@ -11,6 +11,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 )
 
 // budgetHoldNoticeStore is the persistence contract [postBudgetHoldNotice]
@@ -46,6 +47,7 @@ type budgetHoldNoticeParams struct {
 var budgetHoldCeilingWords = map[string]string{
 	budgetReasonSession: "session budget",
 	budgetReasonToken:   "token budget",
+	budgetReasonMoney:   "money budget",
 }
 
 // Pacing constants for the budget hold notice. At most
@@ -135,6 +137,20 @@ func budgetHoldTokenSpend(entry *BudgetExhaustedEntry) string {
 	}
 }
 
+// budgetHoldMoneySpend renders the entry's estimated cost: exact when the
+// figure is complete, else a lower bound, or unknown when nothing priced.
+func budgetHoldMoneySpend(entry *BudgetExhaustedEntry) string {
+	used := *entry.UsedUSD
+	switch {
+	case entry.UsedUSDComplete != nil && *entry.UsedUSDComplete:
+		return pricing.FormatUSD(used)
+	case used == 0:
+		return "unknown"
+	default:
+		return "at least " + pricing.FormatUSD(used)
+	}
+}
+
 // releaseBudgetHoldNotice deletes the durable row and the memory entry for
 // one issue. It returns without a store call when the memory holds no
 // reason for the issue. The memory entry is dropped only once the durable
@@ -184,6 +200,9 @@ func buildBudgetHoldComment(entry *BudgetExhaustedEntry) string {
 		lines = append(lines, fmt.Sprintf("Ceiling: %s (%s)", word, setting))
 	}
 
+	if entry.BudgetUSD > 0 && entry.UsedUSD != nil {
+		lines = append(lines, fmt.Sprintf("Estimated cost: %s of %s", budgetHoldMoneySpend(entry), pricing.FormatUSD(entry.BudgetUSD)))
+	}
 	if entry.BudgetTokens > 0 && entry.UsedTokens != nil {
 		lines = append(lines, fmt.Sprintf("Tokens: %s of %d", budgetHoldTokenSpend(entry), entry.BudgetTokens))
 	}

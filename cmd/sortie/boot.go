@@ -204,6 +204,7 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		ConfigFunc:      mgr.Config,
 		TrackerRegistry: registry.Trackers,
 		AgentRegistry:   registry.Agents,
+		RatesFunc:       mgr.Rates,
 	}
 	validation := orchestrator.ValidateDispatchConfig(preflightParams)
 	if !validation.OK() {
