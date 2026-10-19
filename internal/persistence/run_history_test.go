@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"testing"
@@ -56,19 +57,62 @@ func assertTokenFields(t *testing.T, reader string, got RunHistory, wantIn, want
 	}
 }
 
+func appendWithPartsOrFatal(t *testing.T, s *Store, run RunHistory) RunHistory {
+	t.Helper()
+	dispatchID := "dispatch-" + run.IssueID
+	run.DispatchID = &dispatchID
+	got, err := s.AppendRunHistoryWithEvents(context.Background(), run, nil, unboundedRunEvents)
+	if err != nil {
+		t.Fatalf("AppendRunHistoryWithEvents: %v", err)
+	}
+	return got
+}
+
+func queryModelUsage(t *testing.T, s *Store, runID int64) map[string]ModelTokens {
+	t.Helper()
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM run_model_usage WHERE run_id = ?`, runID)
+	if err != nil {
+		t.Fatalf("query run_model_usage for run %d: %v", runID, err)
+	}
+	defer rows.Close() //nolint:errcheck // test helper
+
+	parts := map[string]ModelTokens{}
+	for rows.Next() {
+		var model string
+		var tokens ModelTokens
+		if err := rows.Scan(&model, &tokens.InputTokens, &tokens.OutputTokens, &tokens.CacheReadTokens, &tokens.CacheWriteTokens); err != nil {
+			t.Fatalf("scan run_model_usage: %v", err)
+		}
+		parts[model] = tokens
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate run_model_usage: %v", err)
+	}
+	return parts
+}
+
 // TestRunHistoryTokenColumns_RoundTrip reads one row back through every
 // reader, because a token column missed in one reader's SELECT or Scan
 // compiles cleanly and fails only at runtime.
 func TestRunHistoryTokenColumns_RoundTrip(t *testing.T) {
 	t.Parallel()
 
+	twoModels := map[string]ModelTokens{
+		"model-a": {InputTokens: 600, OutputTokens: 1200, CacheReadTokens: 200, CacheWriteTokens: 30},
+		"model-b": {InputTokens: 500, OutputTokens: 1000, CacheReadTokens: 240},
+	}
+
 	tests := []struct {
 		name                  string
 		in, out, total, cache int64
 		measured              bool
+		parts                 map[string]ModelTokens
+		wantParts             map[string]ModelTokens
 	}{
 		{name: "measured", in: 1100, out: 2200, total: 3300, cache: 440, measured: true},
 		{name: "unmeasured"},
+		{name: "parts land with the row", in: 1100, out: 2200, total: 3300, cache: 440, measured: true, parts: twoModels, wantParts: twoModels},
 	}
 
 	for _, tt := range tests {
@@ -82,7 +126,12 @@ func TestRunHistoryTokenColumns_RoundTrip(t *testing.T) {
 			run := newTestRun(1)
 			run.InputTokens, run.OutputTokens, run.TotalTokens, run.CacheReadTokens = tt.in, tt.out, tt.total, tt.cache
 			run.TokensMeasured = tt.measured
-			inserted := appendOrFatal(t, s, run)
+			run.ModelUsage = tt.parts
+			appendRun := appendOrFatal
+			if tt.parts != nil {
+				appendRun = appendWithPartsOrFatal
+			}
+			inserted := appendRun(t, s, run)
 
 			byIssue, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
 			if err != nil {
@@ -103,6 +152,9 @@ func TestRunHistoryTokenColumns_RoundTrip(t *testing.T) {
 					t.Fatalf("%s returned %d entries, want 1", name, len(rows))
 				}
 				assertTokenFields(t, name, rows[0], tt.in, tt.out, tt.total, tt.cache, tt.measured)
+			}
+			if got := queryModelUsage(t, s, inserted.ID); !maps.Equal(got, tt.wantParts) {
+				t.Errorf("run_model_usage of run %d = %+v, want %+v", inserted.ID, got, tt.wantParts)
 			}
 		})
 	}
@@ -179,6 +231,9 @@ func TestListReportedModels(t *testing.T) {
 		run.ReportedModel = model
 		appendOrFatal(t, s, run)
 	}
+	spent := newTestRun(5)
+	spent.ModelUsage = map[string]ModelTokens{"model-a": {}, "model-c": {}, "": {}}
+	appendWithPartsOrFatal(t, s, spent)
 
 	got, err := s.ListReportedModels(context.Background())
 	if err != nil {
@@ -186,7 +241,7 @@ func TestListReportedModels(t *testing.T) {
 	}
 
 	slices.Sort(got)
-	if want := []string{"model-a", "model-b"}; !slices.Equal(got, want) {
+	if want := []string{"model-a", "model-b", "model-c"}; !slices.Equal(got, want) {
 		t.Errorf("ListReportedModels() = %q, want %q", got, want)
 	}
 }
@@ -867,6 +922,11 @@ func TestLatestResumeUsage(t *testing.T) {
 	older := &ResumeUsage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 30, CacheWriteTokens: 40}
 	newer := &ResumeUsage{InputTokens: 11, OutputTokens: 22, CacheReadTokens: 33, CacheWriteTokens: 44}
 	foreign := &ResumeUsage{InputTokens: 99, OutputTokens: 98, CacheReadTokens: 97, CacheWriteTokens: 96}
+	split := map[string]ModelTokens{
+		"model-a": {InputTokens: 6, OutputTokens: 12, CacheReadTokens: 20, CacheWriteTokens: 40},
+		"model-b": {InputTokens: 5, OutputTokens: 10, CacheReadTokens: 13, CacheWriteTokens: 4},
+	}
+	withSplit := &ResumeUsage{InputTokens: 11, OutputTokens: 22, CacheReadTokens: 33, CacheWriteTokens: 44, ByModel: split}
 	run := func(issueID, sessionID string, usage *ResumeUsage) RunHistory {
 		r := newTestRun(1)
 		r.IssueID, r.SessionID, r.ResumeUsage = issueID, sessionID, usage
@@ -884,6 +944,7 @@ func TestLatestResumeUsage(t *testing.T) {
 			run("ISS-A", "sess-1", older), run("ISS-A", "sess-2", foreign), run("ISS-B", "sess-1", foreign),
 		}, older},
 		{"only another session has rows", []RunHistory{run("ISS-A", "sess-2", foreign)}, nil},
+		{"per-model split round-trips", []RunHistory{run("ISS-A", "sess-1", withSplit)}, withSplit},
 	}
 
 	for _, tt := range tests {

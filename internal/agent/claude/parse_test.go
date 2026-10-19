@@ -3,6 +3,7 @@ package claude
 import (
 	"bufio"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -269,11 +270,14 @@ func TestUsageFromAssistant(t *testing.T) {
 func TestUsageFromResult(t *testing.T) {
 	t.Parallel()
 
+	sonnet := domain.TokenUsage{InputTokens: 6200, OutputTokens: 800, TotalTokens: 7000, CacheReadTokens: 1000, CacheWriteTokens: 200}
+	haiku := domain.TokenUsage{InputTokens: 3600, OutputTokens: 1200, TotalTokens: 4800, CacheReadTokens: 500, CacheWriteTokens: 100}
+
 	tests := []struct {
-		name      string
-		event     rawEvent
-		wantUsage domain.TokenUsage
-		wantModel string
+		name        string
+		event       rawEvent
+		wantUsage   domain.TokenUsage
+		wantByModel map[string]domain.TokenUsage
 	}{
 		{
 			name: "modelUsage single entry preferred over usage",
@@ -289,10 +293,14 @@ func TestUsageFromResult(t *testing.T) {
 			wantUsage: domain.TokenUsage{
 				InputTokens: 33649, OutputTokens: 64, TotalTokens: 33713, CacheReadTokens: 17706, CacheWriteTokens: 15933,
 			},
-			wantModel: "claude-haiku-4-5-20251001",
+			wantByModel: map[string]domain.TokenUsage{
+				"claude-haiku-4-5-20251001": {
+					InputTokens: 33649, OutputTokens: 64, TotalTokens: 33713, CacheReadTokens: 17706, CacheWriteTokens: 15933,
+				},
+			},
 		},
 		{
-			name: "modelUsage two entries sums components and picks greater output",
+			name: "modelUsage two entries split by model and sum to the total",
 			event: rawEvent{
 				ModelUsage: map[string]rawModelUsage{
 					"claude-sonnet-4-5-20250929": {InputTokens: 5000, OutputTokens: 800, CacheReadInputTokens: 1000, CacheCreationInputTokens: 200},
@@ -302,18 +310,7 @@ func TestUsageFromResult(t *testing.T) {
 			wantUsage: domain.TokenUsage{
 				InputTokens: 9800, OutputTokens: 2000, TotalTokens: 11800, CacheReadTokens: 1500, CacheWriteTokens: 300,
 			},
-			wantModel: "claude-haiku-4-5-20251001",
-		},
-		{
-			name: "modelUsage tie broken by lexicographically smallest key",
-			event: rawEvent{
-				ModelUsage: map[string]rawModelUsage{
-					"zeta-model":  {InputTokens: 100, OutputTokens: 50},
-					"alpha-model": {InputTokens: 200, OutputTokens: 50},
-				},
-			},
-			wantUsage: domain.TokenUsage{InputTokens: 300, OutputTokens: 100, TotalTokens: 400},
-			wantModel: "alpha-model",
+			wantByModel: map[string]domain.TokenUsage{"claude-sonnet-4-5-20250929": sonnet, "claude-haiku-4-5-20251001": haiku},
 		},
 		{
 			name: "modelUsage absent falls back to usage",
@@ -321,31 +318,28 @@ func TestUsageFromResult(t *testing.T) {
 				Usage: &rawUsage{InputTokens: 200, OutputTokens: 80, CacheReadInputTokens: 8000, CacheCreationInputTokens: 2000},
 			},
 			wantUsage: domain.TokenUsage{InputTokens: 10200, OutputTokens: 80, TotalTokens: 10280, CacheReadTokens: 8000, CacheWriteTokens: 2000},
-			wantModel: "",
 		},
 		{
 			name:      "modelUsage empty map falls back to usage",
 			event:     rawEvent{Usage: &rawUsage{InputTokens: 5, OutputTokens: 2}, ModelUsage: map[string]rawModelUsage{}},
 			wantUsage: domain.TokenUsage{InputTokens: 5, OutputTokens: 2, TotalTokens: 7},
-			wantModel: "",
 		},
 		{
 			name:      "neither modelUsage nor usage present",
 			event:     rawEvent{},
 			wantUsage: domain.TokenUsage{},
-			wantModel: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gotUsage, gotModel := usageFromResult(tt.event)
+			gotUsage, gotByModel := usageFromResult(tt.event)
 			if gotUsage != tt.wantUsage {
 				t.Errorf("usageFromResult() usage = %+v, want %+v", gotUsage, tt.wantUsage)
 			}
-			if gotModel != tt.wantModel {
-				t.Errorf("usageFromResult() model = %q, want %q", gotModel, tt.wantModel)
+			if !maps.Equal(gotByModel, tt.wantByModel) {
+				t.Errorf("usageFromResult() byModel = %+v, want %+v", gotByModel, tt.wantByModel)
 			}
 		})
 	}

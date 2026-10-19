@@ -29,13 +29,13 @@ Chosen option: **Add a `model` label with zero series prepared for every known m
 
 The model values are model names from the workflow configuration and the names agents report. The label therefore multiplies the existing series by the number of models a deployment uses, never by issues or runs. Values pass verbatim. An empty value exports as `<none>`.
 
-A sample counts under the first non-empty model, in this order:
+When a usage event also carries per-model token counts, its tokens count under every model those counts name, split by the counts and never more than the event reports. The ordered rule below governs only the share no count claims, which counts under the first non-empty model, in this order:
 
 1. the model the carrying event or worker result names;
 2. the model the run last reported;
 3. the run's configured model.
 
-The rule lives in orchestrator core and is the same for every agent kind. A run that switches models mid-way counts each sample under the model current when that sample arrived.
+The rule lives in orchestrator core and is the same for every agent kind. A run that switches models mid-way counts each sample, or the share of it no count claims, under the model current when that sample arrived.
 
 Zero series are prepared at start-up for the configured models, for `<none>` and for every model in run history. They are prepared again after every successful configuration reload, and whenever a run first reports a model. A model the deployment has never seen before loses its first increment on a default Prometheus, because the sample that names it is also its first. Prometheus closes that gap with `--enable-feature=created-timestamp-zero-ingestion`: client_golang stamps each new series with its creation time, and the protobuf exposition carries that time to the server. Each server in an HA pair handles this independently. The operator documentation recommends the flag.
 

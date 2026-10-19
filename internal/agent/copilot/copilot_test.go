@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1484,24 +1485,55 @@ func TestRunTurn_SessionStateRecovery_ResumeHandOver(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token-for-unit-test")
 
 	const sessionID = "aa778ea0-6eab-4ce9-b87e-11d6d33dab4f"
-	records := strings.Split(strings.TrimRight(loadTestFixture(t, "session_shutdown.jsonl"), "\n"), "\n")
-	journal := func(n int) string { return strings.Join(records[:n], "\n") + "\n" }
+	const sonnet = "claude-sonnet-5"
+	lines := func(fixture string) []string {
+		return strings.Split(strings.TrimRight(loadTestFixture(t, fixture), "\n"), "\n")
+	}
+	single, multi := lines("session_shutdown.jsonl"), lines("session_shutdown_two_models.jsonl")
+	journal := func(records []string, n int) string { return strings.Join(records[:n], "\n") + "\n" }
 	stream := loadTestFixture(t, "tool_use_no_output_tokens.jsonl")
 
 	record1 := domain.TokenUsage{InputTokens: 193011, OutputTokens: 596, TotalTokens: 193607, CacheReadTokens: 154053, CacheWriteTokens: 38948}
 	record2 := domain.TokenUsage{InputTokens: 271924, OutputTokens: 696, TotalTokens: 272620, CacheReadTokens: 232332, CacheWriteTokens: 39578}
 	record2LessRecord1 := domain.TokenUsage{InputTokens: 78913, OutputTokens: 100, TotalTokens: 79013, CacheReadTokens: 78279, CacheWriteTokens: 630}
+	sonnet1 := map[string]domain.TokenUsage{sonnet: record1}
+	sonnet2 := map[string]domain.TokenUsage{sonnet: record2}
+	sonnetRun := map[string]domain.TokenUsage{sonnet: record2LessRecord1}
+
+	multi1 := map[string]domain.TokenUsage{
+		sonnet:           {InputTokens: 1000, OutputTokens: 100, TotalTokens: 1100, CacheReadTokens: 600, CacheWriteTokens: 200},
+		"claude-haiku-4": {InputTokens: 400, OutputTokens: 40, TotalTokens: 440, CacheReadTokens: 100},
+	}
+	multi2 := map[string]domain.TokenUsage{
+		sonnet:           {InputTokens: 1600, OutputTokens: 150, TotalTokens: 1750, CacheReadTokens: 900, CacheWriteTokens: 300},
+		"claude-haiku-4": {InputTokens: 700, OutputTokens: 90, TotalTokens: 790, CacheReadTokens: 200},
+		"claude-opus-4":  {InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+	}
+	multi1Total := domain.TokenUsage{InputTokens: 1400, OutputTokens: 140, TotalTokens: 1540, CacheReadTokens: 700, CacheWriteTokens: 200}
+	multi2Total := domain.TokenUsage{InputTokens: 2350, OutputTokens: 250, TotalTokens: 2600, CacheReadTokens: 1100, CacheWriteTokens: 300}
+	multi2LessMulti1 := domain.TokenUsage{InputTokens: 950, OutputTokens: 110, TotalTokens: 1060, CacheReadTokens: 400, CacheWriteTokens: 100}
+	multi2LessMulti1ByModel := map[string]domain.TokenUsage{
+		sonnet:           {InputTokens: 600, OutputTokens: 50, TotalTokens: 650, CacheReadTokens: 300, CacheWriteTokens: 100},
+		"claude-haiku-4": {InputTokens: 300, OutputTokens: 50, TotalTokens: 350, CacheReadTokens: 100},
+		"claude-opus-4":  {InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+	}
 
 	tests := []struct {
 		name                          string
+		records                       []string
 		resume                        *domain.TokenUsage
+		resumeByModel                 map[string]domain.TokenUsage
 		recordsAtStart, recordsAtTurn int
 		wantUsage                     domain.TokenUsage
+		wantByModel                   map[string]domain.TokenUsage
+		wantResume                    domain.TokenUsage
+		wantResumeByModel             map[string]domain.TokenUsage
 		wantMeasured                  bool
 	}{
-		{"resume usage r1 and r2 appended reports r2 less r1", &record1, 1, 2, record2LessRecord1, true},
-		{"resume usage r2 and nothing appended reports no figure", &record2, 2, 2, domain.TokenUsage{}, false},
-		{"no resume usage reads r1 at start and reports r2 less r1", nil, 1, 2, record2LessRecord1, true},
+		{"resume usage r1 and r2 appended reports r2 less r1", single, &record1, sonnet1, 1, 2, record2LessRecord1, sonnetRun, record2, sonnet2, true},
+		{"resume usage r2 and nothing appended reports no figure", single, &record2, sonnet2, 2, 2, domain.TokenUsage{}, nil, record2, sonnet2, false},
+		{"no resume usage reads r1 at start and reports r2 less r1", single, nil, nil, 1, 2, record2LessRecord1, sonnetRun, record2, sonnet2, true},
+		{"models split by name and a new model counts whole", multi, &multi1Total, multi1, 1, 2, multi2LessMulti1, multi2LessMulti1ByModel, multi2Total, multi2, true},
 	}
 
 	for _, tt := range tests {
@@ -1509,22 +1541,23 @@ func TestRunTurn_SessionStateRecovery_ResumeHandOver(t *testing.T) {
 			copilotHome := t.TempDir()
 			t.Setenv("COPILOT_HOME", copilotHome)
 			path := journalPath(copilotHome, sessionID)
-			writeJournal(t, path, journal(tt.recordsAtStart))
+			writeJournal(t, path, journal(tt.records, tt.recordsAtStart))
 
 			adapter, err := NewCopilotAdapter()
 			if err != nil {
 				t.Fatalf("NewCopilotAdapter: %v", err)
 			}
 			session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
-				WorkspacePath:   t.TempDir(),
-				AgentConfig:     domain.AgentConfig{Command: fakeCopilotBinaryWithOutput(t, stream, 0)},
-				ResumeSessionID: sessionID,
-				ResumeUsage:     tt.resume,
+				WorkspacePath:      t.TempDir(),
+				AgentConfig:        domain.AgentConfig{Command: fakeCopilotBinaryWithOutput(t, stream, 0)},
+				ResumeSessionID:    sessionID,
+				ResumeUsage:        tt.resume,
+				ResumeUsageByModel: tt.resumeByModel,
 			})
 			if err != nil {
 				t.Fatalf("StartSession: %v", err)
 			}
-			writeJournal(t, path, journal(tt.recordsAtTurn))
+			writeJournal(t, path, journal(tt.records, tt.recordsAtTurn))
 
 			var events []domain.AgentEvent
 			result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
@@ -1539,11 +1572,19 @@ func TestRunTurn_SessionStateRecovery_ResumeHandOver(t *testing.T) {
 				t.Errorf("RunTurn() = usage %+v, measured %v, want %+v, %v", result.Usage, result.UsageMeasured, tt.wantUsage, tt.wantMeasured)
 			}
 			wantUnaccounted := !tt.wantMeasured
-			if result.ResumeUsage == nil || *result.ResumeUsage != record2 || result.SpendUnaccounted != wantUnaccounted {
-				t.Errorf("RunTurn() = resume usage %+v, spend unaccounted %v, want %+v, %v", result.ResumeUsage, result.SpendUnaccounted, record2, wantUnaccounted)
+			if result.ResumeUsage == nil || *result.ResumeUsage != tt.wantResume || result.SpendUnaccounted != wantUnaccounted {
+				t.Errorf("RunTurn() = resume usage %+v, spend unaccounted %v, want %+v, %v", result.ResumeUsage, result.SpendUnaccounted, tt.wantResume, wantUnaccounted)
+			}
+			if !maps.Equal(result.ResumeUsageByModel, tt.wantResumeByModel) {
+				t.Errorf("RunTurn() resume usage by model = %+v, want %+v", result.ResumeUsageByModel, tt.wantResumeByModel)
 			}
 			if tt.wantMeasured {
-				assertSingleUsageReportBeforeTerminal(t, events, tt.wantUsage, "claude-sonnet-5", 4200)
+				assertSingleUsageReportBeforeTerminal(t, events, tt.wantUsage, sonnet, 4200)
+				for _, e := range events {
+					if e.Type == domain.EventTokenUsage && !maps.Equal(e.UsageByModel, tt.wantByModel) {
+						t.Errorf("token_usage event UsageByModel = %+v, want %+v", e.UsageByModel, tt.wantByModel)
+					}
+				}
 			}
 		})
 	}
@@ -1766,7 +1807,7 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 			copilotSessionID: "no-file-session",
 		}
 
-		got, _, _ := state.recoverUsage(logger)
+		got, _, _, _ := state.recoverUsage(logger)
 		if got != nil {
 			t.Errorf("recoverUsage() = %+v, want nil (events file absent)", got)
 		}
@@ -1785,7 +1826,7 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 			copilotSessionID: "abc/../def",
 		}
 
-		got, _, _ := state.recoverUsage(logger)
+		got, _, _, _ := state.recoverUsage(logger)
 		if got != nil {
 			t.Errorf("recoverUsage() = %+v, want nil (invalid session id)", got)
 		}
@@ -1813,7 +1854,7 @@ func TestRunTurn_SessionStateRecovery_Degradation(t *testing.T) {
 			copilotSessionID: "valid-session-id",
 		}
 
-		got, _, _ := state.recoverUsage(logger)
+		got, _, _, _ := state.recoverUsage(logger)
 		if got != nil {
 			t.Errorf("recoverUsage() = %+v, want nil (remote launch)", got)
 		}
@@ -1832,15 +1873,15 @@ func TestRunTurn_SessionStateRecovery_FirstReadAttempt(t *testing.T) {
 		state := &sessionState{
 			target:           agentcore.LaunchTarget{WorkspacePath: t.TempDir()},
 			copilotSessionID: "created-session",
-			resume:           *agentcore.NewResumeBaseline(&domain.TokenUsage{}),
+			resume:           *agentcore.NewResumeBaseline(&domain.TokenUsage{}, nil),
 		}
 
-		if first, _, _ := state.recoverUsage(logger); first != nil {
+		if first, _, _, _ := state.recoverUsage(logger); first != nil {
 			t.Fatalf("first recoverUsage() = %+v, want nil (no journal yet)", first)
 		}
 
 		writeJournal(t, journalPath(root, "created-session"), loadTestFixture(t, "session_shutdown.jsonl"))
-		second, _, _ := state.recoverUsage(logger)
+		second, _, _, _ := state.recoverUsage(logger)
 		if second == nil {
 			t.Fatal("second recoverUsage() = nil, want a recovered figure")
 		}

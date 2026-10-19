@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -330,15 +331,21 @@ func TestRunWorkerAttempt_TokenColumnsEqualVerificationPlusWorking(t *testing.T)
 
 	verifyUsage := domain.TokenUsage{InputTokens: 80, OutputTokens: 20, TotalTokens: 100}
 	workUsage := domain.TokenUsage{InputTokens: 150, OutputTokens: 50, TotalTokens: 200}
-	reportUsage := func(params domain.RunTurnParams, usage domain.TokenUsage) (domain.TurnResult, error) {
-		params.OnEvent(domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Usage: usage, Model: "m"})
+	workByModel := map[string]domain.TokenUsage{
+		"model-verify": {InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+		"model-sub":    {InputTokens: 40, OutputTokens: 10, TotalTokens: 50},
+	}
+	reportUsage := func(params domain.RunTurnParams, model string, usage domain.TokenUsage, byModel map[string]domain.TokenUsage) (domain.TurnResult, error) {
+		params.OnEvent(domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Usage: usage, UsageByModel: byModel, Model: model})
 		return domain.TurnResult{SessionID: "sess", ExitReason: domain.EventTurnCompleted, Usage: usage, UsageMeasured: true}, nil
 	}
 	adapter := &credentialPropertyAdapter{
 		verifyRunFn: func(_ context.Context, params domain.RunTurnParams) (domain.TurnResult, error) {
-			return reportUsage(params, verifyUsage)
+			return reportUsage(params, "model-verify", verifyUsage, nil)
 		},
-		workRunFn: func(params domain.RunTurnParams) (domain.TurnResult, error) { return reportUsage(params, workUsage) },
+		workRunFn: func(params domain.RunTurnParams) (domain.TurnResult, error) {
+			return reportUsage(params, "model-work", workUsage, workByModel)
+		},
 	}
 
 	result := runCredentialWorker(t, context.Background(), defaultWorkerConfig(t.TempDir()), adapter, nil)
@@ -357,6 +364,15 @@ func TestRunWorkerAttempt_TokenColumnsEqualVerificationPlusWorking(t *testing.T)
 	}
 	if result.APIRequestCount < 2 || !result.UsageMeasured {
 		t.Errorf("WorkerResult = {APIRequestCount: %d, UsageMeasured: %v}, want at least 2 requests counted and usage measured", result.APIRequestCount, result.UsageMeasured)
+	}
+
+	wantByModel := map[string]domain.TokenUsage{
+		"model-verify": {InputTokens: 180, OutputTokens: 30, TotalTokens: 210},
+		"model-sub":    {InputTokens: 40, OutputTokens: 10, TotalTokens: 50},
+		"model-work":   {InputTokens: 10, OutputTokens: 30, TotalTokens: 40},
+	}
+	if !maps.Equal(result.UsageByModel, wantByModel) {
+		t.Errorf("WorkerResult.UsageByModel = %+v, want %+v", result.UsageByModel, wantByModel)
 	}
 }
 

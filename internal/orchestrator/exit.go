@@ -234,7 +234,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	if workerResult.ModelName != "" && workerResult.ModelName != entry.ModelName {
 		metrics.PrepareModel(workerResult.ModelName)
 	}
-	applyUsageDelta(state, entry, workerResult.Usage, workerResult.ModelName, metrics)
+	applyUsageDelta(state, entry, workerResult.Usage, workerResult.UsageByModel, workerResult.ModelName, metrics)
 
 	// Reconcile model name and request count the same way: the worker's
 	// mirror folded every event the entry applied, plus any a full
@@ -479,7 +479,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 		FirstAfterHop: entry.FirstAfterHop,
 		AgentBlocked:  blockedSoftStop,
-		ResumeUsage:   persistedResumeUsage(workerResult.ResumeUsage),
+		ResumeUsage:   persistedResumeUsage(workerResult.ResumeUsage, workerResult.ResumeUsageByModel),
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
@@ -490,6 +490,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		runHistory.TotalTokens = 0
 		runHistory.CacheReadTokens = 0
 		runHistory.CacheWriteTokens = 0
+	} else {
+		runHistory.ModelUsage = runModelUsage(entry.UsageByModel)
 	}
 	if workerResult.ReviewMetadata != nil {
 		masked := maskedReviewMetadata(*workerResult.ReviewMetadata)
@@ -1607,17 +1609,44 @@ func classifyWorkerError(err error) domain.RetryClassification {
 }
 
 // persistedResumeUsage drops TotalTokens, which domainResumeUsage derives
-// again.
-func persistedResumeUsage(usage *domain.TokenUsage) *persistence.ResumeUsage {
+// again. A zero usage with no split stores an empty one, which a later run
+// reads as a known per-model baseline of nothing.
+func persistedResumeUsage(usage *domain.TokenUsage, byModel map[string]domain.TokenUsage) *persistence.ResumeUsage {
 	if usage == nil {
 		return nil
 	}
-	return &persistence.ResumeUsage{
+	stored := &persistence.ResumeUsage{
 		InputTokens:      usage.InputTokens,
 		OutputTokens:     usage.OutputTokens,
 		CacheReadTokens:  usage.CacheReadTokens,
 		CacheWriteTokens: usage.CacheWriteTokens,
 	}
+	stored.ByModel = runModelUsage(byModel)
+	if stored.ByModel == nil && !hasTokenClasses(*usage) {
+		stored.ByModel = map[string]persistence.ModelTokens{}
+	}
+	return stored
+}
+
+// runModelUsage maps per-model usage to stored parts, dropping models zero
+// in every token class; nil when none remain.
+func runModelUsage(totals map[string]domain.TokenUsage) map[string]persistence.ModelTokens {
+	var parts map[string]persistence.ModelTokens
+	for model, tokens := range totals {
+		if !hasTokenClasses(tokens) {
+			continue
+		}
+		if parts == nil {
+			parts = make(map[string]persistence.ModelTokens, len(totals))
+		}
+		parts[model] = persistence.ModelTokens{
+			InputTokens:      tokens.InputTokens,
+			OutputTokens:     tokens.OutputTokens,
+			CacheReadTokens:  tokens.CacheReadTokens,
+			CacheWriteTokens: tokens.CacheWriteTokens,
+		}
+	}
+	return parts
 }
 
 func errorStringPtr(err error) *string {

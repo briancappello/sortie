@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -151,7 +153,7 @@ func HandleAgentEvent(state *State, issueID string, event domain.AgentEvent, log
 	}
 	if admitsUsageFigures(entry.UsageArrival) {
 		if hasUsage(event.Usage) {
-			usageDelta = applyUsageDelta(state, entry, event.Usage, carrier, metrics)
+			usageDelta = applyUsageDelta(state, entry, event.Usage, event.UsageByModel, carrier, metrics)
 		}
 
 		// A token_usage event, even one carrying an all-zero payload, or
@@ -288,9 +290,8 @@ func metricModel(carrierModel string, entry *RunningEntry) string {
 
 // usageDeltaAndWatermark computes usage's componentwise delta against
 // watermark, clamped to zero, and the componentwise-maximum watermark
-// raised by usage, over every domain.TokenUsage field. applyUsageDelta
-// and foldLocalUsage both derive their delta and raised watermark from
-// this one rule.
+// raised by usage, over every domain.TokenUsage field. foldUsage derives
+// its delta and raised watermark from this one rule.
 func usageDeltaAndWatermark(usage, watermark domain.TokenUsage) (delta, raisedWatermark domain.TokenUsage) {
 	delta = domain.TokenUsage{
 		InputTokens:      max(usage.InputTokens-watermark.InputTokens, 0),
@@ -309,26 +310,72 @@ func usageDeltaAndWatermark(usage, watermark domain.TokenUsage) (delta, raisedWa
 	return delta, raisedWatermark
 }
 
+// foldUsage applies the clamped-delta rule to usage and splits the delta
+// into per-model credits that sum to it: each model of byModel gets its
+// claim against totals, capped by what the delta has left, and current
+// gets the rest.
+func foldUsage(usage domain.TokenUsage, byModel map[string]domain.TokenUsage, current string, watermark domain.TokenUsage, totals map[string]domain.TokenUsage) (delta, raisedWatermark domain.TokenUsage, credits map[string]domain.TokenUsage) {
+	delta, raisedWatermark = usageDeltaAndWatermark(usage, watermark)
+	budget := delta
+	credits = make(map[string]domain.TokenUsage)
+
+	normalized := agentcore.NormalizeUsageByModel(byModel)
+	for _, name := range slices.Sorted(maps.Keys(normalized)) {
+		claim := agentcore.SubtractUsage(normalized[name], totals[name])
+		take := minUsage(claim, budget)
+		if !hasTokenClasses(take) {
+			continue
+		}
+		credits[name] = take
+		budget = agentcore.SubtractUsage(budget, take)
+	}
+	if hasTokenClasses(budget) {
+		credits[current] = agentcore.AddUsage(credits[current], budget)
+	}
+	return delta, raisedWatermark, credits
+}
+
+// hasTokenClasses reports whether usage is non-zero in an input, output,
+// cache read, or cache write count. TotalTokens is not a class.
+func hasTokenClasses(usage domain.TokenUsage) bool {
+	return usage.InputTokens != 0 || usage.OutputTokens != 0 ||
+		usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0
+}
+
+// minUsage returns the componentwise minimum of a and b over the token
+// classes.
+func minUsage(a, b domain.TokenUsage) domain.TokenUsage {
+	least := domain.TokenUsage{
+		InputTokens:      min(a.InputTokens, b.InputTokens),
+		OutputTokens:     min(a.OutputTokens, b.OutputTokens),
+		CacheReadTokens:  min(a.CacheReadTokens, b.CacheReadTokens),
+		CacheWriteTokens: min(a.CacheWriteTokens, b.CacheWriteTokens),
+	}
+	least.TotalTokens = least.InputTokens + least.OutputTokens
+	return least
+}
+
 // applyUsageDelta applies the monotone-delta token accounting rule to
 // entry and state.AgentTotals: it computes each component's delta
 // against entry's LastReported* watermarks, clamped to zero, adds the
 // deltas to entry and state.AgentTotals, raises the watermarks to the
-// componentwise maximum of their prior value and usage, emits the
-// non-zero deltas through metrics, and returns the applied delta.
-// carrierModel is the model named by the record that brought usage, or
-// "" when it names none; each delta reaches metrics.AddTokens exactly
-// once, under metricModel(carrierModel, entry).
+// componentwise maximum of their prior value and usage, and returns the
+// applied delta. byModel is usage's per-model split, nil when the record
+// names none; carrierModel is the model named by the record that brought
+// usage, or "" when it names none. Each model's share of the delta
+// reaches metrics.AddTokens exactly once under that model, and the
+// unattributed rest under metricModel(carrierModel, entry).
 //
 // applyUsageDelta is the only function that mutates
 // entry.AgentInputTokens, entry.AgentOutputTokens,
-// entry.AgentTotalTokens, entry.CacheReadTokens,
+// entry.AgentTotalTokens, entry.CacheReadTokens, entry.UsageByModel,
 // entry.CacheWriteTokens, the entry.LastReported* watermarks, and
 // State.AgentTotals, and the only caller of metrics.AddTokens for
 // token counters. It runs only on the orchestrator's single-writer
 // event loop goroutine; the worker's own local mirror of these
 // counters applies the identical rule independently on the worker
 // goroutine and never calls this function.
-func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage, carrierModel string, metrics domain.Metrics) domain.TokenUsage {
+func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage, byModel map[string]domain.TokenUsage, carrierModel string, metrics domain.Metrics) domain.TokenUsage {
 	watermark := domain.TokenUsage{
 		InputTokens:      entry.LastReportedInputTokens,
 		OutputTokens:     entry.LastReportedOutputTokens,
@@ -336,7 +383,7 @@ func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage,
 		CacheReadTokens:  entry.LastReportedCacheReadTokens,
 		CacheWriteTokens: entry.LastReportedCacheWriteTokens,
 	}
-	delta, raisedWatermark := usageDeltaAndWatermark(usage, watermark)
+	delta, raisedWatermark, credits := foldUsage(usage, byModel, metricModel(carrierModel, entry), watermark, entry.UsageByModel)
 
 	entry.AgentInputTokens += delta.InputTokens
 	entry.AgentOutputTokens += delta.OutputTokens
@@ -356,18 +403,27 @@ func applyUsageDelta(state *State, entry *RunningEntry, usage domain.TokenUsage,
 	state.AgentTotals.CacheReadTokens += delta.CacheReadTokens
 	state.AgentTotals.CacheWriteTokens += delta.CacheWriteTokens
 
-	model := metricModel(carrierModel, entry)
-	if delta.InputTokens > 0 {
-		metrics.AddTokens("input", model, delta.InputTokens)
-	}
-	if delta.OutputTokens > 0 {
-		metrics.AddTokens("output", model, delta.OutputTokens)
-	}
-	if delta.CacheReadTokens > 0 {
-		metrics.AddTokens("cache_read", model, delta.CacheReadTokens)
-	}
-	if delta.CacheWriteTokens > 0 {
-		metrics.AddTokens("cache_write", model, delta.CacheWriteTokens)
+	for _, model := range slices.Sorted(maps.Keys(credits)) {
+		credit := credits[model]
+		if _, seen := entry.UsageByModel[model]; !seen {
+			metrics.PrepareModel(model)
+		}
+		if entry.UsageByModel == nil {
+			entry.UsageByModel = make(map[string]domain.TokenUsage)
+		}
+		entry.UsageByModel[model] = agentcore.AddUsage(entry.UsageByModel[model], credit)
+		if credit.InputTokens > 0 {
+			metrics.AddTokens("input", model, credit.InputTokens)
+		}
+		if credit.OutputTokens > 0 {
+			metrics.AddTokens("output", model, credit.OutputTokens)
+		}
+		if credit.CacheReadTokens > 0 {
+			metrics.AddTokens("cache_read", model, credit.CacheReadTokens)
+		}
+		if credit.CacheWriteTokens > 0 {
+			metrics.AddTokens("cache_write", model, credit.CacheWriteTokens)
+		}
 	}
 
 	return delta

@@ -60,7 +60,7 @@ The LiteLLM file wins as the shared source because it has the widest circle of c
 
 ### Rate granularity
 
-Runs are priced per model. The adapters carry token counts per model through to the run record, which needs a schema change. An agent whose stream reports no per-model breakdown attributes all of a run's tokens to one model: the one the run's events named last (`reported_model`), else `configured_model`.
+Runs are priced per model. The adapters carry token counts per model through to the run record, which needs a schema change. An agent whose stream reports a per-model breakdown has each model's counts attributed to that model. Counts no model claims go to the model current when they arrive: the one the run's events named last (`reported_model`), else `configured_model`. Counts that arrive before a run's events name any model stay under the configured model and do not move when a model is named later.
 
 An existing per-kind entry such as `token_rates.claude-code` keeps precedence over every table and prices every model of that kind alike, so an upgrade changes no figure (driver 7). It keeps its old rule that an unset cache-read or cache-write rate prices that class at `input_per_mtok`. `sortie validate` warns that such an entry disables per-model pricing for its kind. A per-model operator entry for a model that appears in some table may set any subset of rates and inherits the rest from the table; one for a model that appears in no table must set all of `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, and `cache_write_per_mtok`.
 

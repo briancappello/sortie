@@ -126,37 +126,33 @@ func usageFromAssistant(raw *rawUsage) domain.TokenUsage {
 	}
 }
 
-// usageFromResult returns the usage the result event reports and the
-// model that produced it. It prefers the modelUsage map, which is present
-// whenever the turn touched at least one model and includes sub-agent
-// activity that the top-level usage object excludes; it falls back to the
-// top-level usage object when modelUsage is absent or empty. The reported
-// model is the modelUsage key with the greatest OutputTokens, ties broken
-// by the lexicographically smallest key. InputTokens includes prompt-cache
-// reads and prompt-cache writes in both cases; TotalTokens is computed as
-// InputTokens plus OutputTokens.
+// usageFromResult returns the usage the result event reports and its split
+// by model. It prefers the modelUsage map, which is present whenever the turn
+// touched at least one model and includes sub-agent activity that the
+// top-level usage object excludes; it falls back to the top-level usage
+// object when modelUsage is absent or empty, in which case byModel is nil.
+// InputTokens includes prompt-cache reads and prompt-cache writes in both
+// cases; TotalTokens is computed as InputTokens plus OutputTokens.
 //
 // On a process that restored its session's saved totals the figure is
 // cumulative over the whole session, so callers subtract a baseline
 // instead of adding it to a run total.
-func usageFromResult(event rawEvent) (usage domain.TokenUsage, model string) {
-	if len(event.ModelUsage) > 0 {
-		var bestOutput int64 = -1
-		for name, mu := range event.ModelUsage {
-			input := mu.InputTokens + mu.CacheReadInputTokens + mu.CacheCreationInputTokens
-			usage.InputTokens += input
-			usage.OutputTokens += mu.OutputTokens
-			usage.CacheReadTokens += mu.CacheReadInputTokens
-			usage.CacheWriteTokens += mu.CacheCreationInputTokens
-			if mu.OutputTokens > bestOutput || (mu.OutputTokens == bestOutput && name < model) {
-				bestOutput = mu.OutputTokens
-				model = name
-			}
-		}
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-		return usage, model
+func usageFromResult(event rawEvent) (usage domain.TokenUsage, byModel map[string]domain.TokenUsage) {
+	if len(event.ModelUsage) == 0 {
+		return usageFromAssistant(event.Usage), nil
 	}
-	return usageFromAssistant(event.Usage), ""
+	byModel = make(map[string]domain.TokenUsage, len(event.ModelUsage))
+	for name, mu := range event.ModelUsage {
+		figure := usageFromAssistant(&rawUsage{
+			InputTokens:              mu.InputTokens,
+			OutputTokens:             mu.OutputTokens,
+			CacheReadInputTokens:     mu.CacheReadInputTokens,
+			CacheCreationInputTokens: mu.CacheCreationInputTokens,
+		})
+		byModel[name] = figure
+		usage = agentcore.AddUsage(usage, figure)
+	}
+	return usage, byModel
 }
 
 // firstRestoringRelease is the first release whose resumed process

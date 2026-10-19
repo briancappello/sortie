@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -441,63 +442,106 @@ func TestHandleWorkerExit_NoneArrivalDiscardIsPreserved(t *testing.T) {
 func TestHandleWorkerExit_RunHistoryTokenColumns(t *testing.T) {
 	t.Parallel()
 
-	store := &mockExitStore{}
-	state := exitState(t, "ISSUE-TOK", nil)
-	entry := state.Running["ISSUE-TOK"]
-	entry.AgentInputTokens = 100
-	entry.AgentOutputTokens = 200
-	entry.AgentTotalTokens = 300
-	entry.CacheReadTokens = 40
-	entry.CacheWriteTokens = 25
-	state.AgentTotals.CacheWriteTokens = 25
-	// The event that advanced these totals also marked the entry
-	// measured, so a fixture carrying totals must carry the flag.
-	entry.UsageMeasured = true
-
-	HandleWorkerExit(state, WorkerResult{
-		IssueID:       "ISSUE-TOK",
-		Identifier:    "ISSUE-TOK-ident",
-		ExitKind:      WorkerExitNormal,
-		AgentAdapter:  "mock",
-		WorkspacePath: "/tmp/ws",
-	}, defaultExitParams(t, store))
-
-	if len(store.runHistories) != 1 {
-		t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
-	}
-	run := store.runHistories[0]
-	if run.InputTokens != 100 {
-		t.Errorf("RunHistory.InputTokens = %d, want 100", run.InputTokens)
-	}
-	if run.OutputTokens != 200 {
-		t.Errorf("RunHistory.OutputTokens = %d, want 200", run.OutputTokens)
-	}
-	if run.TotalTokens != 300 {
-		t.Errorf("RunHistory.TotalTokens = %d, want 300", run.TotalTokens)
-	}
-	if run.CacheReadTokens != 40 {
-		t.Errorf("RunHistory.CacheReadTokens = %d, want 40", run.CacheReadTokens)
-	}
-	if run.CacheWriteTokens != 25 {
-		t.Errorf("RunHistory.CacheWriteTokens = %d, want 25", run.CacheWriteTokens)
+	tokenEvent := func(model string, usage domain.TokenUsage, byModel map[string]domain.TokenUsage) domain.AgentEvent {
+		return domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: baseTime, Model: model, Usage: usage, UsageByModel: byModel}
 	}
 
-	if len(store.sessionMetadata) != 1 {
-		t.Fatalf("UpsertSessionMetadata called %d times, want 1", len(store.sessionMetadata))
-	}
-	meta := store.sessionMetadata[0]
-	if meta.TotalTokens != run.TotalTokens {
-		t.Errorf("SessionMetadata.TotalTokens = %d, want %d (parity with run_history)", meta.TotalTokens, run.TotalTokens)
-	}
-	if meta.CacheWriteTokens != run.CacheWriteTokens {
-		t.Errorf("SessionMetadata.CacheWriteTokens = %d, want %d (parity with run_history)", meta.CacheWriteTokens, run.CacheWriteTokens)
+	tests := []struct {
+		name      string
+		events    []domain.AgentEvent
+		worker    WorkerResult
+		wantParts map[string]persistence.ModelTokens
+	}{
+		{
+			name:      "one model",
+			events:    []domain.AgentEvent{tokenEvent("model-a", domain.TokenUsage{InputTokens: 100, OutputTokens: 200, TotalTokens: 300, CacheReadTokens: 40, CacheWriteTokens: 25}, nil)},
+			wantParts: map[string]persistence.ModelTokens{"model-a": {InputTokens: 100, OutputTokens: 200, CacheReadTokens: 40, CacheWriteTokens: 25}},
+		},
+		{
+			name: "two models, the carrier takes what the split does not name",
+			events: []domain.AgentEvent{tokenEvent("model-a",
+				domain.TokenUsage{InputTokens: 300, OutputTokens: 60, TotalTokens: 360, CacheReadTokens: 30},
+				map[string]domain.TokenUsage{"model-b": {InputTokens: 200, OutputTokens: 50, TotalTokens: 250, CacheReadTokens: 30}})},
+			wantParts: map[string]persistence.ModelTokens{
+				"model-a": {InputTokens: 100, OutputTokens: 10},
+				"model-b": {InputTokens: 200, OutputTokens: 50, CacheReadTokens: 30},
+			},
+		},
+		{
+			name:   "dropped event reconciled from the worker's per-model totals",
+			events: []domain.AgentEvent{tokenEvent("model-a", domain.TokenUsage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110}, nil)},
+			worker: WorkerResult{
+				ModelName: "model-a",
+				Usage:     domain.TokenUsage{InputTokens: 180, OutputTokens: 30, TotalTokens: 210},
+				UsageByModel: map[string]domain.TokenUsage{
+					"model-a": {InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+					"model-b": {InputTokens: 80, OutputTokens: 20, TotalTokens: 100},
+				},
+			},
+			wantParts: map[string]persistence.ModelTokens{
+				"model-a": {InputTokens: 100, OutputTokens: 10},
+				"model-b": {InputTokens: 80, OutputTokens: 20},
+			},
+		},
 	}
 
-	if len(store.metrics) != 1 {
-		t.Fatalf("UpsertAggregateMetrics called %d times, want 1", len(store.metrics))
-	}
-	if got := store.metrics[0].CacheWriteTokens; got != 25 {
-		t.Errorf("AggregateMetrics.CacheWriteTokens = %d, want 25 (restored into orchestrator.AgentTotals after a restart)", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockExitStore{}
+			state := exitState(t, "ISSUE-TOK", nil)
+			for _, event := range tt.events {
+				HandleAgentEvent(state, "ISSUE-TOK", event, discardLogger(), nil)
+			}
+			tt.worker.IssueID = "ISSUE-TOK"
+			tt.worker.Identifier = "ISSUE-TOK-ident"
+			tt.worker.ExitKind = WorkerExitNormal
+			tt.worker.AgentAdapter = "mock"
+			tt.worker.WorkspacePath = "/tmp/ws"
+
+			HandleWorkerExit(state, tt.worker, defaultExitParams(t, store))
+
+			if len(store.runHistories) != 1 {
+				t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
+			}
+			run := store.runHistories[0]
+			if !maps.Equal(run.ModelUsage, tt.wantParts) {
+				t.Errorf("RunHistory.ModelUsage = %+v, want %+v", run.ModelUsage, tt.wantParts)
+			}
+			var gotSum persistence.ModelTokens
+			for _, part := range run.ModelUsage {
+				gotSum.InputTokens += part.InputTokens
+				gotSum.OutputTokens += part.OutputTokens
+				gotSum.CacheReadTokens += part.CacheReadTokens
+				gotSum.CacheWriteTokens += part.CacheWriteTokens
+			}
+			wantSum := persistence.ModelTokens{
+				InputTokens:      run.InputTokens,
+				OutputTokens:     run.OutputTokens,
+				CacheReadTokens:  run.CacheReadTokens,
+				CacheWriteTokens: run.CacheWriteTokens,
+			}
+			if gotSum != wantSum {
+				t.Errorf("sum of RunHistory.ModelUsage = %+v, want the token columns %+v", gotSum, wantSum)
+			}
+
+			if len(store.sessionMetadata) != 1 {
+				t.Fatalf("UpsertSessionMetadata called %d times, want 1", len(store.sessionMetadata))
+			}
+			meta := store.sessionMetadata[0]
+			if meta.TotalTokens != run.TotalTokens || meta.CacheWriteTokens != run.CacheWriteTokens {
+				t.Errorf("SessionMetadata (total, cache write) = (%d, %d), want (%d, %d) (parity with run_history)",
+					meta.TotalTokens, meta.CacheWriteTokens, run.TotalTokens, run.CacheWriteTokens)
+			}
+
+			if len(store.metrics) != 1 {
+				t.Fatalf("UpsertAggregateMetrics called %d times, want 1", len(store.metrics))
+			}
+			if got := store.metrics[0].CacheWriteTokens; got != run.CacheWriteTokens {
+				t.Errorf("AggregateMetrics.CacheWriteTokens = %d, want %d (restored into orchestrator.AgentTotals after a restart)", got, run.CacheWriteTokens)
+			}
+		})
 	}
 }
 

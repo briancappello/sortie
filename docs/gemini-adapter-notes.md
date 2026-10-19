@@ -26,7 +26,7 @@ Token accounting is the one row that carries both verdicts. Session continuation
 
 On the protocol surface, retry classification excludes the human-input case as not applicable. The consent request the asking-posture launch raised offered a refusing option, the client refused it inside the protocol, and the turn went on. That exclusion does not cover a question addressed to a person. The native surfaces have no terminal vocabulary for the human-input outcome at all.
 
-The protocol wire has no token figure Sortie can use. The prompt result's extension block has input and output counts but no cache-read, reasoning, or tool counters, so it is only a presence signal and a lower bound. The figure that reaches the budget comes from the runtime's own telemetry and session journal. Both native surfaces report token counts directly: the JSON surface per model, the streaming JSON surface in a flatter form.
+The protocol wire has no token figure Sortie can use. The prompt result's extension block has input and output counts but no cache-read, reasoning, or tool counters, so it is only a presence signal and a lower bound. The figure that reaches the budget comes from the runtime's own telemetry and session journal. That figure carries a per-model split by each record's or message's model. Both native surfaces report token counts directly: the JSON surface per model, the streaming JSON surface in a flatter form.
 
 - protocol turn_disposition: Observed: usable
 - protocol retry_classification: Observed: usable

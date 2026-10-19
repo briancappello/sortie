@@ -10,6 +10,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/domain"
 )
 
 type parsedLine struct {
@@ -126,6 +127,10 @@ type exportUsage struct {
 	CacheReadTokens  int64
 	CacheWriteTokens int64
 	Model            string
+
+	// ByModel splits the totals by each kept message's `providerID/modelID`;
+	// a message missing either part adds to no entry.
+	ByModel map[string]domain.TokenUsage
 
 	// Recovered reports whether the export produced a figure at all,
 	// which is not the same question as whether that figure is non-zero.
@@ -287,10 +292,16 @@ func parseSessionExport(data []byte, sessionID string, sinceUnixMS int64) export
 			}
 		}
 
-		sum.InputTokens += inputTokens + cacheReadTokens + cacheWriteTokens
-		sum.OutputTokens += outputTokens + reasoningTokens
-		sum.CacheReadTokens += cacheReadTokens
-		sum.CacheWriteTokens += cacheWriteTokens
+		messageUsage := domain.TokenUsage{
+			InputTokens:      inputTokens + cacheReadTokens + cacheWriteTokens,
+			OutputTokens:     outputTokens + reasoningTokens,
+			CacheReadTokens:  cacheReadTokens,
+			CacheWriteTokens: cacheWriteTokens,
+		}
+		sum.InputTokens += messageUsage.InputTokens
+		sum.OutputTokens += messageUsage.OutputTokens
+		sum.CacheReadTokens += messageUsage.CacheReadTokens
+		sum.CacheWriteTokens += messageUsage.CacheWriteTokens
 		kept = true
 
 		model := mapFromAny(message["model"])
@@ -298,6 +309,10 @@ func parseSessionExport(data []byte, sessionID string, sinceUnixMS int64) export
 		modelID := stringFromAny(model["id"])
 		if providerID != "" && modelID != "" {
 			sum.Model = providerID + "/" + modelID
+			if sum.ByModel == nil {
+				sum.ByModel = map[string]domain.TokenUsage{}
+			}
+			sum.ByModel[sum.Model] = agentcore.AddUsage(sum.ByModel[sum.Model], messageUsage)
 		}
 	}
 	if !kept {

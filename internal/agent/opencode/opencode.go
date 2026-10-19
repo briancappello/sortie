@@ -973,7 +973,8 @@ func recoverUsage(ctx context.Context, state *sessionState, sinceUnixMS int64) *
 			CacheReadTokens:  usage.CacheReadTokens,
 			CacheWriteTokens: usage.CacheWriteTokens,
 		},
-		Model: usage.Model,
+		Model:   usage.Model,
+		ByModel: usage.ByModel,
 	}
 }
 

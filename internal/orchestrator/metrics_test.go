@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -668,8 +669,38 @@ func TestHandleAgentEvent_TokenMetrics(t *testing.T) {
 			t.Errorf("tokens[1] = %+v, want {output 50}", spy.tokens[1])
 		}
 		assertTokenModels(t, spy, "event-model")
-		if !slices.Equal(spy.preparedModels, []string{"event-model"}) {
-			t.Errorf("PrepareModel calls = %q, want [event-model]", spy.preparedModels)
+		if got := slices.Compact(slices.Sorted(slices.Values(spy.preparedModels))); !slices.Equal(got, []string{"event-model"}) {
+			t.Errorf("PrepareModel models = %q, want [event-model]", got)
+		}
+	})
+
+	t.Run("a run that used two models increments each series by its share", func(t *testing.T) {
+		t.Parallel()
+
+		spy := &spyMetrics{}
+		state, _ := newStateWithEntry("TOK-5")
+
+		HandleAgentEvent(state, "TOK-5", domain.AgentEvent{
+			Type:         domain.EventTokenUsage,
+			Timestamp:    time.Now().UTC(),
+			Model:        "carrier-model",
+			Usage:        domain.TokenUsage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CacheReadTokens: 20},
+			UsageByModel: map[string]domain.TokenUsage{"sub-model": {InputTokens: 30, OutputTokens: 10, TotalTokens: 40}},
+		}, slog.Default(), spy)
+
+		got := map[string]int64{}
+		for _, call := range spy.tokens {
+			got[call.model+"/"+call.tokenType] += call.count
+		}
+		want := map[string]int64{
+			"sub-model/input":          30,
+			"sub-model/output":         10,
+			"carrier-model/input":      70,
+			"carrier-model/output":     40,
+			"carrier-model/cache_read": 20,
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("AddTokens increments by model/type = %v, want %v", got, want)
 		}
 	})
 

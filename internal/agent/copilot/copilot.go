@@ -162,7 +162,7 @@ func (s *sessionState) refreshForkLogger() {
 // last reading, means the turn wrote none: no figure, and the session's
 // usage is unchanged. A reading the baseline cannot place exactly returns no
 // figure and true.
-func (s *sessionState) recoverUsage(logger *slog.Logger) (recovered *agentcore.RecoveredUsage, estimated bool, resume *domain.TokenUsage) {
+func (s *sessionState) recoverUsage(logger *slog.Logger) (recovered *agentcore.RecoveredUsage, estimated bool, resume *domain.TokenUsage, resumeByModel map[string]domain.TokenUsage) {
 	remote := s.target.RemoteCommand != ""
 	sessionID := s.copilotSessionID
 	validID := sessionID != "" && sessionIDPattern.MatchString(sessionID)
@@ -173,18 +173,18 @@ func (s *sessionState) recoverUsage(logger *slog.Logger) (recovered *agentcore.R
 				slog.String("reason", "invalid_session_id"))
 			s.sessionIDRejectionLogged = true
 		}
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	root, err := sessionStateRoot(os.Getenv, os.UserHomeDir)
 	if err != nil {
 		logger.Debug("copilot session-state root resolution failed",
 			slog.String("session_id", sessionID), slog.String("reason", "root_unresolved"))
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	eventsPath := filepath.Join(root, sessionID, "events.jsonl")
 
-	current, model, found, err := readSessionUsage(eventsPath)
+	current, currentByModel, model, found, err := readSessionUsage(eventsPath)
 	if err != nil {
 		if errors.Is(err, errSessionStateCapExceeded) {
 			logger.Warn("copilot session-state read abandoned",
@@ -193,24 +193,26 @@ func (s *sessionState) recoverUsage(logger *slog.Logger) (recovered *agentcore.R
 			logger.Debug("copilot session-state read failed",
 				slog.String("session_id", sessionID), slog.String("reason", "unreadable"))
 		}
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	if !found {
 		logger.Debug("copilot session-state has no session.shutdown record yet",
 			slog.String("session_id", sessionID), slog.String("reason", "no_record"))
-		return nil, false, s.resume.Resume()
+		last, lastByModel := s.resume.Resume()
+		return nil, false, last, lastByModel
 	}
 
-	if last := s.resume.Resume(); last != nil && *last == current {
-		return nil, false, last
+	if last, lastByModel := s.resume.Resume(); last != nil && *last == current {
+		return nil, false, last, lastByModel
 	}
 
-	run, estimated := s.resume.Observe(current, nil)
+	run, runByModel, estimated := s.resume.Observe(current, currentByModel, nil)
+	latest, latestByModel := s.resume.Resume()
 	if estimated {
-		return nil, true, s.resume.Resume()
+		return nil, true, latest, latestByModel
 	}
-	return &agentcore.RecoveredUsage{Run: run, Model: model}, false, s.resume.Resume()
+	return &agentcore.RecoveredUsage{Run: run, Model: model, ByModel: runByModel}, false, latest, latestByModel
 }
 
 // seedResumeBaseline returns the baseline a session starts from: zero for a
@@ -221,9 +223,9 @@ func (s *sessionState) recoverUsage(logger *slog.Logger) (recovered *agentcore.R
 func seedResumeBaseline(params domain.StartSessionParams, target agentcore.LaunchTarget, sessionID string, logger *slog.Logger) agentcore.ResumeBaseline {
 	switch {
 	case params.ResumeSessionID == "":
-		return *agentcore.NewResumeBaseline(&domain.TokenUsage{})
+		return *agentcore.NewResumeBaseline(&domain.TokenUsage{}, nil)
 	case params.ResumeUsage != nil:
-		return *agentcore.NewResumeBaseline(params.ResumeUsage)
+		return *agentcore.NewResumeBaseline(params.ResumeUsage, params.ResumeUsageByModel)
 	case target.RemoteCommand != "" || !sessionIDPattern.MatchString(sessionID):
 		return agentcore.ResumeBaseline{}
 	}
@@ -231,24 +233,24 @@ func seedResumeBaseline(params domain.StartSessionParams, target agentcore.Launc
 }
 
 // journalResumeUsage returns the totals of the newest session.shutdown record
-// in the session's journal, zero when the journal is missing or holds no
-// record, and nil when the journal cannot be read.
-func journalResumeUsage(sessionID string, logger *slog.Logger) *domain.TokenUsage {
+// in the session's journal with its per-model split, zero and nil when the
+// journal is missing or holds no record, and nil and nil when unreadable.
+func journalResumeUsage(sessionID string, logger *slog.Logger) (*domain.TokenUsage, map[string]domain.TokenUsage) {
 	root, err := sessionStateRoot(os.Getenv, os.UserHomeDir)
 	if err != nil {
 		logger.Debug("copilot session-state root resolution failed", slog.String("reason", "root_unresolved"))
-		return nil
+		return nil, nil
 	}
 
-	current, _, found, err := readSessionUsage(filepath.Join(root, sessionID, "events.jsonl"))
+	current, currentByModel, _, found, err := readSessionUsage(filepath.Join(root, sessionID, "events.jsonl"))
 	if errors.Is(err, fs.ErrNotExist) || (err == nil && !found) {
-		return &domain.TokenUsage{}
+		return &domain.TokenUsage{}, nil
 	}
 	if err != nil {
 		logger.Debug("copilot session-state baseline read failed", slog.String("reason", "unreadable"))
-		return nil
+		return nil, nil
 	}
-	return &current
+	return &current, currentByModel
 }
 
 // NewCopilotAdapter creates a [CopilotAdapter]. Settings and command
@@ -479,7 +481,9 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 			return nil, nil
 		},
-		GetUsage:     func() (domain.TokenUsage, bool) { return state.usage.Snapshot(), state.usage.Measured() },
+		GetUsage: func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) {
+			return state.usage.Snapshot(), state.usage.ByModel(), state.usage.Measured()
+		},
 		GetSessionID: func() string { return state.copilotSessionID },
 		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			lastResult, _ := lastParsed.(*rawEvent)
@@ -490,7 +494,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				state.refreshForkLogger()
 			}
 
-			recovered, estimated, resume := state.recoverUsage(state.logger())
+			recovered, estimated, resume, resumeByModel := state.recoverUsage(state.logger())
 			if lastResult != nil && recovered != nil {
 				spend.MarkSettled()
 				spend.MarkSessionTotal()
@@ -539,6 +543,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, recovered, *spend)
 			result.ResumeUsage = resume
+			result.ResumeUsageByModel = resumeByModel
 			return result, agentErr
 		},
 		// Copilot emits EventSessionStarted before the scan loop using the

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1144,6 +1145,15 @@ func TestRunTurn_SubAgentUsage(t *testing.T) {
 			t.Error("Usage.OutputTokens = 0, want non-zero even though the top-level usage object reports zero")
 		}
 		agenttest.AssertUsageContract(t, events)
+
+		wantByModel := map[string]domain.TokenUsage{
+			"claude-sonnet-4-5-20250929": {InputTokens: 6200, OutputTokens: 800, TotalTokens: 7000, CacheReadTokens: 1000, CacheWriteTokens: 200},
+			"claude-haiku-4-5-20251001":  {InputTokens: 3600, OutputTokens: 1200, TotalTokens: 4800, CacheReadTokens: 500, CacheWriteTokens: 100},
+		}
+		terminal := events[len(events)-1]
+		if !maps.Equal(terminal.UsageByModel, wantByModel) {
+			t.Errorf("%s UsageByModel = %+v, want %+v", terminal.Type, terminal.UsageByModel, wantByModel)
+		}
 	})
 
 	t.Run("modelUsage removed falls back to usage", func(t *testing.T) {
@@ -1275,6 +1285,71 @@ func TestRunTurn_ResumedSessionUsage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunTurn_ResumedSessionUsageByModel(t *testing.T) {
+	t.Parallel()
+
+	const sid = "5cf8c387-6196-4296-86e4-eaaf85e8b944"
+
+	usage := func(input, output int64) domain.TokenUsage {
+		return domain.TokenUsage{InputTokens: input, OutputTokens: output, TotalTokens: input + output}
+	}
+	result := func(sonnetIn, sonnetOut, haikuIn, haikuOut int) string {
+		return fmt.Sprintf(`{"type":"result","subtype":"success","is_error":false,"session_id":"%s","modelUsage":{`+
+			`"sonnet":{"inputTokens":%d,"outputTokens":%d},"haiku":{"inputTokens":%d,"outputTokens":%d}}}`+"\n",
+			sid, sonnetIn, sonnetOut, haikuIn, haikuOut)
+	}
+	seed := map[string]domain.TokenUsage{"sonnet": usage(10, 5), "haiku": usage(4, 2)}
+	turns := []struct {
+		stdout     string
+		wantRun    map[string]domain.TokenUsage
+		wantResume map[string]domain.TokenUsage
+	}{
+		{
+			stdout:     result(30, 25, 9, 12),
+			wantRun:    map[string]domain.TokenUsage{"sonnet": usage(20, 20), "haiku": usage(5, 10)},
+			wantResume: map[string]domain.TokenUsage{"sonnet": usage(30, 25), "haiku": usage(9, 12)},
+		},
+		{
+			stdout:     result(31, 40, 12, 13),
+			wantRun:    map[string]domain.TokenUsage{"sonnet": usage(21, 35), "haiku": usage(8, 11)},
+			wantResume: map[string]domain.TokenUsage{"sonnet": usage(31, 40), "haiku": usage(12, 13)},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	initLine := `{"type":"system","subtype":"init","session_id":"` + sid + `","claude_code_version":"2.1.302","cwd":"/tmp"}` + "\n"
+	script := fakeSequentialClaude(t, tmpDir,
+		agenttest.Output{Stdout: initLine + turns[0].stdout},
+		agenttest.Output{Stdout: initLine + turns[1].stdout},
+	)
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+		WorkspacePath:      tmpDir,
+		AgentConfig:        domain.AgentConfig{Command: script},
+		ResumeSessionID:    sid,
+		ResumeUsage:        &domain.TokenUsage{InputTokens: 14, OutputTokens: 7, TotalTokens: 21},
+		ResumeUsageByModel: seed,
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	for i, want := range turns {
+		var terminal domain.AgentEvent
+		turnResult, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{Prompt: "turn", OnEvent: func(e domain.AgentEvent) { terminal = e }})
+		if err != nil {
+			t.Fatalf("RunTurn(turn %d) error = %v", i+1, err)
+		}
+
+		if !maps.Equal(terminal.UsageByModel, want.wantRun) {
+			t.Errorf("RunTurn(turn %d) terminal UsageByModel = %+v, want %+v", i+1, terminal.UsageByModel, want.wantRun)
+		}
+		if !maps.Equal(turnResult.ResumeUsageByModel, want.wantResume) {
+			t.Errorf("RunTurn(turn %d) ResumeUsageByModel = %+v, want %+v", i+1, turnResult.ResumeUsageByModel, want.wantResume)
+		}
 	}
 }
 

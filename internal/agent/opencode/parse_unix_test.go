@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -312,7 +313,7 @@ func TestQueryExportSubprocess(t *testing.T) {
 		state := testExportState(script, tmpDir)
 
 		usage := queryExportUsage(context.Background(), state, 0)
-		if usage != (exportUsage{}) {
+		if !reflect.DeepEqual(usage, exportUsage{}) {
 			t.Errorf("usage = %+v, want zero value", usage)
 		}
 	})
@@ -325,7 +326,7 @@ func TestQueryExportSubprocess(t *testing.T) {
 		state := testExportState(script, tmpDir)
 
 		usage := queryExportUsage(context.Background(), state, 0)
-		if usage != (exportUsage{}) {
+		if !reflect.DeepEqual(usage, exportUsage{}) {
 			t.Errorf("usage = %+v, want zero value", usage)
 		}
 	})

@@ -240,6 +240,9 @@ type TurnMeta struct {
 	// Usage is the session's run-cumulative token usage snapshot.
 	Usage domain.TokenUsage
 
+	// UsageByModel is Usage's per-model split, or nil.
+	UsageByModel map[string]domain.TokenUsage
+
 	// UsageMeasured reports whether the adapter has observed at least one
 	// usage measurement for the session by the end of this turn.
 	UsageMeasured bool
@@ -251,6 +254,9 @@ type TurnMeta struct {
 	// ResumeUsage is the runtime's own usage figure for the session at the
 	// end of this turn, or nil when the turn produced no exact reading.
 	ResumeUsage *domain.TokenUsage
+
+	// ResumeUsageByModel is ResumeUsage's per-model split, or nil.
+	ResumeUsageByModel map[string]domain.TokenUsage
 }
 
 // DecideTurn returns the normalized disposition for one agent turn. It is
@@ -417,13 +423,13 @@ func FinalizeTurn(
 
 	switch disposition.ExitReason {
 	case domain.EventTurnCompleted:
-		EmitTurnCompleted(emit, disposition.EventMessage, meta.APIDurationMS, meta.Usage)
+		EmitTurnCompleted(emit, disposition.EventMessage, meta.APIDurationMS, meta.Usage, meta.UsageByModel)
 	case domain.EventTurnFailed:
-		EmitTurnFailed(emit, disposition.EventMessage, meta.APIDurationMS, meta.Usage)
+		EmitTurnFailed(emit, disposition.EventMessage, meta.APIDurationMS, meta.Usage, meta.UsageByModel)
 	case domain.EventTurnCancelled:
-		EmitTurnCancelled(emit, disposition.EventMessage, meta.Usage)
+		EmitTurnCancelled(emit, disposition.EventMessage, meta.Usage, meta.UsageByModel)
 	case domain.EventTurnInputRequired:
-		EmitTurnInputRequired(emit, disposition.EventMessage, meta.Usage)
+		EmitTurnInputRequired(emit, disposition.EventMessage, meta.Usage, meta.UsageByModel)
 	}
 
 	if disposition.Row == RowZeroWork {
@@ -440,11 +446,12 @@ func FinalizeTurn(
 	}
 
 	result := domain.TurnResult{
-		SessionID:     meta.SessionID,
-		Usage:         meta.Usage,
-		UsageMeasured: meta.UsageMeasured,
-		ResumeUsage:   meta.ResumeUsage,
-		ExitReason:    disposition.ExitReason,
+		SessionID:          meta.SessionID,
+		Usage:              meta.Usage,
+		UsageMeasured:      meta.UsageMeasured,
+		ResumeUsage:        meta.ResumeUsage,
+		ResumeUsageByModel: meta.ResumeUsageByModel,
+		ExitReason:         disposition.ExitReason,
 	}
 	spend.applyTo(&result, disposition.ExitReason == domain.EventTurnCompleted)
 
