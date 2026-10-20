@@ -14,9 +14,9 @@ export function rateText(perMtok: number | null, unset: string): string {
 const LAYER_LABELS: Readonly<Record<string, string>> = {
   kind_entry: "Kind entry",
   model_entry: "Model entry",
-  operator_table: "Operator table",
-  fetched: "Downloaded table",
-  embedded: "Embedded table",
+  operator_table: "Custom prices",
+  fetched: "Downloaded prices",
+  embedded: "Built-in prices",
 };
 
 /** Words a rate layer; a layer the client has no wording for reads as served. */

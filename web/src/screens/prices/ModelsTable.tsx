@@ -20,7 +20,7 @@ import type { SortColumn } from "@/components/use-table-sort";
 
 const TABLE_LAYERS: readonly string[] = ["operator_table", "fetched", "embedded"];
 
-const COLUMN_COUNT = 11;
+const COLUMN_COUNT = 9;
 
 const SEARCH_FIELD =
   "h-(--size-control) w-80 max-w-full rounded-lg border border-line bg-field pr-xl pl-[calc(var(--spacing-sm)+var(--size-icon)+var(--spacing-xs))] text-body-md text-ink outline-none transition-colors duration-(--duration-feedback) placeholder:text-ink-muted hover:border-line-medium focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-focus-ring";
@@ -66,19 +66,6 @@ function RateCell({ rate, isMixed }: RateCellProps) {
   );
 }
 
-function nextRunText(row: ModelPriceResponse): string {
-  switch (row.cost_status) {
-    case "estimated":
-      return "Priced in full";
-    case "partial":
-      return "Partly priced";
-    case "unpriced":
-      return "Unpriced";
-    default:
-      return row.cost_status;
-  }
-}
-
 interface ModelRowProps {
   row: ModelPriceResponse;
 }
@@ -92,20 +79,16 @@ function ModelRow({ row }: ModelRowProps) {
     <TableRow>
       <TableCell>{row.model === "" ? "Model not reported" : row.model}</TableCell>
       <TableCell>{row.agent_kind}</TableCell>
-      <TableCell>{row.table_key}</TableCell>
       <TableCell>{pricedByText(row)}</TableCell>
       <RateCell rate={row.input} isMixed={isMixed} />
       <RateCell rate={row.output} isMixed={isMixed} />
       <RateCell rate={row.cache_read} isMixed={isMixed} />
       <RateCell rate={row.cache_write} isMixed={isMixed} />
-      <TableCell>{nextRunText(row)}</TableCell>
       <TableCell>{row.last_used_at === null ? undefined : fmtStamp(row.last_used_at)}</TableCell>
       <TableCell look="number">{fmtCount(row.runs)}</TableCell>
     </TableRow>
   );
 }
-
-const NEXT_RUN_ORDER: Readonly<Record<string, number>> = { estimated: 0, partial: 1, unpriced: 2 };
 
 function rateValue(rate: ClassRateResponse): number | null {
   return rate.from_input ? null : rate.per_mtok;
@@ -114,13 +97,11 @@ function rateValue(rate: ClassRateResponse): number | null {
 const SORT_COLUMNS: readonly SortColumn<ModelPriceResponse>[] = [
   { id: "model", value: (row) => row.model },
   { id: "agent", value: (row) => row.agent_kind },
-  { id: "key", value: (row) => row.table_key },
   { id: "layer", value: (row) => pricedByText(row) ?? null },
   { id: "input", value: (row) => rateValue(row.input) },
   { id: "output", value: (row) => rateValue(row.output) },
   { id: "cache_read", value: (row) => rateValue(row.cache_read) },
   { id: "cache_write", value: (row) => rateValue(row.cache_write) },
-  { id: "next_run", value: (row) => NEXT_RUN_ORDER[row.cost_status] ?? null },
   {
     id: "last_used",
     value: (row) => (row.last_used_at === null ? null : Date.parse(row.last_used_at)),
@@ -193,9 +174,6 @@ export function ModelsTable({ rows }: ModelsTableProps) {
           <SortableHead columnId="agent" sort={sort}>
             Agent
           </SortableHead>
-          <SortableHead columnId="key" sort={sort}>
-            Table key
-          </SortableHead>
           <SortableHead columnId="layer" sort={sort}>
             Priced by
           </SortableHead>
@@ -210,9 +188,6 @@ export function ModelsTable({ rows }: ModelsTableProps) {
           </SortableHead>
           <SortableHead columnId="cache_write" sort={sort} align="right">
             Cache write per 1M
-          </SortableHead>
-          <SortableHead columnId="next_run" sort={sort}>
-            Next run
           </SortableHead>
           <SortableHead columnId="last_used" sort={sort}>
             Last used

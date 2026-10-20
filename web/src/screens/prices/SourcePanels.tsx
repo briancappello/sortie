@@ -108,9 +108,7 @@ export function PricesInForcePanel({ table }: PricesInForcePanelProps) {
   return (
     <Panel title="Prices in force">
       <Pairs>
-        <Pair label="Price table">
-          {table === null ? "No price table" : layerLabel(table.layer)}
-        </Pair>
+        <Pair label="Source">{table === null ? "None" : layerLabel(table.layer)}</Pair>
         <Pair label="Prices as of">{table === null ? undefined : fmtStamp(table.as_of)}</Pair>
         <Pair label="Age">
           {table === null ? undefined : plural(table.age_days, "day", "days")}
@@ -151,7 +149,7 @@ export function TokenRatesPanel({ source }: TokenRatesPanelProps) {
 export function OperatorTablePanel({ source }: SourceProps) {
   const isFile = source.file !== null;
   return (
-    <Panel title="Operator table">
+    <Panel title="Custom prices">
       <Pairs>
         <Pair label="Status">
           <StatusValue source={source} />
@@ -176,7 +174,7 @@ export function OperatorTablePanel({ source }: SourceProps) {
 /** Renders the table Sortie downloads. */
 export function DownloadedTablePanel({ source }: SourceProps) {
   return (
-    <Panel title="Downloaded table">
+    <Panel title="Downloaded prices">
       <Pairs>
         <Pair label="Status">
           <StatusValue source={source} />
@@ -199,7 +197,7 @@ export function DownloadedTablePanel({ source }: SourceProps) {
 /** Renders the table built into the binary. */
 export function EmbeddedTablePanel({ source }: SourceProps) {
   return (
-    <Panel title="Embedded table">
+    <Panel title="Built-in prices">
       <Pairs>
         <Pair label="Status">
           <StatusValue source={source} loaded="On" />
