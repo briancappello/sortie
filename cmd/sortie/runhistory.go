@@ -37,11 +37,41 @@ func (r runHistoryReader) QueryRuns(ctx context.Context, q server.RunHistoryQuer
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]int64, len(runs))
+	for i, run := range runs {
+		ids[i] = run.ID
+	}
+	parts, err := r.store.QueryRunModelUsage(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]server.RunHistoryEntry, len(runs))
 	for i, run := range runs {
 		out[i] = runHistoryEntry(run)
+		out[i].ModelUsage = runModelUsage(parts[run.ID])
 	}
 	return out, nil
+}
+
+func runModelUsage(parts []persistence.RunModelPart) []server.RunModelUsage {
+	out := make([]server.RunModelUsage, len(parts))
+	for i, p := range parts {
+		out[i] = server.RunModelUsage{
+			Model: p.Model,
+			Tokens: domain.TokenUsage{
+				InputTokens:      p.Tokens.InputTokens,
+				OutputTokens:     p.Tokens.OutputTokens,
+				TotalTokens:      p.Tokens.InputTokens + p.Tokens.OutputTokens,
+				CacheReadTokens:  p.Tokens.CacheReadTokens,
+				CacheWriteTokens: p.Tokens.CacheWriteTokens,
+			},
+			EstimatedCostUSD: p.EstimatedCostUSD,
+			CostStatus:       p.CostStatus,
+			UnratedClasses:   p.UnratedClasses,
+			UnratedRecorded:  p.UnratedRecorded,
+		}
+	}
+	return out
 }
 
 // QueryIssueGroups returns the issues whose runs match q, newest first.

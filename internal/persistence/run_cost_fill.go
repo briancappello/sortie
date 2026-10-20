@@ -175,10 +175,10 @@ func recordRunCost(ctx context.Context, tx *sql.Tx, runID int64, record RunCostR
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE run_model_usage
-			SET estimated_cost_usd = ?, cost_status = ?, price_source = ?, price_table_version = ?
+			SET estimated_cost_usd = ?, cost_status = ?, price_source = ?, price_table_version = ?, unrated_classes = ?
 			WHERE run_id = ? AND model = ? AND cost_status IS NULL`,
 			nullFloat(cost.EstimatedCostUSD), nullIfEmpty(cost.CostStatus), cost.PriceSource, cost.PriceTableVersion,
-			runID, model); err != nil {
+			unratedColumn(cost), runID, model); err != nil {
 			return false, fmt.Errorf("record cost of run %d model %q: %w", runID, model, err)
 		}
 	}

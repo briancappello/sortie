@@ -265,6 +265,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"cost_status", "TEXT", false, 0},
 				{"price_source", "TEXT", true, 0},
 				{"price_table_version", "TEXT", true, 0},
+				{"unrated_classes", "TEXT", false, 0},
 			},
 		},
 		{

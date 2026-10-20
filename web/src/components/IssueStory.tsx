@@ -12,6 +12,7 @@ import { cn } from "@/lib/cn";
 import {
   costText,
   NOT_MEASURED,
+  costTitle,
   runCostText,
   runningTokensText,
   runTokensText,
@@ -210,6 +211,9 @@ function RunCard({ item, identifier, now, hasEstimates }: RunCardProps) {
   const cost = isLive
     ? costText(item.running.cost_status, item.running.estimated_cost_usd)
     : runCostText(item.run);
+  const costHover = isLive
+    ? costTitle(item.running.cost_status, item.running.estimated_cost_usd)
+    : costTitle(item.run.cost_status, item.run.estimated_cost_usd);
   const error = isLive ? null : item.run.error;
   const dispatchId = isLive ? item.running.dispatch_id : item.run.dispatch_id;
   const session = dispatchId ? sessionLinkOf(identifier, dispatchId, location) : undefined;
@@ -245,7 +249,10 @@ function RunCard({ item, identifier, now, hasEstimates }: RunCardProps) {
         </span>
         {hasEstimates && cost !== NOT_MEASURED ? (
           <span>
-            Est. cost <b className="font-medium text-ink-body tabular-nums">{cost}</b>
+            Est. cost{" "}
+            <b title={costHover} className="font-medium text-ink-body tabular-nums">
+              {cost}
+            </b>
           </span>
         ) : undefined}
         {session === undefined ? undefined : (

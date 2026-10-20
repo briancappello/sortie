@@ -16,7 +16,7 @@ import { runRouteText } from "@/lib/lane";
 import { runStatus } from "@/lib/run-status";
 
 import { EventPane } from "./EventPane";
-import { SessionPanel, UsagePanel } from "./SessionPanels";
+import { ModelCostPanel, SessionPanel, UsagePanel } from "./SessionPanels";
 import { SessionsPanel } from "./SessionsPanel";
 import { timelineOf, turnBarsOf } from "./timeline";
 import { TokensChart, TokensLegend } from "./TokensChart";
@@ -182,6 +182,7 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
   const isChartShown = bars.filter((bar) => !bar.inProgress).length >= 2;
   const stallFull = isLive ? session.running.stall_text_full : null;
   const stallOff = isLive ? session.running.stall_off_text : null;
+  const modelUsage = session.kind === "finished" ? (session.run.model_usage ?? []) : [];
 
   return (
     <>
@@ -224,6 +225,7 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
         </div>
         <div className="flex min-w-0 flex-col gap-xl">
           <UsagePanel session={session} />
+          {modelUsage.length > 0 ? <ModelCostPanel parts={modelUsage} /> : undefined}
           <SessionPanel session={session} config={config} />
           <SessionsPanel identifier={identifier} dispatchId={dispatchId} />
         </div>

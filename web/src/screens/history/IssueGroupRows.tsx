@@ -18,6 +18,7 @@ import { cn } from "@/lib/cn";
 import {
   NOT_MEASURED,
   UNPRICED,
+  costTitle,
   runCacheReadsText,
   runCostText,
   runTokensText,
@@ -171,7 +172,11 @@ function RunRow({ run, columns }: RunRowProps) {
       <TableCell>{fmtDuration(runSeconds(run))}</TableCell>
       <TableCell>{fmtCount(run.turns_completed)}</TableCell>
       <TableCell title={cacheReadsTitle(runCacheReadsText(run))}>{runTokensText(run)}</TableCell>
-      {columns.hasCost ? <TableCell>{runCostText(run)}</TableCell> : undefined}
+      {columns.hasCost ? (
+        <TableCell title={costTitle(run.cost_status, run.estimated_cost_usd)}>
+          {runCostText(run)}
+        </TableCell>
+      ) : undefined}
       <TableCell>{fmtStamp(run.completed_at)}</TableCell>
     </TableRow>
   );
@@ -203,6 +208,7 @@ export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
   const mark = groupMark(group);
   const ending = group.status === "history" ? group.issue_outcome : null;
   const cacheReads = totalsCacheReadsText(group.totals);
+  const costHover = costTitle(group.totals.cost_status, group.totals.estimated_cost_usd);
   const secondLine = (
     [
       ["key", group.issue_title ? key : undefined],
@@ -253,7 +259,9 @@ export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
               </p>
               <p className="flex flex-wrap gap-x-md text-body-sm text-ink-muted wrap-anywhere">
                 {secondLine.map(([id, part]) => (
-                  <span key={id}>{id === "status" ? <ServedText text={part} /> : part}</span>
+                  <span key={id} title={id === "cost" ? costHover : undefined}>
+                    {id === "status" ? <ServedText text={part} /> : part}
+                  </span>
                 ))}
               </p>
             </div>

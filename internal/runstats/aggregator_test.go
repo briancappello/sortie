@@ -723,6 +723,8 @@ func TestStatsRecordedCost(t *testing.T) {
 	nullStatus := row("failed", 1_000_000, nil, "")
 	cacheWriteOnly := row("failed", 0, nil, "unpriced")
 	cacheWriteOnly.CacheWriteTokens = 1
+	partial := row("failed", 1_000_000, new(8.0), "partial")
+	partialSpentNothing := row("failed", 0, nil, "partial")
 	uncosted := recordedCaps
 	uncosted.HasRecordedCost = false
 
@@ -732,14 +734,18 @@ func TestStatsRecordedCost(t *testing.T) {
 		rows         []persistence.RunStatsRow
 		wantCost     *float64
 		wantUnpriced int
+		wantPartial  int
 	}{
-		{"priced, spent nothing, unpriced", recordedCaps, []persistence.RunStatsRow{priced, zero, unpriced}, new(15.0), 1},
-		{"spent nothing and unpriced", recordedCaps, []persistence.RunStatsRow{zero, unpriced}, nil, 1},
-		{"spend with a NULL status", recordedCaps, []persistence.RunStatsRow{nullStatus}, nil, 1},
-		{"spend in the cache-write counter only", recordedCaps, []persistence.RunStatsRow{cacheWriteOnly}, nil, 1},
-		{"ci_failed beside a priced run", recordedCaps, []persistence.RunStatsRow{priced, row("ci_failed", 1_000_000, nil, "")}, new(15.0), 0},
-		{"ci_failed alone", recordedCaps, []persistence.RunStatsRow{row("ci_failed", 1_000_000, new(0.0), "estimated")}, nil, 0},
-		{"cost columns missing", uncosted, []persistence.RunStatsRow{priced, unpriced}, nil, 0},
+		{"priced, spent nothing, unpriced", recordedCaps, []persistence.RunStatsRow{priced, zero, unpriced}, new(15.0), 1, 0},
+		{"spent nothing and unpriced", recordedCaps, []persistence.RunStatsRow{zero, unpriced}, nil, 1, 0},
+		{"spend with a NULL status", recordedCaps, []persistence.RunStatsRow{nullStatus}, nil, 1, 0},
+		{"spend in the cache-write counter only", recordedCaps, []persistence.RunStatsRow{cacheWriteOnly}, nil, 1, 0},
+		{"ci_failed beside a priced run", recordedCaps, []persistence.RunStatsRow{priced, row("ci_failed", 1_000_000, nil, "")}, new(15.0), 0, 0},
+		{"ci_failed alone", recordedCaps, []persistence.RunStatsRow{row("ci_failed", 1_000_000, new(0.0), "estimated")}, nil, 0, 0},
+		{"partial beside a priced run", recordedCaps, []persistence.RunStatsRow{priced, partial}, new(23.0), 0, 1},
+		{"partial that spent nothing", recordedCaps, []persistence.RunStatsRow{partialSpentNothing}, nil, 0, 1},
+		{"ci_failed partial", recordedCaps, []persistence.RunStatsRow{row("ci_failed", 1_000_000, new(8.0), "partial")}, nil, 0, 0},
+		{"cost columns missing", uncosted, []persistence.RunStatsRow{priced, unpriced, partial}, nil, 0, 0},
 	}
 
 	for _, tt := range tests {
@@ -749,11 +755,19 @@ func TestStatsRecordedCost(t *testing.T) {
 			agg := New(tt.caps)
 			addRows(t, agg, tt.rows...)
 
-			s := agg.Report(fixedNow, "/wf", "/db", nil, nil).Summary
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
+			s := report.Summary
 
-			if !reflect.DeepEqual(s.CostUSD, tt.wantCost) || s.CostUnpricedRuns != tt.wantUnpriced {
-				t.Errorf("Summary cost_usd, cost_unpriced_runs over %q = %v, %d, want %v, %d",
-					tt.name, derefCost(s.CostUSD), s.CostUnpricedRuns, derefCost(tt.wantCost), tt.wantUnpriced)
+			if !reflect.DeepEqual(s.CostUSD, tt.wantCost) || s.CostUnpricedRuns != tt.wantUnpriced || s.CostPartialRuns != tt.wantPartial {
+				t.Errorf("Summary cost_usd, cost_unpriced_runs, cost_partial_runs over %q = %v, %d, %d, want %v, %d, %d",
+					tt.name, derefCost(s.CostUSD), s.CostUnpricedRuns, s.CostPartialRuns, derefCost(tt.wantCost), tt.wantUnpriced, tt.wantPartial)
+			}
+			var groupPartial int
+			for _, g := range report.ByModel {
+				groupPartial += g.CostPartialRuns
+			}
+			if groupPartial != tt.wantPartial {
+				t.Errorf("by_model cost_partial_runs over %q = %d, want %d", tt.name, groupPartial, tt.wantPartial)
 			}
 		})
 	}

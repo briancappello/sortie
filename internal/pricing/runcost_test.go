@@ -69,6 +69,14 @@ func unpricedOnce(model string) Price {
 	return Price{Status: CostUnpriced, Parts: map[string]PartPrice{model: {Status: CostUnpriced}}}
 }
 
+func withUnrated(p Price, classes []TokenClass) Price {
+	for model, part := range p.Parts {
+		part.Unrated = classes
+		p.Parts[model] = part
+	}
+	return p
+}
+
 func spendOnce(model string, usage domain.TokenUsage) Spend {
 	return Spend{Kind: "m", Measured: true, Totals: usage, Parts: map[string]domain.TokenUsage{model: usage}}
 }
@@ -106,10 +114,11 @@ func TestPriceRun(t *testing.T) {
 	incompleteKind := map[string]any{"k": map[string]any{"input_per_mtok": 2.0}}
 
 	tests := []struct {
-		name  string
-		rates *Rates
-		spend Spend
-		want  Price
+		name    string
+		rates   *Rates
+		spend   Spend
+		want    Price
+		unrated []TokenClass
 	}{
 		{
 			name:  "unmeasured run",
@@ -132,9 +141,10 @@ func TestPriceRun(t *testing.T) {
 			want:  Price{Status: CostUnpriced},
 		},
 		{
-			name:  "kind without an entry",
-			spend: Spend{Kind: "u", Measured: true, Totals: usageS, Parts: map[string]domain.TokenUsage{"m": usageS}},
-			want:  Price{Status: CostUnpriced, Parts: map[string]PartPrice{"m": {Status: CostUnpriced}}},
+			name:    "kind without an entry",
+			spend:   Spend{Kind: "u", Measured: true, Totals: usageS, Parts: map[string]domain.TokenUsage{"m": usageS}},
+			want:    Price{Status: CostUnpriced, Parts: map[string]PartPrice{"m": {Status: CostUnpriced}}},
+			unrated: []TokenClass{ClassInput, ClassOutput},
 		},
 		{
 			name:  "S",
@@ -166,10 +176,11 @@ func TestPriceRun(t *testing.T) {
 			want:  pricedOnce(listed, 8.5, CostEstimated, SourceOperator, overrideVersion+"+"+tableVersion),
 		},
 		{
-			name:  "model entry never matches a longer model name by prefix",
-			rates: overrideRates,
-			spend: spendOnce(listed+"-20250101", usageIn),
-			want:  unpricedOnce(listed + "-20250101"),
+			name:    "model entry never matches a longer model name by prefix",
+			rates:   overrideRates,
+			spend:   spendOnce(listed+"-20250101", usageIn),
+			want:    unpricedOnce(listed + "-20250101"),
+			unrated: []TokenClass{ClassInput},
 		},
 		{
 			name:  "model entry for an unlisted model with every rate set",
@@ -178,16 +189,18 @@ func TestPriceRun(t *testing.T) {
 			want:  pricedOnce("local", 24, CostEstimated, SourceOperator, unlistedVersion),
 		},
 		{
-			name:  "unset cache write rate leaves a cache-writing run partial and unpriced for those tokens",
-			rates: unlistedRates,
-			spend: spendOnce("local-nocw", usageWrite),
-			want:  pricedOnce("local-nocw", 18, CostPartial, SourceOperator, unlistedVersion),
+			name:    "unset cache write rate leaves a cache-writing run partial and unpriced for those tokens",
+			rates:   unlistedRates,
+			spend:   spendOnce("local-nocw", usageWrite),
+			want:    pricedOnce("local-nocw", 18, CostPartial, SourceOperator, unlistedVersion),
+			unrated: []TokenClass{ClassCacheWrite},
 		},
 		{
-			name:  "unset cache read rate is not priced at the input rate on a model entry",
-			rates: unlistedRates,
-			spend: spendOnce("local-nocache", usageRead),
-			want:  pricedOnce("local-nocache", 12, CostPartial, SourceOperator, unlistedVersion),
+			name:    "unset cache read rate is not priced at the input rate on a model entry",
+			rates:   unlistedRates,
+			spend:   spendOnce("local-nocache", usageRead),
+			want:    pricedOnce("local-nocache", 12, CostPartial, SourceOperator, unlistedVersion),
+			unrated: []TokenClass{ClassCacheRead},
 		},
 		{
 			name:  "unset cache read rate is priced at the input rate on a kind entry",
@@ -220,22 +233,25 @@ func TestPriceRun(t *testing.T) {
 			want:  pricedOnce(listed, 1, CostEstimated, SourceOperator, tableVersion),
 		},
 		{
-			name:  "operator table replaces the embedded table",
-			rates: mustLoadRates(t, map[string]any{"price_table": operatorTable()}),
-			spend: spendOnce("claude-sonnet-4-5", usageIn),
-			want:  unpricedOnce("claude-sonnet-4-5"),
+			name:    "operator table replaces the embedded table",
+			rates:   mustLoadRates(t, map[string]any{"price_table": operatorTable()}),
+			spend:   spendOnce("claude-sonnet-4-5", usageIn),
+			want:    unpricedOnce("claude-sonnet-4-5"),
+			unrated: []TokenClass{ClassInput},
 		},
 		{
-			name:  "no rate source prices nothing",
-			rates: mustLoadRates(t, map[string]any{"price_table": noTables()}),
-			spend: spendOnce(listed, usageIn),
-			want:  unpricedOnce(listed),
+			name:    "no rate source prices nothing",
+			rates:   mustLoadRates(t, map[string]any{"price_table": noTables()}),
+			spend:   spendOnce(listed, usageIn),
+			want:    unpricedOnce(listed),
+			unrated: []TokenClass{ClassInput},
 		},
 		{
-			name:  "incomplete kind entry leaves the run unpriced although a table lists the model",
-			rates: mustLoadRates(t, map[string]any{"price_table": operatorTable(), "token_rates": incompleteKind}, "k"),
-			spend: Spend{Kind: "k", Measured: true, Totals: usageIn, Parts: map[string]domain.TokenUsage{listed: usageIn}},
-			want:  unpricedOnce(listed),
+			name:    "incomplete kind entry leaves the run unpriced although a table lists the model",
+			rates:   mustLoadRates(t, map[string]any{"price_table": operatorTable(), "token_rates": incompleteKind}, "k"),
+			spend:   Spend{Kind: "k", Measured: true, Totals: usageIn, Parts: map[string]domain.TokenUsage{listed: usageIn}},
+			want:    unpricedOnce(listed),
+			unrated: []TokenClass{ClassOutput},
 		},
 	}
 
@@ -247,8 +263,9 @@ func TestPriceRun(t *testing.T) {
 
 			got := PriceRun(tt.spend, cmp.Or(tt.rates, kinds))
 
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("PriceRun(%s) = %s, want %s", asJSON(t, tt.spend), asJSON(t, got), asJSON(t, tt.want))
+			want := withUnrated(tt.want, tt.unrated)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("PriceRun(%s) = %s, want %s", asJSON(t, tt.spend), asJSON(t, got), asJSON(t, want))
 			}
 		})
 	}
@@ -319,7 +336,7 @@ func TestPricingWithoutRates(t *testing.T) {
 	run := PriceRun(spend, rates)
 	cost, status := PriceSession(spend, rates)
 
-	if !reflect.DeepEqual(run, unpricedOnce("listed-model")) || cost != nil || status != CostUnpriced {
+	if !reflect.DeepEqual(run, withUnrated(unpricedOnce("listed-model"), []TokenClass{ClassInput})) || cost != nil || status != CostUnpriced {
 		t.Errorf("PriceRun, PriceSession with nil rates = %s, %s, %q, want unpriced and no cost", asJSON(t, run), asJSON(t, cost), status)
 	}
 	if rates.SourceAvailable() || rates.SourceConfigured() || rates.Entries() != nil {

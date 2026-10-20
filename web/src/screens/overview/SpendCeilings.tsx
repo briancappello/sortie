@@ -1,5 +1,6 @@
 import { BudgetMeter } from "@/components/BudgetMeter";
-import { fmtMoney, fmtUtcStamp } from "@/lib/format";
+import { costTitle } from "@/lib/figures";
+import { fmtMoney, fmtMoneyAtLeast, fmtUtcStamp } from "@/lib/format";
 
 import type { SpendCeilingResponse, SpendWindowResponse } from "@/api/types.gen";
 
@@ -15,7 +16,8 @@ interface SpendMeterProps {
 
 function SpendMeter({ name, window }: SpendMeterProps) {
   const { used_usd: used, budget_usd: limit, resets_at: resetsAt } = window;
-  const text = `${window.used_usd_complete ? "" : "at least "}${fmtMoney(used)} of ${fmtMoney(limit)}`;
+  const isComplete = window.used_usd_complete;
+  const text = `${isComplete ? fmtMoney(used) : fmtMoneyAtLeast(used)} of ${fmtMoney(limit)}`;
   return (
     <div className="flex flex-col gap-xxs">
       <BudgetMeter
@@ -23,6 +25,7 @@ function SpendMeter({ name, window }: SpendMeterProps) {
         line={{ used, limit, limitKnown: true }}
         format={fmtMoney}
         text={text}
+        title={costTitle(isComplete ? "estimated" : "partial", used)}
       />
       <p className="text-body-sm text-ink-muted">
         {window.holds_dispatch ? "Holding dispatch, resets " : "Resets "}

@@ -110,7 +110,7 @@ The token columns mirror those on `session_metadata`. The per-issue token budget
 
 The request count needs a column of its own for the reason the token measurement does not. The argument above rests on the in-flight write being gated on a usage-bearing event, so the row's existence is itself the token measurement signal. That gate fires for a kind that reports usage only when a turn ends too, and such a kind counts turns rather than requests, so the row's existence says nothing about whether the request-counting path ran. `api_requests_measured` is what says it. A row written before the column existed reads `0`, because its count was written by the unconditional rule that column exists to qualify; the row self-heals on that issue's next session.
 
-The recorded cost is written once, in the same write as the row, priced under the rates in force at that moment (Section 13.5), and no writer changes it afterwards: a rate edit, a reload, a restart, an upgrade, and a newly fetched price table leave every recorded cost as it is. Every reader of a finished run, the dashboard, the JSON API, `GET /api/v1/stats`, `sortie stats`, and the `cost_budget` tool alike, reads these columns and never re-prices a row. Rows written before the cost columns existed are priced once, by the first start that applies their migration, under the rates in force at that start: each measured row with a non-zero input, output, cache-read, or cache-write column and no `run_model_usage` row becomes one `run_model_usage` row under its `reported_model`, else its `configured_model`, carrying the row's token columns, and a row that already has `run_model_usage` rows keeps them and is priced from them. The result is recorded with its price source and table version like any other. An unmeasured row records `unmeasured` and no `run_model_usage` row. A measured row that spent tokens in no class records `unpriced` and no `run_model_usage` row. After that start those rows never change. A start that fails to price them logs the error and starts anyway; they read as `unpriced` until a later start prices them, under the rates in force at that start.
+The recorded cost is written once, in the same write as the row, priced under the rates in force at that moment (Section 13.5), and no writer changes it afterwards: a rate edit, a reload, a restart, an upgrade, and a newly fetched price table leave every recorded cost as it is. Every reader of a finished run, the dashboard, the JSON API, `GET /api/v1/stats`, `sortie stats`, and the `cost_budget` tool alike, reads these columns and never re-prices a row. Rows written before the cost columns existed are priced once, by the first start that applies their migration, under the rates in force at that start: each measured row with a non-zero input, output, cache-read, or cache-write column and no `run_model_usage` row becomes one `run_model_usage` row under its `reported_model`, else its `configured_model`, carrying the row's token columns, and a row that already has `run_model_usage` rows keeps them and is priced from them. The result is recorded with its price source, table version, and unrated classes like any other. An unmeasured row records `unmeasured` and no `run_model_usage` row. A measured row that spent tokens in no class records `unpriced` and no `run_model_usage` row. After that start those rows never change. A start that fails to price them logs the error and starts anyway; they read as `unpriced` until a later start prices them, under the rates in force at that start.
 
 **`run_model_usage`**: each run's token counts and recorded cost per model
 
@@ -126,8 +126,19 @@ The recorded cost is written once, in the same write as the row, priced under th
 | `cost_status` | TEXT | `estimated`, `partial` when a class the model spent has no rate, or `unpriced` |
 | `price_source` | TEXT | The layer that priced the share: `operator`, `fetched`, or `embedded` (Section 13.5); empty when `cost_status` is `unpriced` |
 | `price_table_version` | TEXT | The version of the rates that priced the share: the pinned upstream revision of the embedded table, or a content digest of the fetched table, the operator's table, or the operator's `token_rates`; for a share priced by a per-model `token_rates` entry that takes some of its rates from a table, the `token_rates` digest, a `+`, and that table's version; empty when `price_source` is empty |
+| `unrated_classes` | TEXT | The token classes whose missing rate left the share `partial` or `unpriced`, comma-joined; see the reading below |
 
 A measured run writes one row per model it spent tokens on, in the same transaction as its `run_history` row, and the rows sum to the run's token columns class by class; an unmeasured run writes none. The per-model counts follow the same resume baseline as the run's totals, so a resumed session's earlier spend is not counted again. `run_history.reported_model` keeps its meaning, the model the last token-usage event named, and is not derived from these rows.
+
+`unrated_classes` reads as follows:
+
+| Value | Meaning |
+| --- | --- |
+| `NULL` | Not recorded: the share's `cost_status` is `NULL`, or the share was priced before the column existed |
+| empty string | Recorded, no class named: every class the model spent had a rate, or its spend was reported as a total without classes (`unpriced`) |
+| `cache_read,cache_write` | Recorded: the unrated class names, comma-joined, in the order `input`, `output`, `cache_read`, `cache_write` |
+
+A recorded value is written in the statement that writes the share's cost, and a share priced before the column existed keeps `NULL`, because a recorded price never changes.
 
 **`session_metadata`**: last known session metadata per issue (for observability and debug)
 

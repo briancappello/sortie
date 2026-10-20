@@ -166,6 +166,7 @@ type groupAccum struct {
 	costUSD           float64
 	pricedRuns        int
 	costUnpricedRuns  int
+	costPartialRuns   int
 	measuredRuns      int
 	unmeasuredRuns    int
 	succeededMeasured int
@@ -194,6 +195,7 @@ type totalAccum struct {
 	costUSD              float64
 	pricedRuns           int
 	costUnpricedRuns     int
+	costPartialRuns      int
 	measuredRuns         int
 	unmeasuredRuns       int
 	succeededMeasured    int
@@ -225,11 +227,13 @@ func bumpGroup(groups map[string]*groupAccum, name string, isSucceeded bool) *gr
 	return g
 }
 
-// round1, round2, and round4 round v to the named number of decimal
-// places so the JSON report is byte-stable.
+// round1, round2, round4, and round9 round v to the named number of decimal
+// places so the JSON report is byte-stable. Costs take round9, which keeps a
+// sub-cent total from reading as zero.
 func round1(v float64) float64 { return math.Round(v*10) / 10 }
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
 func round4(v float64) float64 { return math.Round(v*10000) / 10000 }
+func round9(v float64) float64 { return math.Round(v*1e9) / 1e9 }
 
 // durationStats computes p50, p95, and the mean over samples, in
 // seconds. All three are null when samples is empty. samples is sorted
@@ -498,6 +502,13 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 					}
 				}
 			}
+
+			if a.caps.RecordedCost() && row.Status != "ci_failed" && row.CostStatus == "partial" {
+				a.total.costPartialRuns++
+				for _, g := range bumped {
+					g.costPartialRuns++
+				}
+			}
 		}
 
 		if row.ReviewMetadata != nil {
@@ -664,6 +675,7 @@ func (a *Aggregator) summary(full bool) Summary {
 		ZeroDurationRuns:     a.total.zeroDurationRuns,
 		DurationExcludedRuns: a.total.durationExcludedRuns,
 		CostUnpricedRuns:     a.total.costUnpricedRuns,
+		CostPartialRuns:      a.total.costPartialRuns,
 	}
 	if s.Runs > 0 {
 		s.SuccessRate = round4(float64(s.Succeeded) / float64(s.Runs))
@@ -678,7 +690,7 @@ func (a *Aggregator) summary(full bool) Summary {
 		s.Tokens = new(withUncached(a.total.tokens))
 	}
 	if full && a.total.pricedRuns > 0 {
-		cost := round2(a.total.costUSD)
+		cost := round9(a.total.costUSD)
 		s.CostUSD = &cost
 		if a.total.succeededMeasured > 0 {
 			s.CostPerSucceededRunUSD = new(round2(cost / float64(a.total.succeededMeasured)))
@@ -718,11 +730,12 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 		stat.MeanTurns = new(round2(float64(g.turnSum) / float64(g.runs)))
 		stat.TokensUnmeasuredRuns = g.unmeasuredRuns
 		stat.CostUnpricedRuns = g.costUnpricedRuns
+		stat.CostPartialRuns = g.costPartialRuns
 		if g.measuredRuns > 0 {
 			stat.Tokens = new(withUncached(g.tokens))
 		}
 		if g.pricedRuns > 0 {
-			cost := round2(g.costUSD)
+			cost := round9(g.costUSD)
 			stat.CostUSD = &cost
 			if g.succeededMeasured > 0 {
 				stat.CostPerSucceededRunUSD = new(round2(cost / float64(g.succeededMeasured)))

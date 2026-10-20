@@ -110,13 +110,61 @@ export function pluralVerb(
   return { count: fmtCount(n), noun, verb, subject: plural(n, nouns[0], nouns[1]) };
 }
 
-/** Writes dollars with two decimals below $100 and as whole dollars with thousands separators from $100. */
+/**
+ * Writes dollars with two decimals below $100 and as whole dollars with
+ * thousands separators from $100. A cost above zero and below one cent reads
+ * "under $0.01", so only a cost of zero reads "$0.00".
+ */
 export function fmtMoney(usd: number): string {
+  if (usd > 0 && usd < 0.01) {
+    return "under $0.01";
+  }
   const cents = Math.round(usd * 100);
   if (cents >= 10_000) {
     return `$${fmtCount(Math.round(usd))}`;
   }
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+const EXACT = new Intl.NumberFormat("en-US", {
+  maximumSignificantDigits: 12,
+  useGrouping: false,
+});
+
+/** The amount rounded to 12 significant digits, which drops floating-point noise, split into its whole and fraction digits. */
+function exactDigits(usd: number): { value: number; whole: string; fraction: string } {
+  const plain = EXACT.format(usd);
+  const [whole = "0", fraction = ""] = plain.split(".");
+  return { value: Number(plain), whole, fraction };
+}
+
+/**
+ * Writes the exact amount of a cost in plain decimal with thousands separators
+ * and at least two fraction digits: 4.2 reads "$4.20", 4.203125 "$4.203125",
+ * 0.0045000000000000005 "$0.0045", 1234.5 "$1,234.50".
+ */
+export function fmtMoneyExact(usd: number): string {
+  const { whole, fraction } = exactDigits(usd);
+  return `$${fmtCount(Number(whole))}.${fraction.padEnd(2, "0")}`;
+}
+
+/**
+ * Words a cost that is a lower bound: "at least" and the exact amount cut,
+ * never rounded up, so the text never exceeds the spend it bounds. Below one
+ * cent the cut falls after the first non-zero digit ("at least $0.004"), below
+ * $100 after two fraction digits (4.205 reads "at least $4.20"), and from $100
+ * before the decimal point (149.6 reads "at least $149").
+ */
+export function fmtMoneyAtLeast(usd: number): string {
+  const { value, whole, fraction } = exactDigits(usd);
+  const grouped = fmtCount(Number(whole));
+  if (value >= 100) {
+    return `at least $${grouped}`;
+  }
+  if (value > 0 && value < 0.01) {
+    return `at least $${grouped}.${/^0*[1-9]/.exec(fraction)?.[0] ?? fraction}`;
+  }
+  return `at least $${grouped}.${fraction.padEnd(2, "0").slice(0, 2)}`;
 }
 
 const RATE = new Intl.NumberFormat("en-US", {

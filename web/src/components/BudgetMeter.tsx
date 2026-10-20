@@ -9,10 +9,12 @@ export interface BudgetMeterProps {
   format: (n: number) => string;
   /** Replaces the `<used> of <limit>` value text. */
   text?: string;
+  /** The hover of the value text. */
+  title?: string;
 }
 
 /** Renders one budgeted figure as a name, a value, and a bar; a missing or non-positive limit renders nothing. */
-export function BudgetMeter({ name, line, format, text }: BudgetMeterProps) {
+export function BudgetMeter({ name, line, format, text, title }: BudgetMeterProps) {
   const { used, limit } = line;
   if (used === null || limit === null || limit <= 0) {
     return undefined;
@@ -21,7 +23,7 @@ export function BudgetMeter({ name, line, format, text }: BudgetMeterProps) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm gap-y-xxs text-body-md">
       <span className="text-ink">{name}</span>
-      <span className="text-ink-body tabular-nums">
+      <span title={title} className="text-ink-body tabular-nums">
         {text ?? `${format(used)} of ${format(limit)}`}
       </span>
       <span

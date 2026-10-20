@@ -1704,6 +1704,7 @@ func recordRunCost(row *persistence.RunHistory, rates *pricing.Rates) {
 			CostStatus:        string(part.Status),
 			PriceSource:       string(part.Source),
 			PriceTableVersion: part.TableVersion,
+			UnratedClasses:    part.UnratedNames(),
 		}
 	}
 }
