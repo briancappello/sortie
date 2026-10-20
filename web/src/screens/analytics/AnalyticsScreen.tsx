@@ -11,6 +11,7 @@ import { ChainFunnel } from "./ChainFunnel";
 import { GroupTable } from "./GroupTable";
 import { OutcomeBar } from "./OutcomeBar";
 import { RangePicker } from "./RangePicker";
+import { SpendChart } from "./SpendChart";
 import { SummaryTiles } from "./SummaryTiles";
 import { useAnalyticsRange } from "./analytics-range";
 
@@ -196,6 +197,12 @@ export function AnalyticsScreen() {
             <div key={range} className="flex flex-col gap-xl">
               <SummaryTiles report={report} hasCost={hasRateSource(state)} />
               <OutcomeBar summary={report.summary} />
+              {hasRateSource(state) &&
+              range !== "24h" &&
+              report.spend !== null &&
+              (report.spend.buckets ?? []).length > 0 ? (
+                <SpendChart spend={report.spend} since={report.since} />
+              ) : undefined}
               {(report.chain_funnels ?? []).map((funnel) => (
                 <ChainFunnel key={funnel.stages?.[0]?.rule} funnel={funnel} config={config} />
               ))}

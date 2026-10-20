@@ -1,7 +1,6 @@
 import { Card } from "@/components/ui/card";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { fmtCount, fmtPercent } from "@/lib/format";
+import { fmtCount } from "@/lib/format";
 
 import type { Summary } from "@/api/types.gen";
 
@@ -37,8 +36,7 @@ export interface OutcomeBarProps {
 
 /**
  * Renders how the runs of a range ended as a legend and a stacked bar, one segment per outcome
- * that has runs, each with a tooltip of its count and share of the runs. Renders nothing while no
- * outcome has runs.
+ * that has runs. Renders nothing while no outcome has runs.
  */
 export function OutcomeBar({ summary }: OutcomeBarProps) {
   const segments = segmentsOf(summary);
@@ -59,36 +57,15 @@ export function OutcomeBar({ summary }: OutcomeBarProps) {
         </div>
         <div aria-hidden="true" className="flex h-4 gap-xxs">
           {segments.map((segment, index) => (
-            <Tooltip key={segment.label}>
-              <TooltipTrigger
-                delay={0}
-                render={
-                  <div
-                    className={cn(
-                      "min-w-[4px] basis-0",
-                      segment.fill,
-                      roundingOf(index, segments.length),
-                    )}
-                    style={{ flexGrow: segment.count }}
-                  />
-                }
-              />
-              <TooltipPopup>
-                <div className="min-w-35">
-                  <div className="mb-xxs font-bold">{segment.label}</div>
-                  <div className="flex items-center gap-xs">
-                    Runs
-                    <b className="ml-auto font-medium tabular-nums">{fmtCount(segment.count)}</b>
-                  </div>
-                  <div className="flex items-center gap-xs">
-                    Share
-                    <b className="ml-auto font-medium tabular-nums">
-                      {fmtPercent(segment.count / summary.runs)}
-                    </b>
-                  </div>
-                </div>
-              </TooltipPopup>
-            </Tooltip>
+            <div
+              key={segment.label}
+              className={cn(
+                "min-w-[4px] basis-0",
+                segment.fill,
+                roundingOf(index, segments.length),
+              )}
+              style={{ flexGrow: segment.count }}
+            />
           ))}
         </div>
       </div>

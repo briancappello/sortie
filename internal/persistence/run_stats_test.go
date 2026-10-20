@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -498,6 +499,58 @@ func TestScanRunHistoryRange(t *testing.T) {
 		}
 		if got[0].CacheWriteTokens != 38948 {
 			t.Errorf("RunStatsRow.CacheWriteTokens = %d, want 38948", got[0].CacheWriteTokens)
+		}
+	})
+
+	t.Run("each run is visited once with its parts ordered by model and its unaccounted turns", func(t *testing.T) {
+		t.Parallel()
+
+		s := openTestStore(t)
+		migrateOrFatal(t, s)
+		ctx := context.Background()
+
+		withParts := runAt("with-parts", "2026-01-01T00:00:00Z")
+		withParts.DispatchID, withParts.UnaccountedTurns = new("dispatch-1"), 3
+		withParts.ModelUsage = map[string]ModelTokens{
+			"model-b": {InputTokens: 200, OutputTokens: 20},
+			"model-a": {InputTokens: 100, OutputTokens: 10, CacheReadTokens: 50, CacheWriteTokens: 5},
+		}
+		withParts.ModelCosts = map[string]ModelCost{
+			"model-b": {CostStatus: "unpriced"},
+			"model-a": {EstimatedCostUSD: new(1.5), CostStatus: "estimated"},
+		}
+		if _, err := s.AppendRunHistoryWithEvents(ctx, withParts, nil, unboundedRunEvents); err != nil {
+			t.Fatalf("AppendRunHistoryWithEvents: %v", err)
+		}
+		appendOrFatal(t, s, runAt("no-parts", "2026-01-02T00:00:00Z"))
+
+		caps, err := s.RunHistoryCapabilities(ctx)
+		if err != nil {
+			t.Fatalf("RunHistoryCapabilities: %v", err)
+		}
+		var got []RunStatsRow
+		if err := s.ScanRunHistoryRange(ctx, caps, nil, nil, func(row RunStatsRow) error {
+			got = append(got, row)
+			return nil
+		}); err != nil {
+			t.Fatalf("ScanRunHistoryRange: %v", err)
+		}
+
+		if len(got) != 2 || got[0].IssueID != "with-parts" || got[1].IssueID != "no-parts" {
+			t.Fatalf("ScanRunHistoryRange visited %+v, want with-parts then no-parts, once each", got)
+		}
+		wantParts := []RunModelPart{
+			{Model: "model-a", Tokens: ModelTokens{InputTokens: 100, OutputTokens: 10, CacheReadTokens: 50, CacheWriteTokens: 5}, EstimatedCostUSD: new(1.5), CostStatus: "estimated"},
+			{Model: "model-b", Tokens: ModelTokens{InputTokens: 200, OutputTokens: 20}, CostStatus: "unpriced"},
+		}
+		if !reflect.DeepEqual(got[0].Parts, wantParts) {
+			t.Errorf("RunStatsRow{with-parts}.Parts = %+v, want %+v", got[0].Parts, wantParts)
+		}
+		if got[0].UnaccountedTurns != 3 {
+			t.Errorf("RunStatsRow{with-parts}.UnaccountedTurns = %d, want 3", got[0].UnaccountedTurns)
+		}
+		if got[1].Parts != nil || got[1].UnaccountedTurns != 0 {
+			t.Errorf("RunStatsRow{no-parts} Parts, UnaccountedTurns = %+v, %d, want nil, 0", got[1].Parts, got[1].UnaccountedTurns)
 		}
 	})
 }

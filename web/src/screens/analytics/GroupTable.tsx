@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Hint } from "@/components/ui/hint";
 import {
   SortableHead,
   Table,
@@ -11,10 +12,11 @@ import {
 } from "@/components/ui/table";
 import { useTableSort } from "@/components/use-table-sort";
 import {
-  statsCacheReadsText,
-  statsCostText,
-  statsCostTitle,
-  statsTokensShortfall,
+  statsCostNote,
+  statsCostPerSucceededNote,
+  statsCostPerSucceededText,
+  statsCostFigure,
+  statsTokensNote,
   statsTokensText,
 } from "@/lib/figures";
 import { fmtCount, fmtDuration, fmtMean, fmtPercent } from "@/lib/format";
@@ -129,13 +131,14 @@ function DurationRange({ duration, maxP95 }: DurationRangeProps) {
   );
 }
 
-function tokensTitle(row: Group, tier: string): string | undefined {
-  const cacheReads = statsCacheReadsText(row, tier);
-  const parts = [
-    cacheReads === null ? null : `${cacheReads} cache reads`,
-    statsTokensShortfall(row),
-  ].filter((part) => part !== null);
-  return parts.length === 0 ? undefined : parts.join(", ");
+interface NotedFigureProps {
+  note: string | undefined;
+  children: ReactNode;
+}
+
+// A figure with a note is underlined; one without stays plain.
+function NotedFigure({ note, children }: NotedFigureProps) {
+  return note === undefined ? children : <Hint hint={note}>{children}</Hint>;
 }
 
 /** One name column of a {@link GroupTable}. */
@@ -184,6 +187,10 @@ function sortColumns<Row extends Group>(
       value: (row: Row) => (isRecorded && row.tokens !== null ? row.tokens.uncached : null),
     },
     { id: "cost", value: (row: Row) => (isRecorded ? row.cost_usd : null) },
+    {
+      id: "cost-per-succeeded",
+      value: (row: Row) => (isRecorded ? row.cost_per_succeeded_run_usd : null),
+    },
   ];
 }
 
@@ -233,7 +240,7 @@ export function GroupTable<Row extends Group>({
 
   return (
     <section className="flex flex-col gap-sm">
-      <Table title={title} className={hasRates ? "table-fixed min-w-287" : "table-fixed min-w-248"}>
+      <Table title={title} className={hasRates ? "table-fixed min-w-326" : "table-fixed min-w-248"}>
         <TableHeader>
           {nameColumns.map((column, index) => (
             <SortableHead
@@ -251,7 +258,11 @@ export function GroupTable<Row extends Group>({
           <SortableHead columnId={measure} sort={sort} className={COLUMN_WIDTH.measure}>
             {measure === "share" ? "Share" : "Success"}
           </SortableHead>
-          <SortableHead columnId="duration" sort={sort} title="p50 to p95">
+          <SortableHead
+            columnId="duration"
+            sort={sort}
+            title="From the typical succeeded run to a slow one."
+          >
             Duration
           </SortableHead>
           <SortableHead columnId="turns" sort={sort} align="right" className={COLUMN_WIDTH.turns}>
@@ -269,6 +280,16 @@ export function GroupTable<Row extends Group>({
           {hasRates ? (
             <SortableHead columnId="cost" sort={sort} align="right" className={COLUMN_WIDTH.figure}>
               Est. cost
+            </SortableHead>
+          ) : undefined}
+          {hasRates ? (
+            <SortableHead
+              columnId="cost-per-succeeded"
+              sort={sort}
+              align="right"
+              className={COLUMN_WIDTH.figure}
+            >
+              Per succeeded run
             </SortableHead>
           ) : undefined}
         </TableHeader>
@@ -297,12 +318,21 @@ export function GroupTable<Row extends Group>({
               <TableCell look="number">
                 {row.mean_turns === null ? "not recorded" : fmtMean(row.mean_turns)}
               </TableCell>
-              <TableCell look="number" title={tokensTitle(row, tier)}>
+              <TableCell look="number" title={statsTokensNote(row)}>
                 {statsTokensText(row, tier)}
               </TableCell>
               {hasRates ? (
-                <TableCell look="number" title={statsCostTitle(row, tier)}>
-                  {statsCostText(row, tier)}
+                <TableCell look="number">
+                  <NotedFigure note={statsCostNote(row, tier)}>
+                    {statsCostFigure(row, tier)}
+                  </NotedFigure>
+                </TableCell>
+              ) : undefined}
+              {hasRates ? (
+                <TableCell look="number">
+                  <NotedFigure note={statsCostPerSucceededNote(row, tier)}>
+                    {statsCostPerSucceededText(row, tier) ?? ""}
+                  </NotedFigure>
                 </TableCell>
               ) : undefined}
             </TableRow>

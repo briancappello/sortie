@@ -470,6 +470,7 @@ export interface Report {
   schema_tier: string;
   warnings: string[] | null;
   summary: Summary;
+  spend: Spend | null;
   by_status: Group[] | null;
   by_adapter: Group[] | null;
   by_rule: Group[] | null;
@@ -834,6 +835,20 @@ export interface SnapshotAgentTotals {
   unmeasured_sessions: number;
   running_unreported: number;
   running_non_reporting: number;
+}
+
+export interface Spend {
+  period: string;
+  buckets: SpendBucket[] | null;
+}
+
+export interface SpendBucket {
+  start: string;
+  runs: number;
+  cost_usd: number | null;
+  tokens_unmeasured_runs: number;
+  cost_unpriced_runs: number;
+  cost_partial_runs: number;
 }
 
 export interface SpendCeilingResponse {

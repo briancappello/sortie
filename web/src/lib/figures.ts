@@ -1,4 +1,11 @@
-import { fmtMoney, fmtMoneyAtLeast, fmtMoneyExact, fmtTokens, plural } from "@/lib/format";
+import {
+  fmtMoney,
+  fmtMoneyAtLeast,
+  fmtMoneyCut,
+  fmtMoneyExact,
+  fmtTokens,
+  plural,
+} from "@/lib/format";
 
 import type {
   Group,
@@ -7,11 +14,15 @@ import type {
   RunResponse,
 } from "@/api/types.gen";
 
-/** The report fields a token or cost text reads; a `Summary` satisfies it too. */
-export type StatsFigures = Pick<
+/** The report fields a cost text reads; a `Summary` and a `SpendBucket` satisfy it too. */
+export type CostFigures = Pick<
   Group,
-  "tokens" | "cost_usd" | "tokens_unmeasured_runs" | "cost_unpriced_runs" | "cost_partial_runs"
+  "cost_usd" | "tokens_unmeasured_runs" | "cost_unpriced_runs" | "cost_partial_runs"
 >;
+
+/** The report fields a token or cost text reads; a `Summary` satisfies it too. */
+export type StatsFigures = CostFigures &
+  Pick<Group, "tokens" | "succeeded" | "cost_per_succeeded_run_usd">;
 
 /** The text of a token or cost figure that no run measured. */
 export const NOT_MEASURED = "not measured";
@@ -19,6 +30,9 @@ export const NOT_MEASURED = "not measured";
 export const UNPRICED = "unpriced";
 const NOT_RECORDED = "not recorded";
 const BASE_TIER = "base";
+
+const LOWER_BOUND_NOTE =
+  "At least this much. It leaves out runs Sortie could not price or measure.";
 
 const LEAVES_OUT = "Leaves out spend Sortie could not price or measure";
 
@@ -132,7 +146,7 @@ export function statsCacheReadsText(f: StatsFigures, tier: string): string | nul
 }
 
 /** Whether a report figure holds a cost that leaves out the spend of some runs. */
-function lowerBound(f: StatsFigures): boolean {
+function lowerBound(f: CostFigures): boolean {
   return (
     f.cost_usd !== null &&
     (f.cost_unpriced_runs > 0 || f.cost_partial_runs > 0 || f.tokens_unmeasured_runs > 0)
@@ -140,7 +154,7 @@ function lowerBound(f: StatsFigures): boolean {
 }
 
 /** Words the estimated cost of a report group or summary; a cost that leaves runs out reads "at least". */
-export function statsCostText(f: StatsFigures, tier: string): string {
+export function statsCostText(f: CostFigures, tier: string): string {
   if (tier === BASE_TIER) {
     return NOT_RECORDED;
   }
@@ -154,15 +168,26 @@ export function statsCostText(f: StatsFigures, tier: string): string {
   return f.tokens_unmeasured_runs > 0 ? NOT_MEASURED : "none";
 }
 
+/**
+ * Words the estimated cost of a report group or summary as the Analytics screen
+ * shows it: a lower bound reads as its cut amount alone, because the screen
+ * explains the bound on hover.
+ */
+export function statsCostFigure(f: CostFigures, tier: string): string {
+  return tier !== BASE_TIER && f.cost_usd !== null && lowerBound(f)
+    ? fmtMoneyCut(f.cost_usd)
+    : statsCostText(f, tier);
+}
+
 /** Words the runs the token figure leaves out, or `null` while it leaves none out. */
-export function statsTokensShortfall(f: StatsFigures): string | null {
+export function statsTokensShortfall(f: CostFigures): string | null {
   return f.tokens_unmeasured_runs > 0
     ? plural(f.tokens_unmeasured_runs, "run not measured", "runs not measured")
     : null;
 }
 
 /** Words the runs the token and cost figures leave out, or `null` while they leave none out. */
-export function statsShortfall(f: StatsFigures): string | null {
+export function statsShortfall(f: CostFigures): string | null {
   const parts = [
     statsTokensShortfall(f),
     f.cost_unpriced_runs > 0 ? plural(f.cost_unpriced_runs, "run unpriced", "runs unpriced") : null,
@@ -178,7 +203,7 @@ export function statsShortfall(f: StatsFigures): string | null {
  * out when it is a lower bound, or those runs alone while it has no amount.
  * Gives undefined on a `base` tier and when nothing is left out of a missing amount.
  */
-export function statsCostTitle(f: StatsFigures, tier: string): string | undefined {
+export function statsCostTitle(f: CostFigures, tier: string): string | undefined {
   if (tier === BASE_TIER) {
     return undefined;
   }
@@ -188,4 +213,53 @@ export function statsCostTitle(f: StatsFigures, tier: string): string | undefine
   const exact = fmtMoneyExact(f.cost_usd);
   const shortfall = statsShortfall(f);
   return shortfall === null ? exact : `At least ${exact}. ${LEAVES_OUT}: ${shortfall}.`;
+}
+
+/**
+ * Words the cost per succeeded run of a report group or summary. A figure over a
+ * lower-bound cost reads as its cut amount alone; gives `null` while no run succeeded.
+ */
+export function statsCostPerSucceededText(f: StatsFigures, tier: string): string | null {
+  if (tier === BASE_TIER) {
+    return NOT_RECORDED;
+  }
+  if (f.succeeded === 0) {
+    return null;
+  }
+  const value = f.cost_per_succeeded_run_usd;
+  if (value !== null) {
+    return lowerBound(f) ? fmtMoneyCut(value) : fmtMoney(value);
+  }
+  return f.cost_usd !== null ? NOT_MEASURED : statsCostText(f, tier);
+}
+
+/** Explains in words why a report group or summary token figure is incomplete, or gives undefined while it is complete. */
+export function statsTokensNote(f: CostFigures): string | undefined {
+  return f.tokens_unmeasured_runs > 0
+    ? "Leaves out runs whose tokens were not measured."
+    : undefined;
+}
+
+/**
+ * Explains in words what a report cost figure leaves out: a lower bound names
+ * the spend it cannot count, a missing amount names why it is missing. Gives
+ * undefined for a complete cost and on a `base` tier.
+ */
+export function statsCostNote(f: CostFigures, tier: string): string | undefined {
+  if (tier === BASE_TIER) {
+    return undefined;
+  }
+  if (f.cost_usd !== null) {
+    return lowerBound(f) ? LOWER_BOUND_NOTE : undefined;
+  }
+  if (f.cost_unpriced_runs > 0) {
+    return "The configured rates leave these runs unpriced.";
+  }
+  return f.tokens_unmeasured_runs > 0 ? "The agent reported no tokens for these runs." : undefined;
+}
+
+/** Explains in words that a cost per succeeded run is a lower bound, or gives undefined while it is not. */
+export function statsCostPerSucceededNote(f: StatsFigures, tier: string): string | undefined {
+  const isLowerBound = tier !== BASE_TIER && f.cost_per_succeeded_run_usd !== null && lowerBound(f);
+  return isLowerBound ? LOWER_BOUND_NOTE : undefined;
 }

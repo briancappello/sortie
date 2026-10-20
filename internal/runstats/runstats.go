@@ -10,7 +10,8 @@ package runstats
 
 // Report is the "sortie stats --format json" envelope. Every slice
 // field, by_trigger, by_origin, and chain_funnels included, is never nil; every pointer field is null
-// when the figure it carries is unavailable.
+// when the figure it carries is unavailable. Spend is nil unless
+// [persistence.RunHistoryCapabilities.RecordedCost] reports true.
 type Report struct {
 	GeneratedAt  string       `json:"generated_at"`
 	WorkflowPath string       `json:"workflow_path"`
@@ -20,6 +21,7 @@ type Report struct {
 	SchemaTier   string       `json:"schema_tier"`
 	Warnings     []string     `json:"warnings"`
 	Summary      Summary      `json:"summary"`
+	Spend        *Spend       `json:"spend"`
 	ByStatus     []Group      `json:"by_status"`
 	ByAdapter    []Group      `json:"by_adapter"`
 	ByRule       []Group      `json:"by_rule"`
@@ -58,6 +60,27 @@ type Summary struct {
 	TokensUnmeasuredRuns   int      `json:"tokens_unmeasured_runs"`
 }
 
+// Spend is the recorded cost of the report's runs per UTC calendar period.
+// Report.Spend is nil unless [persistence.RunHistoryCapabilities.RecordedCost]
+// reports true.
+type Spend struct {
+	Period  string        `json:"period"`  // "day" or "month"
+	Buckets []SpendBucket `json:"buckets"` // never nil; ascending by Start
+}
+
+// SpendBucket covers the report's runs whose completed_at falls in one UTC
+// period. CostUSD is null when no run of the bucket is priced, and is the
+// bucket's whole spend only while CostUnpricedRuns, CostPartialRuns, and
+// TokensUnmeasuredRuns are all 0.
+type SpendBucket struct {
+	Start                string   `json:"start"` // first instant of the period, RFC 3339 in UTC
+	Runs                 int      `json:"runs"`
+	CostUSD              *float64 `json:"cost_usd"`
+	TokensUnmeasuredRuns int      `json:"tokens_unmeasured_runs"`
+	CostUnpricedRuns     int      `json:"cost_unpriced_runs"`
+	CostPartialRuns      int      `json:"cost_partial_runs"`
+}
+
 // Duration reports p50, p95, and the arithmetic mean over a sample
 // population, in seconds. All three are null when Samples is 0.
 type Duration struct {
@@ -90,7 +113,11 @@ type Tokens struct {
 // base tier and on a database that records no cost, and CostUSD leaves
 // those runs out. CostPartialRuns counts the group's runs, other than
 // ci_failed, whose recorded cost is a lower bound; CostUSD includes them at
-// that bound. A run counts in at most one of the two.
+// that bound. A run counts in at most one of the two. CostPerSucceededRunUSD
+// is not rounded to cents. A by_model row counts a run once for every model
+// the run spent tokens on and carries that model's tokens and recorded cost,
+// so its Runs can add up to more than Summary.Runs; a run with unaccounted
+// turns counts as partial in every row whose cost is recorded.
 type Group struct {
 	Name                   string   `json:"name"`
 	Runs                   int      `json:"runs"`

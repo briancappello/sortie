@@ -1916,7 +1916,7 @@ A reverse proxy in front of Sortie must pass on the `Host` header the browser se
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
-| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, with the cost recorded with each run. |
+| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, with the cost recorded with each run and that cost per UTC day or month. |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, lists what Sortie does next for it as condition and sentence pairs, and lists the latest 50 agent events of its running or latest run as `recent_events`. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
@@ -3636,7 +3636,7 @@ A running run keeps its newest 1,000 retained events, within 256 KiB, in memory,
 
 #### `GET /api/v1/stats`: run statistics
 
-Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent and what they cost as recorded with each run, with breakdowns by outcome, agent, dispatch rule, prompt template, configured model, stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent, what they cost as recorded with each run, and that cost per UTC day or month, with breakdowns by outcome, agent, dispatch rule, prompt template, model (a run counts under every model it spent tokens on), stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
 
 **Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
 
@@ -3668,12 +3668,19 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
     "mean_turns_succeeded": 4,
     "tokens": {"input": 3900000, "output": 760000, "total": 4660000, "cache_read": 50000, "cache_write": 10000, "uncached": 4610000},
     "cost_usd": 19.52,
-    "cost_per_succeeded_run_usd": 6.51,
+    "cost_per_succeeded_run_usd": 6.506666667,
     "zero_duration_runs": 1,
     "duration_excluded_runs": 1,
     "cost_unpriced_runs": 1,
     "cost_partial_runs": 1,
     "tokens_unmeasured_runs": 1
+  },
+  "spend": {
+    "period": "day",
+    "buckets": [
+      {"start": "2026-02-23T00:00:00Z", "runs": 2, "cost_usd": 7.27, "tokens_unmeasured_runs": 1, "cost_unpriced_runs": 0, "cost_partial_runs": 0},
+      {"start": "2026-02-24T00:00:00Z", "runs": 4, "cost_usd": 12.25, "tokens_unmeasured_runs": 0, "cost_unpriced_runs": 1, "cost_partial_runs": 1}
+    ]
   },
   "by_status": [
     {
@@ -3686,7 +3693,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "mean_turns": 4,
       "tokens": {"input": 3500000, "output": 700000, "total": 4200000, "cache_read": 50000, "cache_write": 10000, "uncached": 4150000},
       "cost_usd": 17.87,
-      "cost_per_succeeded_run_usd": 5.96,
+      "cost_per_succeeded_run_usd": 5.956666667,
       "tokens_unmeasured_runs": 0,
       "cost_unpriced_runs": 0,
       "cost_partial_runs": 0
@@ -3707,7 +3714,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "mean_turns": 4,
       "tokens": {"input": 3000000, "output": 600000, "total": 3600000, "cache_read": 50000, "cache_write": 10000, "uncached": 3550000},
       "cost_usd": 17.87,
-      "cost_per_succeeded_run_usd": 8.94,
+      "cost_per_succeeded_run_usd": 8.935,
       "tokens_unmeasured_runs": 0,
       "cost_unpriced_runs": 0,
       "cost_partial_runs": 0,
@@ -3789,14 +3796,15 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `generated_at`   | string            | The instant of the request, as an RFC 3339 timestamp in UTC. Relative bounds count back from it. |
 | `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
 | `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
-| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `self_review` is `null`, and the figures that need the missing columns are `null`. |
+| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `spend` and `self_review` are `null`, and the figures that need the missing columns are `null`. |
 | `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. A database whose runs carry no recorded cost, because no service start has applied the schema change that records it, names cost among what it leaves out. |
 | `summary`        | object            | The report-wide figures, below. |
+| `spend`          | object or `null`  | The recorded cost per UTC day or month, below. `null` on the `base` tier and on a database whose runs carry no recorded cost. |
 | `by_status`      | array of groups   | One group per run status. |
 | `by_adapter`     | array of groups   | One group per agent kind. `<none>` names the runs that carry no agent kind, a recorded CI result included. |
 | `by_rule`        | array of groups   | One group per dispatch rule name, as in the `rule_name` of a run row. `<none>` names the runs that ran on the workflow-wide fallback. |
 | `by_template`    | array of groups   | One group per prompt template the rule selected, named as the run recorded it, which can be a host path. `<none>` names the runs that recorded none. |
-| `by_model`       | array of groups   | One group per model a run ran on: the model its runtime reported, else its configured model; `<none>` for the runs with neither. |
+| `by_model`       | array of groups   | One group per model a run spent tokens on, below. A run counts in the group of every such model, so it is not a partition. `<none>` names the runs with no model. |
 | `by_chain`       | array of chain groups | One entry per stage chain in which a hop was due or made. It is a listing, not a partition: runs outside a chain, and chains without a hop, are absent. |
 | `chain_funnels`  | array of funnels  | One funnel per stage chain definition, below. It is not a breakdown: its entries are stages, not groups of runs. |
 | `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
@@ -3820,7 +3828,7 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
 | `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage, and `uncached`, which is `total` less `cache_read`, floored at zero, so `uncached` plus `cache_read` equals `total` and cache writes stay in it. `null` on the `base` tier and when no run reported usage. |
 | `cost_usd`                   | number or `null` | The estimated cost of the priced runs, not rounded to cents, so a total under one cent never reads as zero. `null` on the `base` tier, when no run that spent tokens is priced, and when the runs carry no recorded cost. |
-| `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage. `null` when `cost_usd` is, and when no succeeded run reported usage. |
+| `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage, rounded as `cost_usd` is and not to cents, so a figure under one cent never reads as zero. `null` when `cost_usd` is, and when no succeeded run reported usage. |
 | `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |
 | `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
 | `cost_unpriced_runs`         | integer          | The runs that reported usage and were recorded `unpriced`. |
@@ -3844,6 +3852,19 @@ The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `
 | `tokens_unmeasured_runs`     | integer          | The group's runs that reported no usage. |
 | `cost_unpriced_runs`         | integer          | The group's runs that `cost_usd` leaves out for want of a rate, counted as in `summary`. `0` on the `base` tier. |
 | `cost_partial_runs`          | integer          | The group's runs recorded `partial`, counted as in `summary`. `0` on the `base` tier. |
+
+**`spend` fields.** `spend` holds `period` and `buckets`. `period` is `day` when the range has a `since` and `since` lies no more than 2160 hours before the end of the range, which is `until` or else `generated_at`, and `month` otherwise: the last 24 hours and the last 7, 30, and 90 days get days, and an open `since` gets months. `buckets` ascend by `start` and list every UTC day or month from the one holding `since` (the one holding the earliest run when `since` is open) through the later of the one holding the end of the range and the one holding the latest run, so a period without runs appears with `runs` `0` and `cost_usd` `null`. `buckets` is `[]`, never `null`, when no run falls in a period.
+
+| Field                    | Type             | Description |
+| ------------------------ | ---------------- | ----------- |
+| `start`                  | string           | The first instant of the period, as an RFC 3339 timestamp in UTC. |
+| `runs`                   | integer          | The runs of the report that completed in the period. |
+| `cost_usd`               | number or `null` | The sum of the recorded costs of the period's priced runs, not rounded to cents. `null` when no run of the period is priced. |
+| `tokens_unmeasured_runs`, `cost_unpriced_runs`, `cost_partial_runs` | integer | Counted as in `summary`, over the period's runs. |
+
+A run counts in the bucket whose period holds its completion time, the span the daily and monthly spend ceilings count, so a day bucket and `agent.max_daily_cost_usd` over the same UTC day count the same finished runs. The buckets partition the runs the report counts: their `runs`, `tokens_unmeasured_runs`, `cost_unpriced_runs`, and `cost_partial_runs` sum to the `summary` figures, and their `cost_usd` values sum to `summary.cost_usd` within $0.000001. The first bucket of a range whose `since` lies inside a period holds only the runs at or after `since`. A bucket reads the cost recorded with each run and prices nothing. A run whose completion time does not parse as an RFC 3339 timestamp counts in the summary and the breakdowns and in no bucket; Sortie writes none.
+
+**`by_model` groups.** A run counts once in the group of every model it spent tokens on, with the tokens and the recorded cost of that model's share of the run and with the run's outcome, turns, and duration, so a group's success rate, mean turns, duration, and cost per succeeded run cover the runs that used the model. A run with no model share that spent tokens counts once, with its own tokens and cost, under the model its runtime reported, else its configured model, whatever its age. The groups' `runs` can add up to more than `summary.runs`, and their `share` values to more than `1`. When a run is priced per model, its groups' tokens and costs add up to the run's. A `token_rates` entry for an agent kind prices a run once on its summed tokens and each model's share on its own tokens, so the shares' recorded costs can differ in sum from the run's recorded cost; the groups carry the shares as recorded and never reconcile them. A group counts `tokens_unmeasured_runs`, `cost_unpriced_runs`, and `cost_partial_runs` per share. A share counts as partial when its recorded status is `partial`, or when it is `estimated` and the run recorded unaccounted turns: the spend those turns leave out belongs to no recorded model, so the run counts as partial in every group whose share carries a recorded cost. A share recorded `unpriced` counts in `cost_unpriced_runs` only. On a database whose runs carry no recorded cost, every run counts under the one model it reported, else its configured model.
 
 **`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
 
@@ -4220,7 +4241,7 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_budget_exhaustions_total`               | Counter   | `reason`                    | Issue entries into the per-issue budget-exhausted set (`money_budget`, `token_budget`, `session_budget`). |
 | `sortie_budget_exhausted_issues`                | Gauge     | `reason`                    | Issues currently held out of dispatch by a per-issue budget ceiling.                     |
 
-The `model` label is the model the agent reported, otherwise the configured `model`, otherwise `<none>`, the placeholder `sortie stats` uses for the same case. Token samples count as usage arrives, so usage recorded before a run's first model report counts under the configured model or `<none>` and is not moved when the model arrives, a run whose runtime switches model splits its tokens between the models, and when the agent reports how many tokens each model spent, each model's share of a sample counts under that model while usage the agent reports without a per-model count counts under the run's model. Runtime and exit samples are recorded when the session ends, so they carry the model `sortie stats` groups the run under.
+The `model` label is the model the agent reported, otherwise the configured `model`, otherwise `<none>`, the placeholder `sortie stats` uses for the same case. Token samples count as usage arrives, so usage recorded before a run's first model report counts under the configured model or `<none>` and is not moved when the model arrives, a run whose runtime switches model splits its tokens between the models, and when the agent reports how many tokens each model spent, each model's share of a sample counts under that model while usage the agent reports without a per-model count counts under the run's model. Runtime and exit samples are recorded when the session ends, so they carry the run's final model: the one the agent reported, else the configured `model`.
 
 On a default Prometheus, `rate()` and `increase()` miss the first sample of a model Sortie has never run before. Enabling the Prometheus feature flag `--enable-feature=created-timestamp-zero-ingestion`, still experimental in Prometheus, closes that gap with no Sortie setting: `/metrics` sends each series' creation time in the protobuf format the flag makes Prometheus request, so a scrape job that sets `scrape_protocols` keeps `PrometheusProto` in the list. A configured model name that the agent reports under a different, resolved name keeps its series at its true total, usually a flat `0`, beside the series of the reported name. This is expected, as is a flat series for a model only earlier runs used.
 
@@ -4354,7 +4375,7 @@ token_rates:
     cache_write_per_mtok: 0.60
 ```
 
-Sortie estimates the cost in USD of every measured run, per model, and shows it on the dashboard (an estimate on each run, each issue, and each breakdown of its History and Analytics screens, and the cost of today's runs), in the JSON API (each running row's session estimate and the estimate of its whole issue, `estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status, and an estimate with a status on every run row and on the history totals of an issue, including each issue of run history by issue), and in `sortie stats` and `GET /api/v1/stats`. All rates are in USD per 1 million tokens.
+Sortie estimates the cost in USD of every measured run, per model, and shows it on the dashboard (an estimate on each run, each issue, and each breakdown of its History and Analytics screens, the cost of today's runs, a chart of the spend per UTC day or month on Analytics, and the cost per succeeded run in Analytics' summary and in each of its breakdowns that shows a cost), in the JSON API (each running row's session estimate and the estimate of its whole issue, `estimated_cost_usd` and `issue_estimated_cost_usd`, each with a status, and an estimate with a status on every run row and on the history totals of an issue, including each issue of run history by issue), and in `sortie stats` and `GET /api/v1/stats`. All rates are in USD per 1 million tokens.
 
 **Where rates come from.** A run's tokens are split by model, and each model's share takes its rates from the first of these layers that has an entry for it:
 
@@ -4370,7 +4391,7 @@ Sortie estimates the cost in USD of every measured run, per model, and shows it 
 
 **Per-kind entries.** An entry keyed by an agent kind takes precedence over every table and over model entries, prices every model of its kind alike, and needs both `input_per_mtok` and `output_per_mtok` to price anything. An unset `cache_read_per_mtok` or `cache_write_per_mtok` in it prices that class at `input_per_mtok`, so a workflow that priced with per-kind entries sees the same figures as before. `sortie validate` warns that such an entry turns off per-model pricing for its kind.
 
-**How a share is priced.** Fresh input, cache reads, cache writes, and output are each priced once at their own rate. Outside a per-kind entry, no rate is ever substituted: a token class a model spent with no rate contributes nothing and marks the run `partial`, a lower bound. A run whose spend no rate prices is `unpriced`. Outside a per-kind entry a run's cost is the sum of its shares' costs; a per-kind entry prices all of its kind's shares together on their summed tokens. The dashboard words a `partial` cost as a lower bound ("at least $4.20") and a non-zero cost under one cent as "under $0.01", shows the exact amount of every cost on hover, and lists a finished run's cost per model on its session view, naming the token classes that had no rate.
+**How a share is priced.** Fresh input, cache reads, cache writes, and output are each priced once at their own rate. Outside a per-kind entry, no rate is ever substituted: a token class a model spent with no rate contributes nothing and marks the run `partial`, a lower bound. A run whose spend no rate prices is `unpriced`. Outside a per-kind entry a run's cost is the sum of its shares' costs; a per-kind entry prices all of its kind's shares together on their summed tokens. The dashboard words a `partial` cost as a lower bound ("at least $4.20"; Analytics shows the amount cut down with a dotted underline and opens its hover with "At least this much") and a non-zero cost under one cent as "under $0.01", shows the exact amount of a cost on hover on every screen but Analytics, and lists a finished run's cost per model on its session view, naming the token classes that had no rate.
 
 **The price is recorded with the run.** When a run finishes, Sortie records its cost and status, and for each model's share the price source (`operator` for `token_rates` and your own table, `fetched`, or `embedded`) and the version of the rates (the embedded table's pinned upstream revision, or a digest of the downloaded table, your table, or `token_rates`; a model entry that takes some of its rates from a table records the `token_rates` digest, a `+`, and that table's version). Every surface reads the recorded cost, so a later change of rates, a restart, an upgrade, or a newly downloaded table never moves a past figure, and `sortie stats` and `GET /api/v1/stats` report the same cost for the same range. A running session's figure is a live estimate under the rates in force, fixed when its run is recorded. Runs recorded before an upgrade that introduced recorded costs are priced once, at the first start after it, under the rates in force at that start.
 
