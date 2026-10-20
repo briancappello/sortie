@@ -1204,6 +1204,13 @@
         "output_cost_per_token": 4.4e-7,
         "cache_read_input_token_cost": 2.8e-8
     },
+    "azure/eu/gpt-4o": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.00000275,
+        "output_cost_per_token": 0.000011,
+        "cache_read_input_token_cost": 0.000001375,
+        "cache_creation_input_token_cost": 0.00000138
+    },
     "azure/eu/gpt-4o-2024-05-13": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.0000055,
@@ -1221,6 +1228,12 @@
         "output_cost_per_token": 0.000011,
         "cache_read_input_token_cost": 0.000001375,
         "cache_creation_input_token_cost": 0.00000138
+    },
+    "azure/eu/gpt-4o-mini": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 1.65e-7,
+        "output_cost_per_token": 6.6e-7,
+        "cache_read_input_token_cost": 8.3e-8
     },
     "azure/eu/gpt-4o-mini-2024-07-18": {
         "litellm_provider": "azure",
@@ -1461,6 +1474,12 @@
         "cache_read_input_token_cost": 1.2e-7,
         "cache_creation_input_token_cost": 0.000003
     },
+    "azure/eu/o1": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.0000165,
+        "output_cost_per_token": 0.000066,
+        "cache_read_input_token_cost": 0.00000825
+    },
     "azure/eu/o1-2024-12-17": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.0000165,
@@ -1485,6 +1504,12 @@
         "output_cost_per_token": 0.000066,
         "cache_read_input_token_cost": 0.00000825
     },
+    "azure/eu/o3": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.0000022,
+        "output_cost_per_token": 0.0000088,
+        "cache_read_input_token_cost": 5.5e-7
+    },
     "azure/eu/o3-2025-04-16": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.0000022,
@@ -1497,11 +1522,23 @@
         "output_cost_per_token": 0.000044,
         "cache_read_input_token_cost": 0.00000275
     },
+    "azure/eu/o3-mini": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.00000121,
+        "output_cost_per_token": 0.00000484,
+        "cache_read_input_token_cost": 6.05e-7
+    },
     "azure/eu/o3-mini-2025-01-31": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.00000121,
         "output_cost_per_token": 0.00000484,
         "cache_read_input_token_cost": 6.05e-7
+    },
+    "azure/eu/o4-mini": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.00000121,
+        "output_cost_per_token": 0.00000484,
+        "cache_read_input_token_cost": 3.03e-7
     },
     "azure/eu/o4-mini-2025-04-16": {
         "litellm_provider": "azure",
@@ -2531,6 +2568,13 @@
         "output_cost_per_token": 4.4e-7,
         "cache_read_input_token_cost": 2.8e-8
     },
+    "azure/us/gpt-4o": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.00000275,
+        "output_cost_per_token": 0.000011,
+        "cache_read_input_token_cost": 0.000001375,
+        "cache_creation_input_token_cost": 0.00000138
+    },
     "azure/us/gpt-4o-2024-05-13": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.0000055,
@@ -2548,6 +2592,12 @@
         "output_cost_per_token": 0.000011,
         "cache_read_input_token_cost": 0.000001375,
         "cache_creation_input_token_cost": 0.00000138
+    },
+    "azure/us/gpt-4o-mini": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 1.65e-7,
+        "output_cost_per_token": 6.6e-7,
+        "cache_read_input_token_cost": 8.3e-8
     },
     "azure/us/gpt-4o-mini-2024-07-18": {
         "litellm_provider": "azure",
@@ -2794,6 +2844,12 @@
         "output_cost_per_token": 0.000033,
         "cache_read_input_token_cost": 5.5e-7
     },
+    "azure/us/o1": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.0000165,
+        "output_cost_per_token": 0.000066,
+        "cache_read_input_token_cost": 0.00000825
+    },
     "azure/us/o1-2024-12-17": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.0000165,
@@ -2818,6 +2874,12 @@
         "output_cost_per_token": 0.000066,
         "cache_read_input_token_cost": 0.00000825
     },
+    "azure/us/o3": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.0000022,
+        "output_cost_per_token": 0.0000088,
+        "cache_read_input_token_cost": 5.5e-7
+    },
     "azure/us/o3-2025-04-16": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.0000022,
@@ -2830,11 +2892,23 @@
         "output_cost_per_token": 0.000044,
         "cache_read_input_token_cost": 0.00000275
     },
+    "azure/us/o3-mini": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.00000121,
+        "output_cost_per_token": 0.00000484,
+        "cache_read_input_token_cost": 6.05e-7
+    },
     "azure/us/o3-mini-2025-01-31": {
         "litellm_provider": "azure",
         "input_cost_per_token": 0.00000121,
         "output_cost_per_token": 0.00000484,
         "cache_read_input_token_cost": 6.05e-7
+    },
+    "azure/us/o4-mini": {
+        "litellm_provider": "azure",
+        "input_cost_per_token": 0.00000121,
+        "output_cost_per_token": 0.00000484,
+        "cache_read_input_token_cost": 3.03e-7
     },
     "azure/us/o4-mini-2025-04-16": {
         "litellm_provider": "azure",
@@ -5956,7 +6030,8 @@
         "litellm_provider": "dashscope",
         "input_cost_per_token": 0.0000025,
         "output_cost_per_token": 0.0000075,
-        "cache_read_input_token_cost": 5e-7
+        "cache_read_input_token_cost": 5e-7,
+        "cache_creation_input_token_cost": 0.000003125
     },
     "dashscope/qwen3.7-plus": {
         "litellm_provider": "dashscope"
@@ -7449,6 +7524,9 @@
         "output_cost_per_token": 0.00000396,
         "cache_read_input_token_cost": 4.4e-8,
         "cache_creation_input_token_cost": 0
+    },
+    "deepseek/search": {
+        "litellm_provider": "deepseek"
     },
     "dolphin": {
         "litellm_provider": "nlp_cloud",
@@ -9182,6 +9260,12 @@
         "input_cost_per_token": 3e-7,
         "output_cost_per_token": 0.0000012,
         "cache_read_input_token_cost": 6e-8
+    },
+    "fireworks_ai/accounts/fireworks/models/minimax-m3p1-flash": {
+        "litellm_provider": "fireworks_ai",
+        "input_cost_per_token": 1.5e-7,
+        "output_cost_per_token": 6e-7,
+        "cache_read_input_token_cost": 1.5e-8
     },
     "fireworks_ai/accounts/fireworks/models/ministral-3-14b-instruct-2512": {
         "litellm_provider": "fireworks_ai",
@@ -13253,6 +13337,9 @@
         "input_cost_per_token": 1.7e-7,
         "output_cost_per_token": 6.6e-7
     },
+    "meta/muse-image-1.0": {
+        "litellm_provider": "meta"
+    },
     "meta/muse-spark-1.1": {
         "litellm_provider": "meta",
         "input_cost_per_token": 0.00000125,
@@ -13291,6 +13378,9 @@
         "input_cost_per_token": 0.000004,
         "output_cost_per_token": 0.00002,
         "cache_read_input_token_cost": 2e-7
+    },
+    "meta/sam-3.1": {
+        "litellm_provider": "meta"
     },
     "meta_llama/Llama-3.3-70B-Instruct": {
         "litellm_provider": "meta_llama"
@@ -16556,7 +16646,8 @@
         "litellm_provider": "qwen_ai_platform",
         "input_cost_per_token": 0.0000025,
         "output_cost_per_token": 0.0000075,
-        "cache_read_input_token_cost": 5e-7
+        "cache_read_input_token_cost": 5e-7,
+        "cache_creation_input_token_cost": 0.000003125
     },
     "qwen_ai_platform/qwen3.7-plus": {
         "litellm_provider": "qwen_ai_platform"
@@ -16795,7 +16886,8 @@
         "litellm_provider": "qwencloud",
         "input_cost_per_token": 0.0000025,
         "output_cost_per_token": 0.0000075,
-        "cache_read_input_token_cost": 5e-7
+        "cache_read_input_token_cost": 5e-7,
+        "cache_creation_input_token_cost": 0.000003125
     },
     "qwencloud/qwen3.7-plus": {
         "litellm_provider": "qwencloud"
@@ -20477,7 +20569,19 @@
     "volcengine/doubao-seed-2-0-pro-260215": {
         "litellm_provider": "volcengine"
     },
+    "volcengine/doubao-seed-2-1-lite-260915": {
+        "litellm_provider": "volcengine",
+        "input_cost_per_token": 1.15e-7,
+        "output_cost_per_token": 3.88126e-7,
+        "cache_read_input_token_cost": 2.3e-8
+    },
     "volcengine/doubao-seed-2-1-pro-260628": {
+        "litellm_provider": "volcengine",
+        "input_cost_per_token": 8.625e-7,
+        "output_cost_per_token": 0.0000043125,
+        "cache_read_input_token_cost": 1.725e-7
+    },
+    "volcengine/doubao-seed-2-1-pro-260915": {
         "litellm_provider": "volcengine",
         "input_cost_per_token": 8.625e-7,
         "output_cost_per_token": 0.0000043125,
