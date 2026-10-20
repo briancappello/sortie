@@ -11,7 +11,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/pricing"
-	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
 // ModelUse is one agent kind and model pair that recorded runs used; it
@@ -121,9 +120,10 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 	if s.ratesFn != nil {
 		rates = s.ratesFn()
 	}
-	var load workflow.LoadStatus
+	var loadEndedAt time.Time
+	var loadErr error
 	if s.workflowLoadFn != nil {
-		load = s.workflowLoadFn()
+		loadEndedAt, loadErr = s.workflowLoadFn()
 	}
 	var configured []orchestrator.ConfiguredModel
 	if s.configuredModelsFn != nil {
@@ -132,8 +132,8 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 
 	response := sourcesBody(rates.Sources(pricing.SourcesInput{
 		Downloads:   s.priceDownloads,
-		LoadErr:     load.LastError,
-		LoadEndedAt: load.LastLoadAt,
+		LoadErr:     loadErr,
+		LoadEndedAt: loadEndedAt,
 		Now:         now,
 	}), s.maskErrorFn)
 	response.GeneratedAt = timeText(now)

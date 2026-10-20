@@ -959,8 +959,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			ConfiguredModelsFn: o.ConfiguredModels,
 			RatesFn:            br.mgr.Rates,
 			PriceDownloads:     downloader,
-			WorkflowLoadFn:     br.mgr.LoadStatus,
-			MaskErrorFn:        o.MaskError,
+			WorkflowLoadFn: func() (time.Time, error) {
+				status := br.mgr.LoadStatus()
+				return status.LastLoadAt, status.LastError
+			},
+			MaskErrorFn: o.MaskError,
 		})
 		o.AddObserver(srv)
 		br.mgr.SetLoadNotifier(srv.OnStateChange)

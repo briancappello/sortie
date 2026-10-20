@@ -18,7 +18,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server/ui"
-	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
 // SnapshotFunc returns a point-in-time capture of the orchestrator's
@@ -393,9 +392,10 @@ type Params struct {
 	// nil, GET /api/v1/prices reads an enabled download as not loaded.
 	PriceDownloads *pricing.Downloader
 
-	// WorkflowLoadFn returns the outcome of the latest workflow load. When
-	// nil, GET /api/v1/prices reports no load failure.
-	WorkflowLoadFn func() workflow.LoadStatus
+	// WorkflowLoadFn returns when the latest workflow load ended and its
+	// error, nil when it succeeded. When nil, GET /api/v1/prices reports no
+	// load failure.
+	WorkflowLoadFn func() (endedAt time.Time, err error)
 
 	// MaskErrorFn masks an error text before GET /api/v1/prices serves it.
 	// When nil, the route serves no error text.
@@ -432,7 +432,7 @@ type Server struct {
 	configuredModelsFn func() []orchestrator.ConfiguredModel
 	ratesFn            func() *pricing.Rates
 	priceDownloads     *pricing.Downloader
-	workflowLoadFn     func() workflow.LoadStatus
+	workflowLoadFn     func() (time.Time, error)
 	maskErrorFn        func(string) string
 
 	changes *changeFeed
