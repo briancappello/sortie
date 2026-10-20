@@ -1042,16 +1042,13 @@ func TestFetchIssueStatesByIDs_Empty(t *testing.T) {
 func TestFetchIssueStatesByIDs_NotFoundOmitted(t *testing.T) {
 	t.Parallel()
 
-	// First issue found, second returns 404 (omit from map).
-	var callNum atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := callNum.Add(1)
-		if n == 1 {
+		if strings.HasSuffix(r.URL.Path, "/issues/1") {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(issueJSON(1, "backlog"))) //nolint:errcheck // test helper
-		} else {
-			w.WriteHeader(http.StatusNotFound)
+			return
 		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
 
