@@ -198,6 +198,20 @@ export function fmtStamp(at: string): string {
   return isToday ? fmtClock(instant) : `${fmtDate(instant)}, ${fmtClock(instant)}`;
 }
 
+const UTC_WEEKDAY = new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" });
+const UTC_MONTH = new Intl.DateTimeFormat("en-US", { month: "long", timeZone: "UTC" });
+
+/** Writes an instant in UTC as "Wednesday 21 October, 00:00 UTC"; an unparsable instant reads as `fmtStamp` reads it. */
+export function fmtUtcStamp(at: string): string {
+  const instant = parseInstant(at);
+  if (instant === null) {
+    return UNKNOWN;
+  }
+  const date = new Date(instant);
+  const clock = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+  return `${UTC_WEEKDAY.format(date)} ${date.getUTCDate()} ${UTC_MONTH.format(date)}, ${clock} UTC`;
+}
+
 /** Writes `HH:MM:SS` for an instant on the server's current day, else the date and `HH:MM:SS`, as fmtStamp does with `HH:MM`. */
 export function fmtStampSec(at: string): string {
   const instant = parseInstant(at);
