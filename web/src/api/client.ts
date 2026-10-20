@@ -3,6 +3,7 @@ import type {
   CheckNowResponse,
   IssueDetailResponse,
   IssueGroupsResponse,
+  PricesResponse,
   RefreshResponse,
   Report,
   RetryNowResponse,
@@ -128,6 +129,11 @@ export function getIssueGroups(
 /** Fetches the run statistics report; without `since` it covers every run. */
 export function getStats(q: { since?: string }, signal?: AbortSignal): Promise<Report> {
   return getJson<Report>(withQuery("stats", q), signal);
+}
+
+/** Fetches the rates the next run of each model gets and the state of every price source. */
+export function getPrices(signal?: AbortSignal): Promise<PricesResponse> {
+  return getJson<PricesResponse>("prices", signal);
 }
 
 /** Requests a poll and reconcile; `202` queued it, `409` is the server's refusal. */

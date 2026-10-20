@@ -10,6 +10,7 @@ import {
   HistoryIcon,
   InboxIcon,
   SlidersHorizontalIcon,
+  TagIcon,
 } from "@/components/icons";
 
 import type { ScreenEntry } from "@/app/Rail";
@@ -22,6 +23,7 @@ export const screens: ScreenEntry[] = [
   { key: "a", label: "Analytics", path: "/analytics", group: 0, icon: ChartColumnIcon },
   { key: "e", label: "Health", path: "/health", group: 1, icon: ActivityIcon },
   { key: "w", label: "Workflow", path: "/workflow", group: 1, icon: SlidersHorizontalIcon },
+  { key: "r", label: "Prices", path: "/prices", group: 1, icon: TagIcon },
 ];
 
 /** The application's routes under the `/ui` base. */
@@ -86,6 +88,12 @@ export const router = createBrowserRouter(
               lazy: {
                 Component: async () =>
                   (await import("@/screens/workflow/WorkflowScreen")).WorkflowScreen,
+              },
+            },
+            {
+              path: "prices",
+              lazy: {
+                Component: async () => (await import("@/screens/prices/PricesScreen")).PricesScreen,
               },
             },
             { path: "*", element: <NotFound /> },

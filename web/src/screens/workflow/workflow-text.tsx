@@ -1,24 +1,11 @@
 import { Fragment } from "react";
 
+import { Code } from "@/components/Code";
 import { TrackerLabel } from "@/components/TrackerLabel";
 import { fmtDuration } from "@/lib/format";
 
 import type { ShapeMatch, ShapePriority, ShapeRule } from "@/api/types.gen";
 import type { ReactNode } from "react";
-
-/** Props of {@link Code}. */
-export interface CodeProps {
-  children: ReactNode;
-}
-
-/** Renders a configured name or pattern in the monospace face. */
-export function Code({ children }: CodeProps) {
-  return (
-    <code className="rounded bg-surface-raised px-xxs font-mono text-[0.9em] wrap-anywhere">
-      {children}
-    </code>
-  );
-}
 
 /** Renders each tracker label as a {@link TrackerLabel}, joined by a separator text. */
 export function joinLabels(labels: readonly string[], separator: string): ReactNode {

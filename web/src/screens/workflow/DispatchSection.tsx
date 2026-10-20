@@ -1,5 +1,6 @@
 import { Fragment } from "react";
 
+import { Code } from "@/components/Code";
 import { ArrowRightIcon } from "@/components/icons";
 import { fmtCount } from "@/lib/format";
 import { Panel } from "@/components/Panel";
@@ -13,7 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-import { Code, Note, selectionText } from "./workflow-text";
+import { Note, selectionText } from "./workflow-text";
 
 import type { ShapeAgent, ShapeDispatch, ShapeRule } from "@/api/types.gen";
 import type { ReactNode } from "react";
