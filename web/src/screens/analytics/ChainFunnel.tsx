@@ -58,7 +58,7 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
   const reasons = stage.no_hop_reasons ?? [];
   const reasonsTitle =
     reasons.length > 0
-      ? reasons.map((entry) => `${fmtCount(entry.passes)} ${reasonWord(entry.reason)}`).join(", ")
+      ? `No hop was due: ${reasons.map((entry) => reasonWord(entry.reason)).join(", ")}`
       : undefined;
 
   return (

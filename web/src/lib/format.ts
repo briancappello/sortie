@@ -149,22 +149,26 @@ export function fmtMoneyExact(usd: number): string {
 }
 
 /**
- * Words a cost that is a lower bound: "at least" and the exact amount cut,
- * never rounded up, so the text never exceeds the spend it bounds. Below one
- * cent the cut falls after the first non-zero digit ("at least $0.004"), below
- * $100 after two fraction digits (4.205 reads "at least $4.20"), and from $100
- * before the decimal point (149.6 reads "at least $149").
+ * Writes the amount of a lower-bound cost cut, never rounded up, so the text
+ * never exceeds the spend it bounds. Below one cent the cut falls after the
+ * first non-zero digit ("$0.004"), below $100 after two fraction digits (4.205
+ * reads "$4.20"), and from $100 before the decimal point (149.6 reads "$149").
  */
-export function fmtMoneyAtLeast(usd: number): string {
+export function fmtMoneyCut(usd: number): string {
   const { value, whole, fraction } = exactDigits(usd);
   const grouped = fmtCount(Number(whole));
   if (value >= 100) {
-    return `at least $${grouped}`;
+    return `$${grouped}`;
   }
   if (value > 0 && value < 0.01) {
-    return `at least $${grouped}.${/^0*[1-9]/.exec(fraction)?.[0] ?? fraction}`;
+    return `$${grouped}.${/^0*[1-9]/.exec(fraction)?.[0] ?? fraction}`;
   }
-  return `at least $${grouped}.${fraction.padEnd(2, "0").slice(0, 2)}`;
+  return `$${grouped}.${fraction.padEnd(2, "0").slice(0, 2)}`;
+}
+
+/** Words a cost that is a lower bound: "at least" before the amount `fmtMoneyCut` writes. */
+export function fmtMoneyAtLeast(usd: number): string {
+  return `at least ${fmtMoneyCut(usd)}`;
 }
 
 const RATE = new Intl.NumberFormat("en-US", {
@@ -248,6 +252,11 @@ export function fmtStamp(at: string): string {
 
 const UTC_WEEKDAY = new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" });
 const UTC_MONTH = new Intl.DateTimeFormat("en-US", { month: "long", timeZone: "UTC" });
+const UTC_MONTH_SHORT = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" });
+
+function utcClock(date: Date): string {
+  return `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+}
 
 /** Writes an instant in UTC as "Wednesday 21 October, 00:00 UTC"; an unparsable instant reads as `fmtStamp` reads it. */
 export function fmtUtcStamp(at: string): string {
@@ -256,8 +265,37 @@ export function fmtUtcStamp(at: string): string {
     return UNKNOWN;
   }
   const date = new Date(instant);
-  const clock = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
-  return `${UTC_WEEKDAY.format(date)} ${date.getUTCDate()} ${UTC_MONTH.format(date)}, ${clock} UTC`;
+  return `${UTC_WEEKDAY.format(date)} ${date.getUTCDate()} ${UTC_MONTH.format(date)}, ${utcClock(date)} UTC`;
+}
+
+/** Writes the 24-hour `HH:MM` of an instant in UTC; an unparsable instant reads as `fmtStamp` reads it. */
+export function fmtUtcClock(at: string): string {
+  const instant = parseInstant(at);
+  return instant === null ? UNKNOWN : utcClock(new Date(instant));
+}
+
+/** Writes the UTC period starting at an instant as "Wednesday 21 October" or "October 2026"; an unparsable instant reads as `fmtStamp` reads it. */
+export function fmtUtcPeriod(start: string, period: "day" | "month"): string {
+  const instant = parseInstant(start);
+  if (instant === null) {
+    return UNKNOWN;
+  }
+  const date = new Date(instant);
+  return period === "day"
+    ? `${UTC_WEEKDAY.format(date)} ${date.getUTCDate()} ${UTC_MONTH.format(date)}`
+    : `${UTC_MONTH.format(date)} ${date.getUTCFullYear()}`;
+}
+
+/** Writes the UTC period starting at an instant as the axis label "21 Oct" or "Oct 2026"; an unparsable instant reads as `fmtStamp` reads it. */
+export function fmtUtcPeriodTick(start: string, period: "day" | "month"): string {
+  const instant = parseInstant(start);
+  if (instant === null) {
+    return UNKNOWN;
+  }
+  const date = new Date(instant);
+  return period === "day"
+    ? `${date.getUTCDate()} ${UTC_MONTH_SHORT.format(date)}`
+    : `${UTC_MONTH_SHORT.format(date)} ${date.getUTCFullYear()}`;
 }
 
 /** Writes `HH:MM:SS` for an instant on the server's current day, else the date and `HH:MM:SS`, as fmtStamp does with `HH:MM`. */

@@ -1,9 +1,10 @@
 import {
   statsCacheReadsText,
-  statsCostText,
-  statsCostTitle,
-  statsShortfall,
-  statsTokensShortfall,
+  statsCostNote,
+  statsCostPerSucceededNote,
+  statsCostPerSucceededText,
+  statsCostFigure,
+  statsTokensNote,
   statsTokensText,
 } from "@/lib/figures";
 import { Hint } from "@/components/ui/hint";
@@ -15,48 +16,26 @@ import type { ReactNode } from "react";
 interface TileProps {
   label: string;
   value: string;
-  /** The hover of the value. */
-  valueTitle?: string;
   hint?: string | null;
+  /** A note on the value itself, which draws it underlined. */
+  valueHint?: string;
 }
 
 // Spans two rows of the shared figure grid so the labels and the figures of one
 // visual row stay level when a label wraps. The grid sets no row gap because a
 // subgrid inherits it between its own rows; the label margin spaces the visual
 // rows instead.
-function Tile({ label, value, valueTitle, hint }: TileProps) {
+function Tile({ label, value, hint, valueHint }: TileProps) {
   return (
     <div className="row-span-2 grid min-w-0 grid-rows-subgrid">
       <span className="mt-lg text-body-sm text-ink-muted">
         {hint === undefined || hint === null ? label : <Hint hint={hint}>{label}</Hint>}
       </span>
-      <span
-        title={valueTitle}
-        className="mt-xxs font-heading text-h5 font-semibold text-ink tabular-nums"
-      >
-        {value}
+      <span className="mt-xxs font-heading text-h5 font-semibold text-ink tabular-nums">
+        {valueHint === undefined ? value : <Hint hint={valueHint}>{value}</Hint>}
       </span>
     </div>
   );
-}
-
-function runsHint(summary: Report["summary"]): string | undefined {
-  const parts = [
-    summary.failed > 0 ? `${fmtCount(summary.failed)} failed` : undefined,
-    summary.stopped > 0 ? `${fmtCount(summary.stopped)} stopped` : undefined,
-    summary.cancelled > 0 ? `${fmtCount(summary.cancelled)} cancelled` : undefined,
-  ].filter((part) => part !== undefined);
-  return parts.length === 0 ? undefined : parts.join(", ");
-}
-
-function durationHint(duration: Report["summary"]["duration_seconds"]): string | undefined {
-  if (duration.samples === 0) {
-    return undefined;
-  }
-  const p95 = fmtDuration(duration.p95);
-  return p95 === fmtDuration(duration.p50)
-    ? "p50 and p95 of succeeded runs"
-    : `p50 of succeeded runs, p95 ${p95}`;
 }
 
 /** Props of {@link SummaryTiles}. */
@@ -71,7 +50,7 @@ export function SummaryTiles({ report, hasCost }: SummaryTilesProps) {
   const { summary, schema_tier: tier } = report;
   const hasSucceeded = summary.succeeded > 0;
   const tiles: ReactNode[] = [
-    <Tile key="runs" label="Runs" value={fmtCount(summary.runs)} hint={runsHint(summary)} />,
+    <Tile key="runs" label="Runs" value={fmtCount(summary.runs)} />,
     <Tile key="issues" label="Issues" value={fmtCount(summary.issues)} />,
   ];
   if (hasSucceeded) {
@@ -80,7 +59,7 @@ export function SummaryTiles({ report, hasCost }: SummaryTilesProps) {
         key="duration"
         label="Duration"
         value={fmtDuration(summary.duration_seconds.p50)}
-        hint={durationHint(summary.duration_seconds)}
+        hint="Median time of a succeeded run."
       />,
       <Tile
         key="turns"
@@ -99,7 +78,7 @@ export function SummaryTiles({ report, hasCost }: SummaryTilesProps) {
       key="tokens"
       label="Tokens"
       value={statsTokensText(summary, tier)}
-      hint={statsTokensShortfall(summary) ?? (tier === "full" ? "every run measured" : null)}
+      hint={statsTokensNote(summary) ?? (tier === "full" ? "every run measured" : null)}
     />,
   );
   const cacheReads = statsCacheReadsText(summary, tier);
@@ -115,11 +94,22 @@ export function SummaryTiles({ report, hasCost }: SummaryTilesProps) {
       <Tile
         key="cost"
         label="Estimated cost"
-        value={statsCostText(summary, tier)}
-        valueTitle={statsCostTitle(summary, tier)}
-        hint={statsShortfall(summary)}
+        value={statsCostFigure(summary, tier)}
+        valueHint={statsCostNote(summary, tier)}
       />,
     );
+    const costPerSucceeded = statsCostPerSucceededText(summary, tier);
+    if (costPerSucceeded !== null) {
+      tiles.push(
+        <Tile
+          key="cost-per-succeeded"
+          label="Cost per run"
+          hint="Estimated cost divided by the runs that succeeded."
+          value={costPerSucceeded}
+          valueHint={statsCostPerSucceededNote(summary, tier)}
+        />,
+      );
+    }
   }
 
   return (
