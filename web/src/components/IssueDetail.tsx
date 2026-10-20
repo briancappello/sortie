@@ -16,7 +16,7 @@ import { DrawerClose, DrawerTitle } from "@/components/ui/drawer";
 import { useAttentionActions } from "@/components/use-attention-actions";
 import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
-import { costText, NOT_MEASURED, runningTokensText } from "@/lib/figures";
+import { costText, costTitle, NOT_MEASURED, runningTokensText } from "@/lib/figures";
 import { fmtClock, fmtTokens, plural } from "@/lib/format";
 import { issueLinkOf, latestSessionOf, sessionLinkOf } from "@/lib/issue-link";
 import { agentLabel, modelLabel, ruleLabel } from "@/lib/labels";
@@ -256,9 +256,21 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
         ? `turn ${running.turn_count}`
         : `turn ${running.turn_count} of ${config.agent.max_turns}`,
       tokensText === NOT_MEASURED ? "tokens not measured" : `${tokensText} tokens`,
-      cost === null || sessionCost === NOT_MEASURED ? undefined : `${sessionCost} est.`,
-    ].filter((part) => part !== undefined);
-    facts.push(["This session", parts.join(SEP)]);
+    ];
+    facts.push([
+      "This session",
+      <>
+        {parts.join(SEP)}
+        {cost === null || sessionCost === NOT_MEASURED ? undefined : (
+          <>
+            {SEP}
+            <span title={costTitle(running.cost_status, running.estimated_cost_usd)}>
+              {`${sessionCost} est.`}
+            </span>
+          </>
+        )}
+      </>,
+    ]);
   }
   facts.push([
     "Sessions",
@@ -276,7 +288,12 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
   } else if (cost !== null) {
     facts.push([
       "Spent",
-      `${moneyText ?? costText(cost.status, cost.usd)} estimated, ${fmtTokens(uncachedTokens)} tokens`,
+      <>
+        <span title={costTitle(cost.status, cost.usd)}>
+          {`${moneyText ?? costText(cost.status, cost.usd)} estimated`}
+        </span>
+        {`, ${fmtTokens(uncachedTokens)} tokens`}
+      </>,
     ]);
   } else {
     facts.push(["Tokens", fmtTokens(uncachedTokens)]);

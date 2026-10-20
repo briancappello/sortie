@@ -10,6 +10,7 @@ import { rowStyles, secondLineColor } from "@/lib/rows";
 import { endedNavKey } from "./rows";
 
 import type { EndedIssue } from "@/lib/ended";
+import type { TallyLine } from "@/lib/tally";
 
 const LINK =
   "text-link underline underline-offset-2 hover:text-link-hover focus-visible:outline-2 focus-visible:outline-focus-ring active:text-link-active";
@@ -26,7 +27,9 @@ export interface EndedTodayProps {
   /** Why the list is empty when it is; ignored while `rows` holds issues. */
   empty: EndedEmpty;
   /** The tally line, or `undefined` while it is unavailable. */
-  tally: string | undefined;
+  tally: TallyLine | undefined;
+  /** The hover of the tally's cost. */
+  tallyTitle?: string;
   /** Navigation key of the selected item, or `undefined`. */
   selectedKey: string | undefined;
   showSelection: boolean;
@@ -39,6 +42,7 @@ export function EndedToday({
   unreadIds,
   empty,
   tally,
+  tallyTitle,
   selectedKey,
   showSelection,
   onOpen,
@@ -48,7 +52,12 @@ export function EndedToday({
       <div className="flex flex-wrap items-baseline gap-x-sm">
         <h2 className="font-heading text-h7 font-semibold text-ink">Ended today</h2>
         {tally === undefined ? undefined : (
-          <span className="text-body-md text-ink-muted wrap-anywhere">{tally}</span>
+          <span className="text-body-md text-ink-muted wrap-anywhere">{tally.text}</span>
+        )}
+        {tally?.cost === undefined ? undefined : (
+          <span title={tallyTitle} className="text-body-md text-ink-muted wrap-anywhere">
+            {tally.cost}
+          </span>
         )}
         <Link to="/history" className={cn("ml-auto text-body-md", LINK)}>
           History

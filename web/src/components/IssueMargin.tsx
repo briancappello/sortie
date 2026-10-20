@@ -15,7 +15,7 @@ import { useIssueActions } from "@/components/use-issue-actions";
 import { rowMark } from "@/lib/active-rows";
 import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
-import { costText, NOT_MEASURED } from "@/lib/figures";
+import { costText, costTitle, NOT_MEASURED } from "@/lib/figures";
 import {
   fmtAgo,
   fmtClock,
@@ -355,8 +355,15 @@ function noTokenBudgetText(tokens: BudgetLine & { complete: boolean }): string |
   return hasBudget ? undefined : "No token budget.";
 }
 
-function costShares(runs: readonly RunResponse[], chained: boolean): [string, number | null][] {
-  const shares = new Map<string, number | null>();
+interface CostShare {
+  name: string;
+  usd: number | null;
+  /** `partial` when any run of the share is, else `estimated`. */
+  status: "estimated" | "partial";
+}
+
+function costShares(runs: readonly RunResponse[], chained: boolean): CostShare[] {
+  const shares = new Map<string, CostShare>();
   const stageRuns = runs.filter((run) => !run.reaction_kind).length;
   for (const run of runs) {
     const name = run.reaction_kind
@@ -366,11 +373,16 @@ function costShares(runs: readonly RunResponse[], chained: boolean): [string, nu
         : run.rule_name
           ? ruleLabel(run.rule_name)
           : "Work";
-    const before = shares.has(name) ? (shares.get(name) ?? null) : 0;
+    const before = shares.get(name) ?? { name, usd: 0, status: "estimated" };
     const usd = run.estimated_cost_usd;
-    shares.set(name, before === null || usd === null ? null : before + usd);
+    shares.set(name, {
+      name,
+      usd: before.usd === null || usd === null ? null : before.usd + usd,
+      status:
+        before.status === "partial" || run.cost_status === "partial" ? "partial" : "estimated",
+    });
   }
-  return [...shares];
+  return [...shares.values()];
 }
 
 interface BudgetPanelProps {
@@ -400,19 +412,31 @@ function BudgetPanel({ detail, state, chained }: BudgetPanelProps) {
         <BudgetMeter name="Tokens" line={tokens} format={fmtTokens} />
         {note === undefined ? undefined : <p className="text-body-sm text-ink-muted">{note}</p>}
         {moneyText === undefined ? undefined : (
-          <BudgetMeter name="Cost" line={money} format={fmtMoney} text={moneyText} />
+          <BudgetMeter
+            name="Cost"
+            line={money}
+            format={fmtMoney}
+            text={moneyText}
+            title={cost === null ? undefined : costTitle(cost.status, cost.usd)}
+          />
         )}
       </div>
       {cost === null || !hasPairs ? undefined : (
         <Pairs>
           {moneyText === undefined ? (
             <Pair label="Estimated cost">
-              <strong className="font-bold">{costText(cost.status, cost.usd)}</strong>
+              <strong title={costTitle(cost.status, cost.usd)} className="font-bold">
+                {costText(cost.status, cost.usd)}
+              </strong>
             </Pair>
           ) : undefined}
-          {shares.map(([name, usd]) => (
+          {shares.map(({ name, usd, status }) => (
             <Pair key={name} label={name}>
-              {usd === null ? NOT_MEASURED : costText("estimated", usd)}
+              {usd === null ? (
+                NOT_MEASURED
+              ) : (
+                <span title={costTitle(status, usd)}>{costText(status, usd)}</span>
+              )}
             </Pair>
           ))}
         </Pairs>

@@ -1,4 +1,4 @@
-import { fmtMoney } from "@/lib/format";
+import { fmtMoney, fmtMoneyAtLeast } from "@/lib/format";
 
 import type {
   ConfigResponse,
@@ -137,6 +137,6 @@ export function moneyBudgetText({ cost, money }: BudgetFigures): string | undefi
   if (cost === null || money.limit === null || money.limit <= 0 || money.used === null) {
     return undefined;
   }
-  const text = `${fmtMoney(money.used)} of ${fmtMoney(money.limit)}`;
-  return money.complete ? text : `at least ${text}`;
+  const used = money.complete ? fmtMoney(money.used) : fmtMoneyAtLeast(money.used);
+  return `${used} of ${fmtMoney(money.limit)}`;
 }

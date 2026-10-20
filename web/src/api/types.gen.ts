@@ -139,6 +139,7 @@ export interface ChainGroup {
   cost_per_succeeded_run_usd: number | null;
   tokens_unmeasured_runs: number;
   cost_unpriced_runs: number;
+  cost_partial_runs: number;
   issue: string;
   stages: string[] | null;
   last_hop: string;
@@ -225,6 +226,7 @@ export interface Group {
   cost_per_succeeded_run_usd: number | null;
   tokens_unmeasured_runs: number;
   cost_unpriced_runs: number;
+  cost_partial_runs: number;
 }
 
 export interface HealthCheckResponse {
@@ -332,6 +334,15 @@ export interface IssueResponse {
 export interface LastStageResponse {
   chain: string[] | null;
   rule: string;
+}
+
+export interface ModelUsageResponse {
+  model: string;
+  tokens: TokenInfo;
+  uncached_tokens: number;
+  estimated_cost_usd: number | null;
+  cost_status: string;
+  unrated_classes: string[] | null;
 }
 
 export interface NextOutcomeResponse {
@@ -576,6 +587,7 @@ export interface RunResponse {
   session_id: string | null;
   ssh_host: string | null;
   dispatch_id: string | null;
+  model_usage: ModelUsageResponse[] | null;
   stage_chain: string[] | null;
   issue_outcome: IssueOutcomeResponse | null;
   pr_loop: Record<string, PrLoopStationResponse> | null;
@@ -928,6 +940,7 @@ export interface Summary {
   zero_duration_runs: number;
   duration_excluded_runs: number;
   cost_unpriced_runs: number;
+  cost_partial_runs: number;
   tokens_unmeasured_runs: number;
 }
 

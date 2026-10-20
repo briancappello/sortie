@@ -13,7 +13,7 @@ import { useTableSort } from "@/components/use-table-sort";
 import {
   statsCacheReadsText,
   statsCostText,
-  statsShortfall,
+  statsCostTitle,
   statsTokensShortfall,
   statsTokensText,
 } from "@/lib/figures";
@@ -301,7 +301,7 @@ export function GroupTable<Row extends Group>({
                 {statsTokensText(row, tier)}
               </TableCell>
               {hasRates ? (
-                <TableCell look="number" title={statsShortfall(row) ?? undefined}>
+                <TableCell look="number" title={statsCostTitle(row, tier)}>
                   {statsCostText(row, tier)}
                 </TableCell>
               ) : undefined}

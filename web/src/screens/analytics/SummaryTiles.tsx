@@ -1,6 +1,7 @@
 import {
   statsCacheReadsText,
   statsCostText,
+  statsCostTitle,
   statsShortfall,
   statsTokensShortfall,
   statsTokensText,
@@ -14,6 +15,8 @@ import type { ReactNode } from "react";
 interface TileProps {
   label: string;
   value: string;
+  /** The hover of the value. */
+  valueTitle?: string;
   hint?: string | null;
 }
 
@@ -21,13 +24,16 @@ interface TileProps {
 // visual row stay level when a label wraps. The grid sets no row gap because a
 // subgrid inherits it between its own rows; the label margin spaces the visual
 // rows instead.
-function Tile({ label, value, hint }: TileProps) {
+function Tile({ label, value, valueTitle, hint }: TileProps) {
   return (
     <div className="row-span-2 grid min-w-0 grid-rows-subgrid">
       <span className="mt-lg text-body-sm text-ink-muted">
         {hint === undefined || hint === null ? label : <Hint hint={hint}>{label}</Hint>}
       </span>
-      <span className="mt-xxs font-heading text-h5 font-semibold text-ink tabular-nums">
+      <span
+        title={valueTitle}
+        className="mt-xxs font-heading text-h5 font-semibold text-ink tabular-nums"
+      >
         {value}
       </span>
     </div>
@@ -110,6 +116,7 @@ export function SummaryTiles({ report, hasCost }: SummaryTilesProps) {
         key="cost"
         label="Estimated cost"
         value={statsCostText(summary, tier)}
+        valueTitle={statsCostTitle(summary, tier)}
         hint={statsShortfall(summary)}
       />,
     );

@@ -1,8 +1,8 @@
 import { Pair, Pairs, Panel } from "@/components/Panel";
-import { costText, NOT_MEASURED } from "@/lib/figures";
+import { costText, costTitle, NOT_MEASURED } from "@/lib/figures";
 import { fmtCount, fmtDuration } from "@/lib/format";
 
-import type { ConfigResponse, TokenInfo } from "@/api/types.gen";
+import type { ConfigResponse, ModelUsageResponse, TokenInfo } from "@/api/types.gen";
 import type { SessionRun } from "@/components/use-session-run";
 import type { ReactNode } from "react";
 
@@ -60,8 +60,56 @@ export function UsagePanel({ session }: UsagePanelProps) {
         ) : (
           <Pair label="Tokens">{NOT_MEASURED}</Pair>
         )}
-        <Pair label="Est. cost">{costText(source.cost_status, source.estimated_cost_usd)}</Pair>
+        <Pair label="Est. cost">
+          <span title={costTitle(source.cost_status, source.estimated_cost_usd)}>
+            {costText(source.cost_status, source.estimated_cost_usd)}
+          </span>
+        </Pair>
       </Pairs>
+    </Panel>
+  );
+}
+
+const CLASS_WORDS: Readonly<Record<string, string>> = {
+  input: "input",
+  output: "output",
+  cache_read: "cache read",
+  cache_write: "cache write",
+};
+
+function unratedText(classes: readonly string[]): string {
+  return classes.map((name) => CLASS_WORDS[name] ?? name).join(", ");
+}
+
+/** Props of {@link ModelCostPanel}. */
+export interface ModelCostPanelProps {
+  parts: readonly ModelUsageResponse[];
+}
+
+/** Renders the tokens and the estimated cost of a finished run for each model it spent tokens on. */
+export function ModelCostPanel({ parts }: ModelCostPanelProps) {
+  return (
+    <Panel title="Cost per model">
+      {parts.map((part) => (
+        <div key={part.model} className="flex flex-col gap-xs">
+          {part.model === "" ? (
+            <p className="text-body-md font-medium text-ink">Model not reported</p>
+          ) : (
+            <p className="font-mono text-body-sm text-ink wrap-anywhere">{part.model}</p>
+          )}
+          <Pairs>
+            <Pair label="Tokens">{fmtCount(part.uncached_tokens)}</Pair>
+            <Pair label="Est. cost">
+              <span title={costTitle(part.cost_status, part.estimated_cost_usd)}>
+                {costText(part.cost_status, part.estimated_cost_usd)}
+              </span>
+            </Pair>
+            {part.unrated_classes === null || part.unrated_classes.length === 0 ? undefined : (
+              <Pair label="No rate for">{unratedText(part.unrated_classes)}</Pair>
+            )}
+          </Pairs>
+        </div>
+      ))}
     </Panel>
   );
 }

@@ -1,4 +1,4 @@
-import { fmtMoney, fmtTokens, plural } from "@/lib/format";
+import { fmtMoney, fmtMoneyAtLeast, fmtMoneyExact, fmtTokens, plural } from "@/lib/format";
 
 import type {
   Group,
@@ -10,7 +10,7 @@ import type {
 /** The report fields a token or cost text reads; a `Summary` satisfies it too. */
 export type StatsFigures = Pick<
   Group,
-  "tokens" | "cost_usd" | "tokens_unmeasured_runs" | "cost_unpriced_runs"
+  "tokens" | "cost_usd" | "tokens_unmeasured_runs" | "cost_unpriced_runs" | "cost_partial_runs"
 >;
 
 /** The text of a token or cost figure that no run measured. */
@@ -20,19 +20,42 @@ export const UNPRICED = "unpriced";
 const NOT_RECORDED = "not recorded";
 const BASE_TIER = "base";
 
-/** Words an estimated cost by its served status; a status the client does not know reads "unknown". */
+const LEAVES_OUT = "Leaves out spend Sortie could not price or measure";
+
+/**
+ * Words an estimated cost by its served status; a `partial` cost is a lower
+ * bound and reads "at least". A status the client does not know reads "unknown".
+ */
 export function costText(status: string, usd: number | null): string {
   switch (status) {
     case "estimated":
       return usd === null ? "unknown" : fmtMoney(usd);
     case "partial":
-      return usd === null ? "unknown" : fmtMoney(usd);
+      return usd === null ? "unknown" : fmtMoneyAtLeast(usd);
     case "unpriced":
       return UNPRICED;
     case "unmeasured":
       return NOT_MEASURED;
     default:
       return "unknown";
+  }
+}
+
+/**
+ * Gives the hover of a cost: its exact amount, and for a `partial` cost the
+ * note that it leaves out spend. Gives undefined for a cost without an amount.
+ */
+export function costTitle(status: string, usd: number | null): string | undefined {
+  if (usd === null) {
+    return undefined;
+  }
+  switch (status) {
+    case "estimated":
+      return fmtMoneyExact(usd);
+    case "partial":
+      return `At least ${fmtMoneyExact(usd)}. ${LEAVES_OUT}.`;
+    default:
+      return undefined;
   }
 }
 
@@ -108,13 +131,21 @@ export function statsCacheReadsText(f: StatsFigures, tier: string): string | nul
   return cacheReadsText(f.tokens.cache_read, f.tokens.uncached);
 }
 
-/** Words the estimated cost of a report group or summary. */
+/** Whether a report figure holds a cost that leaves out the spend of some runs. */
+function lowerBound(f: StatsFigures): boolean {
+  return (
+    f.cost_usd !== null &&
+    (f.cost_unpriced_runs > 0 || f.cost_partial_runs > 0 || f.tokens_unmeasured_runs > 0)
+  );
+}
+
+/** Words the estimated cost of a report group or summary; a cost that leaves runs out reads "at least". */
 export function statsCostText(f: StatsFigures, tier: string): string {
   if (tier === BASE_TIER) {
     return NOT_RECORDED;
   }
   if (f.cost_usd !== null) {
-    return fmtMoney(f.cost_usd);
+    return lowerBound(f) ? fmtMoneyAtLeast(f.cost_usd) : fmtMoney(f.cost_usd);
   }
   if (f.cost_unpriced_runs > 0) {
     return UNPRICED;
@@ -135,6 +166,26 @@ export function statsShortfall(f: StatsFigures): string | null {
   const parts = [
     statsTokensShortfall(f),
     f.cost_unpriced_runs > 0 ? plural(f.cost_unpriced_runs, "run unpriced", "runs unpriced") : null,
+    f.cost_partial_runs > 0
+      ? plural(f.cost_partial_runs, "run with a partial cost", "runs with a partial cost")
+      : null,
   ].filter((part) => part !== null);
   return parts.length === 0 ? null : parts.join(", ");
+}
+
+/**
+ * Gives the hover of a report cost: its exact amount, with the runs it leaves
+ * out when it is a lower bound, or those runs alone while it has no amount.
+ * Gives undefined on a `base` tier and when nothing is left out of a missing amount.
+ */
+export function statsCostTitle(f: StatsFigures, tier: string): string | undefined {
+  if (tier === BASE_TIER) {
+    return undefined;
+  }
+  if (f.cost_usd === null) {
+    return statsShortfall(f) ?? undefined;
+  }
+  const exact = fmtMoneyExact(f.cost_usd);
+  const shortfall = statsShortfall(f);
+  return shortfall === null ? exact : `At least ${exact}. ${LEAVES_OUT}: ${shortfall}.`;
 }

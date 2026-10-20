@@ -15,7 +15,7 @@ import { condition } from "@/lib/condition";
 import { buildEnded } from "@/lib/ended";
 import { issueLinkOf } from "@/lib/issue-link";
 import { localMidnight } from "@/lib/server-clock";
-import { tallyLine } from "@/lib/tally";
+import { tallyCostTitle, tallyLine } from "@/lib/tally";
 import { attentionKey, endedKey, pruneRead, useReadSet } from "@/lib/unread";
 
 import { ActiveList } from "./ActiveList";
@@ -281,13 +281,17 @@ function OverviewBody({ state }: OverviewBodyProps) {
   ];
   useShortcuts(bindings);
 
-  const tallyText =
+  const hasCost = hasRateSource(view.state);
+  const tallySummary =
     view.tally === undefined ||
     view.pages === undefined ||
     view.isHistoryUnavailable ||
     view.isFirstRun === true
       ? undefined
-      : tallyLine(view.tally.summary, endedAll.length, hasRateSource(view.state));
+      : view.tally.summary;
+  const tallyParts =
+    tallySummary === undefined ? undefined : tallyLine(tallySummary, endedAll.length, hasCost);
+  const tallyTitle = tallySummary === undefined ? undefined : tallyCostTitle(tallySummary, hasCost);
 
   return (
     <div className="flex flex-col gap-xl">
@@ -329,7 +333,8 @@ function OverviewBody({ state }: OverviewBodyProps) {
         rows={endedAll}
         unreadIds={endedUnreadIds}
         empty={endedEmpty(view)}
-        tally={tallyText}
+        tally={tallyParts}
+        tallyTitle={tallyTitle}
         selectedKey={selectedKey}
         showSelection={showSelection}
         onOpen={(issue) => selectAndOpen(endedNavKey(issue.issueId), issue.identifier)}
