@@ -26,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Analytics now charts the estimated spend per UTC day for the 7, 30, and 90 day ranges and per UTC month for all time, so you can see which day a cost jumped and compare it with the days and months `agent.max_daily_cost_usd` and `agent.max_monthly_cost_usd` count. A day or month that leaves out runs Sortie could not price or measure is drawn with a diagonal hatch. The summary and every breakdown with a cost column also show the cost per succeeded run. `sortie stats --format json` and `GET /api/v1/stats` serve the same spend as `spend`. ([#1422](https://github.com/sortie-ai/sortie/issues/1422))
 
-- The dashboard's new Prices screen shows, for every model your runs used and every model your workflow configures, the rates the next run of it gets, whether each rate comes from a `token_rates` entry, your own price table, the downloaded table, or the table built into Sortie, and whether that run is priced in full, in part, or not at all. It also shows each price source: your `token_rates` entries, your own table, whether the download is on and when it last succeeded or why it is failing, the built-in table's upstream revision and its date, and how many days old the prices in force are. `GET /api/v1/prices` serves the same data. ([#1419](https://github.com/sortie-ai/sortie/issues/1419))
+- The dashboard's new Prices screen shows, for every model your runs used and every model your workflow configures, the rates the next run of it gets, whether each rate comes from a `token_rates` entry, your own price table, the downloaded table, or the table built into Sortie. It also shows each price source: your `token_rates` entries, your own table, whether the download is on and when it last succeeded or why it is failing, the built-in table's upstream revision and its date, and how many days old the prices in force are. `GET /api/v1/prices` serves the same data. ([#1419](https://github.com/sortie-ai/sortie/issues/1419))
 
 ### Changed
 
@@ -77,6 +77,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The budget panel of an issue no longer shows a cost share as "not measured" when one of its runs was measured but could not be priced: the share now reads "unpriced", or "at least" the priced amount when other runs in it were priced.
 
 - When a `price_table.replace_file` table fails to load, the error names the file as the setting gives it, not the full path Sortie built from it, so the Health screen no longer shows the directory on the host it was read from. ([#1419](https://github.com/sortie-ai/sortie/issues/1419))
+- With a GitHub or Gitea tracker, Sortie reads issue states up to 8 at a time instead of one by one, so a start after many recent runs no longer keeps the dashboard unreachable for tens of seconds. ([#1419](https://github.com/sortie-ai/sortie/issues/1419))
 
 ## [1.28.1] - 2026-10-18
 

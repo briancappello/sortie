@@ -749,41 +749,40 @@ func (a *GiteaAdapter) fetchStatesByIndexes(ctx context.Context, indexes []strin
 	}
 
 	snapshot := a.model.Snapshot()
-	reads := make(map[string]domain.IssueStateAndLabels, len(indexes))
-	for _, index := range indexes {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+	return issuekit.ReadStates(ctx, indexes, func(ctx context.Context, index string) (domain.IssueStateAndLabels, bool, error) {
+		return a.readState(ctx, snapshot, index)
+	})
+}
 
-		path := "/repos/" + a.owner + "/" + a.repo + "/issues/" + url.PathEscape(index)
-		body, _, err := a.client.Get(ctx, path, nil)
-		if err != nil {
-			if domain.IsNotFound(err) {
-				continue
-			}
-			return nil, err
+// readState reads one issue's state and labels, reporting false for an
+// issue that does not exist or is a pull request.
+func (a *GiteaAdapter) readState(ctx context.Context, snapshot issuekit.LabelStates, index string) (domain.IssueStateAndLabels, bool, error) {
+	path := "/repos/" + a.owner + "/" + a.repo + "/issues/" + url.PathEscape(index)
+	body, _, err := a.client.Get(ctx, path, nil)
+	if err != nil {
+		if domain.IsNotFound(err) {
+			return domain.IssueStateAndLabels{}, false, nil
 		}
-
-		var gi giteaIssue
-		if err := json.Unmarshal(body, &gi); err != nil {
-			return nil, &domain.TrackerError{
-				Kind:    domain.ErrTrackerPayload,
-				Message: "failed to parse issue response",
-				Err:     err,
-			}
-		}
-		if isPullRequest(gi) {
-			continue
-		}
-
-		labels := giteaLabelNames(gi.Labels)
-		reads[index] = domain.IssueStateAndLabels{
-			State:  a.model.Derive(snapshot, index, labels, gi.State == "closed"),
-			Labels: issuekit.NormalizeLabels(labels),
-		}
+		return domain.IssueStateAndLabels{}, false, err
 	}
 
-	return reads, nil
+	var gi giteaIssue
+	if err := json.Unmarshal(body, &gi); err != nil {
+		return domain.IssueStateAndLabels{}, false, &domain.TrackerError{
+			Kind:    domain.ErrTrackerPayload,
+			Message: "failed to parse issue response",
+			Err:     err,
+		}
+	}
+	if isPullRequest(gi) {
+		return domain.IssueStateAndLabels{}, false, nil
+	}
+
+	labels := giteaLabelNames(gi.Labels)
+	return domain.IssueStateAndLabels{
+		State:  a.model.Derive(snapshot, index, labels, gi.State == "closed"),
+		Labels: issuekit.NormalizeLabels(labels),
+	}, true, nil
 }
 
 // resolveLabelIndex pages the repository label catalog to exhaustion and returns
