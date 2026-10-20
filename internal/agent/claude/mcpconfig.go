@@ -20,6 +20,9 @@ const (
 // so the model sees only the tool's name and must spend a step loading
 // it before every call. Other servers keep the runtime's default.
 func alwaysLoadToolServer(mcpConfigPath string) (string, error) {
+	if filepath.Base(filepath.Dir(mcpConfigPath)) != workspacekit.SortieDir {
+		return "", fmt.Errorf("%s is not inside a %s directory", mcpConfigPath, workspacekit.SortieDir)
+	}
 	workspacePath := filepath.Dir(filepath.Dir(mcpConfigPath))
 	f, err := workspacekit.OpenSortieFile(workspacePath, filepath.Base(mcpConfigPath))
 	if err != nil {
