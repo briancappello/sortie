@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-10-20
+
 ### Added
 
 - Sortie now prices runs from a price table built into the binary when `token_rates` is absent, accepts `token_rates` entries for single models that override some or all of a model's rates, and can price from a table of your own with `price_table.replace_file` or drop the built-in table with `price_table.embedded: false`; entries for an agent kind price as before, and `config.token_rates` in `GET /api/v1/state` gains `per_kind` to tell the two kinds of entry apart. ([#1413](https://github.com/sortie-ai/sortie/issues/1413))
@@ -1363,7 +1365,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CI pipeline with `golangci-lint`, `gofmt` enforcement, and test execution via GitHub Actions.
 - Architecture Decision Records (ADR-0001 through ADR-0005).
 
-[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.28.1...HEAD
+[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.29.0...HEAD
+[1.29.0]: https://github.com/sortie-ai/sortie/compare/v1.28.1...v1.29.0
 [1.28.1]: https://github.com/sortie-ai/sortie/compare/v1.28.0...v1.28.1
 [1.28.0]: https://github.com/sortie-ai/sortie/compare/v1.27.0...v1.28.0
 [1.27.0]: https://github.com/sortie-ai/sortie/compare/v1.26.0...v1.27.0
