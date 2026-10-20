@@ -3143,6 +3143,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
         "unaccounted_turns": 0,
         "estimated_cost_usd": null,
         "cost_status": "unmeasured",
+        "model_usage": [],
         "chain_id": "3c8v5n2w7r1t4y6u9i0o8p2asd",
         "stage_target": "implement",
         "stage_result": "advanced",
@@ -3339,6 +3340,22 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
       "unaccounted_turns": 0,
       "estimated_cost_usd": 0.1923,
       "cost_status": "estimated",
+      "model_usage": [
+        {
+          "model": "claude-sonnet-4-20250514",
+          "tokens": {
+            "input_tokens": 52000,
+            "output_tokens": 9100,
+            "total_tokens": 61100,
+            "cache_read_tokens": 30000,
+            "cache_write_tokens": 4000
+          },
+          "uncached_tokens": 31100,
+          "estimated_cost_usd": 0.1923,
+          "cost_status": "estimated",
+          "unrated_classes": []
+        }
+      ],
       "chain_id": "3c8v5n2w7r1t4y6u9i0o8p2asd",
       "stage_previous": "specify",
       "stage_previous_outcome": "succeeded",
@@ -3401,6 +3418,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `unaccounted_turns`      | integer            | The turns that issued a model request no token figure was proven to account for. When it is non-zero, the token figures are lower bounds. |
 | `estimated_cost_usd`     | number or `null`   | The estimated USD cost recorded when the run finished, from its tokens per model under the rates in force then, and never re-priced ([Section 4.4](#44-token_rates--cost-estimation)). Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
 | `cost_status`            | string             | The status recorded with the cost: `estimated`, which a zero rate also gives, and which a run that spent nothing with no unaccounted turn gives whether or not a rate prices its model; `partial` when the estimate is a lower bound because the run has unaccounted turns, or because a model or a token class it spent had no rate beside priced spend; `unpriced` when the run spent tokens and no rate priced any of them; `unmeasured` when `tokens_measured` is `false`. |
+| `model_usage`            | array              | The run's spend split by model, one element per model the run spent tokens on, ordered by `model`. Always present, never `null`. `[]` when the run recorded no per-model spend: an unmeasured run, a run that spent nothing, and a run recorded before per-model spend was kept that no start has priced yet. The members of an element are below. |
 | `chain_id`               | string or absent   | The stage chain identifier of the run. Omitted when empty. |
 | `stage_previous`, `stage_previous_outcome` | string or absent | The rule whose hop led to the run's dispatch and that hop's outcome, `succeeded` or `no_change`. Omitted when empty. |
 | `stage_target`, `stage_result` | string or absent | The rule the run's exit targeted with a hop decision and its result: `advanced`, `partial`, `failed`, or `ceiling`. Omitted when the run reached no decision. A read taken just after the run completes can precede the decision, and the next read carries it. |
@@ -3415,6 +3433,17 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `stage_chain`            | array of strings or `null` | The stage chain the run's rule stands on, as the rule names of the chain in `next` order. It is the chain `stage_position.chain` serves for the run's `rule_name` and `stage_previous`, and it follows the configuration in effect, so a reload that edits the chains changes it for runs recorded before the reload. Always present. `null` when the run has no `rule_name`, when its rule is on no chain, and when the server holds no workflow shape. Not masked. On the per-issue response, `history.last_stage.chain` equals the `stage_chain` of the deciding run. |
 | `issue_outcome`          | object or `null`   | How the issue's latest work ended, as Sortie observed it, or `null` when Sortie observed no ending since it last picked the issue up, or when the issue ended before outcomes were recorded. Always present. It belongs to the issue, so every run of one issue carries the same object, and it is served as recorded whatever the issue's live state. `kind` is `handed_off`, `merged`, or `terminal`, and `observed_at` is when Sortie made or observed the ending, in UTC. `state` is present for `handed_off` and `terminal`: the state the handoff wrote, or the terminal state Sortie read. `merge_path` and `pull_request` are present for `merged`: `merge_path` is `auto_merge` or `merge_completion`, the `reactions` key that observed the merge, and `pull_request` holds `number` and `repository`. `state` and `repository` are masked like `issue_title`. `status_text` and `status_text_full` are always present: the sentence of how the issue ended, worded from the outcome alone, so a stage hop that was not made appears only in the top-level pair of a `history` response. |
 | `pr_loop`                | object or `null`   | What each configured pull request reaction recorded in the run's own pass, in the shape described with the `active` entries. Always present, `null` when the server holds no workflow shape, and `null` on every run in the groups of `GET /api/v1/runs/issues` and in `history.runs`. |
+
+**`model_usage` members.** Each element is one model's part of the run's spend. It carries no price source and no price table version.
+
+| Field                | Type              | Description |
+| -------------------- | ----------------- | ----------- |
+| `model`              | string            | The model the tokens were spent on, as the runtime named it, `""` when it named none. Not masked. |
+| `tokens`             | object            | The token members of a running row's `tokens`, for this model. No member is `null`, and `total_tokens` is `input_tokens` plus `output_tokens`. |
+| `uncached_tokens`    | integer           | `tokens.total_tokens` less `tokens.cache_read_tokens`, floored at zero. |
+| `estimated_cost_usd` | number or `null`  | The USD cost recorded for this model's part, unrounded and never re-priced. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
+| `cost_status`        | string            | `estimated`, `partial` when a token class the model spent has no rate, or `unpriced`. A part recorded without a price reads `unpriced` with a `null` cost until a start prices it. |
+| `unrated_classes`    | array or `null`   | The token classes whose missing rate left the part `partial` or `unpriced`, from `input`, `output`, `cache_read`, and `cache_write`, in that order. `[]` when the part names none: every class it spent had a rate, or its spend was reported as a total without classes. `null` when the part records none, because it has no recorded price or was priced before the classes were kept; `null` never means `[]`. |
 
 The recorded CI result of a failing check is a run with `status` `ci_failed`, no agent kind, and `""` in each origin key and in `dispatch_id`, because it records a verdict and nothing started it.
 
@@ -3643,6 +3672,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
     "zero_duration_runs": 1,
     "duration_excluded_runs": 1,
     "cost_unpriced_runs": 1,
+    "cost_partial_runs": 1,
     "tokens_unmeasured_runs": 1
   },
   "by_status": [
@@ -3658,7 +3688,8 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "cost_usd": 17.87,
       "cost_per_succeeded_run_usd": 5.96,
       "tokens_unmeasured_runs": 0,
-      "cost_unpriced_runs": 0
+      "cost_unpriced_runs": 0,
+      "cost_partial_runs": 0
     }
   ],
   "by_adapter": [],
@@ -3679,6 +3710,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "cost_per_succeeded_run_usd": 8.94,
       "tokens_unmeasured_runs": 0,
       "cost_unpriced_runs": 0,
+      "cost_partial_runs": 0,
       "issue": "MT-649",
       "stages": ["implement", "review"],
       "last_hop": "advanced"
@@ -3717,7 +3749,8 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "cost_usd": 12.25,
       "cost_per_succeeded_run_usd": 6.13,
       "tokens_unmeasured_runs": 1,
-      "cost_unpriced_runs": 1
+      "cost_unpriced_runs": 1,
+      "cost_partial_runs": 1
     }
   ],
   "by_origin": [
@@ -3733,7 +3766,8 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "cost_usd": 12.25,
       "cost_per_succeeded_run_usd": 6.13,
       "tokens_unmeasured_runs": 1,
-      "cost_unpriced_runs": 1
+      "cost_unpriced_runs": 1,
+      "cost_partial_runs": 1
     }
   ],
   "self_review": {
@@ -3790,6 +3824,7 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |
 | `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
 | `cost_unpriced_runs`         | integer          | The runs that reported usage and were recorded `unpriced`. |
+| `cost_partial_runs`          | integer          | The runs recorded `partial`, whose recorded cost is a lower bound that `cost_usd` includes. A run that spent nothing and recorded an unaccounted turn counts. A recorded CI result does not. `0` on the `base` tier. |
 | `tokens_unmeasured_runs`     | integer          | The runs that reported no usage. They add nothing to `tokens` and `cost_usd`. |
 
 The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `runs`.
@@ -3808,6 +3843,7 @@ The outcome counts `succeeded`, `failed`, `stopped`, and `cancelled` add up to `
 | `cost_usd`, `cost_per_succeeded_run_usd` | number or `null` | As in `summary`, over the group's runs. |
 | `tokens_unmeasured_runs`     | integer          | The group's runs that reported no usage. |
 | `cost_unpriced_runs`         | integer          | The group's runs that `cost_usd` leaves out for want of a rate, counted as in `summary`. `0` on the `base` tier. |
+| `cost_partial_runs`          | integer          | The group's runs recorded `partial`, counted as in `summary`. `0` on the `base` tier. |
 
 **`by_chain` extras.** A `by_chain` entry is a group whose `name` is the chain identifier, with more members: `issue`, the display identifier of the issue the chain belongs to, or its identifier when there is none; `stages`, the dispatch rule names the chain's runs used, in order; and `last_hop`, the result of the latest hop decision the chain recorded, `""` when none.
 
@@ -4334,7 +4370,7 @@ Sortie estimates the cost in USD of every measured run, per model, and shows it 
 
 **Per-kind entries.** An entry keyed by an agent kind takes precedence over every table and over model entries, prices every model of its kind alike, and needs both `input_per_mtok` and `output_per_mtok` to price anything. An unset `cache_read_per_mtok` or `cache_write_per_mtok` in it prices that class at `input_per_mtok`, so a workflow that priced with per-kind entries sees the same figures as before. `sortie validate` warns that such an entry turns off per-model pricing for its kind.
 
-**How a share is priced.** Fresh input, cache reads, cache writes, and output are each priced once at their own rate. Outside a per-kind entry, no rate is ever substituted: a token class a model spent with no rate contributes nothing and marks the run `partial`, a lower bound. A run whose spend no rate prices is `unpriced`. Outside a per-kind entry a run's cost is the sum of its shares' costs; a per-kind entry prices all of its kind's shares together on their summed tokens.
+**How a share is priced.** Fresh input, cache reads, cache writes, and output are each priced once at their own rate. Outside a per-kind entry, no rate is ever substituted: a token class a model spent with no rate contributes nothing and marks the run `partial`, a lower bound. A run whose spend no rate prices is `unpriced`. Outside a per-kind entry a run's cost is the sum of its shares' costs; a per-kind entry prices all of its kind's shares together on their summed tokens. The dashboard words a `partial` cost as a lower bound ("at least $4.20") and a non-zero cost under one cent as "under $0.01", shows the exact amount of every cost on hover, and lists a finished run's cost per model on its session view, naming the token classes that had no rate.
 
 **The price is recorded with the run.** When a run finishes, Sortie records its cost and status, and for each model's share the price source (`operator` for `token_rates` and your own table, `fetched`, or `embedded`) and the version of the rates (the embedded table's pinned upstream revision, or a digest of the downloaded table, your table, or `token_rates`; a model entry that takes some of its rates from a table records the `token_rates` digest, a `+`, and that table's version). Every surface reads the recorded cost, so a later change of rates, a restart, an upgrade, or a newly downloaded table never moves a past figure, and `sortie stats` and `GET /api/v1/stats` report the same cost for the same range. A running session's figure is a live estimate under the rates in force, fixed when its run is recorded. Runs recorded before an upgrade that introduced recorded costs are priced once, at the first start after it, under the rates in force at that start.
 
