@@ -549,7 +549,7 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			command := os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND")
 			expect := expectScriptedToolTurn
 			switch env.Scenario {
-			case fakemodel.ScenarioExhaustion, fakemodel.ScenarioCancellation, fakemodel.ScenarioStop:
+			case fakemodel.ScenarioExhaustion, fakemodel.ScenarioCancellation, fakemodel.ScenarioCancellationAfterOutput, fakemodel.ScenarioStop:
 				expect = expectHandshakeOnly
 			case fakemodel.ScenarioContinuation:
 				expect = expectCompletedTurn

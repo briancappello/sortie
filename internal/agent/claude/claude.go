@@ -272,6 +272,19 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		resumeFromByModel = params.ResumeUsageByModel
 	}
 
+	mcpConfigPath := params.MCPConfigPath
+	if mcpConfigPath != "" && target.RemoteCommand == "" && !params.CredentialVerification {
+		alwaysLoadPath, err := alwaysLoadToolServer(mcpConfigPath)
+		if err != nil {
+			return domain.Session{}, &domain.AgentError{
+				Kind:    domain.ErrResponseError,
+				Message: fmt.Sprintf("prepare MCP config: %v", err),
+				Err:     err,
+			}
+		}
+		mcpConfigPath = alwaysLoadPath
+	}
+
 	state := &sessionState{
 		target:                 target,
 		claudeSessionID:        sessionUUID,
@@ -279,7 +292,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		passthrough:            pt,
 		agentConfig:            params.AgentConfig,
 		baseLogger:             slog.Default().With(slog.String("component", "claude-adapter")),
-		mcpConfigPath:          params.MCPConfigPath,
+		mcpConfigPath:          mcpConfigPath,
 		credentialVerification: params.CredentialVerification,
 		acc:                    agentcore.NewRunUsage(),
 		resume:                 *agentcore.NewResumeBaseline(resumeFrom, resumeFromByModel),

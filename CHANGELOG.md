@@ -62,6 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `sortie_tokens_total` now counts a run's tokens under each model the run used instead of counting all of them under one model. ([#1409](https://github.com/sortie-ai/sortie/issues/1409))
 
+- On a local launch with Claude Code 2.1.304 or later, a `claude-code` agent again sees Sortie's own tools from the start of every turn instead of having to look them up before it can call them.
+
 ## [1.28.1] - 2026-10-18
 
 ### Security
