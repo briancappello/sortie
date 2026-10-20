@@ -175,8 +175,8 @@ export interface SpendChartProps {
 
 /**
  * Draws the estimated cost of each served UTC period as a bar chart, with a
- * tooltip of period, runs, and cost on every slot. Every date and time it writes
- * is in UTC.
+ * tooltip on every slot that names the period and says in words what its bar
+ * means. Every date and time it writes is in UTC.
  */
 export function SpendChart({ spend, since }: SpendChartProps) {
   const plotRef = useRef<HTMLDivElement>(null);
