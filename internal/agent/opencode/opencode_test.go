@@ -1553,6 +1553,13 @@ cat '`+runPath+`'`)
 	if result.SpendUnaccounted {
 		t.Error("RunTurn().SpendUnaccounted = true, want false for a turn whose process exited cleanly after the export recovered its usage")
 	}
+	if !result.UsageMeasured {
+		t.Error("RunTurn().UsageMeasured = false, want true when the session export yielded a usage figure")
+	}
+	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 20 || result.Usage.TotalTokens != 30 {
+		t.Errorf("RunTurn().Usage = {input %d, output %d, total %d}, want {10, 20, 30} from the export",
+			result.Usage.InputTokens, result.Usage.OutputTokens, result.Usage.TotalTokens)
+	}
 }
 
 // TestRunTurn_UsageMeasured_TrueWhenTheExportIsAGenuineZero is the same
