@@ -558,7 +558,9 @@ func applyQueued[T any](ch <-chan T, apply func(T)) {
 }
 
 // applyAgentEvent applies one agent event to its issue's running entry and,
-// only when enforceCeiling is true, evaluates the in-flight token ceiling.
+// only when enforceCeiling is true, evaluates the in-flight money and token
+// ceilings. The money ceiling is evaluated first, so a money stop wins when
+// one event reaches both.
 func (o *Orchestrator) applyAgentEvent(ctx context.Context, msg agentEventMsg, enforceCeiling bool) {
 	HandleAgentEvent(o.state, msg.IssueID, msg.Event, o.logger, o.metrics)
 	if enforceCeiling {
@@ -566,6 +568,7 @@ func (o *Orchestrator) applyAgentEvent(ctx context.Context, msg agentEventMsg, e
 	}
 	o.maybeWriteIncrementalMetadata(ctx, msg.IssueID, msg.Event)
 	if enforceCeiling {
+		enforceInFlightMoneyCeiling(ctx, o.state, msg.IssueID, msg.Event, o.store, o.logger)
 		enforceInFlightTokenCeiling(ctx, o.state, msg.IssueID, msg.Event, o.store, o.logger)
 	}
 }
@@ -767,6 +770,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				HandoffParkingLabel:    o.handoffParkingLabel,
 				HandoffEvidencePolicy:  cfg.Tracker.HandoffEvidence,
 				MaxTokens:              cfg.Agent.MaxTokens,
+				MaxCostUSD:             cfg.Agent.MaxCostUSD,
 				Metrics:                o.metrics,
 				HostPool:               o.hostPool,
 				WorkflowFile:           o.workflowFile(),
@@ -952,6 +956,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.state.PollIntervalMS = cfg.Polling.IntervalMS
 	o.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
 	o.state.MaxTokens = cfg.Agent.MaxTokens
+	o.state.MaxCostUSD = cfg.Agent.MaxCostUSD
 	o.state.StallTimeoutMS = cfg.Agent.StallTimeoutMS
 	o.state.MaxSessions = cfg.Agent.MaxSessions
 	o.state.StageChains = cfg.Dispatch.Chains()
@@ -1821,22 +1826,24 @@ func (o *Orchestrator) latestRunsOfExhausted(ctx context.Context, issues []domai
 var ceilingSettingByBudgetReason = map[string]string{
 	budgetReasonSession: "agent.max_sessions",
 	budgetReasonToken:   "agent.max_tokens",
+	budgetReasonMoney:   "agent.max_cost_usd",
 }
 
 // rebuildBudgetExhausted replaces the BudgetExhausted set once per tick from
-// run_history, as the union of the session-count and token-sum gates scoped
-// to the candidate set. Token budget takes precedence. On a query error for
-// one axis, the prior entries for that axis are folded back in so a
-// transient error never drops an issue mid-tick. An issue entering the set
+// run_history, as the union of the session-count, token-sum, and money gates
+// scoped to the candidate set. Money budget takes precedence, then token
+// budget. On a query error for one axis, the prior entries for that axis are
+// folded back in so a transient error never drops an issue mid-tick. An issue entering the set
 // for the first time under a given reason produces one log record and one
 // counter increment; a hold the memory already knows produces neither. Must
 // run on the event loop.
 func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.ServiceConfig, sorted []domain.Issue) {
-	if cfg.Agent.MaxSessions == 0 && cfg.Agent.MaxTokens == 0 {
+	if cfg.Agent.MaxSessions == 0 && cfg.Agent.MaxTokens == 0 && cfg.Agent.MaxCostUSD == 0 {
 		prior := o.state.BudgetExhausted
 		o.state.BudgetExhausted = make(map[string]*BudgetExhaustedEntry)
 		syncBudgetPasses(ctx, o.store, prior, o.state.BudgetExhausted, o.logger)
 		o.state.TokenBudgetIncomplete = make(map[string]struct{})
+		o.state.MoneyBudgetIncomplete = make(map[string]struct{})
 		releaseAllBudgetHoldNotices(ctx, o.state, o.store, o.logger)
 		return
 	}
@@ -1893,59 +1900,107 @@ func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.Se
 					UsedSessions:   count,
 					BudgetSessions: cfg.Agent.MaxSessions,
 					BudgetTokens:   int64(cfg.Agent.MaxTokens),
+					BudgetUSD:      cfg.Agent.MaxCostUSD,
 				}
 			}
 		}
 	}
 
 	freshIncomplete := make(map[string]struct{})
-	if cfg.Agent.MaxTokens > 0 {
+	freshMoneyIncomplete := make(map[string]struct{})
+	if cfg.Agent.MaxTokens > 0 || cfg.Agent.MaxCostUSD > 0 {
 		usageByIssue, qErr := o.store.QueryTokenBudgetUsage(ctx, candidateIDs)
 		if qErr != nil {
-			o.logger.Warn("token budget exhaustion query failed, retaining previous set",
-				slog.Any("error", qErr),
-			)
+			if cfg.Agent.MaxTokens > 0 {
+				o.logger.Warn("token budget exhaustion query failed, retaining previous set",
+					slog.Any("error", qErr),
+				)
+			}
+			if cfg.Agent.MaxCostUSD > 0 {
+				o.logger.Warn("money budget exhaustion query failed, retaining previous set",
+					slog.Any("error", qErr),
+				)
+			}
 			budgetEvidenceComplete = false
 			for id, entry := range prior {
-				if entry.Reason != budgetReasonToken {
+				tokenHeld := entry.Reason == budgetReasonToken && cfg.Agent.MaxTokens > 0
+				moneyHeld := entry.Reason == budgetReasonMoney && cfg.Agent.MaxCostUSD > 0
+				if !tokenHeld && !moneyHeld {
 					continue
 				}
 				fresh[id] = entry
 				foldedForward[id] = struct{}{}
 			}
 		} else {
-			for _, id := range candidateIDs {
-				usage := usageByIssue[id]
-				if usage.UncachedTokens >= int64(cfg.Agent.MaxTokens) {
-					entry := &BudgetExhaustedEntry{
-						Identifier:     identifierByID[id],
-						DisplayID:      displayIDByID[id],
-						IssueIdentity:  identityByID[id],
-						Reason:         budgetReasonToken,
-						UsedSessions:   usage.Sessions,
-						BudgetSessions: cfg.Agent.MaxSessions,
-						BudgetTokens:   int64(cfg.Agent.MaxTokens),
+			if cfg.Agent.MaxTokens > 0 {
+				for _, id := range candidateIDs {
+					usage := usageByIssue[id]
+					if usage.UncachedTokens >= int64(cfg.Agent.MaxTokens) {
+						entry := &BudgetExhaustedEntry{
+							Identifier:     identifierByID[id],
+							DisplayID:      displayIDByID[id],
+							IssueIdentity:  identityByID[id],
+							Reason:         budgetReasonToken,
+							UsedSessions:   usage.Sessions,
+							BudgetSessions: cfg.Agent.MaxSessions,
+							BudgetTokens:   int64(cfg.Agent.MaxTokens),
+							BudgetUSD:      cfg.Agent.MaxCostUSD,
+						}
+						entry.setTokenUsage(usage)
+						fresh[id] = entry
+						continue
 					}
-					entry.setTokenUsage(usage)
-					fresh[id] = entry
-					continue
+					if entry, held := fresh[id]; held {
+						entry.setTokenUsage(usage)
+					}
+					if !usage.SpendIncomplete() {
+						continue
+					}
+					freshIncomplete[id] = struct{}{}
+					if _, wasIncomplete := o.state.TokenBudgetIncomplete[id]; wasIncomplete {
+						continue
+					}
+					issueLog := logging.WithIssue(o.logger, id, identifierByID[id])
+					warnTokenBudgetIncomplete(issueLog, usage, cfg.Agent.MaxTokens)
 				}
-				if entry, held := fresh[id]; held {
-					entry.setTokenUsage(usage)
+			}
+			if cfg.Agent.MaxCostUSD > 0 {
+				for _, id := range candidateIDs {
+					usage := usageByIssue[id]
+					used, status := pricing.IssueCost(recordedOf(usage), pricing.SessionCost{}, !usage.SpendIncomplete())
+					if pricing.CeilingReached(used, cfg.Agent.MaxCostUSD) {
+						entry := &BudgetExhaustedEntry{
+							Identifier:     identifierByID[id],
+							DisplayID:      displayIDByID[id],
+							IssueIdentity:  identityByID[id],
+							Reason:         budgetReasonMoney,
+							UsedSessions:   usage.Sessions,
+							BudgetSessions: cfg.Agent.MaxSessions,
+							BudgetTokens:   int64(cfg.Agent.MaxTokens),
+							BudgetUSD:      cfg.Agent.MaxCostUSD,
+						}
+						entry.setMoneyUsage(usage)
+						fresh[id] = entry
+						continue
+					}
+					if entry, held := fresh[id]; held {
+						entry.setMoneyUsage(usage)
+					}
+					if status == pricing.CostEstimated {
+						continue
+					}
+					freshMoneyIncomplete[id] = struct{}{}
+					if _, wasIncomplete := o.state.MoneyBudgetIncomplete[id]; wasIncomplete {
+						continue
+					}
+					issueLog := logging.WithIssue(o.logger, id, identifierByID[id])
+					warnMoneyBudgetIncomplete(issueLog, usage, cfg.Agent.MaxCostUSD)
 				}
-				if !usage.SpendIncomplete() {
-					continue
-				}
-				freshIncomplete[id] = struct{}{}
-				if _, wasIncomplete := o.state.TokenBudgetIncomplete[id]; wasIncomplete {
-					continue
-				}
-				issueLog := logging.WithIssue(o.logger, id, identifierByID[id])
-				warnTokenBudgetIncomplete(issueLog, usage, cfg.Agent.MaxTokens)
 			}
 		}
 	}
 	o.state.TokenBudgetIncomplete = freshIncomplete
+	o.state.MoneyBudgetIncomplete = freshMoneyIncomplete
 
 	o.describeBudgetHolds(ctx, cfg, prior, fresh)
 	syncBudgetPasses(ctx, o.store, prior, fresh, o.logger)
@@ -1968,6 +2023,12 @@ func (o *Orchestrator) rebuildBudgetExhausted(ctx context.Context, cfg config.Se
 			attrs = append(attrs,
 				slog.Int64("used_tokens", *entry.UsedTokens),
 				slog.Int64("budget_tokens", entry.BudgetTokens),
+			)
+		}
+		if entry.UsedUSD != nil {
+			attrs = append(attrs,
+				slog.Float64("used_usd", *entry.UsedUSD),
+				slog.Float64("budget_usd", entry.BudgetUSD),
 			)
 		}
 		if setting, known := ceilingSettingByBudgetReason[entry.Reason]; known {

@@ -635,14 +635,17 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 
 	const issueID = "ISS-STOPPED-PARITY"
 
+	cost := func(v float64) *float64 { return &v }
 	fixture := []struct {
 		totalTokens, cacheReadTokens int64
 		agentAdapter, status         string
 		measured                     bool
+		cost                         *float64
+		costStatus                   string
 	}{
-		{totalTokens: 1500, cacheReadTokens: 900, agentAdapter: "claude", status: "budget_stopped", measured: true},
+		{totalTokens: 1500, cacheReadTokens: 900, agentAdapter: "claude", status: "budget_stopped", measured: true, cost: cost(0.5), costStatus: "estimated"},
 		{totalTokens: 100, cacheReadTokens: 150, agentAdapter: "claude", status: "budget_stopped", measured: true},
-		{totalTokens: 2500, cacheReadTokens: 1400, agentAdapter: "codex", status: "cancelled", measured: true},
+		{totalTokens: 2500, cacheReadTokens: 1400, agentAdapter: "codex", status: "cancelled", measured: true, cost: cost(0.25), costStatus: "partial"},
 		{agentAdapter: "mock", status: "succeeded"},
 	}
 	for i, row := range fixture {
@@ -651,6 +654,7 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 		run.AgentAdapter = row.agentAdapter
 		run.Status = row.status
 		run.TokensMeasured = row.measured
+		run.EstimatedCostUSD, run.CostStatus = row.cost, row.costStatus
 		appendOrFatal(t, s, run)
 	}
 
@@ -673,10 +677,13 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 		Sessions:           4,
 		UnmeasuredSessions: 1,
 		StoppedInFlight:    2,
+		RecordedCostUSD:    0.75,
+		PricedSessions:     2,
+		PartialSessions:    1,
+		UnpricedSessions:   1,
 	}
 	wantByIssue := want
 	wantByIssue.CacheReadTokens = 2450
-	wantByIssue.UnpricedSessions = 3
 	if byIssue != wantByIssue {
 		t.Errorf("TokenUsageByIssue(%s) = %+v, want %+v", issueID, byIssue, wantByIssue)
 	}

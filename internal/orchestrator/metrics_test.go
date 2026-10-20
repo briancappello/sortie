@@ -529,8 +529,9 @@ func TestUpdateGauges_BudgetLevels(t *testing.T) {
 		}
 		o.updateGauges(now)
 
-		if len(spy.budgetExhaustedIssues) != 2 {
-			t.Fatalf("SetBudgetExhaustedIssues call count = %d, want 2 (one per declared reason)", len(spy.budgetExhaustedIssues))
+		wantReasons := []string{budgetReasonSession, budgetReasonToken, budgetReasonMoney}
+		if len(spy.budgetExhaustedIssues) != len(wantReasons) {
+			t.Fatalf("SetBudgetExhaustedIssues call count = %d, want %d (one per declared reason)", len(spy.budgetExhaustedIssues), len(wantReasons))
 		}
 		got := make(map[string]int, len(spy.budgetExhaustedIssues))
 		for _, c := range spy.budgetExhaustedIssues {
@@ -539,7 +540,7 @@ func TestUpdateGauges_BudgetLevels(t *testing.T) {
 		// The reasons are named literally rather than iterated from
 		// knownBudgetReasons, so a constant missing from that list would
 		// still fail this assertion.
-		for _, reason := range []string{budgetReasonSession, budgetReasonToken} {
+		for _, reason := range wantReasons {
 			count, ok := got[reason]
 			if !ok {
 				t.Errorf("SetBudgetExhaustedIssues never called for %q, want called with 0", reason)

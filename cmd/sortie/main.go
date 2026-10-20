@@ -385,6 +385,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	)
 	state.TokenWarningThreshold = br.cfg.Agent.TokenWarningThreshold()
 	state.MaxSessions = br.cfg.Agent.MaxSessions
+	state.MaxCostUSD = br.cfg.Agent.MaxCostUSD
 	orchestrator.PopulateRetries(state, pendingRetries, br.logger)
 
 	parkedRows, err := store.ListParkedIssues(ctx)
@@ -847,15 +848,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	// reads only tool metadata, never executing the tools, so the
 	// connection is not needed beyond construction.
 	//
-	// The notification entries come from the live configuration, so a reload
-	// that adds or removes an agent.message subscriber changes what the next
-	// session advertises.
+	// The money ceiling and the notification entries come from the live
+	// configuration, so a reload that sets agent.max_cost_usd or changes an
+	// agent.message subscriber changes what the next session advertises.
 	sessionToolFunc := func(ctx context.Context, issueID, workspacePath string) (*domain.ToolRegistry, error) {
 		sessionTools, err := BuildSessionToolRegistry(ctx, br.logger, SessionToolParams{
 			TrackerAdapter:        br.trackerAdapter,
 			Project:               br.cfg.Tracker.Project,
 			DBPath:                dbPath,
 			MaxTokens:             br.cfg.Agent.MaxTokens,
+			MaxCostUSD:            br.mgr.Config().Agent.MaxCostUSD,
 			MaxSessions:           br.cfg.Agent.MaxSessions,
 			TokenWarningThreshold: br.mgr.Config().Agent.TokenWarningThreshold(),
 			Notifications:         br.mgr.Config().Notifications.Backends,

@@ -79,6 +79,13 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 					" reports no token usage for the sessions this configuration produces: the per-issue token ceiling can never be reached for it",
 			})
 		}
+		if cfg.Agent.MaxCostUSD > 0 {
+			warns = append(warns, PreflightWarning{
+				Check: "agent.max_cost_usd.no_usage_reporting",
+				Message: "agent.max_cost_usd is set but agent kind " + strconv.Quote(kind) +
+					" reports no token usage for the sessions this configuration produces: the per-issue money ceiling can never be reached for it",
+			})
+		}
 		if rates, _ := pricing.ParseTokenRates(cfg.ExtensionValue("token_rates")); rates[kind].Complete() {
 			warns = append(warns, PreflightWarning{
 				Check: "agent.kind.no_cost_estimate",

@@ -37,7 +37,7 @@ func executeOK(t *testing.T, tool *BudgetTool) costBudgetResponse {
 func TestBudgetTool_Name(t *testing.T) {
 	t.Parallel()
 
-	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0)
+	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0, 0)
 
 	if got := tool.Name(); got != "cost_budget" {
 		t.Errorf("Name() = %q, want %q", got, "cost_budget")
@@ -47,7 +47,7 @@ func TestBudgetTool_Name(t *testing.T) {
 func TestBudgetTool_Description(t *testing.T) {
 	t.Parallel()
 
-	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0)
+	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0, 0)
 
 	got := tool.Description()
 	if got == "" {
@@ -66,8 +66,8 @@ func TestBudgetTool_Description_WarningThreshold(t *testing.T) {
 		"warning_reached is true, wrap up or hand off the work in progress before the " +
 		"ceiling stops this run."
 
-	withThreshold := New(noopQuery, "10042", "sess-1", 0, 0, 100)
-	withoutThreshold := New(noopQuery, "10042", "sess-1", 0, 0, 0)
+	withThreshold := New(noopQuery, "10042", "sess-1", 0, 0, 100, 0)
+	withoutThreshold := New(noopQuery, "10042", "sess-1", 0, 0, 0, 0)
 
 	if strings.Contains(withoutThreshold.Description(), "warning_tokens") {
 		t.Errorf("Description() = %q, want no mention of warning_tokens when warningTokens is 0", withoutThreshold.Description())
@@ -122,7 +122,7 @@ func TestBudgetTool_Execute_WarningThreshold(t *testing.T) {
 			query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 				return tt.usage, nil
 			}
-			tool := New(query, "10042", "sess-1", 0, 0, tt.warningTokens)
+			tool := New(query, "10042", "sess-1", 0, 0, tt.warningTokens, 0)
 
 			resp := executeOK(t, tool)
 
@@ -149,7 +149,7 @@ func TestBudgetTool_Execute_WarningThreshold(t *testing.T) {
 func TestBudgetTool_InputSchema_ValidJSON(t *testing.T) {
 	t.Parallel()
 
-	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0)
+	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0, 0)
 
 	schema := tool.InputSchema()
 
@@ -173,7 +173,7 @@ func TestBudgetTool_InputSchema_ValidJSON(t *testing.T) {
 func TestBudgetTool_InputSchema_DefensiveCopy(t *testing.T) {
 	t.Parallel()
 
-	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0)
+	tool := New(noopQuery, "10042", "sess-1", 0, 0, 0, 0)
 
 	schema1 := tool.InputSchema()
 
@@ -267,7 +267,7 @@ func TestBudgetTool_Execute(t *testing.T) {
 			query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 				return tt.usage, nil
 			}
-			tool := New(query, "10042", "sess-1", tt.budgetTokens, tt.budgetSessions, 0)
+			tool := New(query, "10042", "sess-1", tt.budgetTokens, tt.budgetSessions, 0, 0)
 
 			resp := executeOK(t, tool)
 
@@ -295,6 +295,56 @@ func TestBudgetTool_Execute(t *testing.T) {
 	}
 }
 
+func TestBudgetTool_Execute_MoneyFields(t *testing.T) {
+	t.Parallel()
+
+	// A variable sum: the constant expression 0.7 + 0.1 folds exactly to 0.8
+	// and never exercises the float error the clamp exists for.
+	sum := func(a, b float64) float64 { return a + b }
+
+	tests := []struct {
+		name          string
+		budgetUSD     float64
+		usedUSD       float64
+		wantRemaining float64
+		wantPresent   bool
+	}{
+		{name: "ceiling zero omits every money field", budgetUSD: 0, usedUSD: 3},
+		{name: "below the ceiling reports the difference", budgetUSD: 5, usedUSD: 3.5, wantRemaining: 1.5, wantPresent: true},
+		{name: "float sum equal to the ceiling clamps to zero", budgetUSD: 0.8, usedUSD: sum(0.7, 0.1), wantRemaining: 0, wantPresent: true},
+		{name: "past the ceiling clamps to zero", budgetUSD: 5, usedUSD: 7, wantRemaining: 0, wantPresent: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
+				return BudgetUsage{UsedUSD: tt.usedUSD, UsedUSDComplete: true}, nil
+			}
+			tool := New(query, "10042", "sess-1", 0, 0, 0, tt.budgetUSD)
+
+			resp := executeOK(t, tool)
+
+			if !tt.wantPresent {
+				if resp.UsedUSD != nil || resp.BudgetUSD != nil || resp.RemainingUSD != nil || resp.UsedUSDComplete != nil {
+					t.Errorf("Execute() money fields with budgetUSD=%v = %+v, want all absent", tt.budgetUSD, resp)
+				}
+				return
+			}
+			if resp.RemainingUSD == nil || resp.UsedUSD == nil || resp.BudgetUSD == nil || resp.UsedUSDComplete == nil {
+				t.Fatalf("Execute() money fields with budgetUSD=%v = %+v, want all present", tt.budgetUSD, resp)
+			}
+			if *resp.RemainingUSD != tt.wantRemaining {
+				t.Errorf("data.remaining_usd (used=%v, budget=%v) = %v, want %v", tt.usedUSD, tt.budgetUSD, *resp.RemainingUSD, tt.wantRemaining)
+			}
+			if *resp.BudgetUSD != tt.budgetUSD {
+				t.Errorf("data.budget_usd = %v, want %v", *resp.BudgetUSD, tt.budgetUSD)
+			}
+		})
+	}
+}
+
 func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 	t.Parallel()
 
@@ -310,7 +360,7 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 				UnaccountedTurns:        1,
 			}, nil
 		}
-		tool := New(query, "10042", "dispatch-1", 1000, 5, 0)
+		tool := New(query, "10042", "dispatch-1", 1000, 5, 0, 0)
 
 		resp := executeOK(t, tool)
 
@@ -336,7 +386,7 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 				UnmeasuredSessions:      1,
 			}, nil
 		}
-		tool := New(query, "10042", "", 1000, 5, 0)
+		tool := New(query, "10042", "", 1000, 5, 0, 0)
 
 		resp := executeOK(t, tool)
 
@@ -375,7 +425,7 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 				RunningMeasured:         true,
 			}, nil
 		}
-		tool := New(query, "10042", "sess-running", 1000, 5, 0)
+		tool := New(query, "10042", "sess-running", 1000, 5, 0, 0)
 
 		resp := executeOK(t, tool)
 
@@ -402,7 +452,7 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 				RunningMeasured:         true,
 			}, nil
 		}
-		tool := New(query, "10042", "sess-running", 1000, 5, 0)
+		tool := New(query, "10042", "sess-running", 1000, 5, 0, 0)
 
 		resp := executeOK(t, tool)
 
@@ -426,7 +476,7 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 				RunningMeasured:         true,
 			}, nil
 		}
-		tool := New(query, "10042", "", 1000, 5, 0)
+		tool := New(query, "10042", "", 1000, 5, 0, 0)
 
 		resp := executeOK(t, tool)
 
@@ -446,7 +496,7 @@ func TestBudgetTool_Execute_UsedTokensComplete(t *testing.T) {
 				RunningMeasured:         false,
 			}, nil
 		}
-		tool := New(query, "10042", "sess-running", 1000, 5, 0)
+		tool := New(query, "10042", "sess-running", 1000, 5, 0, 0)
 
 		resp := executeOK(t, tool)
 
@@ -462,7 +512,7 @@ func TestBudgetTool_Execute_SuccessEnvelopeShape(t *testing.T) {
 	query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 		return BudgetUsage{CompletedUncachedTokens: 10, CompletedSessions: 1}, nil
 	}
-	tool := New(query, "10042", "", 0, 0, 0)
+	tool := New(query, "10042", "", 0, 0, 0, 0)
 
 	out, err := tool.Execute(context.Background(), json.RawMessage(`{}`))
 	if err != nil {
@@ -516,7 +566,7 @@ func TestBudgetTool_Execute_QueryError(t *testing.T) {
 		return BudgetUsage{}, fmt.Errorf("database is locked")
 	}
 
-	tool := New(query, "10042", "sess-1", 1000, 5, 0)
+	tool := New(query, "10042", "sess-1", 1000, 5, 0, 0)
 
 	out, err := tool.Execute(context.Background(), json.RawMessage(`{}`))
 	if err != nil {
@@ -554,7 +604,7 @@ func TestBudgetTool_Execute_FailureEnvelopeShape(t *testing.T) {
 	query := func(_ context.Context, _ string, _ string) (BudgetUsage, error) {
 		return BudgetUsage{}, fmt.Errorf("disk full")
 	}
-	tool := New(query, "10042", "sess-1", 0, 0, 0)
+	tool := New(query, "10042", "sess-1", 0, 0, 0, 0)
 
 	out, err := tool.Execute(context.Background(), json.RawMessage(`{}`))
 	if err != nil {
@@ -591,7 +641,7 @@ func TestBudgetTool_Execute_PassesIdentity(t *testing.T) {
 		return BudgetUsage{}, nil
 	}
 
-	tool := New(query, "10042", "sess-live", 0, 0, 0)
+	tool := New(query, "10042", "sess-live", 0, 0, 0, 0)
 
 	executeOK(t, tool)
 
@@ -611,7 +661,7 @@ func TestNew_PanicsOnNilQuery(t *testing.T) {
 			t.Error(`New(nil, "10042", ...) did not panic`)
 		}
 	}()
-	New(nil, "10042", "sess-1", 0, 0, 0)
+	New(nil, "10042", "sess-1", 0, 0, 0, 0)
 
 }
 
@@ -623,6 +673,6 @@ func TestNew_PanicsOnEmptyIssueID(t *testing.T) {
 			t.Error(`New(noopQuery, "", ...) did not panic`)
 		}
 	}()
-	New(noopQuery, "", "sess-1", 0, 0, 0)
+	New(noopQuery, "", "sess-1", 0, 0, 0, 0)
 
 }

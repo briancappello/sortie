@@ -11,12 +11,16 @@ import (
 	"github.com/sortie-ai/sortie/internal/persistence"
 )
 
-// errTokenCeilingStop distinguishes a ceiling stop from other cancellation causes.
-var errTokenCeilingStop = errors.New("token ceiling reached")
+// errCeilingStop distinguishes a ceiling stop from other cancellation causes.
+var errCeilingStop = errors.New("budget ceiling reached")
 
-// TokenCeilingStopRequest records the in-flight token ceiling's decision
-// to stop a run, set by [requestTokenCeilingStop].
-type TokenCeilingStopRequest struct {
+// CeilingStopRequest records an in-flight budget ceiling's decision to stop
+// a run, set by [requestTokenCeilingStop] or [enforceInFlightMoneyCeiling].
+// The fields of the axis that did not decide the stop stay zero.
+type CeilingStopRequest struct {
+	// Reason is budgetReasonToken or budgetReasonMoney.
+	Reason string
+
 	// BudgetTokens is the ceiling in force when the stop was decided.
 	BudgetTokens int
 
@@ -31,6 +35,23 @@ type TokenCeilingStopRequest struct {
 	// SessionTokens is this session's own cumulative uncached tokens at the
 	// decision.
 	SessionTokens int64
+
+	// BudgetUSD is the money ceiling in force when the stop was decided.
+	BudgetUSD float64
+
+	// UsedUSD is IssueCostCompleted plus SessionCostUSD at the decision.
+	UsedUSD float64
+
+	// IssueCostCompleted is the recorded cost of the issue's finished runs
+	// at the decision.
+	IssueCostCompleted float64
+
+	// SessionCostUSD is this session's own estimate at the decision; 0
+	// unless the session is priced estimated or partial.
+	SessionCostUSD float64
+
+	// CostComplete reports whether UsedUSD priced all of the issue's spend.
+	CostComplete bool
 
 	// SumSource is tokenSumConfirmedRead or tokenSumSessionSpendAlone.
 	SumSource string
@@ -73,6 +94,12 @@ func freezeIssueTokenBaseline(ctx context.Context, state *State, issueID string,
 
 	if state.MaxTokens > 0 {
 		warnCeilingUnboundAtDispatch(log, state.MaxTokens, entry, err)
+	}
+
+	if err != nil && state.MaxCostUSD > 0 {
+		log.Warn("prior spend unknown, money ceiling bounds this session only",
+			slog.Float64("budget_usd", state.MaxCostUSD),
+		)
 	}
 
 	if err != nil {
@@ -127,7 +154,7 @@ func enforceInFlightTokenCeiling(ctx context.Context, state *State, issueID stri
 		return
 	}
 	entry, ok := state.Running[issueID]
-	if !ok || entry.TokenCeilingStopRequest != nil {
+	if !ok || entry.CeilingStopRequest != nil {
 		return
 	}
 	if !admitsUsageFigures(entry.UsageArrival) {
@@ -201,7 +228,7 @@ func reachTokenWarning(state *State, issueID string, entry *RunningEntry, logger
 	if threshold <= 0 || entry.TokenWarningReached {
 		return false
 	}
-	if entry.TokenCeilingStopRequest != nil {
+	if entry.CeilingStopRequest != nil {
 		return false
 	}
 	select {
@@ -238,9 +265,10 @@ const (
 )
 
 // requestTokenCeilingStop records the ceiling's decision and cancels the
-// worker context with [errTokenCeilingStop]. usage is nil without a read.
+// worker context with [errCeilingStop]. usage is nil without a read.
 func requestTokenCeilingStop(entry *RunningEntry, ceiling int, usage *persistence.IssueTokenUsage, sumSource string) {
-	entry.TokenCeilingStopRequest = &TokenCeilingStopRequest{
+	entry.CeilingStopRequest = &CeilingStopRequest{
+		Reason:               budgetReasonToken,
 		BudgetTokens:         ceiling,
 		UsedTokens:           entry.issueUncachedTokens(),
 		IssueTokensCompleted: entry.IssueTokensCompleted,
@@ -248,15 +276,20 @@ func requestTokenCeilingStop(entry *RunningEntry, ceiling int, usage *persistenc
 		SumSource:            sumSource,
 		Usage:                usage,
 	}
-	if entry.TokenCeilingCancelFunc != nil {
-		entry.TokenCeilingCancelFunc()
+	if entry.CeilingCancelFunc != nil {
+		entry.CeilingCancelFunc()
 	}
 }
 
-// reportTokenCeilingStop counts and logs a decided stop once the run's
+// reportCeilingStop counts and logs a decided stop once the run's
 // exit confirms the ceiling ended it. Must be called at most once per run.
-func reportTokenCeilingStop(log *slog.Logger, metrics domain.Metrics, request *TokenCeilingStopRequest) {
-	metrics.IncRunsStoppedByBudget(budgetReasonToken)
+func reportCeilingStop(log *slog.Logger, metrics domain.Metrics, request *CeilingStopRequest) {
+	metrics.IncRunsStoppedByBudget(request.Reason)
+
+	if request.Reason == budgetReasonMoney {
+		reportMoneyCeilingStop(log, request)
+		return
+	}
 
 	attrs := []any{
 		slog.String("reason", budgetReasonToken),
@@ -271,6 +304,24 @@ func reportTokenCeilingStop(log *slog.Logger, metrics domain.Metrics, request *T
 		attrs = append(attrs, incompleteSpendAttrs(*request.Usage)...)
 	}
 	log.Warn("run stopped by token ceiling", attrs...)
+}
+
+// reportMoneyCeilingStop logs a run the money ceiling stopped in flight.
+func reportMoneyCeilingStop(log *slog.Logger, request *CeilingStopRequest) {
+	attrs := []any{
+		slog.String("reason", budgetReasonMoney),
+		slog.Float64("used_usd", request.UsedUSD),
+		slog.Float64("budget_usd", request.BudgetUSD),
+		slog.Float64("issue_cost_completed", request.IssueCostCompleted),
+		slog.Float64("session_cost_usd", request.SessionCostUSD),
+		slog.Bool("cost_complete", request.CostComplete),
+		slog.String("sum_source", request.SumSource),
+		slog.String("ceiling_setting", ceilingSettingByBudgetReason[budgetReasonMoney]),
+	}
+	if request.Usage != nil {
+		attrs = append(attrs, incompleteSpendAttrs(*request.Usage)...)
+	}
+	log.Warn("run stopped by money ceiling", attrs...)
 }
 
 // incompleteSpendAttrs names the two counts that keep a summed token total

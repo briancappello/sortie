@@ -31,6 +31,8 @@ func TestBuildBudgetHoldComment(t *testing.T) {
 	zeroStopped := 0
 	oneStopped := 1
 	twoStopped := 2
+	usedUSD, noSpendUSD := 5.12, 0.0
+	complete, incomplete := true, false
 
 	tests := []struct {
 		name     string
@@ -182,6 +184,37 @@ func TestBuildBudgetHoldComment(t *testing.T) {
 				"Sessions: 4 of 3\n" +
 				"Stopped in flight: 1 session\n" +
 				"Raising agent.max_sessions raises this ceiling.",
+		},
+		{
+			name: "money hold with a complete figure places Estimated cost between Ceiling and Tokens",
+			entry: &BudgetExhaustedEntry{
+				Reason:          budgetReasonMoney,
+				UsedSessions:    5,
+				BudgetSessions:  3,
+				UsedTokens:      &usedTokens,
+				BudgetTokens:    100000,
+				UsedUSD:         &usedUSD,
+				UsedUSDComplete: &complete,
+				BudgetUSD:       5,
+				ExhaustedAt:     recordedAt,
+			},
+			want: "Sortie stopped dispatching this issue.\n" +
+				"Recorded: 2026-08-25T09:14:03Z\n" +
+				"Ceiling: money budget (agent.max_cost_usd)\n" +
+				"Estimated cost: $5.12 of $5.00\n" +
+				"Tokens: 128400 of 100000\n" +
+				"Sessions: 5 of 3\n" +
+				"Raising agent.max_cost_usd raises this ceiling.",
+		},
+		{
+			name:     "an incomplete figure at zero prints the Estimated cost line as unknown",
+			entry:    &BudgetExhaustedEntry{Reason: budgetReasonSession, UsedUSD: &noSpendUSD, UsedUSDComplete: &incomplete, BudgetUSD: 5, ExhaustedAt: recordedAt},
+			wantLine: "Estimated cost: unknown of $5.00",
+		},
+		{
+			name:     "an incomplete figure above zero prints the Estimated cost line as a lower bound",
+			entry:    &BudgetExhaustedEntry{Reason: budgetReasonSession, UsedUSD: &usedUSD, UsedUSDComplete: &incomplete, BudgetUSD: 5, ExhaustedAt: recordedAt},
+			wantLine: "Estimated cost: at least $5.12 of $5.00",
 		},
 	}
 

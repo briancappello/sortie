@@ -1,10 +1,8 @@
 package server
 
 import (
-	"fmt"
-	"math"
-
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 )
 
 // Cost states served on running rows. An estimate is exact only in the
@@ -56,35 +54,47 @@ func issueCost(completed *orchestrator.SnapshotIssueUsage, usedTokens *int64, us
 		return nil, costStatusUnmeasured
 	}
 
-	var recorded orchestrator.SnapshotIssueUsage
-	if completed != nil {
-		recorded = *completed
+	total, folded := foldIssueCost(completed, session, usedComplete)
+	switch folded {
+	case pricing.CostUnpriced, pricing.CostUnmeasured:
+		return nil, string(folded)
 	}
-	total := recorded.RecordedCostUSD
-	priced := recorded.PricedSessions > 0
-	partial := recorded.PartialSessions > 0
-	unpriced := recorded.UnpricedSessions > 0
+	return &total, string(folded)
+}
 
-	switch session.status {
-	case costStatusEstimated, costStatusPartial:
-		if session.cost != nil {
-			total += *session.cost
-		}
-		priced = priced || session.spent
-		partial = partial || session.status == costStatusPartial
-	case costStatusUnpriced:
-		unpriced = unpriced || session.spent
+// foldIssueCost folds the issue's completed sessions and its running session
+// through [pricing.IssueCost].
+func foldIssueCost(completed *orchestrator.SnapshotIssueUsage, session sessionCostPart, usedComplete bool) (float64, pricing.CostStatus) {
+	return pricing.IssueCost(recordedOf(completed), pricing.SessionCost{
+		USD:    session.cost,
+		Status: pricing.CostStatus(session.status),
+		Spent:  session.spent,
+	}, usedComplete)
+}
+
+// issueCostUSD returns the priced sum of the issue's completed sessions and
+// its running session, nil for none, which the next outcomes' money gate
+// compares. Completeness moves the status, never the sum.
+func issueCostUSD(completed *orchestrator.SnapshotIssueUsage, running *orchestrator.SnapshotRunningEntry) float64 {
+	var session sessionCostPart
+	if running != nil {
+		session = sessionPartOf(*running)
 	}
+	usd, _ := foldIssueCost(completed, session, false)
+	return usd
+}
 
-	switch {
-	case usedComplete && !unpriced && !partial:
-		return &total, costStatusEstimated
-	case priced:
-		return &total, costStatusPartial
-	case unpriced:
-		return nil, costStatusUnpriced
-	default:
-		return nil, costStatusUnmeasured
+// recordedOf maps the cost aggregates of an issue's completed sessions, nil
+// for none, onto the input of [pricing.IssueCost].
+func recordedOf(completed *orchestrator.SnapshotIssueUsage) pricing.RecordedCost {
+	if completed == nil {
+		return pricing.RecordedCost{}
+	}
+	return pricing.RecordedCost{
+		USD:      completed.RecordedCostUSD,
+		Priced:   completed.PricedSessions,
+		Partial:  completed.PartialSessions,
+		Unpriced: completed.UnpricedSessions,
 	}
 }
 
@@ -108,16 +118,8 @@ func activeCostTotal(running []orchestrator.SnapshotRunningEntry) (total float64
 	return total, anySet, unpriced
 }
 
-// FormatCost formats a USD cost value as a string with two decimal places.
-// Values >= 1000 receive comma thousand separators (e.g. "$1,234.56").
-// Rounding is performed on the integer-cents representation to avoid
-// float splitting artifacts near boundaries (e.g. 999.999 -> "$1,000.00").
+// FormatCost formats a USD cost value as a string with two decimal places
+// and comma thousand separators; see [pricing.FormatUSD].
 func FormatCost(v float64) string {
-	cents := int64(math.Round(v * 100))
-	dollars := cents / 100
-	remainder := cents % 100
-	if dollars >= 1000 {
-		return fmt.Sprintf("$%s.%02d", FormatInt(dollars), remainder)
-	}
-	return fmt.Sprintf("$%d.%02d", dollars, remainder)
+	return pricing.FormatUSD(v)
 }

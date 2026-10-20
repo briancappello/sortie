@@ -760,8 +760,8 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 
 	runCtx, cancelFn := context.WithCancel(ctx) //nolint:gosec // G118: cancelFn is stored in RunningEntry.CancelFunc for later use
 	workerCtx, cancelWorkerCause := context.WithCancelCause(runCtx)
-	tokenCeilingCancelFn := func() {
-		cancelWorkerCause(errTokenCeilingStop)
+	ceilingCancelFn := func() {
+		cancelWorkerCause(errCeilingStop)
 	}
 
 	var attemptCopy *int
@@ -776,16 +776,16 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 	state.Claimed[issue.ID] = struct{}{}
 
 	state.Running[issue.ID] = &RunningEntry{
-		Identifier:             issue.Identifier,
-		Issue:                  issue,
-		DispatchID:             dispatchID,
-		RetryAttempt:           attemptCopy,
-		StartedAt:              time.Now().UTC(),
-		CancelFunc:             cancelFn,
-		TokenCeilingCancelFunc: tokenCeilingCancelFn,
-		WorkerDone:             workerCtx.Done(),
-		SSHHost:                sshHost,
-		events:                 state.RetainedEvents.register(dispatchID),
+		Identifier:        issue.Identifier,
+		Issue:             issue,
+		DispatchID:        dispatchID,
+		RetryAttempt:      attemptCopy,
+		StartedAt:         time.Now().UTC(),
+		CancelFunc:        cancelFn,
+		CeilingCancelFunc: ceilingCancelFn,
+		WorkerDone:        workerCtx.Done(),
+		SSHHost:           sshHost,
+		events:            state.RetainedEvents.register(dispatchID),
 	}
 
 	CancelRetry(state, issue.ID)

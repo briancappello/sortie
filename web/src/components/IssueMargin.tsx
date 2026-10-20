@@ -12,7 +12,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip";
 import { linkActionOf, useAttentionActions } from "@/components/use-attention-actions";
 import { useIssueActions } from "@/components/use-issue-actions";
 import { rowMark } from "@/lib/active-rows";
-import { budgetOf } from "@/lib/budget";
+import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import { costText, NOT_MEASURED } from "@/lib/figures";
 import {
@@ -20,6 +20,7 @@ import {
   fmtClock,
   fmtCount,
   fmtDue,
+  fmtMoney,
   fmtStamp,
   fmtTokens,
   parseInstant,
@@ -346,9 +347,11 @@ interface BudgetMeterProps {
   name: string;
   line: BudgetLine;
   format: (n: number) => string;
+  /** Replaces the `<used> of <limit>` value text. */
+  text?: string;
 }
 
-function BudgetMeter({ name, line, format }: BudgetMeterProps) {
+function BudgetMeter({ name, line, format, text }: BudgetMeterProps) {
   const { used, limit } = line;
   if (used === null || limit === null || limit <= 0) {
     return undefined;
@@ -357,7 +360,9 @@ function BudgetMeter({ name, line, format }: BudgetMeterProps) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm gap-y-xxs text-body-md">
       <span className="text-ink">{name}</span>
-      <span className="text-ink-body tabular-nums">{`${format(used)} of ${format(limit)}`}</span>
+      <span className="text-ink-body tabular-nums">
+        {text ?? `${format(used)} of ${format(limit)}`}
+      </span>
       <span
         aria-hidden="true"
         className={cn(
@@ -410,9 +415,12 @@ interface BudgetPanelProps {
 }
 
 function BudgetPanel({ detail, state, chained }: BudgetPanelProps) {
-  const { sessions, tokens, cost } = budgetOf(detail, state);
+  const figures = budgetOf(detail, state);
+  const { sessions, tokens, money, cost } = figures;
   const note = noTokenBudgetText(tokens);
+  const moneyText = moneyBudgetText(figures);
   const shares = cost === null ? [] : costShares(detail.history?.runs ?? [], chained);
+  const hasPairs = cost !== null && (moneyText === undefined || shares.length > 0);
 
   return (
     <Panel title={cost === null ? "Budget" : "Budget and cost"}>
@@ -426,12 +434,17 @@ function BudgetPanel({ detail, state, chained }: BudgetPanelProps) {
         )}
         <BudgetMeter name="Tokens" line={tokens} format={fmtTokens} />
         {note === undefined ? undefined : <p className="text-body-sm text-ink-muted">{note}</p>}
+        {moneyText === undefined ? undefined : (
+          <BudgetMeter name="Cost" line={money} format={fmtMoney} text={moneyText} />
+        )}
       </div>
-      {cost === null ? undefined : (
+      {cost === null || !hasPairs ? undefined : (
         <Pairs>
-          <Pair label="Estimated cost">
-            <strong className="font-bold">{costText(cost.status, cost.usd)}</strong>
-          </Pair>
+          {moneyText === undefined ? (
+            <Pair label="Estimated cost">
+              <strong className="font-bold">{costText(cost.status, cost.usd)}</strong>
+            </Pair>
+          ) : undefined}
           {shares.map(([name, usd]) => (
             <Pair key={name} label={name}>
               {usd === null ? NOT_MEASURED : costText("estimated", usd)}

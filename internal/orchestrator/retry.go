@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 )
 
@@ -115,6 +116,11 @@ type HandleRetryTimerParams struct {
 	// MaxTokens is the per-issue token budget. When > 0, the claim is
 	// released instead of dispatching once summed tokens reach it.
 	MaxTokens int
+
+	// MaxCostUSD is the per-issue money budget. When > 0, the claim is
+	// released instead of dispatching once the issue's estimated cost
+	// reaches it.
+	MaxCostUSD float64
 
 	// Metrics records retry timer instrumentation. If nil, defaults to
 	// [domain.NoopMetrics].
@@ -303,9 +309,9 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	}
 
 	// blockBudget releases the claim and drops the retry entry for an issue
-	// whose budget is exhausted. The token gate may call this after the
-	// session gate did, overwriting the entry so an issue exhausted on both
-	// axes reports the token budget. ExhaustedAt is taken from the
+	// whose budget is exhausted. Each later gate may call this after an
+	// earlier one did, overwriting the entry so an issue exhausted on several
+	// axes reports the money budget, then the token budget. ExhaustedAt is taken from the
 	// announcement memory when it already knows this issue under the same
 	// reason, so a hold surviving a gap in candidacy keeps its onset time.
 	blocked := false
@@ -322,6 +328,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			UsedSessions:    usedSessions,
 			BudgetSessions:  params.MaxSessions,
 			BudgetTokens:    int64(params.MaxTokens),
+			BudgetUSD:       params.MaxCostUSD,
 			ExhaustedAt:     at,
 			RuleName:        popped.RuleName,
 			StageLineage:    popped.StageLineage,
@@ -362,33 +369,65 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		}
 	}
 
-	// Token budget gate: release the claim if summed tokens have reached
-	// max_tokens. Evaluated after the session gate so an issue exhausted on
-	// both axes reports the token budget; a query error fails open on the
-	// token axis only, leaving any session block above intact.
-	if params.MaxTokens > 0 {
+	// Token and money gates share one usage read. They run after the session
+	// gate, token before money, so an issue exhausted on several axes reports
+	// the money budget, then the token budget; a query error fails open on
+	// both axes, leaving any session block above intact.
+	if params.MaxTokens > 0 || params.MaxCostUSD > 0 {
 		usage, usageErr := params.Store.TokenUsageByIssue(ctx, issueID)
 		if usageErr != nil {
-			log.Warn("token budget check failed, proceeding with dispatch",
-				slog.Any("error", usageErr),
-			)
-		} else if usage.UncachedTokens >= int64(params.MaxTokens) {
-			log.Warn("token budget exhausted, blocking re-dispatch",
-				slog.String("reason", budgetReasonToken),
-				slog.Int64("used_tokens", usage.UncachedTokens),
-				slog.Int("budget_tokens", params.MaxTokens),
-				slog.Int("used_sessions", usage.Sessions),
-				slog.Int("budget_sessions", params.MaxSessions),
-			)
-			blockBudget(budgetReasonToken, usage.Sessions, &usage)
-		} else {
-			if blocked {
-				// Session gate already blocked; enrich the entry with the
-				// token fields, mirroring the rebuild's enrichment.
-				state.BudgetExhausted[issueID].setTokenUsage(usage)
+			if params.MaxTokens > 0 {
+				log.Warn("token budget check failed, proceeding with dispatch",
+					slog.Any("error", usageErr),
+				)
 			}
-			if usage.SpendIncomplete() {
-				warnTokenBudgetIncomplete(log, usage, params.MaxTokens)
+			if params.MaxCostUSD > 0 {
+				log.Warn("money budget check failed, proceeding with dispatch",
+					slog.Any("error", usageErr),
+				)
+			}
+		} else {
+			if params.MaxTokens > 0 {
+				if usage.UncachedTokens >= int64(params.MaxTokens) {
+					log.Warn("token budget exhausted, blocking re-dispatch",
+						slog.String("reason", budgetReasonToken),
+						slog.Int64("used_tokens", usage.UncachedTokens),
+						slog.Int("budget_tokens", params.MaxTokens),
+						slog.Int("used_sessions", usage.Sessions),
+						slog.Int("budget_sessions", params.MaxSessions),
+					)
+					blockBudget(budgetReasonToken, usage.Sessions, &usage)
+				} else {
+					if blocked {
+						// Session gate already blocked; enrich the entry with the
+						// token fields, mirroring the rebuild's enrichment.
+						state.BudgetExhausted[issueID].setTokenUsage(usage)
+					}
+					if usage.SpendIncomplete() {
+						warnTokenBudgetIncomplete(log, usage, params.MaxTokens)
+					}
+				}
+			}
+			if params.MaxCostUSD > 0 {
+				used, status := pricing.IssueCost(recordedOf(usage), pricing.SessionCost{}, !usage.SpendIncomplete())
+				if pricing.CeilingReached(used, params.MaxCostUSD) {
+					log.Warn("money budget exhausted, blocking re-dispatch",
+						slog.String("reason", budgetReasonMoney),
+						slog.Float64("used_usd", used),
+						slog.Float64("budget_usd", params.MaxCostUSD),
+						slog.Int("used_sessions", usage.Sessions),
+						slog.Int("budget_sessions", params.MaxSessions),
+					)
+					blockBudget(budgetReasonMoney, usage.Sessions, &usage)
+					state.BudgetExhausted[issueID].setMoneyUsage(usage)
+				} else {
+					if blocked {
+						state.BudgetExhausted[issueID].setMoneyUsage(usage)
+					}
+					if status != pricing.CostEstimated {
+						warnMoneyBudgetIncomplete(log, usage, params.MaxCostUSD)
+					}
+				}
 			}
 		}
 	}

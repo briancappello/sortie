@@ -111,6 +111,7 @@ func runValidate(_ context.Context, args []string, stdout io.Writer, stderr io.W
 		ConfigFunc:      mgr.Config,
 		TrackerRegistry: registry.Trackers,
 		AgentRegistry:   registry.Agents,
+		RatesFunc:       mgr.Rates,
 	}
 
 	validation := orchestrator.ValidateDispatchConfig(preflightParams)

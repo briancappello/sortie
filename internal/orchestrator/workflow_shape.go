@@ -42,6 +42,7 @@ type ShapeAgent struct {
 	MaxRetryBackoffMS          int            `json:"max_retry_backoff_ms"`
 	MaxSessions                *int           `json:"max_sessions"`
 	MaxTokens                  *int           `json:"max_tokens"`
+	MaxCostUSD                 *float64       `json:"max_cost_usd"`
 	MaxConcurrentAgents        int            `json:"max_concurrent_agents"`
 	MaxConcurrentAgentsByState map[string]int `json:"max_concurrent_agents_by_state"`
 }
@@ -196,6 +197,7 @@ func (o *Orchestrator) WorkflowShape() WorkflowShape {
 			MaxRetryBackoffMS:          cfg.Agent.MaxRetryBackoffMS,
 			MaxSessions:                positiveOrNil(cfg.Agent.MaxSessions),
 			MaxTokens:                  positiveOrNil(cfg.Agent.MaxTokens),
+			MaxCostUSD:                 positiveOrNil(cfg.Agent.MaxCostUSD),
 			MaxConcurrentAgents:        cfg.Agent.MaxConcurrentAgents,
 			MaxConcurrentAgentsByState: copyCaps(cfg.Agent.MaxConcurrentByState),
 		},
@@ -415,7 +417,7 @@ func copyCaps(caps map[string]int) map[string]int {
 
 // positiveOrNil serves a non-positive setting as nil because such a value
 // imposes no ceiling, and a client would read 0 as a ceiling of zero.
-func positiveOrNil(n int) *int {
+func positiveOrNil[T int | float64](n T) *T {
 	if n <= 0 {
 		return nil
 	}

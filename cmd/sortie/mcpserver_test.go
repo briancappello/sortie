@@ -20,6 +20,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/tool/mcpserver"
 	"github.com/sortie-ai/sortie/internal/tool/notify"
 	"github.com/sortie-ai/sortie/internal/tool/status"
@@ -387,11 +388,6 @@ func TestBuildBudgetQuery(t *testing.T) {
 	})
 }
 
-// seedBudgetMeasurementStore builds a store with run_history and
-// session_metadata rows exercising the three running-session measurement
-// cases: a mismatched running session id (unmeasured), a matching row
-// reporting a genuine spend, and a matching row reporting a measurement
-// of zero.
 func seedBudgetMeasurementStore(t *testing.T) *persistence.Store {
 	t.Helper()
 	ctx := context.Background()
@@ -421,6 +417,21 @@ func seedBudgetMeasurementStore(t *testing.T) *persistence.Store {
 			Workspace: "/tmp/ws/PROJ-ZERO", StartedAt: "2026-03-19T10:00:00Z", CompletedAt: "2026-03-19T10:00:30Z",
 			Status: "succeeded", TotalTokens: 500, TokensMeasured: true,
 		},
+		{
+			IssueID: "iss-priced", Identifier: "PROJ-PRICED", Attempt: 1, AgentAdapter: "mock",
+			Workspace: "/tmp/ws/PROJ-PRICED", StartedAt: "2026-03-19T10:00:00Z", CompletedAt: "2026-03-19T10:00:30Z",
+			Status: "succeeded", TotalTokens: 300, TokensMeasured: true, EstimatedCostUSD: new(0.5), CostStatus: "estimated",
+		},
+		{
+			IssueID: "iss-priced-gap", Identifier: "PROJ-GAP", Attempt: 1, AgentAdapter: "mock",
+			Workspace: "/tmp/ws/PROJ-GAP", StartedAt: "2026-03-19T10:00:00Z", CompletedAt: "2026-03-19T10:00:30Z",
+			Status: "succeeded", TotalTokens: 300, TokensMeasured: true, EstimatedCostUSD: new(0.5), CostStatus: "estimated",
+		},
+		{
+			IssueID: "iss-priced-gap", Identifier: "PROJ-GAP", Attempt: 2, AgentAdapter: "mock",
+			Workspace: "/tmp/ws/PROJ-GAP", StartedAt: "2026-03-19T10:01:00Z", CompletedAt: "2026-03-19T10:01:30Z",
+			Status: "succeeded", TotalTokens: 200, TokensMeasured: true,
+		},
 	}
 	for i, run := range runs {
 		if _, err := rw.AppendRunHistory(ctx, run); err != nil {
@@ -431,6 +442,8 @@ func seedBudgetMeasurementStore(t *testing.T) *persistence.Store {
 	metas := []persistence.SessionMetadata{
 		{IssueID: "iss-mixed", SessionID: "sess-mixed-live", DispatchID: "dispatch-mixed-live", TotalTokens: 50, UpdatedAt: "2026-03-19T10:02:00Z"},
 		{IssueID: "iss-zero", SessionID: "sess-zero-live", DispatchID: "dispatch-zero-live", TotalTokens: 0, UpdatedAt: "2026-03-19T10:02:00Z"},
+		{IssueID: "iss-priced", SessionID: "sess-priced-live", DispatchID: "dispatch-priced-live", TotalTokens: 100, EstimatedCostUSD: new(0.125), CostStatus: "estimated", UpdatedAt: "2026-03-19T10:02:00Z"},
+		{IssueID: "iss-priced-gap", SessionID: "sess-gap-live", DispatchID: "dispatch-gap-live", TotalTokens: 100, EstimatedCostUSD: new(0.125), CostStatus: "estimated", UpdatedAt: "2026-03-19T10:02:00Z"},
 	}
 	for _, meta := range metas {
 		if err := rw.UpsertSessionMetadata(ctx, meta); err != nil {
@@ -454,10 +467,6 @@ func seedBudgetMeasurementStore(t *testing.T) *persistence.Store {
 	return ro
 }
 
-// TestBuildBudgetQuery_Measurement covers the wiring layer's
-// UnmeasuredSessions and RunningMeasured population, at the three
-// running-session cases the budget tool's own test suite exercises at
-// the result-shape layer.
 func TestBuildBudgetQuery_Measurement(t *testing.T) {
 	t.Parallel()
 
@@ -523,6 +532,61 @@ func TestBuildBudgetQuery_Measurement(t *testing.T) {
 			t.Errorf("CompletedUncachedTokens = %d, want 500", usage.CompletedUncachedTokens)
 		}
 	})
+}
+
+func TestBuildBudgetQuery_UsedUSD(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		issueID    string
+		dispatchID string
+		recorded   pricing.RecordedCost
+		session    pricing.SessionCost
+		complete   bool
+	}{
+		{
+			name:       "recorded run plus the running dispatch's estimate",
+			issueID:    "iss-priced",
+			dispatchID: "dispatch-priced-live",
+			recorded:   pricing.RecordedCost{USD: 0.5, Priced: 1},
+			session:    pricing.SessionCost{USD: new(0.125), Status: pricing.CostEstimated, Spent: true},
+			complete:   true,
+		},
+		{
+			name:       "another dispatch's row adds nothing",
+			issueID:    "iss-priced",
+			dispatchID: "dispatch-other",
+			recorded:   pricing.RecordedCost{USD: 0.5, Priced: 1},
+		},
+		{
+			name:       "an unpriced recorded run keeps the figure incomplete",
+			issueID:    "iss-priced-gap",
+			dispatchID: "dispatch-gap-live",
+			recorded:   pricing.RecordedCost{USD: 0.5, Priced: 1, Unpriced: 1},
+			session:    pricing.SessionCost{USD: new(0.125), Status: pricing.CostEstimated, Spent: true},
+			complete:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			query := buildBudgetQuery(seedBudgetMeasurementStore(t))
+			wantUSD, wantStatus := pricing.IssueCost(tt.recorded, tt.session, tt.complete)
+
+			usage, err := query(context.Background(), tt.issueID, tt.dispatchID)
+			if err != nil {
+				t.Fatalf("buildBudgetQuery query: %v", err)
+			}
+
+			if usage.UsedUSD != wantUSD || usage.UsedUSDComplete != (wantStatus == pricing.CostEstimated) {
+				t.Errorf("query(%q, %q) = UsedUSD %v, UsedUSDComplete %v, want %v, %v",
+					tt.issueID, tt.dispatchID, usage.UsedUSD, usage.UsedUSDComplete, wantUSD, wantStatus == pricing.CostEstimated)
+			}
+		})
+	}
 }
 
 // TestSessionToolParamsFromEnv covers env-to-SessionToolParams mapping:

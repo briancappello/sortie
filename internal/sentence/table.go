@@ -41,7 +41,7 @@ const (
 	watched      = "{{if .Label}}the `{{.Label}}` label{{else}}a label command{{end}}"
 	parkingLabel = "Parking label: `{{.Label}}`{{if .Unseen}} (not yet seen on the issue){{end}}."
 	inNext       = "{{if .Window}} in the next {{duration .Window}}{{end}}"
-	heldAt       = "{{if .TokenHold}}token budget of {{tokens .Budget}}{{else}}session budget ({{count .Sessions}} of {{count .MaxSessions}} sessions used){{end}}"
+	heldAt       = "{{if .MoneyHold}}money budget (`agent.max_cost_usd`){{else if .TokenHold}}token budget of {{tokens .Budget}}{{else}}session budget ({{count .Sessions}} of {{count .MaxSessions}} sessions used){{end}}"
 	ofMax        = "{{if .Max}} of {{count .Max}}{{end}}"
 	posture      = "{{if eq .Escalation \"label\"}}applies `{{.EscalationLabel}}` to the issue" +
 		"{{else if eq .Escalation \"comment\"}}comments on the issue" +
@@ -168,6 +168,10 @@ var table = map[string]parts{
 		short: "Held: token budget reached",
 		long:  "Held at the token budget{{if .HasBudget}} of {{tokens .Budget}}{{end}}. Tokens used: {{if .AtLeast}}at least {{end}}{{tokens .Used}}.",
 	},
+	"held_budget_money": {
+		short: "Held: money budget reached",
+		long:  "Held at the money budget (`agent.max_cost_usd`).",
+	},
 	"held_budget_sessions": {
 		short: "Held: session budget reached",
 		long:  "Held at the session budget" + ofLimit + ". Sessions used: {{count .Sessions}}.",
@@ -255,6 +259,12 @@ var table = map[string]parts{
 		why: "The issue has used {{if .AtLeast}}at least {{end}}{{tokens .Used}} tokens of its budget of {{tokens .Budget}}" +
 			"{{if .Stopped}}, and the budget stopped {{plural .Stopped \"session\" \"sessions\"}} mid-run{{end}}.",
 		clears: "Clears on the next poll tick after `agent.max_tokens` is raised above what the issue has used or is removed, " + budgetLeaves,
+	},
+	"attn_budget_money": {
+		reason: "Money budget reached",
+		why: "The issue has used {{if .AtLeast}}at least {{end}}{{usd .Used}} of its budget of {{usd .Budget}} in estimated cost" +
+			"{{if .Stopped}}, and a budget ceiling stopped {{plural .Stopped \"session\" \"sessions\"}} mid-run{{end}}.",
+		clears: "Clears on the next poll tick after `agent.max_cost_usd` is raised above what the issue has used or is removed, " + budgetLeaves,
 	},
 	"attn_budget_sessions": {
 		reason: "Session budget reached",
@@ -352,6 +362,7 @@ var table = map[string]parts{
 
 	"next_if_run_succeeds": {condition: "If the run succeeds"},
 	"next_if_run_fails":    {condition: "If the run fails"},
+	"next_if_money_reach":  {condition: "If the money budget is reached"},
 	"next_if_tokens_reach": {condition: "If tokens reach {{tokens .Budget}}"},
 	"next_when_retry_due":  {condition: "When {{retry .Trigger .RunInline .Attempt}} comes due"},
 	"next_when_label_read": {condition: "When a poll tick reads `{{.Label}}` on the issue"},
@@ -374,6 +385,7 @@ var table = map[string]parts{
 		"{{if .Watch}}, and a pull request the run leaves gets the {{series .Watch}} {{if gt (len .Watch) 1}}reactions{{else}}reaction{{end}}{{end}}."},
 	"next_continue":   {text: "Sortie dispatches another session if the issue is still in an active state."},
 	"next_backoff":    {text: "Sortie retries with exponential backoff."},
+	"next_money_stop": {text: "Sortie stops the session and holds the issue at its money budget."},
 	"next_token_stop": {text: "Sortie stops the session and holds the issue at its token budget."},
 	"next_dispatch": {text: "Sortie dispatches a new session" + onStage +
 		"{{if .ActiveState}} if the issue is still in an active state{{end}}."},

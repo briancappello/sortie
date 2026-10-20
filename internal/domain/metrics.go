@@ -197,21 +197,21 @@ type Metrics interface {
 
 	// IncBudgetExhaustions increments the counter of issues that entered
 	// the per-issue budget exhausted set. reason is one of the
-	// dispatch-gate reason values, and the vocabulary may gain a third
-	// value later. Called once per entry from whichever lane discovered
+	// dispatch-gate reason values: "session_budget", "token_budget", or
+	// "money_budget". Called once per entry from whichever lane discovered
 	// it (sortie_budget_exhaustions_total{reason} counter).
 	IncBudgetExhaustions(reason string)
 
 	// IncRunsStoppedByBudget increments the counter of runs the
 	// orchestrator stopped in flight because a budget ceiling was
-	// reached. reason is "token_budget"
+	// reached. reason is "token_budget" or "money_budget"
 	// (sortie_runs_stopped_by_budget_total{reason} counter).
 	IncRunsStoppedByBudget(reason string)
 
 	// SetBudgetExhaustedIssues records how many issues are currently
 	// held out of dispatch under the given reason, one of the
-	// dispatch-gate reason values whose vocabulary may gain a third
-	// value later. Called for every known reason value on every
+	// dispatch-gate reason values listed on [Metrics.IncBudgetExhaustions].
+	// Called for every known reason value on every
 	// recompute, so a reason that no longer holds any issue reports
 	// zero rather than keeping its last value
 	// (sortie_budget_exhausted_issues{reason} gauge).

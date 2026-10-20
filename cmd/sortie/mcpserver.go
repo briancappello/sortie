@@ -16,6 +16,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/tool/budget"
@@ -141,6 +142,7 @@ func sessionToolParamsFromEnv(getenv func(string) string, cfg config.ServiceConf
 		Attempt:               attempt,
 		AgentKind:             getenv("SORTIE_SESSION_AGENT_KIND"),
 		MaxTokens:             cfg.Agent.MaxTokens,
+		MaxCostUSD:            cfg.Agent.MaxCostUSD,
 		MaxSessions:           cfg.Agent.MaxSessions,
 		TokenWarningThreshold: cfg.Agent.TokenWarningThreshold(),
 		Notifications:         cfg.Notifications.Backends,
@@ -209,19 +211,52 @@ func buildBudgetQuery(store *persistence.Store) budget.BudgetQueryFunc {
 		// Add the running session's spend only when its stored dispatch ID
 		// matches the live one, so neither a stale dispatch's row nor a
 		// session-exit cleared row is double counted.
-		if runningDispatchID == "" {
-			return usage, nil
+		var session pricing.SessionCost
+		if runningDispatchID != "" {
+			meta, found, err := store.LoadSessionMetadata(ctx, issueID)
+			if err != nil {
+				return budget.BudgetUsage{}, err
+			}
+			if found && meta.DispatchID == runningDispatchID {
+				usage.RunningUncachedTokens = domain.TokenUsage{TotalTokens: meta.TotalTokens, CacheReadTokens: meta.CacheReadTokens}.Uncached()
+				usage.RunningMeasured = true
+				usage.UnaccountedTurns += meta.UnaccountedTurns
+				session = sessionCostOf(meta)
+			}
 		}
-		meta, found, err := store.LoadSessionMetadata(ctx, issueID)
-		if err != nil {
-			return budget.BudgetUsage{}, err
-		}
-		if found && meta.DispatchID == runningDispatchID {
-			usage.RunningUncachedTokens = domain.TokenUsage{TotalTokens: meta.TotalTokens, CacheReadTokens: meta.CacheReadTokens}.Uncached()
-			usage.RunningMeasured = true
-			usage.UnaccountedTurns += meta.UnaccountedTurns
-		}
+
+		spendComplete := usage.UnmeasuredSessions == 0 && usage.UnaccountedTurns == 0 &&
+			runningDispatchID != "" && usage.RunningMeasured
+		var status pricing.CostStatus
+		usage.UsedUSD, status = pricing.IssueCost(recordedOf(completed), session, spendComplete)
+		usage.UsedUSDComplete = status == pricing.CostEstimated
 		return usage, nil
+	}
+}
+
+// recordedOf maps the cost aggregates of an issue's usage read onto the input
+// of [pricing.IssueCost].
+func recordedOf(usage persistence.IssueTokenUsage) pricing.RecordedCost {
+	return pricing.RecordedCost{
+		USD:      usage.RecordedCostUSD,
+		Priced:   usage.PricedSessions,
+		Partial:  usage.PartialSessions,
+		Unpriced: usage.UnpricedSessions,
+	}
+}
+
+// sessionCostOf reads the running session's stored estimate; a row recorded
+// without a status reads as unmeasured.
+func sessionCostOf(meta persistence.SessionMetadata) pricing.SessionCost {
+	status := pricing.CostStatus(meta.CostStatus)
+	if status == "" {
+		status = pricing.CostUnmeasured
+	}
+	return pricing.SessionCost{
+		USD:    meta.EstimatedCostUSD,
+		Status: status,
+		Spent: meta.InputTokens != 0 || meta.OutputTokens != 0 || meta.TotalTokens != 0 ||
+			meta.CacheReadTokens != 0 || meta.CacheWriteTokens != 0,
 	}
 }
 

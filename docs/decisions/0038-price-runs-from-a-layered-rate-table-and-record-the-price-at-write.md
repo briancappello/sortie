@@ -76,7 +76,7 @@ Because a recorded figure never changes, `token_rates` reloads live like every o
 
 ### Runs that cannot be priced
 
-A run that spent tokens on a model no layer prices, or whose tokens include a class its rate entry leaves unset, is recorded with the `unpriced` or `partial` cost status. A money ceiling sums the priced spend as a lower bound, lets dispatch proceed, and warns. A missing rate and missing usage reporting are treated differently, because one is fixed by a line of configuration and the other is not: `sortie validate` refuses a money ceiling on a configuration under which an agent kind it applies to reports no token usage, and refuses a money ceiling when no rate source is available at all (the embedded table disabled, fetching off, and no operator rates or table).
+A run that spent tokens on a model no layer prices, or whose tokens include a class its rate entry leaves unset, is recorded with the `unpriced` or `partial` cost status. A money ceiling sums the priced spend as a lower bound, lets dispatch proceed, and warns. A configuration under which the ceiling can never see spend is warned about, never refused: `sortie validate` and the running service warn when an agent kind a money ceiling applies to reports no token usage under that configuration, and when no rate source is available at all (the embedded table disabled, fetching off, and no operator rates or table). Dispatch continues under either configuration, because a pricing gap must not stop an operator's work, and the operator who reads the warning decides whether to fix the configuration.
 
 ### Rates in the `cost_budget` sidecar
 
@@ -118,7 +118,7 @@ A money ceiling bounds Sortie's estimate, computed from the input, output, cache
 
 **Price at read.** It needs no schema change but lets a restart, an upgrade, or a table refresh move recorded spend and start or end an instance-wide hold.
 
-**Holding an unpriceable issue, or refusing every unpriceable combination in `sortie validate`.** A new model released after the binary would then stop work or fail validation until the operator adds a line. A lower bound with a warning keeps work moving; validation refuses only what no configuration line can fix.
+**Holding an unpriceable issue, or refusing a money ceiling the configuration cannot enforce.** A new model released after the binary would then stop work or fail validation until the operator adds a line, and a kind that reports no token usage, or a deployment with every rate source off, would stop all dispatch. A lower bound with a warning keeps work moving; no pricing gap stops work.
 
 **Rates passed to the sidecar.** The sidecar would then price the running session itself and could still disagree with the orchestrator whenever a reload lands mid-session.
 
@@ -155,4 +155,4 @@ The decision is satisfied when all of the following hold:
 5. Editing `token_rates` without a restart changes the cost of runs written afterward and leaves every recorded cost unchanged.
 6. `cost_budget` reports a cost equal to the recorded run costs plus the running estimate in `session_metadata`, and reads no rates.
 7. A run with cache reads on a model whose entry has no cache-read rate is recorded `partial`, never priced at the input rate, unless a per-kind entry prices it.
-8. `sortie validate` refuses a money ceiling under a kind that reports no token usage, and a money ceiling with no rate source available.
+8. `sortie validate` and the service warn, and dispatch continues, when a money ceiling applies to a kind that reports no token usage, or when no rate source is available.

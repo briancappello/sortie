@@ -385,7 +385,10 @@ func selectBudgetHold(e *orchestrator.SnapshotBudgetEntry) (string, map[string]a
 		"Limit":     e.BudgetSessions,
 		"Sessions":  e.UsedSessions,
 	}
-	if e.Reason == "token_budget" {
+	switch e.Reason {
+	case budgetReasonMoney:
+		return "held_budget_money", data
+	case budgetReasonTokens:
 		return "held_budget_tokens", data
 	}
 	return "held_budget_sessions", data

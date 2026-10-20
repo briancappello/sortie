@@ -105,8 +105,8 @@ type runningEntryResponse struct {
 	TokensAwaited       bool   `json:"tokens_awaited"`
 	APIRequestsMeasured bool   `json:"api_requests_measured"`
 
-	// The issue-level figures below are nil when unknown. The two budget
-	// keys are nil when no limit is configured and are never omitted.
+	// The issue-level figures below are nil when unknown. The budget keys
+	// are nil when no limit is configured and are never omitted.
 	// IssueTokensCompleted and UsedTokens count uncached tokens, the unit of
 	// the token budget.
 	UsedSessions          *int     `json:"used_sessions"`
@@ -116,6 +116,7 @@ type runningEntryResponse struct {
 	UsedTokens            *int64   `json:"used_tokens"`
 	UsedTokensComplete    bool     `json:"used_tokens_complete"`
 	BudgetTokens          *int64   `json:"budget_tokens"`
+	BudgetUSD             *float64 `json:"budget_usd"`
 	EstimatedCostUSD      *float64 `json:"estimated_cost_usd"`
 	CostStatus            string   `json:"cost_status"`
 	IssueEstimatedCostUSD *float64 `json:"issue_estimated_cost_usd"`
@@ -319,6 +320,9 @@ type attentionEvidenceResponse struct {
 	UsedTokens         *int64                 `json:"used_tokens,omitempty"`
 	UsedTokensComplete *bool                  `json:"used_tokens_complete,omitempty"`
 	BudgetTokens       *int64                 `json:"budget_tokens,omitempty"`
+	UsedUSD            *float64               `json:"used_usd,omitempty"`
+	UsedUSDComplete    *bool                  `json:"used_usd_complete,omitempty"`
+	BudgetUSD          *float64               `json:"budget_usd,omitempty"`
 	ReactionKind       string                 `json:"reaction_kind,omitempty"`
 	ConfigKey          string                 `json:"config_key,omitempty"`
 	PullRequest        *pullRequestResponse   `json:"pull_request,omitempty"`
@@ -404,6 +408,9 @@ type budgetExhaustedResponse struct {
 	BudgetSessions     *int                   `json:"budget_sessions"`
 	UsedTokens         *int64                 `json:"used_tokens"`
 	BudgetTokens       *int64                 `json:"budget_tokens"`
+	UsedUSD            *float64               `json:"used_usd"`
+	UsedUSDComplete    *bool                  `json:"used_usd_complete"`
+	BudgetUSD          *float64               `json:"budget_usd"`
 	UnmeasuredSessions *int                   `json:"unmeasured_sessions"`
 	StoppedInFlight    *int                   `json:"stopped_in_flight"`
 	ExhaustedAt        time.Time              `json:"exhausted_at"`
@@ -643,6 +650,9 @@ func toServedRunningEntry(e orchestrator.SnapshotRunningEntry, snap orchestrator
 	if snap.MaxTokens > 0 {
 		resp.BudgetTokens = new(int64(snap.MaxTokens))
 	}
+	if snap.MaxCostUSD > 0 {
+		resp.BudgetUSD = new(snap.MaxCostUSD)
+	}
 	if snap.MaxSessions > 0 {
 		resp.BudgetSessions = new(snap.MaxSessions)
 	}
@@ -842,6 +852,9 @@ func toAttentionResponses(items []sentence.AttentionItem) []attentionItemRespons
 				UsedTokens:         ev.UsedTokens,
 				UsedTokensComplete: ev.UsedTokensComplete,
 				BudgetTokens:       ev.BudgetTokens,
+				UsedUSD:            ev.UsedUSD,
+				UsedUSDComplete:    ev.UsedUSDComplete,
+				BudgetUSD:          ev.BudgetUSD,
 				ReactionKind:       ev.ReactionKind,
 				ConfigKey:          ev.ConfigKey,
 				EscalationTrigger:  ev.EscalationTrigger,
@@ -903,6 +916,10 @@ func toBudgetExhaustedResponse(e orchestrator.SnapshotBudgetEntry) budgetExhaust
 	if e.BudgetTokens > 0 {
 		budgetTokens = new(e.BudgetTokens)
 	}
+	var budgetUSD *float64
+	if e.BudgetUSD > 0 {
+		budgetUSD = new(e.BudgetUSD)
+	}
 	return budgetExhaustedResponse{
 		IssueID:            e.IssueID,
 		IssueIdentifier:    e.Identifier,
@@ -918,6 +935,9 @@ func toBudgetExhaustedResponse(e orchestrator.SnapshotBudgetEntry) budgetExhaust
 		BudgetSessions:     budgetSessions,
 		UsedTokens:         heldUsedTokens(e),
 		BudgetTokens:       budgetTokens,
+		UsedUSD:            e.UsedUSD,
+		UsedUSDComplete:    e.UsedUSDComplete,
+		BudgetUSD:          budgetUSD,
 		UnmeasuredSessions: e.UnmeasuredSessions,
 		StoppedInFlight:    e.StoppedInFlight,
 		ExhaustedAt:        e.ExhaustedAt,
@@ -1237,7 +1257,7 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 	}
 	if len(page) == 0 {
 		if detail != nil {
-			detail.situation.Spend = &sentence.Spend{}
+			detail.situation.Spend = &sentence.Spend{CostUSD: issueCostUSD(nil, detail.situation.Running)}
 			if err := s.attachIssuePRLoop(ctx, detail, snap, words.Shape, nil); err != nil {
 				s.historyReadFailed(w, r, err)
 				return nil, false
@@ -1262,7 +1282,11 @@ func (s *Server) withIssueHistory(w http.ResponseWriter, r *http.Request, identi
 		detail = historyOnlyDetail(issueID, newest)
 		detail.StatusText, detail.StatusTextFull = sentencesOf(sentence.Entry{Finished: finishedOf(newest, outcome, hasOutcome)}, words)
 	}
-	detail.situation.Spend = &sentence.Spend{Sessions: totals.Usage.Sessions, Tokens: totals.Usage.UncachedTokens}
+	detail.situation.Spend = &sentence.Spend{
+		Sessions: totals.Usage.Sessions,
+		Tokens:   totals.Usage.UncachedTokens,
+		CostUSD:  issueCostUSD(&totals.Usage, detail.situation.Running),
+	}
 	var chains [][]string
 	if words.Shape != nil {
 		chains = words.Shape.Dispatch.Chains

@@ -1071,6 +1071,16 @@ func (s *Store) LatestResumeUsage(ctx context.Context, issueID, sessionID string
 // spentPredicate matches a run_history row that spent any tokens.
 const spentPredicate = `(input_tokens > 0 OR output_tokens > 0 OR total_tokens > 0 OR cache_read_tokens > 0 OR cache_write_tokens > 0)`
 
+// costAggregates is the select-list fragment that sums the recorded cost of an
+// issue's rows. Both per-issue usage statements embed it, so the ceiling and
+// the figure served for the same issue cannot drift apart. Its columns scan
+// into RecordedCostUSD, PricedSessions, PartialSessions, and UnpricedSessions
+// in that order.
+const costAggregates = `COALESCE(SUM(CASE WHEN cost_status IN ('estimated', 'partial') THEN estimated_cost_usd ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN ` + spentPredicate + ` AND estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN cost_status = 'partial' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN ` + spentPredicate + ` AND estimated_cost_usd IS NULL THEN 1 ELSE 0 END), 0)`
+
 // IssueTokenUsage is the per-issue token spend read by the token ceiling
 // and the cost_budget tool.
 type IssueTokenUsage struct {
@@ -1086,7 +1096,7 @@ type IssueTokenUsage struct {
 	Sessions           int
 	UnmeasuredSessions int
 
-	// StoppedInFlight counts rows recording a session the token ceiling
+	// StoppedInFlight counts rows recording a session a budget ceiling
 	// stopped while running.
 	StoppedInFlight int
 
@@ -1104,8 +1114,7 @@ type IssueTokenUsage struct {
 	CacheWriteTokens int64
 
 	// RecordedCostUSD and the session counts aggregate the recorded cost. A
-	// row that spent nothing is in neither priced nor unpriced. Only
-	// [Store.TokenUsageByIssue] fills them.
+	// row that spent nothing is in neither priced nor unpriced.
 	RecordedCostUSD  float64
 	PricedSessions   int
 	PartialSessions  int
@@ -1139,10 +1148,7 @@ func (s *Store) TokenUsageByIssue(ctx context.Context, issueID string) (IssueTok
 			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN cache_write_tokens ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN output_tokens ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tokens_measured = 1 THEN input_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN cost_status IN ('estimated', 'partial') THEN estimated_cost_usd ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN `+spentPredicate+` AND estimated_cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN cost_status = 'partial' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN `+spentPredicate+` AND estimated_cost_usd IS NULL THEN 1 ELSE 0 END), 0)
+			`+costAggregates+`
 		FROM run_history WHERE issue_id = ?`, issueID,
 	).Scan(&usage.TotalTokens, &usage.UncachedTokens, &usage.Sessions, &unmeasured, &stoppedInFlight, &unaccounted,
 		&usage.CacheReadTokens, &usage.CacheWriteTokens, &usage.OutputTokens, &usage.InputTokens,
@@ -1216,8 +1222,7 @@ func (s *Store) LatestRunCompletionByIdentifier(ctx context.Context, identifiers
 // QueryTokenBudgetUsage returns one [IssueTokenUsage] per candidate with at
 // least one row; a candidate with no rows is absent, which the caller reads
 // as zero on every count. An empty candidateIDs returns an empty non-nil map
-// without querying. The recorded cost aggregates stay zero.
-// Comparing against a ceiling is the caller's job.
+// without querying. Comparing against a ceiling is the caller's job.
 func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string) (map[string]IssueTokenUsage, error) {
 	usage := map[string]IssueTokenUsage{}
 	if len(candidateIDs) == 0 {
@@ -1234,9 +1239,10 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 
 	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(candidateIDs); no user data in format string
 		`SELECT issue_id, COALESCE(SUM(total_tokens), 0), COALESCE(SUM(MAX(total_tokens - cache_read_tokens, 0)), 0), COUNT(*), SUM(CASE WHEN tokens_measured = 0 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN status = 'budget_stopped' THEN 1 ELSE 0 END), COALESCE(SUM(unaccounted_turns), 0)
+		SUM(CASE WHEN status = 'budget_stopped' THEN 1 ELSE 0 END), COALESCE(SUM(unaccounted_turns), 0),
+		%s
 		FROM run_history WHERE issue_id IN (%s) GROUP BY issue_id`,
-		placeholders,
+		costAggregates, placeholders,
 	)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1249,7 +1255,8 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 		var issueID string
 		var issueUsage IssueTokenUsage
 		var unmeasured, stoppedInFlight, unaccounted sql.NullInt64
-		if err := rows.Scan(&issueID, &issueUsage.TotalTokens, &issueUsage.UncachedTokens, &issueUsage.Sessions, &unmeasured, &stoppedInFlight, &unaccounted); err != nil {
+		if err := rows.Scan(&issueID, &issueUsage.TotalTokens, &issueUsage.UncachedTokens, &issueUsage.Sessions, &unmeasured, &stoppedInFlight, &unaccounted,
+			&issueUsage.RecordedCostUSD, &issueUsage.PricedSessions, &issueUsage.PartialSessions, &issueUsage.UnpricedSessions); err != nil {
 			return nil, fmt.Errorf("scan token budget usage: %w", err)
 		}
 		issueUsage.UnmeasuredSessions = int(unmeasured.Int64)

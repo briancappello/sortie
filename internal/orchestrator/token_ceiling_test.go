@@ -232,25 +232,25 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-STOP"] = &RunningEntry{
-			Identifier:             "ISS-STOP-ident",
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:        "ISS-STOP-ident",
+			CeilingCancelFunc: func() { cancelCalls++ },
 		}
 		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 0}}}}
 
 		driveEvent(state, "ISS-STOP", domain.TokenUsage{TotalTokens: 60}, store, spy, logger)
-		if state.Running["ISS-STOP"].TokenCeilingStopRequest != nil {
+		if state.Running["ISS-STOP"].CeilingStopRequest != nil {
 			t.Fatal("run stopped below the ceiling (60 < 100)")
 		}
 
 		driveEvent(state, "ISS-STOP", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
 
 		entry := state.Running["ISS-STOP"]
-		request := entry.TokenCeilingStopRequest
+		request := entry.CeilingStopRequest
 		if request == nil {
-			t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil once the ceiling is reached")
+			t.Fatal("entry.CeilingStopRequest = nil, want non-nil once the ceiling is reached")
 		}
 		if cancelCalls != 1 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times, want 1", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times, want 1", cancelCalls)
 		}
 		if request.BudgetTokens != 100 {
 			t.Errorf("request.BudgetTokens = %d, want 100", request.BudgetTokens)
@@ -276,8 +276,8 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		spy := &spyMetrics{}
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-UNACC"] = &RunningEntry{
-			Identifier:             "ISS-UNACC-ident",
-			TokenCeilingCancelFunc: func() {},
+			Identifier:        "ISS-UNACC-ident",
+			CeilingCancelFunc: func() {},
 		}
 		// Every completed session was measured, but the sum still omits
 		// two unaccounted turns.
@@ -287,9 +287,9 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 
 		driveEvent(state, "ISS-UNACC", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
 
-		request := state.Running["ISS-UNACC"].TokenCeilingStopRequest
+		request := state.Running["ISS-UNACC"].CeilingStopRequest
 		if request == nil {
-			t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil once the ceiling is reached")
+			t.Fatal("entry.CeilingStopRequest = nil, want non-nil once the ceiling is reached")
 		}
 		if request.Usage == nil {
 			t.Fatal("request.Usage = nil, want the confirming read")
@@ -307,13 +307,13 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-LATCH"] = &RunningEntry{
-			Identifier:             "ISS-LATCH-ident",
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:        "ISS-LATCH-ident",
+			CeilingCancelFunc: func() { cancelCalls++ },
 		}
 		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 0}}}}
 
 		driveEvent(state, "ISS-LATCH", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
-		firstRequest := state.Running["ISS-LATCH"].TokenCeilingStopRequest
+		firstRequest := state.Running["ISS-LATCH"].CeilingStopRequest
 		if firstRequest == nil {
 			t.Fatal("setup failed: run did not record a stop request on the first over-ceiling event")
 		}
@@ -326,10 +326,10 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 			t.Errorf("TokenUsageByIssue called %d more time(s) after the latch, want 0", len(store.calls)-callsAfterStop)
 		}
 		if cancelCalls != 1 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times total, want 1", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times total, want 1", cancelCalls)
 		}
-		if state.Running["ISS-LATCH"].TokenCeilingStopRequest != firstRequest {
-			t.Error("TokenCeilingStopRequest changed after the latch, want the same request the first crossing recorded")
+		if state.Running["ISS-LATCH"].CeilingStopRequest != firstRequest {
+			t.Error("CeilingStopRequest changed after the latch, want the same request the first crossing recorded")
 		}
 	})
 
@@ -367,8 +367,8 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-FAILREAD"] = &RunningEntry{
-			Identifier:             "ISS-FAILREAD-ident",
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:        "ISS-FAILREAD-ident",
+			CeilingCancelFunc: func() { cancelCalls++ },
 			// The frozen baseline, not this session's own spend, carries
 			// the issue over the ceiling, so the failed read is the only
 			// evidence available.
@@ -385,23 +385,23 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		driveEvent(state, "ISS-FAILREAD", domain.TokenUsage{TotalTokens: 26}, store, spy, logger)
 
 		entry := state.Running["ISS-FAILREAD"]
-		if entry.TokenCeilingStopRequest != nil {
-			t.Fatal("entry.TokenCeilingStopRequest = non-nil, want nil while every confirming read fails")
+		if entry.CeilingStopRequest != nil {
+			t.Fatal("entry.CeilingStopRequest = non-nil, want nil while every confirming read fails")
 		}
 		if got := strings.Count(lb.String(), "in-flight token ceiling check failed, run continues"); got != 1 {
 			t.Errorf(`log contains %d "in-flight token ceiling check failed, run continues" records across 2 failing reads, want 1`, got)
 		}
 		if cancelCalls != 0 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times, want 0 while reads keep failing", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times, want 0 while reads keep failing", cancelCalls)
 		}
 
 		driveEvent(state, "ISS-FAILREAD", domain.TokenUsage{TotalTokens: 27}, store, spy, logger)
 
-		if entry.TokenCeilingStopRequest == nil {
-			t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil once the confirming read succeeds and the sum is at the ceiling")
+		if entry.CeilingStopRequest == nil {
+			t.Fatal("entry.CeilingStopRequest = nil, want non-nil once the confirming read succeeds and the sum is at the ceiling")
 		}
 		if cancelCalls != 1 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times after recovery, want 1", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times after recovery, want 1", cancelCalls)
 		}
 	})
 
@@ -413,20 +413,20 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-OUTAGE"] = &RunningEntry{
-			Identifier:             "ISS-OUTAGE-ident",
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:        "ISS-OUTAGE-ident",
+			CeilingCancelFunc: func() { cancelCalls++ },
 		}
 		store := &fakeTokenStore{responses: []tokenStoreResponse{{err: errors.New("db unavailable")}}}
 
 		driveEvent(state, "ISS-OUTAGE", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
 
 		entry := state.Running["ISS-OUTAGE"]
-		request := entry.TokenCeilingStopRequest
+		request := entry.CeilingStopRequest
 		if request == nil {
-			t.Fatal("entry.TokenCeilingStopRequest = nil; a session whose own spend reached the ceiling needs no read to prove the breach")
+			t.Fatal("entry.CeilingStopRequest = nil; a session whose own spend reached the ceiling needs no read to prove the breach")
 		}
 		if cancelCalls != 1 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times, want 1", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times, want 1", cancelCalls)
 		}
 		if request.SumSource != tokenSumSessionSpendAlone {
 			t.Errorf("request.SumSource = %q, want %q", request.SumSource, tokenSumSessionSpendAlone)
@@ -447,9 +447,9 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 1000, nil, AgentTotals{})
 		state.Running["ISS-BELOW"] = &RunningEntry{
-			Identifier:             "ISS-BELOW-ident",
-			IssueTokensCompleted:   900, // a stale, overestimated frozen baseline
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:           "ISS-BELOW-ident",
+			IssueTokensCompleted: 900, // a stale, overestimated frozen baseline
+			CeilingCancelFunc:    func() { cancelCalls++ },
 		}
 		// Pre-filter (stale 900 + 150 = 1050) crosses the ceiling, but
 		// the confirming read's true 800 + 150 = 950 stays under it.
@@ -458,8 +458,8 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		driveEvent(state, "ISS-BELOW", domain.TokenUsage{TotalTokens: 150}, store, spy, logger)
 
 		entry := state.Running["ISS-BELOW"]
-		if entry.TokenCeilingStopRequest != nil {
-			t.Error("entry.TokenCeilingStopRequest = non-nil, want nil (950 < 1000 ceiling)")
+		if entry.CeilingStopRequest != nil {
+			t.Error("entry.CeilingStopRequest = non-nil, want nil (950 < 1000 ceiling)")
 		}
 		if entry.IssueTokensCompleted != 800 {
 			t.Errorf("entry.IssueTokensCompleted = %d, want 800 (replaced by the confirming read)", entry.IssueTokensCompleted)
@@ -468,7 +468,7 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 			t.Errorf("entry.IssueUsage = %+v, want the confirming read (TotalTokens 800, Sessions 2)", entry.IssueUsage)
 		}
 		if cancelCalls != 0 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times, want 0", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times, want 0", cancelCalls)
 		}
 	})
 
@@ -480,10 +480,10 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-NONE-CEIL"] = &RunningEntry{
-			Identifier:             "ISS-NONE-CEIL-ident",
-			UsageArrival:           registry.UsageArrivalNone,
-			IssueTokensCompleted:   100,
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:           "ISS-NONE-CEIL-ident",
+			UsageArrival:         registry.UsageArrivalNone,
+			IssueTokensCompleted: 100,
+			CeilingCancelFunc:    func() { cancelCalls++ },
 		}
 		store := &failingIssueTokenStore{t: t}
 
@@ -492,11 +492,11 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 			store, logger)
 
 		entry := state.Running["ISS-NONE-CEIL"]
-		if entry.TokenCeilingStopRequest != nil {
-			t.Error("entry.TokenCeilingStopRequest = non-nil, want nil (none arrival)")
+		if entry.CeilingStopRequest != nil {
+			t.Error("entry.CeilingStopRequest = non-nil, want nil (none arrival)")
 		}
 		if cancelCalls != 0 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times, want 0", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times, want 0", cancelCalls)
 		}
 		if len(spy.runsStoppedByBudget) != 0 {
 			t.Errorf("IncRunsStoppedByBudget calls = %v, want none", spy.runsStoppedByBudget)
@@ -510,10 +510,10 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		var cancelCalls int
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running["ISS-INC-CEIL"] = &RunningEntry{
-			Identifier:             "ISS-INC-CEIL-ident",
-			UsageArrival:           registry.UsageArrivalIncremental,
-			IssueTokensCompleted:   100,
-			TokenCeilingCancelFunc: func() { cancelCalls++ },
+			Identifier:           "ISS-INC-CEIL-ident",
+			UsageArrival:         registry.UsageArrivalIncremental,
+			IssueTokensCompleted: 100,
+			CeilingCancelFunc:    func() { cancelCalls++ },
 		}
 		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 100, UncachedTokens: 100}}}}
 
@@ -522,11 +522,11 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 			store, logger)
 
 		entry := state.Running["ISS-INC-CEIL"]
-		if entry.TokenCeilingStopRequest == nil {
-			t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil (incremental arrival at the ceiling)")
+		if entry.CeilingStopRequest == nil {
+			t.Fatal("entry.CeilingStopRequest = nil, want non-nil (incremental arrival at the ceiling)")
 		}
 		if cancelCalls != 1 {
-			t.Errorf("entry.TokenCeilingCancelFunc called %d times, want 1", cancelCalls)
+			t.Errorf("entry.CeilingCancelFunc called %d times, want 1", cancelCalls)
 		}
 		if len(store.calls) != 1 {
 			t.Errorf("TokenUsageByIssue calls = %v, want exactly one", store.calls)
@@ -539,22 +539,22 @@ func TestEnforceInFlightTokenCeiling(t *testing.T) {
 		_, logger := textLogger()
 		state := NewState(5000, 4, 1000, nil, AgentTotals{})
 		state.Running["ISS-UNCACHED"] = &RunningEntry{
-			Identifier:             "ISS-UNCACHED-ident",
-			IssueTokensCompleted:   600,
-			TokenCeilingCancelFunc: func() {},
+			Identifier:           "ISS-UNCACHED-ident",
+			IssueTokensCompleted: 600,
+			CeilingCancelFunc:    func() {},
 		}
 		store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 1600, UncachedTokens: 600}}}}
 
 		driveEvent(state, "ISS-UNCACHED", domain.TokenUsage{TotalTokens: 900, CacheReadTokens: 600}, store, &spyMetrics{}, logger)
-		if request := state.Running["ISS-UNCACHED"].TokenCeilingStopRequest; request != nil || len(store.calls) != 0 {
+		if request := state.Running["ISS-UNCACHED"].CeilingStopRequest; request != nil || len(store.calls) != 0 {
 			t.Fatalf("live 900 with 600 cache reads: stop request = %v, store reads = %d, want none of either", request, len(store.calls))
 		}
 
 		driveEvent(state, "ISS-UNCACHED", domain.TokenUsage{TotalTokens: 1000, CacheReadTokens: 600}, store, &spyMetrics{}, logger)
 
-		request := state.Running["ISS-UNCACHED"].TokenCeilingStopRequest
+		request := state.Running["ISS-UNCACHED"].CeilingStopRequest
 		if request == nil {
-			t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil at 600 + 400 uncached")
+			t.Fatal("entry.CeilingStopRequest = nil, want non-nil at 600 + 400 uncached")
 		}
 		if request.UsedTokens != 1000 || request.SessionTokens != 400 {
 			t.Errorf("request (UsedTokens, SessionTokens) = (%d, %d), want (1000, 400)", request.UsedTokens, request.SessionTokens)
@@ -586,8 +586,8 @@ func TestEnforceInFlightTokenCeiling_TurnEndPairSingleRequest(t *testing.T) {
 
 	state := NewState(5000, 4, 100, nil, AgentTotals{})
 	state.Running["ISS-TE"] = &RunningEntry{
-		Identifier:             "ISS-TE-ident",
-		TokenCeilingCancelFunc: func() { cancelCalls++ },
+		Identifier:        "ISS-TE-ident",
+		CeilingCancelFunc: func() { cancelCalls++ },
 	}
 	store := &fakeTokenStore{responses: []tokenStoreResponse{{usage: persistence.IssueTokenUsage{TotalTokens: 0}}}}
 
@@ -596,12 +596,12 @@ func TestEnforceInFlightTokenCeiling_TurnEndPairSingleRequest(t *testing.T) {
 	enforceInFlightTokenCeiling(context.Background(), state, "ISS-TE", usageEvent, store, logger)
 
 	entry := state.Running["ISS-TE"]
-	firstRequest := entry.TokenCeilingStopRequest
+	firstRequest := entry.CeilingStopRequest
 	if firstRequest == nil {
-		t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil after the token_usage event alone (S1.TotalTokens exceeds the ceiling)")
+		t.Fatal("entry.CeilingStopRequest = nil, want non-nil after the token_usage event alone (S1.TotalTokens exceeds the ceiling)")
 	}
 	if cancelCalls != 1 {
-		t.Fatalf("entry.TokenCeilingCancelFunc called %d times after the token_usage event, want 1", cancelCalls)
+		t.Fatalf("entry.CeilingCancelFunc called %d times after the token_usage event, want 1", cancelCalls)
 	}
 
 	terminalEvent := domain.AgentEvent{Type: domain.EventTurnCompleted, Usage: s1}
@@ -609,10 +609,10 @@ func TestEnforceInFlightTokenCeiling_TurnEndPairSingleRequest(t *testing.T) {
 	enforceInFlightTokenCeiling(context.Background(), state, "ISS-TE", terminalEvent, store, logger)
 
 	if cancelCalls != 1 {
-		t.Errorf("entry.TokenCeilingCancelFunc called %d times total, want 1 (the terminal event produces no second request)", cancelCalls)
+		t.Errorf("entry.CeilingCancelFunc called %d times total, want 1 (the terminal event produces no second request)", cancelCalls)
 	}
-	if entry.TokenCeilingStopRequest != firstRequest {
-		t.Error("TokenCeilingStopRequest changed on the terminal event, want the same request the first event recorded")
+	if entry.CeilingStopRequest != firstRequest {
+		t.Error("CeilingStopRequest changed on the terminal event, want the same request the first event recorded")
 	}
 }
 
@@ -633,13 +633,13 @@ func TestTokenCeilingRecordsCarryIssueContext(t *testing.T) {
 	newState := func(arrival registry.UsageArrival, completedTokens, sessionTokens int64) *State {
 		state := NewState(5000, 4, 100, nil, AgentTotals{})
 		state.Running[issueID] = &RunningEntry{
-			Identifier:             identifier,
-			SessionID:              sessionID,
-			AgentKind:              "mock",
-			UsageArrival:           arrival,
-			IssueTokensCompleted:   completedTokens,
-			AgentTotalTokens:       sessionTokens,
-			TokenCeilingCancelFunc: func() {},
+			Identifier:           identifier,
+			SessionID:            sessionID,
+			AgentKind:            "mock",
+			UsageArrival:         arrival,
+			IssueTokensCompleted: completedTokens,
+			AgentTotalTokens:     sessionTokens,
+			CeilingCancelFunc:    func() {},
 		}
 		return state
 	}
@@ -873,7 +873,7 @@ func TestReachTokenWarning_NoRecordConditions(t *testing.T) {
 			name: "ceiling stop already decided for this run",
 			setup: func(state *State, entry *RunningEntry) {
 				state.TokenWarningThreshold = 50
-				entry.TokenCeilingStopRequest = &TokenCeilingStopRequest{}
+				entry.CeilingStopRequest = &CeilingStopRequest{}
 			},
 		},
 		{

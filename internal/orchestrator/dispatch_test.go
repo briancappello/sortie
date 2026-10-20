@@ -1255,9 +1255,9 @@ func TestDispatchIssue_TokenCeilingContexts(t *testing.T) {
 		wantRunDone bool
 	}{
 		{
-			name:      "TokenCeilingCancelFunc cancels the worker context with the ceiling cause and leaves the run context live",
-			trigger:   func(entry *RunningEntry) { entry.TokenCeilingCancelFunc() },
-			wantCause: errTokenCeilingStop,
+			name:      "CeilingCancelFunc cancels the worker context with the ceiling cause and leaves the run context live",
+			trigger:   func(entry *RunningEntry) { entry.CeilingCancelFunc() },
+			wantCause: errCeilingStop,
 		},
 		{
 			name:        "CancelFunc cancels both the run and worker contexts with context.Canceled",
@@ -1285,8 +1285,8 @@ func TestDispatchIssue_TokenCeilingContexts(t *testing.T) {
 			}
 
 			entry := s.Running["ISS-TC"]
-			if entry.TokenCeilingCancelFunc == nil {
-				t.Fatal("RunningEntry.TokenCeilingCancelFunc = nil, want non-nil")
+			if entry.CeilingCancelFunc == nil {
+				t.Fatal("RunningEntry.CeilingCancelFunc = nil, want non-nil")
 			}
 			tt.trigger(entry)
 

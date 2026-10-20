@@ -14,7 +14,7 @@ import { StateBadge } from "@/components/StateBadge";
 import { Button, buttonStyles } from "@/components/ui/button";
 import { DrawerClose, DrawerTitle } from "@/components/ui/drawer";
 import { useAttentionActions } from "@/components/use-attention-actions";
-import { budgetOf } from "@/lib/budget";
+import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import { costText, NOT_MEASURED, runningTokensText } from "@/lib/figures";
 import { fmtClock, fmtTokens, plural } from "@/lib/format";
@@ -234,7 +234,9 @@ interface PeekFactsProps {
 
 function PeekFacts({ detail, state, position }: PeekFactsProps) {
   const config = state?.config;
-  const { sessions, uncachedTokens, cost } = budgetOf(detail, state);
+  const figures = budgetOf(detail, state);
+  const { sessions, uncachedTokens, cost } = figures;
+  const moneyText = moneyBudgetText(figures);
   const { running } = detail;
   const pullRequest = pullRequestOf(detail);
   const agent = agentText(detail);
@@ -274,7 +276,7 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
   } else if (cost !== null) {
     facts.push([
       "Spent",
-      `${costText(cost.status, cost.usd)} estimated, ${fmtTokens(uncachedTokens)} tokens`,
+      `${moneyText ?? costText(cost.status, cost.usd)} estimated, ${fmtTokens(uncachedTokens)} tokens`,
     ]);
   } else {
     facts.push(["Tokens", fmtTokens(uncachedTokens)]);

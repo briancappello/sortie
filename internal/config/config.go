@@ -284,6 +284,10 @@ type AgentConfig struct {
 	// event loop for the run already in flight. 0 means unlimited.
 	MaxTokens int
 
+	// MaxCostUSD is the per-issue ceiling on the issue's estimated cost
+	// in USD. 0 means unlimited. Non-negative and finite.
+	MaxCostUSD float64
+
 	// TokenWarningPercent is the percentage of MaxTokens, 0 to 99,
 	// at which the event loop warns that the ceiling is near. 0
 	// disables the warning threshold. Call [AgentConfig.TokenWarningThreshold]
@@ -1230,6 +1234,23 @@ func buildAgentConfig(m map[string]any) (AgentConfig, error) {
 		}
 	}
 
+	maxCostUSD, err := coerceFloatField(m, "max_cost_usd", "agent.max_cost_usd")
+	if err != nil {
+		return AgentConfig{}, err
+	}
+	if math.IsNaN(maxCostUSD) || math.IsInf(maxCostUSD, 0) {
+		return AgentConfig{}, &ConfigError{
+			Field:   "agent.max_cost_usd",
+			Message: "must be a finite number",
+		}
+	}
+	if maxCostUSD < 0 {
+		return AgentConfig{}, &ConfigError{
+			Field:   "agent.max_cost_usd",
+			Message: "must be non-negative",
+		}
+	}
+
 	tokenWarningPercent, err := coerceIntField(m, "token_warning_percent", "agent.token_warning_percent")
 	if err != nil {
 		return AgentConfig{}, err
@@ -1277,6 +1298,7 @@ func buildAgentConfig(m map[string]any) (AgentConfig, error) {
 		MaxConcurrentByState:   byState,
 		MaxSessions:            maxSessions,
 		MaxTokens:              maxTokens,
+		MaxCostUSD:             maxCostUSD,
 		TokenWarningPercent:    tokenWarningPercent,
 		MaxConsecutiveAbsences: maxConsecutiveAbsences,
 	}, nil
@@ -1763,6 +1785,50 @@ func coerceIntField(m map[string]any, key, field string) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// coerceFloat converts a YAML integer, a float, or a string that
+// [strconv.ParseFloat] accepts after trimming. It passes NaN and the
+// infinities through for the caller to judge; a string that overflows
+// float64 fails.
+func coerceFloat(x any) (float64, error) {
+	switch v := x.(type) {
+	case int:
+		return float64(v), nil
+	case int32:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	case uint64:
+		return float64(v), nil
+	case float64:
+		return v, nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number value: %v", x)
+		}
+		return f, nil
+	default:
+		return 0, fmt.Errorf("invalid number value: %v", x)
+	}
+}
+
+// coerceFloatField coerces a map value to float64, returning a ConfigError
+// on failure. Returns 0 when the key is absent or nil.
+func coerceFloatField(m map[string]any, key, field string) (float64, error) {
+	v, exists := m[key]
+	if !exists || v == nil {
+		return 0, nil
+	}
+	f, err := coerceFloat(v)
+	if err != nil {
+		return 0, &ConfigError{
+			Field:   field,
+			Message: err.Error(),
+		}
+	}
+	return f, nil
 }
 
 // coerceIntFieldSafe is like coerceIntField but never returns a
