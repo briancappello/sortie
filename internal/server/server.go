@@ -136,6 +136,27 @@ type RunHistoryEntry struct {
 	// DispatchID keys the run's retained events: empty on the recorded CI
 	// result, nil for a run recorded before the dispatch ID existed.
 	DispatchID *string
+	// ModelUsage is the run's per-model spend ordered by model; empty when
+	// the run recorded none.
+	ModelUsage []RunModelUsage
+}
+
+// RunModelUsage is one model's part of a finished run's spend.
+type RunModelUsage struct {
+	// Model is the model name as recorded; empty when the agent reported none.
+	Model string
+	// Tokens.TotalTokens is InputTokens plus OutputTokens, as for a run.
+	Tokens domain.TokenUsage
+	// EstimatedCostUSD and CostStatus are the cost recorded for the part.
+	// CostStatus is empty when the part was recorded without a price.
+	EstimatedCostUSD *float64
+	CostStatus       string
+	// UnratedClasses names the token classes that had no rate; empty when
+	// none did or when UnratedRecorded is false.
+	UnratedClasses []string
+	// UnratedRecorded is false for a part recorded without a price or priced
+	// before the classes were recorded.
+	UnratedRecorded bool
 }
 
 // RunHistoryQuery selects completed runs; a zero field matches every run.

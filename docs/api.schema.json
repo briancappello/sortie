@@ -546,6 +546,9 @@
     },
     "ChainGroup": {
       "properties": {
+        "cost_partial_runs": {
+          "type": "integer"
+        },
         "cost_per_succeeded_run_usd": {
           "anyOf": [
             {
@@ -643,6 +646,7 @@
         "cost_per_succeeded_run_usd",
         "tokens_unmeasured_runs",
         "cost_unpriced_runs",
+        "cost_partial_runs",
         "issue",
         "stages",
         "last_hop"
@@ -932,6 +936,9 @@
     },
     "Group": {
       "properties": {
+        "cost_partial_runs": {
+          "type": "integer"
+        },
         "cost_per_succeeded_run_usd": {
           "anyOf": [
             {
@@ -1009,7 +1016,8 @@
         "cost_usd",
         "cost_per_succeeded_run_usd",
         "tokens_unmeasured_runs",
-        "cost_unpriced_runs"
+        "cost_unpriced_runs",
+        "cost_partial_runs"
       ],
       "type": "object"
     },
@@ -1613,6 +1621,54 @@
       "required": [
         "chain",
         "rule"
+      ],
+      "type": "object"
+    },
+    "ModelUsageResponse": {
+      "properties": {
+        "cost_status": {
+          "type": "string"
+        },
+        "estimated_cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "tokens": {
+          "$ref": "#/$defs/TokenInfo"
+        },
+        "uncached_tokens": {
+          "type": "integer"
+        },
+        "unrated_classes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "tokens",
+        "uncached_tokens",
+        "estimated_cost_usd",
+        "cost_status",
+        "unrated_classes"
       ],
       "type": "object"
     },
@@ -2690,6 +2746,19 @@
         "model_name": {
           "type": "string"
         },
+        "model_usage": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ModelUsageResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "origin_recorded": {
           "type": "boolean"
         },
@@ -2854,6 +2923,7 @@
         "session_id",
         "ssh_host",
         "dispatch_id",
+        "model_usage",
         "stage_chain",
         "issue_outcome",
         "pr_loop"
@@ -4499,6 +4569,9 @@
         "cancelled": {
           "type": "integer"
         },
+        "cost_partial_runs": {
+          "type": "integer"
+        },
         "cost_per_succeeded_run_usd": {
           "anyOf": [
             {
@@ -4589,6 +4662,7 @@
         "zero_duration_runs",
         "duration_excluded_runs",
         "cost_unpriced_runs",
+        "cost_partial_runs",
         "tokens_unmeasured_runs"
       ],
       "type": "object"

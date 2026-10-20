@@ -2,6 +2,7 @@ package server
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
@@ -204,6 +205,52 @@ func TestHistoryTotalsOf(t *testing.T) {
 
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("historyTotalsOf(%+v) = %v, want %v", tt.in, jsonObject(t, got), jsonObject(t, tt.want))
+			}
+		})
+	}
+}
+
+func TestToRunResponseModelUsage(t *testing.T) {
+	t.Parallel()
+
+	spend := domain.TokenUsage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CacheReadTokens: 40, CacheWriteTokens: 7}
+	const spendJSON = `{"input_tokens":100,"output_tokens":50,"total_tokens":150,"cache_read_tokens":40,"cache_write_tokens":7}`
+
+	tests := []struct {
+		name  string
+		parts []RunModelUsage
+		want  string
+	}{
+		{"no part", nil, `[]`},
+		{
+			"part recorded without a price",
+			[]RunModelUsage{{Model: "model-a", Tokens: spend}},
+			`[{"model":"model-a","tokens":` + spendJSON + `,"uncached_tokens":110,"estimated_cost_usd":null,"cost_status":"unpriced","unrated_classes":null}]`,
+		},
+		{
+			"priced part with no unrated class recorded",
+			[]RunModelUsage{{Model: "model-a", Tokens: spend, EstimatedCostUSD: new(1.5), CostStatus: "estimated", UnratedRecorded: true}},
+			`[{"model":"model-a","tokens":` + spendJSON + `,"uncached_tokens":110,"estimated_cost_usd":1.5,"cost_status":"estimated","unrated_classes":[]}]`,
+		},
+		{
+			"partial part with an unrated class",
+			[]RunModelUsage{{Model: "model-b", Tokens: spend, EstimatedCostUSD: new(0.2), CostStatus: "partial", UnratedClasses: []string{"cache_write"}, UnratedRecorded: true}},
+			`[{"model":"model-b","tokens":` + spendJSON + `,"uncached_tokens":110,"estimated_cost_usd":0.2,"cost_status":"partial","unrated_classes":["cache_write"]}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp := toRunResponse(RunHistoryEntry{ID: 1, ModelUsage: tt.parts}, nil)
+
+			got, err := json.Marshal(resp.ModelUsage)
+			if err != nil {
+				t.Fatalf("json.Marshal(model_usage): %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("toRunResponse(%q).model_usage = %s, want %s", tt.name, got, tt.want)
 			}
 		})
 	}

@@ -65,26 +65,63 @@ func appendWithPartsOrFatal(t *testing.T, s *Store, run RunHistory) RunHistory {
 
 func queryModelUsage(t *testing.T, s *Store, runID int64) map[string]ModelTokens {
 	t.Helper()
-	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM run_model_usage WHERE run_id = ?`, runID)
+	got, err := s.QueryRunModelUsage(context.Background(), []int64{runID})
 	if err != nil {
-		t.Fatalf("query run_model_usage for run %d: %v", runID, err)
+		t.Fatalf("QueryRunModelUsage(%d): %v", runID, err)
 	}
-	defer rows.Close() //nolint:errcheck // test helper
 
 	parts := map[string]ModelTokens{}
-	for rows.Next() {
-		var model string
-		var tokens ModelTokens
-		if err := rows.Scan(&model, &tokens.InputTokens, &tokens.OutputTokens, &tokens.CacheReadTokens, &tokens.CacheWriteTokens); err != nil {
-			t.Fatalf("scan run_model_usage: %v", err)
-		}
-		parts[model] = tokens
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate run_model_usage: %v", err)
+	for _, part := range got[runID] {
+		parts[part.Model] = part.Tokens
 	}
 	return parts
+}
+
+func TestQueryRunModelUsage(t *testing.T) {
+	t.Parallel()
+
+	usage := map[string]ModelTokens{"m": {InputTokens: 10, OutputTokens: 5}}
+	part := RunModelPart{Model: "m", Tokens: usage["m"]}
+	classes := []string{"output", "cache_write"}
+
+	tests := []struct {
+		name  string
+		usage map[string]ModelTokens
+		costs map[string]ModelCost
+		want  []RunModelPart
+	}{
+		{"classes read back in order", usage, map[string]ModelCost{"m": {CostStatus: "partial", UnratedClasses: classes}},
+			[]RunModelPart{{Model: "m", Tokens: usage["m"], CostStatus: "partial", UnratedClasses: classes, UnratedRecorded: true}}},
+		{"status without classes reads recorded-empty", usage, map[string]ModelCost{"m": {CostStatus: "estimated"}},
+			[]RunModelPart{{Model: "m", Tokens: usage["m"], CostStatus: "estimated", UnratedRecorded: true}}},
+		{"no status reads not recorded", usage, map[string]ModelCost{"m": {UnratedClasses: classes}}, []RunModelPart{part}},
+		{"run without parts has no key", nil, nil, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			run := newTestRun(1)
+			run.ModelUsage, run.ModelCosts = tt.usage, tt.costs
+			inserted := appendWithPartsOrFatal(t, s, run)
+			want := map[int64][]RunModelPart{}
+			if tt.want != nil {
+				want[inserted.ID] = tt.want
+			}
+
+			got, err := s.QueryRunModelUsage(context.Background(), []int64{inserted.ID})
+			if err != nil {
+				t.Fatalf("QueryRunModelUsage(%d): %v", inserted.ID, err)
+			}
+
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("QueryRunModelUsage(%d) = %+v, want %+v", inserted.ID, got, want)
+			}
+		})
+	}
 }
 
 // TestRunHistoryTokenColumns_RoundTrip reads one row back through every

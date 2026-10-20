@@ -86,6 +86,7 @@ func modelCosts(prices map[string]pricing.PartPrice) map[string]persistence.Mode
 			CostStatus:        string(price.Status),
 			PriceSource:       string(price.Source),
 			PriceTableVersion: price.TableVersion,
+			UnratedClasses:    price.UnratedNames(),
 		}
 	}
 	return costs

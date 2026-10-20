@@ -166,6 +166,7 @@ type groupAccum struct {
 	costUSD           float64
 	pricedRuns        int
 	costUnpricedRuns  int
+	costPartialRuns   int
 	measuredRuns      int
 	unmeasuredRuns    int
 	succeededMeasured int
@@ -194,6 +195,7 @@ type totalAccum struct {
 	costUSD              float64
 	pricedRuns           int
 	costUnpricedRuns     int
+	costPartialRuns      int
 	measuredRuns         int
 	unmeasuredRuns       int
 	succeededMeasured    int
@@ -498,6 +500,13 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 					}
 				}
 			}
+
+			if a.caps.RecordedCost() && row.Status != "ci_failed" && row.CostStatus == "partial" {
+				a.total.costPartialRuns++
+				for _, g := range bumped {
+					g.costPartialRuns++
+				}
+			}
 		}
 
 		if row.ReviewMetadata != nil {
@@ -664,6 +673,7 @@ func (a *Aggregator) summary(full bool) Summary {
 		ZeroDurationRuns:     a.total.zeroDurationRuns,
 		DurationExcludedRuns: a.total.durationExcludedRuns,
 		CostUnpricedRuns:     a.total.costUnpricedRuns,
+		CostPartialRuns:      a.total.costPartialRuns,
 	}
 	if s.Runs > 0 {
 		s.SuccessRate = round4(float64(s.Succeeded) / float64(s.Runs))
@@ -718,6 +728,7 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 		stat.MeanTurns = new(round2(float64(g.turnSum) / float64(g.runs)))
 		stat.TokensUnmeasuredRuns = g.unmeasuredRuns
 		stat.CostUnpricedRuns = g.costUnpricedRuns
+		stat.CostPartialRuns = g.costPartialRuns
 		if g.measuredRuns > 0 {
 			stat.Tokens = new(withUncached(g.tokens))
 		}

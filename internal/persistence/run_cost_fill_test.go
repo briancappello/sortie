@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -36,7 +37,7 @@ func readCostState(t *testing.T, s *Store) costState {
 	}
 
 	parts, err := s.db.QueryContext(context.Background(),
-		`SELECT run_id, model, estimated_cost_usd, cost_status, price_source, price_table_version FROM run_model_usage`)
+		`SELECT run_id, model, estimated_cost_usd, cost_status, price_source, price_table_version, unrated_classes FROM run_model_usage`)
 	if err != nil {
 		t.Fatalf("query part costs: %v", err)
 	}
@@ -45,14 +46,21 @@ func readCostState(t *testing.T, s *Store) costState {
 		var id int64
 		var model, source, version string
 		var cost sql.NullFloat64
-		var status sql.NullString
-		if err := parts.Scan(&id, &model, &cost, &status, &source, &version); err != nil {
+		var status, unrated sql.NullString
+		if err := parts.Scan(&id, &model, &cost, &status, &source, &version, &unrated); err != nil {
 			t.Fatalf("scan part cost: %v", err)
 		}
 		if state.Parts[id] == nil {
 			state.Parts[id] = map[string]ModelCost{}
 		}
-		state.Parts[id][model] = ModelCost{EstimatedCostUSD: floatPtr(cost), CostStatus: status.String, PriceSource: source, PriceTableVersion: version}
+		part := ModelCost{EstimatedCostUSD: floatPtr(cost), CostStatus: status.String, PriceSource: source, PriceTableVersion: version}
+		if unrated.Valid {
+			part.UnratedClasses = []string{}
+			if unrated.String != "" {
+				part.UnratedClasses = strings.Split(unrated.String, ",")
+			}
+		}
+		state.Parts[id][model] = part
 	}
 	if err := parts.Err(); err != nil {
 		t.Fatalf("iterate part costs: %v", err)
@@ -68,7 +76,7 @@ func floatPtr(v sql.NullFloat64) *float64 {
 }
 
 func operatorCost(v float64) ModelCost {
-	return ModelCost{EstimatedCostUSD: &v, CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: "v1"}
+	return ModelCost{EstimatedCostUSD: &v, CostStatus: "estimated", PriceSource: "operator", PriceTableVersion: "v1", UnratedClasses: []string{}}
 }
 
 func TestRecordUnrecordedRunCosts(t *testing.T) {
@@ -76,6 +84,8 @@ func TestRecordUnrecordedRunCosts(t *testing.T) {
 
 	partsA := map[string]ModelTokens{"a": {InputTokens: 1_000_000, CacheReadTokens: 2_000_000}, "b": {InputTokens: 3_000_000, OutputTokens: 1_000_000}}
 	partS := map[string]ModelTokens{"m1": {InputTokens: 1_000_000, OutputTokens: 1_000_000}}
+	recordedPart := ModelCost{EstimatedCostUSD: new(5.0), CostStatus: "partial", PriceSource: "operator", PriceTableVersion: "v0", UnratedClasses: []string{"input"}}
+	pricedPart := ModelCost{EstimatedCostUSD: new(16.0), CostStatus: "partial", PriceSource: "operator", PriceTableVersion: "v1", UnratedClasses: []string{"cache_read", "cache_write"}}
 
 	t.Run("records NULL-status rows only and a second fill records none", func(t *testing.T) {
 		t.Parallel()
@@ -92,6 +102,7 @@ func TestRecordUnrecordedRunCosts(t *testing.T) {
 		withParts := newTestRun(2)
 		withParts.TokensMeasured, withParts.TotalTokens = true, 7_000_000
 		withParts.ModelUsage = partsA
+		withParts.ModelCosts = map[string]ModelCost{"a": recordedPart}
 		withPartsRun := appendWithPartsOrFatal(t, s, withParts)
 
 		bare := newTestRun(3)
@@ -105,7 +116,7 @@ func TestRecordUnrecordedRunCosts(t *testing.T) {
 			switch run.ID {
 			case withPartsRun.ID:
 				return RunCostRecord{EstimatedCostUSD: new(15.0), CostStatus: "estimated", PartCosts: map[string]ModelCost{
-					"a": operatorCost(1), "b": operatorCost(16),
+					"a": operatorCost(1), "b": pricedPart,
 				}}
 			case bareRun.ID:
 				return RunCostRecord{EstimatedCostUSD: new(12.0), CostStatus: "estimated", NewParts: partS,
@@ -138,7 +149,7 @@ func TestRecordUnrecordedRunCosts(t *testing.T) {
 			t.Errorf("recorded run %d changed: got %+v %+v, want %+v %+v",
 				recordedRun.ID, after.Runs[recordedRun.ID], after.Parts[recordedRun.ID], before.Runs[recordedRun.ID], before.Parts[recordedRun.ID])
 		}
-		wantParts := map[string]ModelCost{"a": operatorCost(1), "b": operatorCost(16)}
+		wantParts := map[string]ModelCost{"a": recordedPart, "b": pricedPart}
 		if !reflect.DeepEqual(after.Parts[withPartsRun.ID], wantParts) {
 			t.Errorf("parts of run %d = %+v, want %+v", withPartsRun.ID, after.Parts[withPartsRun.ID], wantParts)
 		}

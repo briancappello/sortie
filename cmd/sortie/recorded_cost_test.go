@@ -68,7 +68,7 @@ func TestRecordedCostOf(t *testing.T) {
 		{"kind without an entry records unpriced run and part", spentRun("u", "m1"), persistence.RunCostRecord{
 			CostStatus: "unpriced",
 			NewParts:   map[string]persistence.ModelTokens{"m1": spent},
-			PartCosts:  map[string]persistence.ModelCost{"m1": {CostStatus: "unpriced"}},
+			PartCosts:  map[string]persistence.ModelCost{"m1": {CostStatus: "unpriced", UnratedClasses: []string{"input", "output"}}},
 		}},
 		{"spent nothing gets no part", measured, persistence.RunCostRecord{EstimatedCostUSD: new(0.0), CostStatus: "estimated"}},
 		{"only total_tokens gets no part", totalOnly, persistence.RunCostRecord{CostStatus: "unpriced"}},

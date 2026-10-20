@@ -43,6 +43,24 @@ type ModelCost struct {
 	CostStatus        string
 	PriceSource       string
 	PriceTableVersion string
+
+	// UnratedClasses names the token classes that had no rate. An empty
+	// CostStatus writes NULL for it whatever it holds, so an unpriced part
+	// reads as not recorded.
+	UnratedClasses []string
+}
+
+// RunModelPart is one run_model_usage row as read.
+type RunModelPart struct {
+	Model            string
+	Tokens           ModelTokens
+	EstimatedCostUSD *float64 // nil when NULL
+	CostStatus       string   // "" when NULL
+
+	// UnratedRecorded is false when unrated_classes is NULL; UnratedClasses
+	// is nil when it is NULL or empty.
+	UnratedClasses  []string
+	UnratedRecorded bool
 }
 
 // ResumeUsage is the usage figure an agent runtime kept for a session, which
@@ -207,6 +225,14 @@ func nullIfEmpty(v string) sql.NullString {
 	return sql.NullString{String: v, Valid: v != ""}
 }
 
+// unratedColumn encodes cost's unrated classes for the unrated_classes column.
+func unratedColumn(cost ModelCost) sql.NullString {
+	if cost.CostStatus == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: strings.Join(cost.UnratedClasses, ","), Valid: true}
+}
+
 // insertRunModelUsage inserts one run_model_usage row per part for runID.
 func insertRunModelUsage(ctx context.Context, ex statementExecer, runID int64, parts map[string]ModelTokens, costs map[string]ModelCost) error {
 	for model, tokens := range parts {
@@ -214,15 +240,68 @@ func insertRunModelUsage(ctx context.Context, ex statementExecer, runID int64, p
 		if _, err := ex.ExecContext(ctx,
 			`INSERT INTO run_model_usage
 				(run_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-				 estimated_cost_usd, cost_status, price_source, price_table_version)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 estimated_cost_usd, cost_status, price_source, price_table_version, unrated_classes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			runID, model, tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheWriteTokens,
 			nullFloat(cost.EstimatedCostUSD), nullIfEmpty(cost.CostStatus), cost.PriceSource, cost.PriceTableVersion,
+			unratedColumn(cost),
 		); err != nil {
 			return fmt.Errorf("append run model usage for run %d model %q: %w", runID, model, err)
 		}
 	}
 	return nil
+}
+
+// QueryRunModelUsage returns the run_model_usage rows of runIDs keyed by run
+// ID, each run's rows ordered by model; a run without rows has no key. It
+// holds one statement and closes it before returning, so callers pass one
+// page of IDs after their own read has closed.
+func (s *Store) QueryRunModelUsage(ctx context.Context, runIDs []int64) (map[int64][]RunModelPart, error) {
+	parts := make(map[int64][]RunModelPart)
+	if len(runIDs) == 0 {
+		return parts, nil
+	}
+
+	args := make([]any, len(runIDs))
+	for i, id := range runIDs {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(runIDs); values remain bound parameters
+		`SELECT run_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+			estimated_cost_usd, cost_status, unrated_classes
+		FROM run_model_usage
+		WHERE run_id IN (%s)
+		ORDER BY run_id, model`, placeholders)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query run model usage: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+
+	for rows.Next() {
+		var runID int64
+		var part RunModelPart
+		var cost sql.NullFloat64
+		var status, unrated sql.NullString
+		if err := rows.Scan(&runID, &part.Model, &part.Tokens.InputTokens, &part.Tokens.OutputTokens,
+			&part.Tokens.CacheReadTokens, &part.Tokens.CacheWriteTokens, &cost, &status, &unrated); err != nil {
+			return nil, fmt.Errorf("scan run model usage: %w", err)
+		}
+		if cost.Valid {
+			part.EstimatedCostUSD = &cost.Float64
+		}
+		part.CostStatus = status.String
+		part.UnratedRecorded = unrated.Valid
+		if unrated.String != "" {
+			part.UnratedClasses = strings.Split(unrated.String, ",")
+		}
+		parts[runID] = append(parts[runID], part)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query run model usage: %w", err)
+	}
+	return parts, nil
 }
 
 // insertRunHistory inserts run through ex, so the plain append and the

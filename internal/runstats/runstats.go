@@ -36,7 +36,8 @@ type Report struct {
 // Tokens, CostUSD, and CostPerSucceededRunUSD are null on the base
 // schema tier; CostUSD and CostPerSucceededRunUSD are also null when
 // no run that spent tokens is priced in range. Succeeded, Failed, Stopped,
-// and Cancelled add up to Runs.
+// and Cancelled add up to Runs. CostUSD is the whole spend only while
+// CostUnpricedRuns, CostPartialRuns, and TokensUnmeasuredRuns are all 0.
 type Summary struct {
 	Runs                   int      `json:"runs"`
 	Issues                 int      `json:"issues"`
@@ -53,6 +54,7 @@ type Summary struct {
 	ZeroDurationRuns       int      `json:"zero_duration_runs"`
 	DurationExcludedRuns   int      `json:"duration_excluded_runs"`
 	CostUnpricedRuns       int      `json:"cost_unpriced_runs"`
+	CostPartialRuns        int      `json:"cost_partial_runs"`
 	TokensUnmeasuredRuns   int      `json:"tokens_unmeasured_runs"`
 }
 
@@ -86,7 +88,9 @@ type Tokens struct {
 // equal to Runs. CostUnpricedRuns counts the group's measured runs, other
 // than ci_failed, that spent tokens and recorded no cost; it is 0 on the
 // base tier and on a database that records no cost, and CostUSD leaves
-// those runs out.
+// those runs out. CostPartialRuns counts the group's runs, other than
+// ci_failed, whose recorded cost is a lower bound; CostUSD includes them at
+// that bound. A run counts in at most one of the two.
 type Group struct {
 	Name                   string   `json:"name"`
 	Runs                   int      `json:"runs"`
@@ -100,6 +104,7 @@ type Group struct {
 	CostPerSucceededRunUSD *float64 `json:"cost_per_succeeded_run_usd"`
 	TokensUnmeasuredRuns   int      `json:"tokens_unmeasured_runs"`
 	CostUnpricedRuns       int      `json:"cost_unpriced_runs"`
+	CostPartialRuns        int      `json:"cost_partial_runs"`
 }
 
 // ChainGroup is one by_chain entry; Name is the chain identifier.

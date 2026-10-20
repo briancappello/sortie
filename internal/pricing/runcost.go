@@ -1,6 +1,11 @@
 package pricing
 
-import "github.com/sortie-ai/sortie/internal/domain"
+import (
+	"cmp"
+	"slices"
+
+	"github.com/sortie-ai/sortie/internal/domain"
+)
 
 // CostStatus says how far a cost figure can be trusted.
 type CostStatus string
@@ -58,6 +63,32 @@ type Spend struct {
 	UnaccountedTurns int
 }
 
+// TokenClass names a class of tokens a rate prices.
+type TokenClass string
+
+const (
+	// ClassInput is fresh input, which excludes cache reads and writes.
+	ClassInput TokenClass = "input"
+
+	// ClassOutput is generated tokens.
+	ClassOutput TokenClass = "output"
+
+	// ClassCacheRead is input served from the prompt cache.
+	ClassCacheRead TokenClass = "cache_read"
+
+	// ClassCacheWrite is input written to the prompt cache.
+	ClassCacheWrite TokenClass = "cache_write"
+)
+
+// tokenClasses lists the classes in the order [PartPrice.Unrated] reports
+// them, indexed by rate class.
+var tokenClasses = [rateClasses]TokenClass{
+	rateInput:      ClassInput,
+	rateOutput:     ClassOutput,
+	rateCacheRead:  ClassCacheRead,
+	rateCacheWrite: ClassCacheWrite,
+}
+
 // PartPrice is the price of one model's share of a run.
 type PartPrice struct {
 	CostUSD *float64
@@ -71,6 +102,21 @@ type PartPrice struct {
 	// TableVersion is the version of the rates that priced the part, empty
 	// when Source is empty.
 	TableVersion string
+
+	// Unrated lists the classes whose missing rate left the part partial or
+	// unpriced, in the order input, output, cache_read, cache_write; nil when
+	// none.
+	Unrated []TokenClass
+}
+
+// UnratedNames returns [PartPrice.Unrated] as the strings persistence stores;
+// nil when none.
+func (p PartPrice) UnratedNames() []string {
+	var names []string
+	for _, class := range p.Unrated {
+		names = append(names, string(class))
+	}
+	return names
 }
 
 // Price is the cost of a finished run and of each of its parts.
@@ -125,9 +171,12 @@ func PriceRun(s Spend, r *Rates) Price {
 func priceRunByKind(s Spend, r *Rates, status CostStatus) Price {
 	entry, priceable := completeEntry(r, s.Kind)
 	if !priceable {
+		unrated := unratedByEntry(entry)
 		return Price{
 			Status: CostUnpriced,
-			Parts:  partPrices(s.Parts, func(domain.TokenUsage) PartPrice { return PartPrice{Status: CostUnpriced} }),
+			Parts: partPrices(s.Parts, func(domain.TokenUsage) PartPrice {
+				return PartPrice{Status: CostUnpriced, Unrated: slices.Clone(unrated)}
+			}),
 		}
 	}
 
@@ -232,9 +281,6 @@ func pricePart(usage domain.TokenUsage, res *resolution) PartPrice {
 		}
 		return part
 	}
-	if res == nil {
-		return PartPrice{Status: CostUnpriced}
-	}
 
 	tokens := [rateClasses]int64{
 		rateInput:      max(usage.InputTokens-usage.CacheReadTokens-usage.CacheWriteTokens, 0),
@@ -243,26 +289,50 @@ func pricePart(usage domain.TokenUsage, res *resolution) PartPrice {
 		rateCacheWrite: usage.CacheWriteTokens,
 	}
 	var cost float64
-	priced, missing := false, false
+	var unrated [rateClasses]bool
+	priced := false
 	for _, class := range [...]int{rateInput, rateCacheRead, rateCacheWrite, rateOutput} {
 		if tokens[class] <= 0 {
 			continue
 		}
-		if res.perToken[class] == nil {
-			missing = true
+		if res == nil || res.perToken[class] == nil {
+			unrated[class] = true
 			continue
 		}
 		cost += float64(tokens[class]) * *res.perToken[class]
 		priced = true
 	}
+	var missing []TokenClass
+	for class, isUnrated := range unrated {
+		if isUnrated {
+			missing = append(missing, tokenClasses[class])
+		}
+	}
 	if !priced {
-		return PartPrice{Status: CostUnpriced}
+		return PartPrice{Status: CostUnpriced, Unrated: missing}
 	}
 	status := CostEstimated
-	if missing {
+	if missing != nil {
 		status = CostPartial
 	}
-	return PartPrice{CostUSD: &cost, Status: status, Source: res.source, TableVersion: res.version}
+	return PartPrice{CostUSD: &cost, Status: status, Source: res.source, TableVersion: res.version, Unrated: missing}
+}
+
+// unratedByEntry lists the classes entry gives no rate, after an unset cache
+// rate falls back to the input rate as [EstimateCost] prices it.
+func unratedByEntry(entry TokenRateConfig) []TokenClass {
+	var unrated []TokenClass
+	for class, rate := range [rateClasses]*float64{
+		rateInput:      entry.InputPerMtok,
+		rateOutput:     entry.OutputPerMtok,
+		rateCacheRead:  cmp.Or(entry.CacheReadPerMtok, entry.InputPerMtok),
+		rateCacheWrite: cmp.Or(entry.CacheWritePerMtok, entry.InputPerMtok),
+	} {
+		if rate == nil {
+			unrated = append(unrated, tokenClasses[class])
+		}
+	}
+	return unrated
 }
 
 func completeEntry(r *Rates, kind string) (TokenRateConfig, bool) {

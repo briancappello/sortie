@@ -81,6 +81,9 @@ type runResponse struct {
 	// before the dispatch ID existed.
 	DispatchID *string `json:"dispatch_id"`
 
+	// ModelUsage is the run's cost per model; [] when the run recorded none.
+	ModelUsage []modelUsageResponse `json:"model_usage"`
+
 	// StageChain is the chain the run's rule stood on; null when the run has
 	// no rule, its rule is on no chain, or no workflow shape is held.
 	StageChain []string `json:"stage_chain"`
@@ -92,6 +95,17 @@ type runResponse struct {
 	// run's pass; null on the runs the per-issue history and the issue
 	// groups serve, and when the server holds no workflow shape.
 	PRLoop map[string]prLoopStationResponse `json:"pr_loop"`
+}
+
+// modelUsageResponse is one model's part of a finished run's spend.
+// UnratedClasses is null for a part recorded without its unrated classes.
+type modelUsageResponse struct {
+	Model            string    `json:"model"`
+	Tokens           tokenInfo `json:"tokens"`
+	UncachedTokens   int64     `json:"uncached_tokens"`
+	EstimatedCostUSD *float64  `json:"estimated_cost_usd"`
+	CostStatus       string    `json:"cost_status"`
+	UnratedClasses   []string  `json:"unrated_classes"`
 }
 
 // issueOutcomeResponse is how an issue's latest work ended. State is present
@@ -273,6 +287,7 @@ func toRunResponse(e RunHistoryEntry, chains [][]string) runResponse {
 		OriginRecorded:       e.OriginRecorded,
 		StageChain:           orchestrator.StageChainOf(chains, e.RuleName, e.StagePrevious),
 		DispatchID:           copyText(e.DispatchID),
+		ModelUsage:           toModelUsageResponses(e.ModelUsage),
 	}
 	if e.Error != nil {
 		resp.Error = new(redact.Mask(sentence.RunError(*e.Error)))
@@ -300,6 +315,30 @@ func toRunResponse(e RunHistoryEntry, chains [][]string) runResponse {
 		resp.SSHHost = new(e.SSHHost)
 	}
 	return resp
+}
+
+// toModelUsageResponses converts a run's parts to their wire format; it
+// returns an empty slice, never nil, so the member serves [] and not null.
+func toModelUsageResponses(parts []RunModelUsage) []modelUsageResponse {
+	out := make([]modelUsageResponse, len(parts))
+	for i, p := range parts {
+		out[i] = modelUsageResponse{
+			Model: p.Model,
+			Tokens: tokenInfo{
+				InputTokens:      new(p.Tokens.InputTokens),
+				OutputTokens:     new(p.Tokens.OutputTokens),
+				TotalTokens:      new(p.Tokens.TotalTokens),
+				CacheReadTokens:  new(p.Tokens.CacheReadTokens),
+				CacheWriteTokens: new(p.Tokens.CacheWriteTokens),
+			},
+			UncachedTokens: p.Tokens.Uncached(),
+		}
+		out[i].EstimatedCostUSD, out[i].CostStatus = servedCost(p.EstimatedCostUSD, p.CostStatus)
+		if p.UnratedRecorded {
+			out[i].UnratedClasses = append([]string{}, p.UnratedClasses...)
+		}
+	}
+	return out
 }
 
 // copyText returns a pointer to a copy of *s, or nil for nil.
