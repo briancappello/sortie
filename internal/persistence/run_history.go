@@ -1378,6 +1378,58 @@ func (s *Store) UsageCompletedBetween(ctx context.Context, since, until time.Tim
 	return usage, nil
 }
 
+// ModelUse is the use of one model under one agent kind across recorded runs.
+type ModelUse struct {
+	AgentKind string
+	// Model is possibly empty.
+	Model string
+	// LastUsedAt is the latest completed_at of the runs, zero when none parses.
+	LastUsedAt time.Time
+	// Runs counts the runs that have a run_model_usage row for the pair.
+	Runs int
+}
+
+// ListModelUse returns one element per distinct agent kind and model pair
+// over every run_model_usage row, in no defined order. LastUsedAt compares
+// completed_at as an instant, so differing UTC offsets order correctly. It
+// scans both tables, so its cost grows with history. Returns an empty slice
+// (not nil) when none exist.
+func (s *Store) ListModelUse(ctx context.Context) ([]ModelUse, error) {
+	// With one max() aggregate SQLite fills the bare completed_at column from
+	// the row that holds the maximum, which keeps the stored text, and its
+	// nanoseconds, for the instant the comparison picked.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT run_history.agent_adapter, run_model_usage.model, COUNT(*),
+			max(unixepoch(run_history.completed_at, 'subsec')), run_history.completed_at
+		FROM run_model_usage
+		JOIN run_history ON run_history.id = run_model_usage.run_id
+		GROUP BY run_history.agent_adapter, run_model_usage.model`)
+	if err != nil {
+		return nil, fmt.Errorf("list model use: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+
+	uses := []ModelUse{}
+	for rows.Next() {
+		var use ModelUse
+		var latestEpoch sql.NullFloat64
+		var latestText string
+		if err := rows.Scan(&use.AgentKind, &use.Model, &use.Runs, &latestEpoch, &latestText); err != nil {
+			return nil, fmt.Errorf("scan model use: %w", err)
+		}
+		if latestEpoch.Valid {
+			if at, err := time.Parse(time.RFC3339Nano, latestText); err == nil {
+				use.LastUsedAt = at.UTC()
+			}
+		}
+		uses = append(uses, use)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list model use: %w", err)
+	}
+	return uses, nil
+}
+
 // ListReportedModels returns each distinct non-empty model a run reported or
 // spent tokens on: the reported_model values of run_history and the model
 // values of run_model_usage, each name once, in no defined order. It scans

@@ -2,7 +2,9 @@ package pricing
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -106,11 +108,12 @@ func (r *Rates) Entries() []Entry {
 
 // priceTableSettings is the price_table section after its defaults.
 type priceTableSettings struct {
-	embedded    bool
-	fetch       bool
-	fetchURL    string
-	replaceFile string
-	replaceURL  string
+	embedded     bool
+	fetch        bool
+	fetchFromEnv bool
+	fetchURL     string
+	replaceFile  string
+	replaceURL   string
 }
 
 // downloads lists the tables the settings name, the shared one first.
@@ -210,7 +213,12 @@ func (r *Rates) WithDownloaded(downloaded func(Download) *Table) *Rates {
 }
 
 func readPriceTableSettings(cfg config.ServiceConfig) (priceTableSettings, error) {
-	settings := priceTableSettings{embedded: true, fetch: true, fetchURL: DefaultFetchURL}
+	settings := priceTableSettings{
+		embedded:     true,
+		fetch:        true,
+		fetchFromEnv: cfg.SetFromEnvironment("price_table.fetch"),
+		fetchURL:     DefaultFetchURL,
+	}
 	raw, _ := cfg.ExtensionValue("price_table")
 	if raw == nil {
 		return settings, nil
@@ -316,16 +324,25 @@ func loadOperatorTable(replaceFile string, in LoadInput) (*Table, error) {
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // the operator names this table file in their own workflow
 	if err != nil {
-		return nil, replaceFileError(err.Error())
+		return nil, replaceFileError(fmt.Sprintf("%s: %v", replaceFile, withoutPath(err)))
 	}
 	table, err := ParseTable(data, nil)
 	if err != nil {
-		return nil, replaceFileError(fmt.Sprintf("%s: %v", path, err))
+		return nil, replaceFileError(fmt.Sprintf("%s: %v", replaceFile, err))
 	}
 	if kept := in.InForce.operatorTable(table.Version()); kept != nil {
 		return kept, nil
 	}
 	return table.withRevision(table.Version(), time.Now()), nil
+}
+
+// withoutPath returns the cause of a failed file operation without the path
+// it opened, because that path is resolved on the host.
+func withoutPath(err error) error {
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+		return pathErr.Err
+	}
+	return err
 }
 
 func replaceFileError(message string) *config.ConfigError {
@@ -451,7 +468,7 @@ func (r *Rates) resolve(model string) *resolution {
 		}
 	}
 
-	operator, hasOperator := r.operatorModelEntry(model, layer, row, listed)
+	operator, _, hasOperator := r.operatorModelEntry(model, layer, row, listed)
 	switch {
 	case !hasOperator && !listed:
 		return nil
@@ -496,10 +513,11 @@ func perToken(perMtok *float64) *float64 {
 // operatorModelEntry finds the model entry that applies to model: the one
 // keyed exactly so, else the one that maps to the same table entry, else,
 // for a name no layer lists, the one equal under the matching fold. Two
-// candidates at one step apply to nothing.
-func (r *Rates) operatorModelEntry(model string, layer int, row TableEntry, listed bool) (TokenRateConfig, bool) {
+// candidates at one step apply to nothing. It also returns the token_rates
+// key of the entry that applies.
+func (r *Rates) operatorModelEntry(model string, layer int, row TableEntry, listed bool) (TokenRateConfig, string, bool) {
 	if rates, ok := r.models[model]; ok {
-		return rates, true
+		return rates, model, true
 	}
 	var candidates []string
 	if listed {
@@ -508,7 +526,7 @@ func (r *Rates) operatorModelEntry(model string, layer int, row TableEntry, list
 		candidates = r.folded[fold(model)]
 	}
 	if len(candidates) != 1 {
-		return TokenRateConfig{}, false
+		return TokenRateConfig{}, "", false
 	}
-	return r.models[candidates[0]], true
+	return r.models[candidates[0]], candidates[0], true
 }

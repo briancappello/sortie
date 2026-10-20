@@ -235,6 +235,22 @@ func labelFixCommandActive(cfg config.ServiceConfig) bool {
 	return cfg.LabelCommands.Provider != "" && cfg.LabelCommands.FixLabel != ""
 }
 
+// modelUseSource serves the HTTP server's model usage from the store, so the
+// server needs no persistence import.
+func modelUseSource(store *persistence.Store) server.ModelUseFunc {
+	return func(ctx context.Context) ([]server.ModelUse, error) {
+		uses, err := store.ListModelUse(ctx)
+		if err != nil {
+			return nil, err
+		}
+		served := make([]server.ModelUse, 0, len(uses))
+		for _, use := range uses {
+			served = append(served, server.ModelUse(use))
+		}
+		return served, nil
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
@@ -938,6 +954,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			RunEventsFn:      o.RunEvents,
 			RunEventsAfterFn: o.RunEventsAfter,
 			Stats:            stats.report,
+
+			ModelUse:           modelUseSource(store),
+			ConfiguredModelsFn: o.ConfiguredModels,
+			RatesFn:            br.mgr.Rates,
+			PriceDownloads:     downloader,
+			WorkflowLoadFn:     br.mgr.LoadStatus,
+			MaskErrorFn:        o.MaskError,
 		})
 		o.AddObserver(srv)
 		br.mgr.SetLoadNotifier(srv.OnStateChange)

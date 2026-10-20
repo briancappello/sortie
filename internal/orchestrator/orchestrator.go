@@ -2187,14 +2187,26 @@ func (o *Orchestrator) ruleAgents(cfg config.ServiceConfig) map[string]RuleAgent
 	return agents
 }
 
-// configuredModels returns the distinct models of the settings blocks cfg
-// can resolve, "" included when a block configures none.
-func configuredModels(cfg config.ServiceConfig) []string {
-	var models []string
+// ConfiguredModel is the model one settings block of the workflow configures
+// for an agent kind.
+type ConfiguredModel struct {
+	AgentKind string
+	// Model is empty for a block that configures none.
+	Model string
+}
+
+// configuredModels returns the distinct agent kind and model pairs of the
+// settings blocks cfg can resolve, with an empty Model where a block
+// configures none.
+func configuredModels(cfg config.ServiceConfig) []ConfiguredModel {
+	var pairs []ConfiguredModel
 	add := func(selection config.SettingsSelection) {
-		model := config.ResolveAgentSettings(cfg, selection, "").Model
-		if !slices.Contains(models, model) {
-			models = append(models, model)
+		pair := ConfiguredModel{
+			AgentKind: selection.Kind,
+			Model:     config.ResolveAgentSettings(cfg, selection, "").Model,
+		}
+		if !slices.Contains(pairs, pair) {
+			pairs = append(pairs, pair)
 		}
 	}
 	for _, ref := range orderedUniqueAgentKinds(cfg) {
@@ -2205,14 +2217,35 @@ func configuredModels(cfg config.ServiceConfig) []string {
 			add(config.SettingsSelection{Kind: rule.SettingsKind, RuleName: rule.Name})
 		}
 	}
-	return models
+	return pairs
+}
+
+// ConfiguredModels returns the agent kind and model pairs of the workflow
+// configuration in effect that name a model, or nil without a workflow
+// manager. It reads no event-loop state, so any goroutine may call it.
+func (o *Orchestrator) ConfiguredModels() []ConfiguredModel {
+	if o.workflowManager == nil {
+		return nil
+	}
+	var named []ConfiguredModel
+	for _, pair := range configuredModels(o.workflowManager.Config()) {
+		if pair.Model != "" {
+			named = append(named, pair)
+		}
+	}
+	return named
 }
 
 // prepareConfiguredModels exports zero series for every model cfg
 // configures, so rate() and increase() count each model's first sample.
 func (o *Orchestrator) prepareConfiguredModels(cfg config.ServiceConfig) {
-	for _, model := range configuredModels(cfg) {
-		o.metrics.PrepareModel(model)
+	var prepared []string
+	for _, pair := range configuredModels(cfg) {
+		if slices.Contains(prepared, pair.Model) {
+			continue
+		}
+		prepared = append(prepared, pair.Model)
+		o.metrics.PrepareModel(pair.Model)
 	}
 }
 

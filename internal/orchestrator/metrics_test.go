@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"log/slog"
 	"maps"
@@ -290,19 +291,20 @@ func TestMetricModel(t *testing.T) {
 func TestConfiguredModels(t *testing.T) {
 	t.Parallel()
 
-	ruleModel := func(model string) config.DispatchRule {
-		return config.DispatchRule{Name: "r", SettingsKind: "kind-a", Settings: map[string]any{"model": model}}
+	ruleModel := func(kind, model string) config.DispatchRule {
+		return config.DispatchRule{Name: "r", SettingsKind: kind, Settings: map[string]any{"model": model}}
 	}
 	tests := []struct {
 		name     string
 		topLevel map[string]any
 		rules    []config.DispatchRule
-		want     []string
+		want     []ConfiguredModel
 	}{
-		{name: "kind block model", topLevel: map[string]any{"model": "m-kind"}, want: []string{"m-kind"}},
-		{name: "rule settings model", topLevel: map[string]any{"model": "m-kind"}, rules: []config.DispatchRule{ruleModel("m-rule")}, want: []string{"m-kind", "m-rule"}},
-		{name: "block without a model", want: []string{""}},
-		{name: "model shared by two blocks", topLevel: map[string]any{"model": "m"}, rules: []config.DispatchRule{ruleModel("m")}, want: []string{"m"}},
+		{name: "top-level kind block without dispatch", topLevel: map[string]any{"model": "m-kind"}, want: []ConfiguredModel{{"kind-a", "m-kind"}}},
+		{name: "rule model under its own kind", topLevel: map[string]any{"model": "m-kind"}, rules: []config.DispatchRule{ruleModel("kind-b", "m-rule")}, want: []ConfiguredModel{{"kind-a", "m-kind"}, {"kind-b", "m-rule"}}},
+		{name: "block without a model", want: []ConfiguredModel{{"kind-a", ""}}},
+		{name: "model shared by two kinds", topLevel: map[string]any{"model": "m"}, rules: []config.DispatchRule{ruleModel("kind-b", "m")}, want: []ConfiguredModel{{"kind-a", "m"}, {"kind-b", "m"}}},
+		{name: "model shared by two blocks of one kind", topLevel: map[string]any{"model": "m"}, rules: []config.DispatchRule{ruleModel("kind-a", "m")}, want: []ConfiguredModel{{"kind-a", "m"}}},
 	}
 
 	for _, tt := range tests {
@@ -311,9 +313,11 @@ func TestConfiguredModels(t *testing.T) {
 
 			got := configuredModels(settingsConfig(tt.topLevel, tt.rules...))
 
-			slices.Sort(got)
+			slices.SortFunc(got, func(a, b ConfiguredModel) int {
+				return cmp.Or(cmp.Compare(a.AgentKind, b.AgentKind), cmp.Compare(a.Model, b.Model))
+			})
 			if !slices.Equal(got, tt.want) {
-				t.Errorf("configuredModels() = %q, want %q", got, tt.want)
+				t.Errorf("configuredModels() = %v, want %v", got, tt.want)
 			}
 		})
 	}

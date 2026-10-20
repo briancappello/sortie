@@ -104,6 +104,17 @@ type ServiceConfig struct {
 	// [ServiceConfig.AgentKindConversions] and
 	// [ServiceConfig.AgentCommand].
 	conversions []AgentKindConversion
+
+	// envSet holds the field paths an environment variable or .env value
+	// set during this load. Read through [ServiceConfig.SetFromEnvironment].
+	envSet map[string]bool
+}
+
+// SetFromEnvironment reports whether an environment variable or .env
+// value set the field at path (for example "price_table.fetch") during
+// this load. A zero ServiceConfig reports false.
+func (c ServiceConfig) SetFromEnvironment(path string) bool {
+	return c.envSet[path]
 }
 
 // SetDispatch attaches a parsed [DispatchConfig] to the service
@@ -767,6 +778,7 @@ func NewServiceConfig(raw map[string]any, opts ...ServiceConfigOption) (ServiceC
 		extensionsPreResolution: preResolution,
 		Notifications:           notifications,
 		conversions:             conversions,
+		envSet:                  envKeys,
 	}
 	cfg.AddAdvisories(advisories...)
 	return cfg, nil

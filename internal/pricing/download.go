@@ -72,9 +72,12 @@ const (
 
 // schedule is the timing state of one wanted download.
 type schedule struct {
-	failures int         // consecutive failed tries
-	due      bool        // a try is owed
-	stop     func() bool // stops the armed wait, nil when none is armed
+	failures  int         // consecutive failed tries
+	failedAt  time.Time   // end of the latest failed try, zero when failures is 0
+	errText   string      // error text of the latest failed try, "" when failures is 0
+	due       bool        // a try is owed
+	nextTryAt time.Time   // end of the armed wait, zero when none is armed
+	stop      func() bool // stops the armed wait, nil when none is armed
 }
 
 // claim is the try the run loop is working on.
@@ -135,12 +138,54 @@ func NewDownloader(dbPath string, logger *slog.Logger) *Downloader {
 func (d *Downloader) Table(dl Download) *Table {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.tableLocked(dl)
+}
+
+// tableLocked is [Downloader.Table] for a caller that holds d.mu.
+func (d *Downloader) tableLocked(dl Download) *Table {
 	if table, looked := d.tables[dl]; looked {
 		return table
 	}
 	table := d.readCopy(dl)
 	d.tables[dl] = table
 	return table
+}
+
+// DownloadState is what a [Downloader] holds about one download.
+type DownloadState struct {
+	// Table is what [Downloader.Table] returns for the download.
+	Table *Table
+
+	// NextTryAt is the end of the armed wait; zero while a try is due or
+	// running, or when the download is not wanted.
+	NextTryAt time.Time
+
+	// Failures counts the consecutive failed tries since the last accepted
+	// one.
+	Failures int
+
+	// FailedAt is the end of the latest failed try; zero when Failures is 0.
+	FailedAt time.Time
+
+	// Err is the error text of that try; empty when Failures is 0.
+	Err string
+}
+
+// State reports the table, timing, and failures of dl without sending a
+// request. A download that is not wanted reports its table with zero timing
+// and failure fields, and a nil Downloader reports the zero value. Safe for
+// concurrent use.
+func (d *Downloader) State(dl Download) DownloadState {
+	if d == nil {
+		return DownloadState{}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	state := DownloadState{Table: d.tableLocked(dl)}
+	if s := d.schedules[dl]; s != nil {
+		state.NextTryAt, state.Failures, state.FailedAt, state.Err = s.nextTryAt, s.failures, s.failedAt, s.errText
+	}
+	return state
 }
 
 func (d *Downloader) copyPath(role DownloadRole) string {
@@ -227,14 +272,16 @@ func writeCopy(path string, stored storedTable) error {
 
 // try downloads dl once. The result is accepted only when a table entered
 // force.
-func (d *Downloader) try(ctx context.Context, dl Download) tryResult {
+//
+// The error is non-nil only when the result is [tryFailed].
+func (d *Downloader) try(ctx context.Context, dl Download) (tryResult, error) {
 	body, err := d.fetch(ctx, dl)
 	if err != nil {
 		return d.fail(ctx, dl, err)
 	}
 	receivedAt := time.Now().UTC()
 	if !d.wants(dl) {
-		return tryDiscarded
+		return tryDiscarded, nil
 	}
 
 	baseline := d.Table(dl)
@@ -249,22 +296,24 @@ func (d *Downloader) try(ctx context.Context, dl Download) tryResult {
 	}
 	table := parsed.withRevision(parsed.Version(), receivedAt)
 	if !d.accept(dl, table) {
-		return tryDiscarded
+		return tryDiscarded, nil
 	}
 
 	d.store(dl, table)
 	d.logger.LogAttrs(ctx, slog.LevelInfo, "price table downloaded",
 		append(downloadAttrs(dl), slog.String("version", table.Version()))...)
-	return tryAccepted
+	return tryAccepted, nil
 }
 
-func (d *Downloader) fail(ctx context.Context, dl Download, err error) tryResult {
+// fail logs a failed try and returns the error it logged, unless ctx ended,
+// which discards the try.
+func (d *Downloader) fail(ctx context.Context, dl Download, err error) (tryResult, error) {
 	if ctx.Err() != nil {
-		return tryDiscarded
+		return tryDiscarded, nil
 	}
 	d.logger.LogAttrs(ctx, slog.LevelWarn, "price table download failed",
 		append(downloadAttrs(dl), slog.Any("error", err))...)
-	return tryFailed
+	return tryFailed, err
 }
 
 // fetch returns the body of dl.URL. No error it returns carries the address,
@@ -329,11 +378,22 @@ func parseAddress(raw string) (*url.URL, bool) {
 // host, and path only, because userinfo and query may hold credentials.
 func downloadAttrs(dl Download) []slog.Attr {
 	attrs := []slog.Attr{slog.String("table", string(dl.Role))}
-	if address, ok := parseAddress(dl.URL); ok {
-		safe := url.URL{Scheme: address.Scheme, Host: address.Host, Path: address.Path}
-		attrs = append(attrs, slog.String("url", safe.String()))
+	if address := displayAddress(dl.URL); address != "" {
+		attrs = append(attrs, slog.String("url", address))
 	}
 	return attrs
+}
+
+// displayAddress returns raw as scheme, host, and path only, because userinfo
+// and query may hold credentials. It returns "" for an address that does not
+// parse.
+func displayAddress(raw string) string {
+	address, ok := parseAddress(raw)
+	if !ok {
+		return ""
+	}
+	safe := url.URL{Scheme: address.Scheme, Host: address.Host, Path: address.Path}
+	return safe.String()
 }
 
 func (d *Downloader) wants(dl Download) bool {
@@ -417,12 +477,12 @@ func (d *Downloader) Run(ctx context.Context, landed func()) {
 			}
 			continue
 		}
-		result := d.try(c.ctx, c.download)
+		result, failure := d.try(c.ctx, c.download)
 		d.release(c)
 		if result == tryAccepted && landed != nil {
 			landed()
 		}
-		d.settle(c, result)
+		d.settle(c, result, failure)
 	}
 }
 
@@ -450,9 +510,10 @@ func (d *Downloader) release(c claim) {
 	c.cancel()
 }
 
-// settle arms the wait that follows a try, unless the download left the wanted
-// set meanwhile.
-func (d *Downloader) settle(c claim, result tryResult) {
+// settle records the outcome of a try and arms the wait that follows it,
+// unless the download left the wanted set meanwhile. failure is the error of a
+// failed try.
+func (d *Downloader) settle(c claim, result tryResult, failure error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.schedules[c.download] != c.schedule {
@@ -460,10 +521,11 @@ func (d *Downloader) settle(c claim, result tryResult) {
 	}
 	switch result {
 	case tryAccepted:
-		c.schedule.failures = 0
+		c.schedule.failures, c.schedule.failedAt, c.schedule.errText = 0, time.Time{}, ""
 		d.arm(c, refreshInterval)
 	case tryFailed:
 		c.schedule.failures++
+		c.schedule.failedAt, c.schedule.errText = time.Now().UTC(), failure.Error()
 		d.arm(c, retryWait(c.schedule.failures))
 	case tryDiscarded:
 	}
@@ -471,10 +533,12 @@ func (d *Downloader) settle(c claim, result tryResult) {
 
 // arm starts the wait after which c is due again. The caller MUST hold d.mu.
 func (d *Downloader) arm(c claim, wait time.Duration) {
+	c.schedule.nextTryAt = time.Now().Add(wait).UTC()
 	c.schedule.stop = d.afterFunc(wait, func() {
 		d.mu.Lock()
 		if d.schedules[c.download] == c.schedule {
 			c.schedule.due = true
+			c.schedule.nextTryAt = time.Time{}
 			c.schedule.stop = nil
 		}
 		d.mu.Unlock()
