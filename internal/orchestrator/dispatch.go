@@ -267,6 +267,9 @@ const (
 	SkipBlockersUnresolved SkipReason = "blockers_unresolved"
 	SkipBlockersNotRead    SkipReason = "blockers_not_read"
 	SkipBlockersIncomplete SkipReason = "blockers_incomplete"
+
+	SkipDailySpendCeiling   SkipReason = "daily_spend_ceiling"
+	SkipMonthlySpendCeiling SkipReason = "monthly_spend_ceiling"
 )
 
 // CandidateDecision is the outcome of evaluating one candidate.

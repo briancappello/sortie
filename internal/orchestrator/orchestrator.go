@@ -51,6 +51,7 @@ type OrchestratorStore interface {
 	ListReportedModels(ctx context.Context) ([]string, error)
 	QueryBudgetExhaustedIssues(ctx context.Context, candidateIDs []string, maxSessions int) (map[string]int, error)
 	QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string) (map[string]persistence.IssueTokenUsage, error)
+	UsageCompletedBetween(ctx context.Context, since, until time.Time) (persistence.IssueTokenUsage, error)
 	LatestAgentRuns(ctx context.Context, issueIDs []string) (map[string]persistence.RunHistory, error)
 	LatestResumeUsage(ctx context.Context, issueID, sessionID string) (*persistence.ResumeUsage, error)
 	UpsertReactionFingerprint(ctx context.Context, issueID, kind, fingerprint string) error
@@ -771,6 +772,9 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				HandoffEvidencePolicy:  cfg.Tracker.HandoffEvidence,
 				MaxTokens:              cfg.Agent.MaxTokens,
 				MaxCostUSD:             cfg.Agent.MaxCostUSD,
+				MaxDailyCostUSD:        cfg.Agent.MaxDailyCostUSD,
+				MaxMonthlyCostUSD:      cfg.Agent.MaxMonthlyCostUSD,
+				PollIntervalMS:         cfg.Polling.IntervalMS,
 				Metrics:                o.metrics,
 				HostPool:               o.hostPool,
 				WorkflowFile:           o.workflowFile(),
@@ -1035,6 +1039,16 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		})
 	}
 
+	spendHold := evaluateSpendCeiling(o.state, spendCeilingParams{
+		Ctx:        ctx,
+		Store:      o.store,
+		DailyUSD:   cfg.Agent.MaxDailyCostUSD,
+		MonthlyUSD: cfg.Agent.MaxMonthlyCostUSD,
+		Rates:      o.state.Rates,
+		Now:        time.Now(),
+		Logger:     o.logger,
+	})
+
 	// On preflight failure, skip dispatch but still notify observers.
 	if !validation.OK() {
 		pollResult = outcomeError
@@ -1090,6 +1104,9 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		}
 
 		decision := EvaluateCandidate(ctx, issue, o.state, activeSet, terminalSet, o.blockerResolver, pass)
+		if decision.Dispatch && spendHold != SkipNone {
+			decision = CandidateDecision{Reason: spendHold, Issue: decision.Issue}
+		}
 		if !decision.Dispatch {
 			if decision.Err != nil {
 				readFailures++
@@ -1259,9 +1276,10 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.notifyObservers()
 }
 
-// recordCandidateHold logs the per-issue record for a held candidate and
-// increments [IncCandidateHolds] for every reason except [SkipIneligible],
-// which produces neither record nor counter.
+// recordCandidateHold logs the per-issue record of a candidate held by a
+// blocker, the only reasons that log, and increments [IncCandidateHolds] for
+// every reason except [SkipIneligible], which produces neither record nor
+// counter.
 func (o *Orchestrator) recordCandidateHold(decision CandidateDecision, pass *TickResolution, terminalSet map[string]struct{}) {
 	if decision.Reason == SkipIneligible {
 		return

@@ -139,11 +139,11 @@ type stubStore struct {
 	// is zero.
 	tokenUnaccountedIDs []string
 
-	// tokenExhaustedUsage reports this usage for a candidate, for a test
-	// controlling every field, including the cost aggregates.
 	tokenExhaustedUsage map[string]persistence.IssueTokenUsage
 
 	upsertSessionMetadataErr error
+
+	windowUsage persistence.IssueTokenUsage
 
 	parkedIssues       []persistence.ParkedIssue
 	deletedParkedIDs   []string
@@ -276,6 +276,12 @@ func (s *stubStore) TokenUsageByIssue(_ context.Context, _ string) (persistence.
 		UnmeasuredSessions: s.tokenUnmeasured,
 		UnaccountedTurns:   s.tokenUnaccounted,
 	}, nil
+}
+
+func (s *stubStore) UsageCompletedBetween(context.Context, time.Time, time.Time) (persistence.IssueTokenUsage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.windowUsage, nil
 }
 
 func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, candidateIDs []string, _ int) (map[string]int, error) {

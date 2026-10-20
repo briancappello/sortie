@@ -38,6 +38,10 @@ type stateResponse struct {
 	// configured; omitted otherwise.
 	CostUnpricedRunning *int `json:"cost_unpriced_running,omitempty"`
 
+	// SpendCeiling carries the instance spend windows. Omitted while
+	// neither agent.max_daily_cost_usd nor agent.max_monthly_cost_usd is set.
+	SpendCeiling *spendCeilingResponse `json:"spend_ceiling,omitempty"`
+
 	Config *configResponse `json:"config,omitempty"`
 
 	Health *stateHealthResponse `json:"health,omitempty"`
@@ -310,6 +314,22 @@ type attentionActionResponse struct {
 	URL  string `json:"url,omitempty"`
 }
 
+// spendCeilingResponse is the JSON wire format of the instance spend windows;
+// a window whose setting is 0 is null.
+type spendCeilingResponse struct {
+	Daily   *spendWindowResponse `json:"daily"`
+	Monthly *spendWindowResponse `json:"monthly"`
+}
+
+// spendWindowResponse is the latest evaluation of one spend window.
+type spendWindowResponse struct {
+	BudgetUSD       float64   `json:"budget_usd"`
+	UsedUSD         float64   `json:"used_usd"`
+	UsedUSDComplete bool      `json:"used_usd_complete"`
+	HoldsDispatch   bool      `json:"holds_dispatch"`
+	ResetsAt        time.Time `json:"resets_at"`
+}
+
 // attentionEvidenceResponse carries each member only on the item kinds that
 // have it.
 type attentionEvidenceResponse struct {
@@ -323,6 +343,7 @@ type attentionEvidenceResponse struct {
 	UsedUSD            *float64               `json:"used_usd,omitempty"`
 	UsedUSDComplete    *bool                  `json:"used_usd_complete,omitempty"`
 	BudgetUSD          *float64               `json:"budget_usd,omitempty"`
+	ResetsAt           *time.Time             `json:"resets_at,omitempty"`
 	ReactionKind       string                 `json:"reaction_kind,omitempty"`
 	ConfigKey          string                 `json:"config_key,omitempty"`
 	PullRequest        *pullRequestResponse   `json:"pull_request,omitempty"`
@@ -871,6 +892,9 @@ func toAttentionResponses(items []sentence.AttentionItem) []attentionItemRespons
 		if item.AcknowledgedAt != nil {
 			resp.AcknowledgedAt = new(item.AcknowledgedAt.UTC())
 		}
+		if ev.ResetsAt != nil {
+			resp.Evidence.ResetsAt = new(ev.ResetsAt.UTC())
+		}
 		if ev.PullRequest != nil {
 			resp.Evidence.PullRequest = new(toPullRequestResponse(*ev.PullRequest))
 		}
@@ -1041,8 +1065,31 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Con
 		}
 		resp.CostUnpricedRunning = &unpriced
 	}
+	resp.SpendCeiling = spendCeilingOf(snap.SpendCeilings)
 
 	return resp
+}
+
+func spendCeilingOf(statuses []orchestrator.SpendCeilingStatus) *spendCeilingResponse {
+	if len(statuses) == 0 {
+		return nil
+	}
+	var ceiling spendCeilingResponse
+	for _, status := range statuses {
+		window := &spendWindowResponse{
+			BudgetUSD:       status.BudgetUSD,
+			UsedUSD:         status.UsedUSD,
+			UsedUSDComplete: status.UsedComplete,
+			HoldsDispatch:   status.Holding,
+			ResetsAt:        status.ResetsAt.UTC(),
+		}
+		if status.Window == orchestrator.SpendWindowMonthly {
+			ceiling.Monthly = window
+		} else {
+			ceiling.Daily = window
+		}
+	}
+	return &ceiling
 }
 
 func writeJSON(w http.ResponseWriter, logger *slog.Logger, status int, v any) {

@@ -306,12 +306,14 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 
 	errs = append(errs, stageCollisions(cfg)...)
 
-	if cfg.Agent.MaxCostUSD > 0 && !ratesInForce(params).SourceConfigured() {
-		warns = append(warns, PreflightWarning{
-			Check: "agent.max_cost_usd.no_rate_source",
-			Message: "agent.max_cost_usd is set but no price source is configured: price_table.embedded and price_table.fetch are off " +
-				"and no token_rates entry or operator price table is set, so no run can be priced",
-		})
+	if settings := moneyCeilingSettings(cfg.Agent); len(settings) > 0 && !ratesInForce(params).SourceConfigured() {
+		for _, setting := range settings {
+			warns = append(warns, PreflightWarning{
+				Check: setting.Key + ".no_rate_source",
+				Message: setting.Key + " is set but no price source is configured: price_table.embedded and price_table.fetch are off " +
+					"and no token_rates entry or operator price table is set, so no run can be priced",
+			})
+		}
 	}
 
 	// Workspace root must exist and be writable.
@@ -325,6 +327,38 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 	}
 
 	return PreflightResult{Errors: errs, Warnings: warns}
+}
+
+// moneyCeilingSetting is one money setting above 0 with the consequence of
+// its kind reporting no token usage.
+type moneyCeilingSetting struct {
+	Key     string
+	NoUsage string
+}
+
+// moneyCeilingSettings returns each money setting of agent above 0, in the
+// order per-issue, daily, monthly.
+func moneyCeilingSettings(agent config.AgentConfig) []moneyCeilingSetting {
+	var settings []moneyCeilingSetting
+	if agent.MaxCostUSD > 0 {
+		settings = append(settings, moneyCeilingSetting{
+			Key:     "agent.max_cost_usd",
+			NoUsage: "the per-issue money ceiling can never be reached for it",
+		})
+	}
+	if agent.MaxDailyCostUSD > 0 {
+		settings = append(settings, moneyCeilingSetting{
+			Key:     "agent.max_daily_cost_usd",
+			NoUsage: "the daily spend ceiling counts none of its spend",
+		})
+	}
+	if agent.MaxMonthlyCostUSD > 0 {
+		settings = append(settings, moneyCeilingSetting{
+			Key:     "agent.max_monthly_cost_usd",
+			NoUsage: "the monthly spend ceiling counts none of its spend",
+		})
+	}
+	return settings
 }
 
 // ratesInForce returns the rates params carries; a nil RatesFunc reads as

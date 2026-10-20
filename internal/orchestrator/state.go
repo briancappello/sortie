@@ -412,6 +412,11 @@ type RetryEntry struct {
 	// paused. Runtime-only: never persisted, never on ScheduleRetryParams.
 	pausedSinceMS int64
 
+	// spendHeld is true when HandleRetryTimer re-armed this entry because an
+	// instance spend ceiling held, so a later slot or host shortage keeps
+	// Attempt. Runtime-only.
+	spendHeld bool
+
 	// dueBeforeRequestMS is the DueAtMS the entry had before the first request
 	// that made it due now; zero when no request did. Runtime-only.
 	dueBeforeRequestMS int64
@@ -1423,6 +1428,11 @@ type State struct {
 	// wholesale each tick when the money ceiling is enabled, cleared when
 	// not. Owned by the event loop.
 	MoneyBudgetIncomplete map[string]struct{}
+
+	// SpendCeilings holds the latest evaluation of each configured instance
+	// spend window, daily first. Nil while neither window is configured.
+	// Written only by evaluateSpendCeiling on the event loop.
+	SpendCeilings []SpendCeilingStatus
 }
 
 // continuationCtxKey is the context key for reaction continuation data
@@ -1836,6 +1846,9 @@ type RuntimeSnapshotResult struct {
 	// AttentionAcknowledgements is a copy of State.AttentionAcknowledgements,
 	// keyed by attention item ID.
 	AttentionAcknowledgements map[string]time.Time `json:"-"`
+
+	// SpendCeilings is a copy of State.SpendCeilings.
+	SpendCeilings []SpendCeilingStatus `json:"-"`
 }
 
 // ActiveElapsedSeconds sums wall-clock elapsed seconds across all running
@@ -2106,6 +2119,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 	snap.MaxSessions = state.MaxSessions
 	snap.Rates = state.Rates
 	snap.AttentionAcknowledgements = maps.Clone(state.AttentionAcknowledgements)
+	snap.SpendCeilings = slices.Clone(state.SpendCeilings)
 
 	snap.BudgetExhaustedCount = len(state.BudgetExhausted)
 	budgetExhausted := make([]SnapshotBudgetEntry, 0, len(state.BudgetExhausted))

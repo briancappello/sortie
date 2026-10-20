@@ -252,6 +252,10 @@
         "reason": {
           "type": "string"
         },
+        "resets_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "used_attempts": {
           "type": "integer"
         },
@@ -4041,6 +4045,63 @@
       ],
       "type": "object"
     },
+    "SpendCeilingResponse": {
+      "properties": {
+        "daily": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpendWindowResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "monthly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpendWindowResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "daily",
+        "monthly"
+      ],
+      "type": "object"
+    },
+    "SpendWindowResponse": {
+      "properties": {
+        "budget_usd": {
+          "type": "number"
+        },
+        "holds_dispatch": {
+          "type": "boolean"
+        },
+        "resets_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "used_usd": {
+          "type": "number"
+        },
+        "used_usd_complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "budget_usd",
+        "used_usd",
+        "used_usd_complete",
+        "holds_dispatch",
+        "resets_at"
+      ],
+      "type": "object"
+    },
     "StageHopResponse": {
       "properties": {
         "agent_kind": {
@@ -4396,6 +4457,9 @@
               "type": "null"
             }
           ]
+        },
+        "spend_ceiling": {
+          "$ref": "#/$defs/SpendCeilingResponse"
         },
         "started_at": {
           "anyOf": [

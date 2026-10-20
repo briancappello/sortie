@@ -1081,8 +1081,15 @@ const costAggregates = `COALESCE(SUM(CASE WHEN cost_status IN ('estimated', 'par
 			COALESCE(SUM(CASE WHEN cost_status = 'partial' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN ` + spentPredicate + ` AND estimated_cost_usd IS NULL THEN 1 ELSE 0 END), 0)`
 
-// IssueTokenUsage is the per-issue token spend read by the token ceiling
-// and the cost_budget tool.
+// usageAggregates is the select-list fragment that precedes costAggregates in
+// the usage statements. Its columns scan into TotalTokens, UncachedTokens,
+// Sessions, UnmeasuredSessions, StoppedInFlight, and UnaccountedTurns in that
+// order.
+const usageAggregates = `COALESCE(SUM(total_tokens), 0), COALESCE(SUM(MAX(total_tokens - cache_read_tokens, 0)), 0), COUNT(*), SUM(CASE WHEN tokens_measured = 0 THEN 1 ELSE 0 END),
+		SUM(CASE WHEN status = 'budget_stopped' THEN 1 ELSE 0 END), COALESCE(SUM(unaccounted_turns), 0)`
+
+// IssueTokenUsage is the token and cost spend of a set of run_history rows:
+// one issue's, or those completed in a window.
 type IssueTokenUsage struct {
 	// TotalTokens sums total_tokens, prompt-cache reads included. It is not
 	// the figure the token ceiling compares; see UncachedTokens.
@@ -1238,11 +1245,10 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 	}
 
 	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(candidateIDs); no user data in format string
-		`SELECT issue_id, COALESCE(SUM(total_tokens), 0), COALESCE(SUM(MAX(total_tokens - cache_read_tokens, 0)), 0), COUNT(*), SUM(CASE WHEN tokens_measured = 0 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN status = 'budget_stopped' THEN 1 ELSE 0 END), COALESCE(SUM(unaccounted_turns), 0),
+		`SELECT issue_id, %s,
 		%s
 		FROM run_history WHERE issue_id IN (%s) GROUP BY issue_id`,
-		costAggregates, placeholders,
+		usageAggregates, costAggregates, placeholders,
 	)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1267,6 +1273,29 @@ func (s *Store) QueryTokenBudgetUsage(ctx context.Context, candidateIDs []string
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("query token budget usage: %w", err)
 	}
+	return usage, nil
+}
+
+// UsageCompletedBetween returns the usage and recorded cost aggregates of the
+// run_history rows whose completed_at lies in [since, until), or the zero
+// [IssueTokenUsage] when no row does.
+func (s *Store) UsageCompletedBetween(ctx context.Context, since, until time.Time) (IssueTokenUsage, error) {
+	var usage IssueTokenUsage
+	var unmeasured, stoppedInFlight, unaccounted sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT `+usageAggregates+`,
+		`+costAggregates+`
+		FROM run_history WHERE completed_at >= ? AND completed_at < ?`,
+		since.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339),
+	).Scan(&usage.TotalTokens, &usage.UncachedTokens, &usage.Sessions, &unmeasured, &stoppedInFlight, &unaccounted,
+		&usage.RecordedCostUSD, &usage.PricedSessions, &usage.PartialSessions, &usage.UnpricedSessions)
+	if err != nil {
+		return IssueTokenUsage{}, fmt.Errorf("usage completed between %s and %s: %w",
+			since.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339), err)
+	}
+	usage.UnmeasuredSessions = int(unmeasured.Int64)
+	usage.StoppedInFlight = int(stoppedInFlight.Int64)
+	usage.UnaccountedTurns = int(unaccounted.Int64)
 	return usage, nil
 }
 

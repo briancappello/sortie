@@ -395,6 +395,10 @@ func (s *fingerprintModelStore) TokenUsageByIssue(context.Context, string) (pers
 	return persistence.IssueTokenUsage{}, nil
 }
 
+func (s *fingerprintModelStore) UsageCompletedBetween(context.Context, time.Time, time.Time) (persistence.IssueTokenUsage, error) {
+	return persistence.IssueTokenUsage{}, nil
+}
+
 func (s *fingerprintModelStore) UpsertParkedIssue(context.Context, persistence.ParkedIssue) error {
 	return nil
 }

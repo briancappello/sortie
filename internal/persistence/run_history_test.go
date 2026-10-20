@@ -809,11 +809,11 @@ func TestCountWorkerRunsCompletedSince(t *testing.T) {
 	s := openTestStore(t)
 	migrateOrFatal(t, s)
 
-	appendOrFatal(t, s, countRun(1, issueID, "succeeded", "2026-04-01T09:00:00Z")) // at bound, counts
+	appendOrFatal(t, s, countRun(1, issueID, "succeeded", "2026-04-01T09:00:00Z"))
 	appendOrFatal(t, s, countRun(2, issueID, "failed", "2026-04-01T10:00:00Z"))
 	appendOrFatal(t, s, countRun(3, issueID, "cancelled", "2026-04-01T11:00:00Z"))
 	appendOrFatal(t, s, countRun(4, issueID, "ci_failed", "2026-04-01T10:30:00Z"))
-	appendOrFatal(t, s, countRun(5, issueID, "succeeded", "2026-03-31T23:59:59Z")) // before bound, excluded
+	appendOrFatal(t, s, countRun(5, issueID, "succeeded", "2026-03-31T23:59:59Z"))
 	appendOrFatal(t, s, countRun(6, "ISS-CWR-OTHER", "succeeded", "2026-04-01T12:00:00Z"))
 
 	got, err := s.CountWorkerRunsCompletedSince(context.Background(), issueID, since)
@@ -1047,6 +1047,46 @@ func TestLoadLatestSuccessfulRunsForIssues(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("LoadLatestSuccessfulRunsForIssues(%v) run ids = %v, want %v", tt.issueIDs, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsageCompletedBetween(t *testing.T) {
+	t.Parallel()
+
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	until := since.AddDate(0, 0, 1)
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	for i, completedAt := range []string{"2026-03-31T23:59:59Z", "2026-04-01T00:00:00Z", "2026-04-01T23:59:59Z", "2026-04-02T00:00:00Z"} {
+		run := tokenRun(i+1, "ISS-WINDOW", 100)
+		run.TokensMeasured, run.EstimatedCostUSD, run.CostStatus, run.CompletedAt = true, new(float64(int(1)<<i)), "estimated", completedAt
+		appendOrFatal(t, s, run)
+	}
+	inWindow := IssueTokenUsage{TotalTokens: 200, UncachedTokens: 200, Sessions: 2, RecordedCostUSD: 6, PricedSessions: 2}
+
+	tests := []struct {
+		name         string
+		since, until time.Time
+		want         IssueTokenUsage
+	}{
+		{"includes since and excludes until", since, until, inWindow},
+		{"binds bounds given in another zone as UTC", since.In(time.FixedZone("UTC+2", 2*60*60)), until.In(time.FixedZone("UTC+2", 2*60*60)), inWindow},
+		{"empty window returns zero usage", until.Add(time.Hour), until.Add(2 * time.Hour), IssueTokenUsage{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := s.UsageCompletedBetween(context.Background(), tt.since, tt.until)
+			if err != nil {
+				t.Fatalf("UsageCompletedBetween(%v, %v): %v", tt.since, tt.until, err)
+			}
+
+			if got != tt.want {
+				t.Errorf("UsageCompletedBetween(%v, %v) = %+v, want %+v", tt.since, tt.until, got, tt.want)
 			}
 		})
 	}

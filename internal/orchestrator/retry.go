@@ -41,6 +41,7 @@ type RetryTimerStore interface {
 	MarkStageHopDispatched(ctx context.Context, issueID string) error
 	DeleteStageHop(ctx context.Context, issueID string) error
 	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
+	UsageCompletedBetween(ctx context.Context, since, until time.Time) (persistence.IssueTokenUsage, error)
 }
 
 // HandleRetryTimerParams holds the dependencies for [HandleRetryTimer]
@@ -122,6 +123,20 @@ type HandleRetryTimerParams struct {
 	// reaches it.
 	MaxCostUSD float64
 
+	// MaxDailyCostUSD and MaxMonthlyCostUSD are the instance spend
+	// ceilings. While either window has reached its ceiling the retry is
+	// kept scheduled instead of dispatching.
+	MaxDailyCostUSD   float64
+	MaxMonthlyCostUSD float64
+
+	// PollIntervalMS is the recheck delay of a retry held by a spend
+	// ceiling.
+	PollIntervalMS int
+
+	// NowFunc reads the clock for the spend ceiling evaluation. Nil reads
+	// [time.Now].
+	NowFunc func() time.Time
+
 	// Metrics records retry timer instrumentation. If nil, defaults to
 	// [domain.NoopMetrics].
 	Metrics domain.Metrics
@@ -148,6 +163,15 @@ func putBackSchedule(popped *RetryEntry, attempt int, maxRetryBackoffMS int) (in
 		return popped.Attempt, max(0, popped.dueBeforeRequestMS-time.Now().UnixMilli())
 	}
 	return attempt, computeBackoffDelay(attempt, maxRetryBackoffMS)
+}
+
+// retryClock returns the instant the spend ceiling evaluation of a retry fire
+// reads.
+func retryClock(params HandleRetryTimerParams) time.Time {
+	if params.NowFunc != nil {
+		return params.NowFunc()
+	}
+	return time.Now()
 }
 
 // HandleRetryTimer processes a retry timer event for the given issue: it
@@ -194,7 +218,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 
 	log = logging.WithIssue(log, issueID, popped.Identifier)
 
-	reschedule := func(attempt int, delayMS int64, retryErr string) {
+	rearm := func(attempt int, delayMS int64, retryErr string) {
 		ScheduleRetry(state, ScheduleRetryParams{
 			IssueID:             issueID,
 			Identifier:          popped.Identifier,
@@ -218,6 +242,10 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			Trigger:             triggerTimer,
 			OriginTrigger:       popped.OriginTrigger,
 		}, params.OnRetryFire)
+	}
+
+	reschedule := func(attempt int, delayMS int64, retryErr string) {
+		rearm(attempt, delayMS, retryErr)
 		if isKnownReactionKind(popped.ReactionKind) {
 			if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
 				log.Error("failed to delete persisted reaction retry entry",
@@ -228,6 +256,15 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			persistRetryEntry(ctx, log, params.Store, state, issueID)
 		}
 		metrics.IncRetries(triggerTimer)
+	}
+
+	// rearmHeld re-arms the retry unchanged, one poll interval ahead, and
+	// marks the new entry so a later slot or host shortage keeps its attempt.
+	rearmHeld := func() {
+		rearm(popped.Attempt, int64(params.PollIntervalMS), popped.Error)
+		if entry, ok := state.RetryAttempts[issueID]; ok {
+			entry.spendHeld = true
+		}
 	}
 
 	// ScheduleRetry builds a fresh entry, so the flag is applied to it
@@ -349,6 +386,30 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			}
 		}
 		blocked = true
+	}
+
+	// Held retries keep their attempt, error, and persisted row so the hold
+	// costs no backoff and no budget; only the due time moves.
+	if hold := evaluateSpendCeiling(state, spendCeilingParams{
+		Ctx:        ctx,
+		Store:      params.Store,
+		DailyUSD:   params.MaxDailyCostUSD,
+		MonthlyUSD: params.MaxMonthlyCostUSD,
+		Rates:      state.Rates,
+		Now:        retryClock(params),
+		Logger:     params.Logger,
+	}); hold != SkipNone {
+		rearmHeld()
+		if entry, ok := state.RetryAttempts[issueID]; ok {
+			entry.pausedSinceMS = popped.pausedSinceMS
+			entry.noStateObserved = popped.noStateObserved
+		}
+		log.Debug("retry held by spend ceiling, rechecking",
+			slog.String("reason", string(hold)),
+			slog.Int("attempt", popped.Attempt),
+			slog.Int64("delay_ms", int64(params.PollIntervalMS)),
+		)
+		return
 	}
 
 	// Effort budget gate: release the claim if completed sessions have
@@ -661,6 +722,16 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	}
 
 	if !HasAvailableSlots(state, issue.State) {
+		if popped.spendHeld {
+			log.Warn("no available orchestrator slots, rescheduling retry",
+				slog.String("issue_state", issue.State),
+				slog.Int("attempt", popped.Attempt),
+				slog.Int64("delay_ms", int64(params.PollIntervalMS)),
+			)
+			rearmHeld()
+			return
+		}
+
 		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 		log.Warn("no available orchestrator slots, rescheduling retry",
@@ -678,6 +749,15 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		var ok bool
 		host, ok = params.HostPool.AcquireHost(issueID, popped.LastSSHHost)
 		if !ok {
+			if popped.spendHeld {
+				log.Warn("no available SSH hosts, rescheduling retry",
+					slog.Int("attempt", popped.Attempt),
+					slog.Int64("delay_ms", int64(params.PollIntervalMS)),
+				)
+				rearmHeld()
+				return
+			}
+
 			nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
 
 			log.Warn("no available SSH hosts, rescheduling retry",
