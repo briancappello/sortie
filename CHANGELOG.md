@@ -68,6 +68,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - On a local launch with Claude Code 2.1.304 or later, a `claude-code` agent again sees Sortie's own tools from the start of every turn instead of having to look them up before it can call them.
 
+- The budget panel of an issue no longer shows a cost share as "not measured" when one of its runs was measured but could not be priced: the share now reads "unpriced", or "at least" the priced amount when other runs in it were priced.
+
 ## [1.28.1] - 2026-10-18
 
 ### Security

@@ -15,7 +15,7 @@ import { useIssueActions } from "@/components/use-issue-actions";
 import { rowMark } from "@/lib/active-rows";
 import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
-import { costText, costTitle, NOT_MEASURED } from "@/lib/figures";
+import { costText, costTitle } from "@/lib/figures";
 import {
   fmtAgo,
   fmtClock,
@@ -357,9 +357,19 @@ function noTokenBudgetText(tokens: BudgetLine & { complete: boolean }): string |
 
 interface CostShare {
   name: string;
-  usd: number | null;
-  /** `partial` when any run of the share is, else `estimated`. */
-  status: "estimated" | "partial";
+  usd: number;
+  hasPriced: boolean;
+  hasUnpriced: boolean;
+  /** True when a run of the share is a lower bound or reported no usage. */
+  isIncomplete: boolean;
+}
+
+/** Folds the runs of a share as the issue's own cost folds them. */
+function shareStatus(share: CostShare): string {
+  if (share.hasPriced) {
+    return share.hasUnpriced || share.isIncomplete ? "partial" : "estimated";
+  }
+  return share.hasUnpriced ? "unpriced" : "unmeasured";
 }
 
 function costShares(runs: readonly RunResponse[], chained: boolean): CostShare[] {
@@ -373,13 +383,21 @@ function costShares(runs: readonly RunResponse[], chained: boolean): CostShare[]
         : run.rule_name
           ? ruleLabel(run.rule_name)
           : "Work";
-    const before = shares.get(name) ?? { name, usd: 0, status: "estimated" };
+    const before = shares.get(name) ?? {
+      name,
+      usd: 0,
+      hasPriced: false,
+      hasUnpriced: false,
+      isIncomplete: false,
+    };
     const usd = run.estimated_cost_usd;
     shares.set(name, {
       name,
-      usd: before.usd === null || usd === null ? null : before.usd + usd,
-      status:
-        before.status === "partial" || run.cost_status === "partial" ? "partial" : "estimated",
+      usd: before.usd + (usd ?? 0),
+      hasPriced: before.hasPriced || usd !== null,
+      hasUnpriced: before.hasUnpriced || run.cost_status === "unpriced",
+      isIncomplete:
+        before.isIncomplete || run.cost_status === "partial" || run.cost_status === "unmeasured",
     });
   }
   return [...shares.values()];
@@ -430,15 +448,15 @@ function BudgetPanel({ detail, state, chained }: BudgetPanelProps) {
               </strong>
             </Pair>
           ) : undefined}
-          {shares.map(({ name, usd, status }) => (
-            <Pair key={name} label={name}>
-              {usd === null ? (
-                NOT_MEASURED
-              ) : (
+          {shares.map((share) => {
+            const status = shareStatus(share);
+            const usd = share.hasPriced ? share.usd : null;
+            return (
+              <Pair key={share.name} label={share.name}>
                 <span title={costTitle(status, usd)}>{costText(status, usd)}</span>
-              )}
-            </Pair>
-          ))}
+              </Pair>
+            );
+          })}
         </Pairs>
       )}
     </Panel>
