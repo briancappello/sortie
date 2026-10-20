@@ -25,6 +25,7 @@ import { EndedToday } from "./EndedToday";
 import { Headline } from "./Headline";
 import { buildHeadline } from "./headline";
 import { activeNavKey, attentionNavKey, endedNavKey } from "./rows";
+import { SpendCeilings } from "./SpendCeilings";
 
 import type { AttentionItemResponse, Report, RunsResponse, StateResponse } from "@/api/types.gen";
 import type { Binding } from "@/app/keys";
@@ -314,6 +315,7 @@ function OverviewBody({ state }: OverviewBodyProps) {
           now={view.now}
         />
       ) : undefined}
+      <SpendCeilings ceiling={view.state.spend_ceiling} />
       <ActiveList
         rows={view.rows}
         visibleRows={visibleRows}

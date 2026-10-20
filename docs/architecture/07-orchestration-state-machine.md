@@ -57,8 +57,9 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Validate config, which forces a defensive reload, then apply the result to runtime state.
   - Reconcile active runs.
   - Run the periodic workspace sweep when due (Section 8.7).
+  - Evaluate the instance spend ceiling (Section 8.4), whether or not validation succeeded.
   - Fetch candidate issues.
-  - Dispatch until slots are exhausted. Dispatch is the only step gated on validation success.
+  - Dispatch until slots are exhausted, unless a spend window holds dispatch (Section 8.4). Dispatch is the only step gated on validation success.
   - Dispatched workers perform the optional dispatch-time in-progress transition (via `tracker.in_progress_state`) as their first step, before workspace preparation.
 
 - `Worker Exit (normal)`
@@ -107,7 +108,8 @@ A verdict that withholds the write is, immediately before any of its effects, ch
   - Every agent update and self-review progress message a worker delivered before its exit is applied before that exit is handled, so no message from one run is applied after its exit or to a later run of the same issue. A usage figure applied this way for a run whose exit is being handled or already waiting is evaluated against neither an in-flight ceiling (token or money) nor the token warning threshold, because that run has already ended; the run's recorded total carries the figure to the next dispatch decision.
 
 - `Retry Timer Fired`
-  - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
+  - While an instance spend window holds dispatch, re-arm the retry one `polling.interval_ms` ahead and start nothing, leaving its attempt count, claim, and persisted entry unchanged (Section 8.4).
+  - Otherwise re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
 
 - `Reconciliation State Refresh`
   - Stop runs whose issue states are terminal or no longer active.
@@ -168,7 +170,7 @@ Retry staleness is measured from a monotonic timestamp captured before arming th
 
 `retry_attempts` holds at most one entry per issue: the retry slot. The entry's reaction kind records the owner, with the empty string meaning the orchestrator's own continuation lane. Every code path that wants to schedule a retry for an issue (a challenger) checks whether the slot is occupied before writing. A non-nil occupant (the incumbent) means another unit of work already owns the issue's next dispatch; the challenger defers instead of overwriting it, leaving the incumbent untouched and making no other state mutation. The rule keys on occupancy alone: it does not compare owners, rank reaction kinds, or preempt.
 
-Only two writers are exempt from checking first, because each frees the slot itself immediately before writing back into it: the retry-timer handler's inner reschedule, which pops and deletes the entry it is replacing before rescheduling it, and the overdue-retry re-arm pass (below), which cancels the same entry before re-arming it with a zero delay. Every other writer is admitted only into a free slot.
+Only two writers are exempt from checking first, because each frees the slot itself immediately before writing back into it: the retry-timer handler's inner reschedule and its re-arm under a spend hold (Section 8.4), which pop and delete the entry they are replacing before rescheduling it, and the overdue-retry re-arm pass (below), which cancels the same entry before re-arming it with a zero delay. Every other writer is admitted only into a free slot.
 
 Two liveness bounds keep an arbitrated slot from being held for the process lifetime:
 

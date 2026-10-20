@@ -59,6 +59,10 @@ on_tick(state):
     state.sweep_tick_counter = 0
     sweep_workspaces(state)
 
+  # Runs whether or not validation passed, so the figures and the hold
+  # edges stay current; reads nothing while neither ceiling is above 0.
+  spend_hold = evaluate_spend_ceiling(state, now())    // Section 8.4: none, daily_spend_ceiling, or monthly_spend_ceiling
+
   if validation is not ok:
     log_validation_error(validation)
     notify_observers()
@@ -83,6 +87,11 @@ on_tick(state):
       break
 
     if should_dispatch(issue, state):
+      # A candidate that failed a gate of its own keeps that reason; this
+      # one passed them all and only the hold keeps it from starting.
+      if spend_hold != none:
+        record_candidate_hold(state, issue, spend_hold)        // counts the reason; logs nothing
+        continue
       issue, dispatchable = hold_for_stage_hop(issue, state)   // Section 16.4
       if not dispatchable:
         continue
@@ -1143,6 +1152,14 @@ on_retry_timer(issue_id, state):
   if missing:
     return state
 
+  # After the parked and handoff-absence gates, before the budget gates (§8.4).
+  # Touches no persisted entry and no claim, increments no retry counter, and
+  # keeps the attempt number, error, and continuation fields.
+  spend_hold = evaluate_spend_ceiling(state, now())
+  if spend_hold != none:
+    log_debug("retry held by spend ceiling, rechecking")
+    return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, spend_held=true)
+
   issue, err = tracker.fetch_issue_by_id(issue_id)
   if err:
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
@@ -1171,6 +1188,8 @@ on_retry_timer(issue_id, state):
     })
 
   if available_slots(state) == 0:
+    if retry_entry.spend_held:                         // a held retry keeps its attempt number until a slot frees; the same holds when no SSH host is free
+      return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, spend_held=true)
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
       identifier: issue.identifier,
       error: "no available orchestrator slots",
@@ -1216,6 +1235,8 @@ on_retry_timer(issue_id, state):
 ```
 
 A changed settings result never clears `resume_session_id`; only a changed kind or template does.
+
+`rearm_retry` arms the retry timer for the entry's own fields one poll interval ahead, with the attempt number and error the caller passes. It writes no persisted entry, deletes none, and counts no retry. While a spend window holds, a retry whose timer fires, a pull request reaction continuation included, therefore returns to the retry slot unchanged except for its due time, and the first fire after the hold ends dispatches with the attempt number the retry had. The entry carries `spend_held` only until a fire takes any other path.
 
 `retry_selection` keeps the frozen triple, with a retired kind replaced by its replacement kind, while the kind is still reachable through `agent.kind`, `dispatch.default.agent`, or a rule and the template is still held, and otherwise returns `resolve_rule` over the configuration in force, passing the issue's hop route (§5.3.9, §8.4). A retry that finds its issue terminal or no longer active ends the issue's hop count. A retry that finds its issue in no state never touches the hop record.
 

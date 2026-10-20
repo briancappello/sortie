@@ -2,6 +2,7 @@ import { useId } from "react";
 
 import { useNow } from "@/app/live";
 import { ExternalLinkIcon } from "@/components/icons";
+import { BudgetMeter } from "@/components/BudgetMeter";
 import { Pair, Pairs, Panel } from "@/components/Panel";
 import { ServedText } from "@/components/ServedText";
 import { StateBadge } from "@/components/StateBadge";
@@ -340,42 +341,6 @@ export function NextOutcomes({ outcomes }: NextOutcomesProps) {
         </li>
       ))}
     </ul>
-  );
-}
-
-interface BudgetMeterProps {
-  name: string;
-  line: BudgetLine;
-  format: (n: number) => string;
-  /** Replaces the `<used> of <limit>` value text. */
-  text?: string;
-}
-
-function BudgetMeter({ name, line, format, text }: BudgetMeterProps) {
-  const { used, limit } = line;
-  if (used === null || limit === null || limit <= 0) {
-    return undefined;
-  }
-  const isFull = used >= limit;
-  return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm gap-y-xxs text-body-md">
-      <span className="text-ink">{name}</span>
-      <span className="text-ink-body tabular-nums">
-        {text ?? `${format(used)} of ${format(limit)}`}
-      </span>
-      <span
-        aria-hidden="true"
-        className={cn(
-          "col-span-2 h-1 overflow-hidden rounded-full",
-          isFull ? "bg-warning-container" : "bg-viz-1-track",
-        )}
-      >
-        <span
-          className={cn("block h-full rounded-full", isFull ? "bg-warning-fill" : "bg-viz-1")}
-          style={{ width: `${Math.min(100, (used / limit) * 100)}%` }}
-        />
-      </span>
-    </div>
   );
 }
 

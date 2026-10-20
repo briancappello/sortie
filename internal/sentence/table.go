@@ -281,6 +281,18 @@ var table = map[string]parts{
 		why:    "The dispatch preflight failed ({{.Error}}), so poll ticks dispatch nothing until it passes.",
 		clears: "Clears on the first poll tick whose dispatch preflight passes.",
 	},
+	"attn_spend_daily": {
+		reason: "Daily spend ceiling reached",
+		why: "Sortie has spent {{if .AtLeast}}at least {{end}}{{usd .Used}} in estimated cost this UTC day against the daily ceiling of {{usd .Budget}}, " +
+			"so it starts no agent session for any issue while sessions already running finish.",
+		clears: "Clears once the UTC day ends, or after `agent.max_daily_cost_usd` is raised above the day's spend or removed.",
+	},
+	"attn_spend_monthly": {
+		reason: "Monthly spend ceiling reached",
+		why: "Sortie has spent {{if .AtLeast}}at least {{end}}{{usd .Used}} in estimated cost this UTC month against the monthly ceiling of {{usd .Budget}}, " +
+			"so it starts no agent session for any issue while sessions already running finish.",
+		clears: "Clears once the UTC month ends, or after `agent.max_monthly_cost_usd` is raised above the month's spend or removed.",
+	},
 
 	"attn_escalated_ci": {
 		reason: "CI escalated on #{{.PR}}",

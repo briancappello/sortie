@@ -288,6 +288,16 @@ type AgentConfig struct {
 	// in USD. 0 means unlimited. Non-negative and finite.
 	MaxCostUSD float64
 
+	// MaxDailyCostUSD is the instance ceiling in USD on the estimated cost
+	// of the current UTC calendar day; 0 disables it. Non-negative and
+	// finite.
+	MaxDailyCostUSD float64
+
+	// MaxMonthlyCostUSD is the instance ceiling in USD on the estimated
+	// cost of the current UTC calendar month; 0 disables it.
+	// Non-negative and finite.
+	MaxMonthlyCostUSD float64
+
 	// TokenWarningPercent is the percentage of MaxTokens, 0 to 99,
 	// at which the event loop warns that the ceiling is near. 0
 	// disables the warning threshold. Call [AgentConfig.TokenWarningThreshold]
@@ -1251,6 +1261,16 @@ func buildAgentConfig(m map[string]any) (AgentConfig, error) {
 		}
 	}
 
+	maxDailyCostUSD, err := coerceNonNegativeFiniteFloat(m, "max_daily_cost_usd", "agent.max_daily_cost_usd")
+	if err != nil {
+		return AgentConfig{}, err
+	}
+
+	maxMonthlyCostUSD, err := coerceNonNegativeFiniteFloat(m, "max_monthly_cost_usd", "agent.max_monthly_cost_usd")
+	if err != nil {
+		return AgentConfig{}, err
+	}
+
 	tokenWarningPercent, err := coerceIntField(m, "token_warning_percent", "agent.token_warning_percent")
 	if err != nil {
 		return AgentConfig{}, err
@@ -1299,6 +1319,8 @@ func buildAgentConfig(m map[string]any) (AgentConfig, error) {
 		MaxSessions:            maxSessions,
 		MaxTokens:              maxTokens,
 		MaxCostUSD:             maxCostUSD,
+		MaxDailyCostUSD:        maxDailyCostUSD,
+		MaxMonthlyCostUSD:      maxMonthlyCostUSD,
 		TokenWarningPercent:    tokenWarningPercent,
 		MaxConsecutiveAbsences: maxConsecutiveAbsences,
 	}, nil
@@ -1827,6 +1849,22 @@ func coerceFloatField(m map[string]any, key, field string) (float64, error) {
 			Field:   field,
 			Message: err.Error(),
 		}
+	}
+	return f, nil
+}
+
+// coerceNonNegativeFiniteFloat is coerceFloatField plus the finite and
+// non-negative checks of a money ceiling.
+func coerceNonNegativeFiniteFloat(m map[string]any, key, field string) (float64, error) {
+	f, err := coerceFloatField(m, key, field)
+	if err != nil {
+		return 0, err
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, &ConfigError{Field: field, Message: "must be a finite number"}
+	}
+	if f < 0 {
+		return 0, &ConfigError{Field: field, Message: "must be non-negative"}
 	}
 	return f, nil
 }

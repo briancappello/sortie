@@ -190,8 +190,9 @@ type Metrics interface {
 
 	// IncCandidateHolds increments the counter of candidates the
 	// dispatch loop held. reason is "blocked_by",
-	// "blockers_unresolved", "blockers_not_read", or
-	// "blockers_incomplete"
+	// "blockers_unresolved", "blockers_not_read",
+	// "blockers_incomplete", "daily_spend_ceiling", or
+	// "monthly_spend_ceiling"
 	// (sortie_candidate_holds_total{reason} counter).
 	IncCandidateHolds(reason string)
 

@@ -66,6 +66,7 @@ export interface AttentionEvidenceResponse {
   used_usd?: number;
   used_usd_complete?: boolean;
   budget_usd?: number;
+  resets_at?: string;
   reaction_kind?: string;
   config_key?: string;
   pull_request?: PullRequestResponse;
@@ -823,6 +824,19 @@ export interface SnapshotAgentTotals {
   running_non_reporting: number;
 }
 
+export interface SpendCeilingResponse {
+  daily: SpendWindowResponse | null;
+  monthly: SpendWindowResponse | null;
+}
+
+export interface SpendWindowResponse {
+  budget_usd: number;
+  used_usd: number;
+  used_usd_complete: boolean;
+  holds_dispatch: boolean;
+  resets_at: string;
+}
+
 export interface StageHopResponse {
   issue_id: string;
   issue_identifier: string;
@@ -893,6 +907,7 @@ export interface StateResponse {
   rate_limits: Record<string, unknown> | null;
   active_estimated_cost_usd?: number;
   cost_unpriced_running?: number;
+  spend_ceiling?: SpendCeilingResponse;
   config?: ConfigResponse;
   health?: StateHealthResponse;
 }

@@ -10,8 +10,8 @@ import (
 )
 
 // AttentionItem is one thing that needs a person, worded and ready to serve.
-// Kind is parked, budget_held, reaction_escalated, workflow_reload_failed, or
-// preflight_failed; Severity is critical or warning. Since is nil only for a
+// Kind is parked, budget_held, reaction_escalated, workflow_reload_failed,
+// preflight_failed, or spend_ceiling_reached; Severity is critical or warning. Since is nil only for a
 // park whose stored time did not parse. AcknowledgedAt is nil while no person
 // has acknowledged the item. The issue fields are empty on a process-wide item.
 type AttentionItem struct {
@@ -62,6 +62,7 @@ type AttentionEvidence struct {
 	LastCheck          *orchestrator.ReactionCheck
 	File               string
 	Error              string
+	ResetsAt           *time.Time
 }
 
 const (
@@ -127,6 +128,8 @@ func attentionItem(cause orchestrator.AttentionCause, c Context) AttentionItem {
 		return workflowReloadItem(cause)
 	case orchestrator.AttentionKindPreflightFailed:
 		return preflightItem(cause)
+	case orchestrator.AttentionKindSpendCeilingReached:
+		return spendCeilingItem(cause)
 	}
 	return AttentionItem{ID: cause.ID, Kind: cause.Kind, Since: cause.Since}
 }
@@ -297,6 +300,24 @@ func preflightItem(cause orchestrator.AttentionCause) AttentionItem {
 	return failingCheckItem(cause, "attn_preflight",
 		map[string]any{"Error": leadless},
 		AttentionEvidence{Error: check.Error})
+}
+
+func spendCeilingItem(cause orchestrator.AttentionCause) AttentionItem {
+	status := cause.Spend
+	template, reason, configKey := "attn_spend_daily", orchestrator.SkipDailySpendCeiling, "agent.max_daily_cost_usd"
+	if status.Window == orchestrator.SpendWindowMonthly {
+		template, reason, configKey = "attn_spend_monthly", orchestrator.SkipMonthlySpendCeiling, "agent.max_monthly_cost_usd"
+	}
+	return failingCheckItem(cause, template,
+		map[string]any{"Used": status.UsedUSD, "AtLeast": !status.UsedComplete, "Budget": status.BudgetUSD},
+		AttentionEvidence{
+			Reason:          string(reason),
+			ConfigKey:       configKey,
+			UsedUSD:         new(status.UsedUSD),
+			UsedUSDComplete: new(status.UsedComplete),
+			BudgetUSD:       new(status.BudgetUSD),
+			ResetsAt:        new(status.ResetsAt.UTC()),
+		})
 }
 
 // failingCheckItem builds a process-wide item, which no issue owns and only an
