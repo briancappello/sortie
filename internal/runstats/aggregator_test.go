@@ -3,6 +3,7 @@ package runstats
 import (
 	"encoding/json"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -192,6 +193,22 @@ func TestStatsSummaryFormulas(t *testing.T) {
 		if report.Summary.CostPerSucceededRunUSD == nil || *report.Summary.CostPerSucceededRunUSD != 15 {
 			t.Errorf("Summary.CostPerSucceededRunUSD = %v, want 15 (cost_usd / succeeded, not succeeded-only spend / succeeded)",
 				report.Summary.CostPerSucceededRunUSD)
+		}
+	})
+
+	t.Run("a sub-cent cost per succeeded run stays above zero in the summary and a group", func(t *testing.T) {
+		t.Parallel()
+
+		agg := New(recordedCaps)
+		addRows(t, agg, withCost(modelRow("mock", "model-a", "succeeded", 1_000), new(0.004), "estimated"))
+
+		report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
+
+		adapter := findGroup(t, report.ByAdapter, "mock")
+		for name, got := range map[string]*float64{"Summary": report.Summary.CostPerSucceededRunUSD, "ByAdapter[mock]": adapter.CostPerSucceededRunUSD} {
+			if got == nil || *got != 0.004 {
+				t.Errorf("%s.CostPerSucceededRunUSD = %v, want 0.004", name, derefCost(got))
+			}
 		}
 	})
 }
@@ -508,6 +525,220 @@ func TestStatsByModel(t *testing.T) {
 	}
 	if modelA.CostUSD == nil || *modelA.CostUSD != 10 || modelB.CostUSD != nil {
 		t.Errorf("model-a, model-b CostUSD = %v, %v, want 10 (the recorded cost) and nil (recorded unpriced)", modelA.CostUSD, modelB.CostUSD)
+	}
+
+	type share struct {
+		runs, succeeded, unpriced, partial int
+		input, output, total               int64
+		cost                               float64
+	}
+	part := func(model string, input, output int64, usd *float64, costStatus string) persistence.RunModelPart {
+		return persistence.RunModelPart{
+			Model: model, Tokens: persistence.ModelTokens{InputTokens: input, OutputTokens: output},
+			EstimatedCostUSD: usd, CostStatus: costStatus,
+		}
+	}
+	split := func(unaccounted int, runCost *float64, runStatus string, parts ...persistence.RunModelPart) persistence.RunStatsRow {
+		row := withCost(modelRow("claude-code", "run-model", "succeeded", 0), runCost, runStatus)
+		row.Parts, row.UnaccountedTurns = parts, unaccounted
+		for _, p := range parts {
+			row.InputTokens += p.Tokens.InputTokens
+			row.OutputTokens += p.Tokens.OutputTokens
+			row.TotalTokens += p.Tokens.InputTokens + p.Tokens.OutputTokens
+		}
+		return row
+	}
+	withoutParts := withCost(reportedModelRow("model-d", "model-e"), new(1.0), "estimated")
+	withoutParts.Status, withoutParts.InputTokens, withoutParts.TotalTokens = "failed", 100, 100
+
+	tests := []struct {
+		name string
+		rows []persistence.RunStatsRow
+		want map[string]share
+	}{
+		{
+			name: "a run priced per model lands in each spent part's row; a run without parts lands once under its reported model",
+			rows: []persistence.RunStatsRow{
+				split(0, new(9.0), "estimated",
+					part("model-a", 600, 100, new(6.0), "estimated"),
+					part("model-b", 300, 50, new(3.0), "estimated"),
+					part("model-z", 0, 0, new(0.0), "estimated")),
+				withoutParts,
+			},
+			want: map[string]share{
+				"model-a": {runs: 1, succeeded: 1, input: 600, output: 100, total: 700, cost: 6.0},
+				"model-b": {runs: 1, succeeded: 1, input: 300, output: 50, total: 350, cost: 3.0},
+				"model-e": {runs: 1, input: 100, total: 100, cost: 1.0},
+			},
+		},
+		{
+			name: "unaccounted turns mark the priced part partial and leave the unpriced part unpriced only",
+			rows: []persistence.RunStatsRow{split(2, new(4.0), "partial",
+				part("model-a", 100, 10, new(4.0), "estimated"),
+				part("model-b", 200, 20, nil, "unpriced"))},
+			want: map[string]share{
+				"model-a": {runs: 1, succeeded: 1, input: 100, output: 10, total: 110, cost: 4.0, partial: 1},
+				"model-b": {runs: 1, succeeded: 1, input: 200, output: 20, total: 220, unpriced: 1},
+			},
+		},
+		{
+			name: "without unaccounted turns the estimated part counts in neither shortfall",
+			rows: []persistence.RunStatsRow{split(0, new(4.0), "partial",
+				part("model-a", 100, 10, new(4.0), "estimated"),
+				part("model-b", 200, 20, nil, "unpriced"))},
+			want: map[string]share{
+				"model-a": {runs: 1, succeeded: 1, input: 100, output: 10, total: 110, cost: 4.0},
+				"model-b": {runs: 1, succeeded: 1, input: 200, output: 20, total: 220, unpriced: 1},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agg := New(recordedCaps)
+			addRows(t, agg, tt.rows...)
+
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
+
+			got := map[string]share{}
+			for _, g := range report.ByModel {
+				if g.Tokens == nil {
+					t.Fatalf("by_model %q Tokens = nil, want measured tokens", g.Name)
+				}
+				var cost float64
+				if g.CostUSD != nil {
+					cost = *g.CostUSD
+				}
+				got[g.Name] = share{
+					runs: g.Runs, succeeded: g.Succeeded, unpriced: g.CostUnpricedRuns, partial: g.CostPartialRuns,
+					input: g.Tokens.Input, output: g.Tokens.Output, total: g.Tokens.Total, cost: cost,
+				}
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Report(%q).ByModel = %+v, want %+v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStatsSpend(t *testing.T) {
+	t.Parallel()
+
+	run := func(completedAt string, usd *float64, costStatus string) persistence.RunStatsRow {
+		row := withCost(modelRow("claude-code", "model-a", "succeeded", 1_000), usd, costStatus)
+		row.CompletedAt = completedAt
+		return row
+	}
+	unmeasured := run("2026-08-04T12:00:00Z", nil, "")
+	unmeasured.TokensMeasured = false
+	ciFailed := run("2026-08-04T13:00:00Z", nil, "")
+	ciFailed.Status = "ci_failed"
+	sevenDays := new(fixedNow.Add(-168 * time.Hour))
+
+	tests := []struct {
+		name        string
+		since       *time.Time
+		rows        []persistence.RunStatsRow
+		wantPeriod  string
+		wantBuckets []SpendBucket
+	}{
+		{
+			name:  "runs on several UTC days of a 168 hour range land in their own days",
+			since: sevenDays,
+			rows: []persistence.RunStatsRow{
+				run("2026-07-31T12:00:00Z", new(1.0), "estimated"),
+				run("2026-08-02T08:00:00Z", new(0.5), "estimated"),
+				run("2026-08-02T23:30:00Z", new(2.0), "estimated"),
+				run("2026-08-05T10:00:00Z", nil, "unpriced"),
+			},
+			wantPeriod: "day",
+			wantBuckets: []SpendBucket{
+				{Start: "2026-07-31T00:00:00Z", Runs: 1, CostUSD: new(1.0)},
+				{Start: "2026-08-01T00:00:00Z"},
+				{Start: "2026-08-02T00:00:00Z", Runs: 2, CostUSD: new(2.5)},
+				{Start: "2026-08-03T00:00:00Z"},
+				{Start: "2026-08-04T00:00:00Z"},
+				{Start: "2026-08-05T00:00:00Z", Runs: 1, CostUnpricedRuns: 1},
+				{Start: "2026-08-06T00:00:00Z"},
+				{Start: "2026-08-07T00:00:00Z"},
+			},
+		},
+		{
+			name: "an open range lists months and folds each run as the summary does",
+			rows: []persistence.RunStatsRow{
+				run("2026-06-15T10:00:00Z", new(4.0), "estimated"),
+				run("2026-07-20T10:00:00Z", new(3.0), "partial"),
+				run("2026-08-03T10:00:00Z", nil, "unpriced"),
+				unmeasured,
+				ciFailed,
+			},
+			wantPeriod: "month",
+			wantBuckets: []SpendBucket{
+				{Start: "2026-06-01T00:00:00Z", Runs: 1, CostUSD: new(4.0)},
+				{Start: "2026-07-01T00:00:00Z", Runs: 1, CostUSD: new(3.0), CostPartialRuns: 1},
+				{Start: "2026-08-01T00:00:00Z", Runs: 3, CostUnpricedRuns: 1, TokensUnmeasuredRuns: 1},
+			},
+		},
+		{
+			name:       "a 2160 hour span gives days",
+			since:      new(fixedNow.Add(-2160 * time.Hour)),
+			rows:       []persistence.RunStatsRow{run("2026-08-06T10:00:00Z", new(1.0), "estimated")},
+			wantPeriod: "day",
+		},
+		{
+			name:       "a span above 2160 hours gives months",
+			since:      new(fixedNow.Add(-2160*time.Hour - time.Second)),
+			rows:       []persistence.RunStatsRow{run("2026-08-06T10:00:00Z", new(1.0), "estimated")},
+			wantPeriod: "month",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agg := New(recordedCaps)
+			addRows(t, agg, tt.rows...)
+
+			report := agg.Report(fixedNow, "/wf", "/db", tt.since, nil)
+
+			spend := report.Spend
+			if spend == nil {
+				t.Fatalf("Report(since=%v).Spend = nil, want a listing on a database with recorded cost", tt.since)
+			}
+			if spend.Period != tt.wantPeriod {
+				t.Errorf("Report(since=%v).Spend.Period = %q, want %q", tt.since, spend.Period, tt.wantPeriod)
+			}
+			if tt.wantBuckets != nil && !reflect.DeepEqual(spend.Buckets, tt.wantBuckets) {
+				t.Errorf("Report(since=%v).Spend.Buckets = %+v, want %+v", tt.since, spend.Buckets, tt.wantBuckets)
+			}
+			var sum SpendBucket
+			var cost float64
+			for _, b := range spend.Buckets {
+				sum.Runs += b.Runs
+				sum.CostUnpricedRuns += b.CostUnpricedRuns
+				sum.CostPartialRuns += b.CostPartialRuns
+				sum.TokensUnmeasuredRuns += b.TokensUnmeasuredRuns
+				if b.CostUSD != nil {
+					cost += *b.CostUSD
+				}
+			}
+			s := report.Summary
+			if sum.Runs != s.Runs || sum.CostUnpricedRuns != s.CostUnpricedRuns || sum.CostPartialRuns != s.CostPartialRuns || sum.TokensUnmeasuredRuns != s.TokensUnmeasuredRuns {
+				t.Errorf("Spend bucket runs, unpriced, partial, unmeasured sums = %d, %d, %d, %d, want the summary's %d, %d, %d, %d",
+					sum.Runs, sum.CostUnpricedRuns, sum.CostPartialRuns, sum.TokensUnmeasuredRuns,
+					s.Runs, s.CostUnpricedRuns, s.CostPartialRuns, s.TokensUnmeasuredRuns)
+			}
+			var want float64
+			if s.CostUSD != nil {
+				want = *s.CostUSD
+			}
+			if math.Abs(cost-want) > 1e-6 {
+				t.Errorf("Spend bucket cost_usd sums to %v, want summary.cost_usd %v", cost, want)
+			}
+		})
 	}
 }
 

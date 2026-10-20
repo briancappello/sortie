@@ -149,21 +149,73 @@ type RunStatsRow struct {
 	// for a NULL status and under the same condition.
 	EstimatedCostUSD *float64
 	CostStatus       string
+
+	// Parts are the run's run_model_usage rows ordered by model, carrying
+	// Model, Tokens, EstimatedCostUSD, and CostStatus; UnratedClasses and
+	// UnratedRecorded stay zero. Nil when the run has none or
+	// [RunHistoryCapabilities.RecordedCost] reports false.
+	Parts []RunModelPart
+
+	// UnaccountedTurns is run_history.unaccounted_turns; zero when
+	// [RunHistoryCapabilities.RecordedCost] reports false.
+	UnaccountedTurns int
+}
+
+// joinedPart holds the run_model_usage columns of one result row, all NULL
+// when the LEFT JOIN found no part for the run.
+type joinedPart struct {
+	model                                            sql.NullString
+	inputTokens, outputTokens, cacheRead, cacheWrite sql.NullInt64
+	cost                                             sql.NullFloat64
+	costStatus                                       sql.NullString
+}
+
+// dest lists the scan targets in the order of the part columns.
+func (p *joinedPart) dest() []any {
+	return []any{&p.model, &p.inputTokens, &p.outputTokens, &p.cacheRead, &p.cacheWrite, &p.cost, &p.costStatus}
+}
+
+// part returns the part the result row carries; ok is false for a run
+// without parts.
+func (p *joinedPart) part() (part RunModelPart, ok bool) {
+	if !p.model.Valid {
+		return RunModelPart{}, false
+	}
+	part = RunModelPart{
+		Model: p.model.String,
+		Tokens: ModelTokens{
+			InputTokens:      p.inputTokens.Int64,
+			OutputTokens:     p.outputTokens.Int64,
+			CacheReadTokens:  p.cacheRead.Int64,
+			CacheWriteTokens: p.cacheWrite.Int64,
+		},
+		CostStatus: p.costStatus.String,
+	}
+	if p.cost.Valid {
+		part.EstimatedCostUSD = new(p.cost.Float64)
+	}
+	return part, true
 }
 
 // runStatsColumnsFull is the column list when Full reports true and
 // HasCacheWriteTokens false.
-const runStatsColumnsFull = `SELECT issue_id, status, agent_adapter, rule_name, template_id, started_at, completed_at,
-	turns_completed, review_metadata, input_tokens, output_tokens, total_tokens, cache_read_tokens, tokens_measured`
+const runStatsColumnsFull = `SELECT run_history.issue_id, run_history.status, run_history.agent_adapter,
+	run_history.rule_name, run_history.template_id, run_history.started_at, run_history.completed_at,
+	run_history.turns_completed, run_history.review_metadata, run_history.input_tokens, run_history.output_tokens,
+	run_history.total_tokens, run_history.cache_read_tokens, run_history.tokens_measured`
 
 // runStatsColumnsFullWithCacheWrite is the column list when Full and
 // HasCacheWriteTokens both report true.
-const runStatsColumnsFullWithCacheWrite = `SELECT issue_id, status, agent_adapter, rule_name, template_id, started_at, completed_at,
-	turns_completed, review_metadata, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured`
+const runStatsColumnsFullWithCacheWrite = `SELECT run_history.issue_id, run_history.status, run_history.agent_adapter,
+	run_history.rule_name, run_history.template_id, run_history.started_at, run_history.completed_at,
+	run_history.turns_completed, run_history.review_metadata, run_history.input_tokens, run_history.output_tokens,
+	run_history.total_tokens, run_history.cache_read_tokens, run_history.cache_write_tokens,
+	run_history.tokens_measured`
 
 // runStatsColumnsBase is the column list every schema version carries,
 // used when Full reports false.
-const runStatsColumnsBase = `SELECT issue_id, status, agent_adapter, started_at, completed_at`
+const runStatsColumnsBase = `SELECT run_history.issue_id, run_history.status, run_history.agent_adapter,
+	run_history.started_at, run_history.completed_at`
 
 // RunHistoryCapabilities reports which optional run_history column groups
 // this store's database carries, by reading the table's live column set
@@ -219,13 +271,17 @@ func (s *Store) RunHistoryCapabilities(ctx context.Context) (RunHistoryCapabilit
 }
 
 // ScanRunHistoryRange issues one SELECT over run_history bounded by a
-// half-open completed_at range and calls visit once per row in ascending
+// half-open completed_at range and calls visit once per run in ascending
 // id order. caps selects the projection through [RunHistoryCapabilities.Full];
 // a nil since or until omits its predicate rather than substituting a
 // sentinel. since is compared with >= and until with <, both formatted as
 // since.UTC().Format(time.RFC3339). A non-nil error returned by visit
 // aborts iteration and is returned unmodified, so the caller can compare it
 // with errors.Is.
+//
+// While caps.RecordedCost() holds, the statement joins each run's
+// run_model_usage rows, so the runs and their parts come from one snapshot
+// of the database.
 //
 // visit MUST NOT call any Store method. The scan holds the store's single
 // pooled connection for the duration of iteration, because OpenReadOnly
@@ -253,42 +309,53 @@ func (s *Store) ScanRunHistoryRange(
 		query = runStatsColumnsFull
 	}
 	if breakdown {
-		query += ", configured_model, reported_model"
+		query += ", run_history.configured_model, run_history.reported_model"
 	}
 	if chains {
-		query += ", identifier, display_identifier, chain_id, stage_previous, stage_result"
+		query += ", run_history.identifier, run_history.display_identifier, run_history.chain_id," +
+			" run_history.stage_previous, run_history.stage_result"
 	}
 	if triggers {
-		query += ", trigger, reaction_kind"
+		query += ", run_history.trigger, run_history.reaction_kind"
 	}
 	if origins {
-		query += ", first_after_hop"
+		query += ", run_history.first_after_hop"
 	}
 	var args []any
 	if funnels {
-		query += `, agent_blocked,
-		CASE WHEN status = 'failed' AND substr(error, 1, ?) = ? THEN 1 ELSE 0 END`
+		query += `, run_history.agent_blocked,
+		CASE WHEN run_history.status = 'failed' AND substr(run_history.error, 1, ?) = ? THEN 1 ELSE 0 END`
 		args = append(args, len(HandoffAbsenceErrorPrefix), HandoffAbsenceErrorPrefix)
 	}
 	if recordedCost {
-		query += ", estimated_cost_usd, cost_status"
+		query += `, run_history.estimated_cost_usd, run_history.cost_status, run_history.unaccounted_turns,
+		run_history.id,
+		run_model_usage.model, run_model_usage.input_tokens, run_model_usage.output_tokens,
+		run_model_usage.cache_read_tokens, run_model_usage.cache_write_tokens,
+		run_model_usage.estimated_cost_usd, run_model_usage.cost_status`
 	}
 	query += "\nFROM run_history"
+	if recordedCost {
+		query += " LEFT JOIN run_model_usage ON run_model_usage.run_id = run_history.id"
+	}
 
 	where := ""
 	if since != nil {
-		where += " WHERE completed_at >= ?"
+		where += " WHERE run_history.completed_at >= ?"
 		args = append(args, since.UTC().Format(time.RFC3339))
 	}
 	if until != nil {
 		if where == "" {
-			where += " WHERE completed_at < ?"
+			where += " WHERE run_history.completed_at < ?"
 		} else {
-			where += " AND completed_at < ?"
+			where += " AND run_history.completed_at < ?"
 		}
 		args = append(args, until.UTC().Format(time.RFC3339))
 	}
-	query += where + " ORDER BY id ASC"
+	query += where + " ORDER BY run_history.id ASC"
+	if recordedCost {
+		query += ", run_model_usage.model ASC"
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -296,10 +363,14 @@ func (s *Store) ScanRunHistoryRange(
 	}
 	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
 
+	var pending *RunStatsRow
+	var pendingID int64
 	for rows.Next() {
 		var row RunStatsRow
 		var reviewMeta, displayID, trigger, reactionKind, costStatus sql.NullString
 		var cost sql.NullFloat64
+		var runID int64
+		var joined joinedPart
 		var dest []any
 		switch {
 		case full && caps.HasCacheWriteTokens:
@@ -334,7 +405,8 @@ func (s *Store) ScanRunHistoryRange(
 			dest = append(dest, &row.AgentBlocked, &row.HandoffWithheld)
 		}
 		if recordedCost {
-			dest = append(dest, &cost, &costStatus)
+			dest = append(dest, &cost, &costStatus, &row.UnaccountedTurns, &runID)
+			dest = append(dest, joined.dest()...)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return fmt.Errorf("scan run history range: %w", err)
@@ -352,12 +424,30 @@ func (s *Store) ScanRunHistoryRange(
 		}
 		row.CostStatus = costStatus.String
 
-		if err := visit(row); err != nil {
-			return err
+		if !recordedCost {
+			if err := visit(row); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if pending == nil || runID != pendingID {
+			if pending != nil {
+				if err := visit(*pending); err != nil {
+					return err
+				}
+			}
+			pending, pendingID = &row, runID
+		}
+		if part, ok := joined.part(); ok {
+			pending.Parts = append(pending.Parts, part)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("scan run history range: %w", err)
+	}
+	if pending != nil {
+		return visit(*pending)
 	}
 	return nil
 }

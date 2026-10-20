@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -123,6 +124,111 @@ func spentTokens(row persistence.RunStatsRow) bool {
 		row.CacheReadTokens != 0 || row.CacheWriteTokens != 0
 }
 
+// costOutcome is how one measured run, or one model's share of it, counts in
+// the cost figures. A run counts in at most one of priced and unpriced, and
+// partial is independent of both.
+type costOutcome struct {
+	priced   bool
+	unpriced bool
+	partial  bool
+	cost     float64
+}
+
+// classifyCost classifies a measured run's cost for every figure the report
+// serves, so the summary, the groups, the model shares, and the spend buckets
+// cannot drift apart. A ci_failed run records a CI verdict and no agent
+// session, so it is neither priced, unpriced, nor partial.
+func classifyCost(status string, spent bool, cost *float64, costStatus string) costOutcome {
+	if status == "ci_failed" {
+		return costOutcome{}
+	}
+	var out costOutcome
+	switch {
+	case !spent:
+	case cost == nil:
+		out.unpriced = true
+	default:
+		out.priced = true
+		out.cost = *cost
+	}
+	out.partial = costStatus == "partial"
+	return out
+}
+
+// costAccum accumulates the folded [costOutcome] values of one figure.
+type costAccum struct {
+	costUSD          float64
+	pricedRuns       int
+	costUnpricedRuns int
+	costPartialRuns  int
+}
+
+func (c *costAccum) add(out costOutcome) {
+	if out.priced {
+		c.costUSD += out.cost
+		c.pricedRuns++
+	}
+	if out.unpriced {
+		c.costUnpricedRuns++
+	}
+	if out.partial {
+		c.costPartialRuns++
+	}
+}
+
+// modelShare is the part of a run credited to one model in by_model.
+type modelShare struct {
+	model      string
+	tokens     Tokens
+	spent      bool
+	cost       *float64
+	costStatus string
+	fromPart   bool
+}
+
+// sharesOf splits row across the models it spent tokens on, one share per
+// spent part with the part's recorded cost. A run with no spent part, whatever
+// its age, is one share under [modelOf] carrying the run's own figures.
+func sharesOf(row persistence.RunStatsRow) []modelShare {
+	var shares []modelShare
+	for _, part := range row.Parts {
+		t := part.Tokens
+		if t.InputTokens <= 0 && t.OutputTokens <= 0 && t.CacheReadTokens <= 0 && t.CacheWriteTokens <= 0 {
+			continue
+		}
+		shares = append(shares, modelShare{
+			model: part.Model,
+			tokens: Tokens{
+				Input:      t.InputTokens,
+				Output:     t.OutputTokens,
+				Total:      t.InputTokens + t.OutputTokens,
+				CacheRead:  t.CacheReadTokens,
+				CacheWrite: t.CacheWriteTokens,
+			},
+			spent:      true,
+			cost:       part.EstimatedCostUSD,
+			costStatus: part.CostStatus,
+			fromPart:   true,
+		})
+	}
+	if len(shares) > 0 {
+		return shares
+	}
+	return []modelShare{{
+		model: modelOf(row),
+		tokens: Tokens{
+			Input:      row.InputTokens,
+			Output:     row.OutputTokens,
+			Total:      row.TotalTokens,
+			CacheRead:  row.CacheReadTokens,
+			CacheWrite: row.CacheWriteTokens,
+		},
+		spent:      spentTokens(row),
+		cost:       row.EstimatedCostUSD,
+		costStatus: row.CostStatus,
+	}}
+}
+
 // selfReviewAccum accumulates the self-review folding state across
 // every row that carries non-nil review metadata.
 type selfReviewAccum struct {
@@ -163,14 +269,11 @@ type groupAccum struct {
 	succeeded         int
 	turnSum           int
 	tokens            Tokens
-	costUSD           float64
-	pricedRuns        int
-	costUnpricedRuns  int
-	costPartialRuns   int
 	measuredRuns      int
 	unmeasuredRuns    int
 	succeededMeasured int
 	durationSamples   []float64
+	costAccum
 }
 
 // chainAccum accumulates the by_chain figures a groupAccum does
@@ -192,16 +295,20 @@ type totalAccum struct {
 	cancelled            int
 	succeededTurns       int
 	tokens               Tokens
-	costUSD              float64
-	pricedRuns           int
-	costUnpricedRuns     int
-	costPartialRuns      int
 	measuredRuns         int
 	unmeasuredRuns       int
 	succeededMeasured    int
 	zeroDurationRuns     int
 	durationExcludedRuns int
 	succeededSamples     []float64
+	costAccum
+}
+
+// dayAccum accumulates the runs that completed within one UTC calendar day.
+type dayAccum struct {
+	runs       int
+	unmeasured int
+	costAccum
 }
 
 // withUncached returns t with Uncached derived from its Total and
@@ -359,6 +466,7 @@ type Aggregator struct {
 	tierLabel string
 
 	total totalAccum
+	days  map[time.Time]*dayAccum // keyed by the UTC midnight starting the day
 
 	byStatus   map[string]*groupAccum
 	byAdapter  map[string]*groupAccum
@@ -382,6 +490,7 @@ func New(caps persistence.RunHistoryCapabilities) *Aggregator {
 	return &Aggregator{
 		caps:       caps,
 		tierLabel:  tier(caps),
+		days:       make(map[time.Time]*dayAccum),
 		byStatus:   make(map[string]*groupAccum),
 		byAdapter:  make(map[string]*groupAccum),
 		byRule:     make(map[string]*groupAccum),
@@ -428,6 +537,9 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 		bumpGroup(a.byAdapter, label(row.AgentAdapter), isSucceeded),
 	}
 
+	seconds, hasDuration := duration(row)
+	var cost costOutcome
+
 	full := a.caps.Full()
 	if full {
 		bumped = append(bumped,
@@ -435,7 +547,7 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 			bumpGroup(a.byTemplate, label(row.TemplateID), isSucceeded),
 		)
 		if a.caps.ModelBreakdown() {
-			bumped = append(bumped, bumpGroup(a.byModel, label(modelOf(row)), isSucceeded))
+			a.foldModels(row, isSucceeded, seconds, hasDuration)
 		}
 		if a.caps.ChainBreakdown() && row.ChainID != "" {
 			bumped = append(bumped, bumpGroup(a.byChain, row.ChainID, isSucceeded))
@@ -485,28 +597,11 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 				a.total.succeededMeasured++
 			}
 
-			// A ci_failed row records a CI verdict and no agent session, so it
-			// is not an unpriced run.
-			if a.caps.RecordedCost() && row.Status != "ci_failed" && spentTokens(row) {
-				if row.EstimatedCostUSD == nil {
-					a.total.costUnpricedRuns++
-					for _, g := range bumped {
-						g.costUnpricedRuns++
-					}
-				} else {
-					a.total.costUSD += *row.EstimatedCostUSD
-					a.total.pricedRuns++
-					for _, g := range bumped {
-						g.costUSD += *row.EstimatedCostUSD
-						g.pricedRuns++
-					}
-				}
-			}
-
-			if a.caps.RecordedCost() && row.Status != "ci_failed" && row.CostStatus == "partial" {
-				a.total.costPartialRuns++
+			if a.caps.RecordedCost() {
+				cost = classifyCost(row.Status, spentTokens(row), row.EstimatedCostUSD, row.CostStatus)
+				a.total.add(cost)
 				for _, g := range bumped {
-					g.costPartialRuns++
+					g.add(cost)
 				}
 			}
 		}
@@ -516,8 +611,11 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 		}
 	}
 
-	seconds, ok := duration(row)
-	if !ok {
+	if a.caps.RecordedCost() {
+		a.foldSpend(row, cost)
+	}
+
+	if !hasDuration {
 		a.total.durationExcludedRuns++
 		return nil
 	}
@@ -532,6 +630,70 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 	}
 
 	return nil
+}
+
+// foldModels folds row into the by_model group of every model share it
+// carries. Only the share's tokens and cost reach a group, never the run's
+// totals, so the rows of a multi-model run add up to the run.
+func (a *Aggregator) foldModels(row persistence.RunStatsRow, isSucceeded bool, seconds float64, hasDuration bool) {
+	for _, share := range sharesOf(row) {
+		g := bumpGroup(a.byModel, label(share.model), isSucceeded)
+		g.turnSum += row.TurnsCompleted
+		if hasDuration {
+			g.durationSamples = append(g.durationSamples, seconds)
+		}
+		if !row.TokensMeasured {
+			g.unmeasuredRuns++
+			continue
+		}
+		g.tokens.Input += share.tokens.Input
+		g.tokens.Output += share.tokens.Output
+		g.tokens.Total += share.tokens.Total
+		g.tokens.CacheRead += share.tokens.CacheRead
+		g.tokens.CacheWrite += share.tokens.CacheWrite
+		g.measuredRuns++
+		if isSucceeded {
+			g.succeededMeasured++
+		}
+		if !a.caps.RecordedCost() {
+			continue
+		}
+		status := share.costStatus
+		// Turns the agent left unaccounted spent tokens no part records, so a
+		// part's cost is a lower bound even when the part priced fully.
+		if share.fromPart && status == "estimated" && row.UnaccountedTurns > 0 {
+			status = "partial"
+		}
+		g.add(classifyCost(row.Status, share.spent, share.cost, status))
+	}
+}
+
+// utcDay returns the UTC midnight that starts the calendar day holding t.
+func utcDay(t time.Time) time.Time {
+	y, m, d := t.UTC().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
+// foldSpend folds row into the accumulator of the UTC day it completed on. A
+// run whose completion time does not parse joins no day. cost is the zero
+// outcome for a run whose tokens were not measured.
+func (a *Aggregator) foldSpend(row persistence.RunStatsRow, cost costOutcome) {
+	completed, err := time.Parse(time.RFC3339, row.CompletedAt)
+	if err != nil {
+		return
+	}
+	day := utcDay(completed)
+	d, ok := a.days[day]
+	if !ok {
+		d = &dayAccum{}
+		a.days[day] = d
+	}
+	d.runs++
+	if !row.TokensMeasured {
+		d.unmeasured++
+		return
+	}
+	d.add(cost)
 }
 
 // foldChain folds row into its chain's by_chain accumulator. Rows arrive
@@ -593,6 +755,7 @@ func (a *Aggregator) Report(
 		SchemaTier:   a.tierLabel,
 		Warnings:     a.composeWarnings(),
 		Summary:      a.summary(full),
+		Spend:        a.spend(generatedAt, since, until),
 		ByStatus:     a.groupSlice(a.byStatus, full),
 		ByAdapter:    a.groupSlice(a.byAdapter, full),
 		ByRule:       []Group{},
@@ -628,6 +791,114 @@ func (a *Aggregator) Report(
 	}
 
 	return rpt
+}
+
+// spendPeriods maps the length of a report's range to the period its spend is
+// bucketed by; the first entry whose limit holds the range names it.
+var spendPeriods = []struct {
+	limit  time.Duration
+	period string
+}{
+	{limit: 2160 * time.Hour, period: "day"},
+}
+
+// spendPeriod names the period a range from since to end is bucketed by. An
+// open range, and one longer than every entry of spendPeriods, takes months.
+func spendPeriod(since *time.Time, end time.Time) string {
+	if since == nil {
+		return "month"
+	}
+	for _, rule := range spendPeriods {
+		if end.Sub(*since) <= rule.limit {
+			return rule.period
+		}
+	}
+	return "month"
+}
+
+// periodStart returns the UTC instant that starts the period holding t.
+func periodStart(t time.Time, period string) time.Time {
+	day := utcDay(t)
+	if period == "month" {
+		return day.AddDate(0, 0, 1-day.Day())
+	}
+	return day
+}
+
+// nextPeriod returns the start of the period after the one starting at start.
+func nextPeriod(start time.Time, period string) time.Time {
+	if period == "month" {
+		return start.AddDate(0, 1, 0)
+	}
+	return start.AddDate(0, 0, 1)
+}
+
+// spend lists the recorded cost of the folded runs per UTC period, every
+// period from the one holding the range's first instant to the one holding its
+// last, so a period without runs is listed with none. It is nil unless the
+// database records cost.
+func (a *Aggregator) spend(generatedAt time.Time, since, until *time.Time) *Spend {
+	if !a.caps.RecordedCost() {
+		return nil
+	}
+	end := generatedAt
+	if until != nil {
+		end = *until
+	}
+	period := spendPeriod(since, end)
+	out := &Spend{Period: period, Buckets: []SpendBucket{}}
+	if len(a.days) == 0 {
+		return out
+	}
+
+	// Days are summed in ascending order so a bucket's cost does not depend
+	// on map iteration order.
+	days := slices.SortedFunc(maps.Keys(a.days), time.Time.Compare)
+	sums := make(map[time.Time]*dayAccum)
+	for _, day := range days {
+		start := periodStart(day, period)
+		sum, ok := sums[start]
+		if !ok {
+			sum = &dayAccum{}
+			sums[start] = sum
+		}
+		d := a.days[day]
+		sum.runs += d.runs
+		sum.unmeasured += d.unmeasured
+		sum.costUSD += d.costUSD
+		sum.pricedRuns += d.pricedRuns
+		sum.costUnpricedRuns += d.costUnpricedRuns
+		sum.costPartialRuns += d.costPartialRuns
+	}
+
+	firstAt := days[0]
+	if since != nil {
+		firstAt = *since
+	}
+	lastAt := generatedAt
+	if until != nil {
+		lastAt = until.Add(-time.Nanosecond)
+	}
+	first := periodStart(firstAt, period)
+	last := periodStart(lastAt, period)
+	if latest := periodStart(days[len(days)-1], period); latest.After(last) {
+		last = latest
+	}
+
+	for start := first; !start.After(last); start = nextPeriod(start, period) {
+		bucket := SpendBucket{Start: start.Format(time.RFC3339)}
+		if sum, ok := sums[start]; ok {
+			bucket.Runs = sum.runs
+			bucket.TokensUnmeasuredRuns = sum.unmeasured
+			bucket.CostUnpricedRuns = sum.costUnpricedRuns
+			bucket.CostPartialRuns = sum.costPartialRuns
+			if sum.pricedRuns > 0 {
+				bucket.CostUSD = new(round9(sum.costUSD))
+			}
+		}
+		out.Buckets = append(out.Buckets, bucket)
+	}
+	return out
 }
 
 // composeWarnings returns the non-nil warning list: the one warning that
@@ -693,7 +964,7 @@ func (a *Aggregator) summary(full bool) Summary {
 		cost := round9(a.total.costUSD)
 		s.CostUSD = &cost
 		if a.total.succeededMeasured > 0 {
-			s.CostPerSucceededRunUSD = new(round2(cost / float64(a.total.succeededMeasured)))
+			s.CostPerSucceededRunUSD = new(round9(cost / float64(a.total.succeededMeasured)))
 		}
 	}
 	return s
@@ -738,7 +1009,7 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 			cost := round9(g.costUSD)
 			stat.CostUSD = &cost
 			if g.succeededMeasured > 0 {
-				stat.CostPerSucceededRunUSD = new(round2(cost / float64(g.succeededMeasured)))
+				stat.CostPerSucceededRunUSD = new(round9(cost / float64(g.succeededMeasured)))
 			}
 		}
 	}
