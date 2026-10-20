@@ -401,7 +401,6 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	}); hold != SkipNone {
 		rearmHeld()
 		if entry, ok := state.RetryAttempts[issueID]; ok {
-			entry.pausedSinceMS = popped.pausedSinceMS
 			entry.noStateObserved = popped.noStateObserved
 		}
 		log.Debug("retry held by spend ceiling, rechecking",
