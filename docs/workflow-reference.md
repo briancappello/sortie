@@ -1909,7 +1909,7 @@ A reverse proxy in front of Sortie must pass on the `Host` header the browser se
 | Method | Path                     | Description                                                        |
 | ------ | ------------------------ | ------------------------------------------------------------------ |
 | GET    | `/`                      | Redirects to `/ui/` with `302 Found`. |
-| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change: run-history reads (History, the older runs of an issue page or a session view, and the issue lookup of the command palette) at most once per 5 seconds and Analytics at most once per 30 seconds. |
+| GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change: run-history reads (History, the older runs of an issue page or a session view, and the issue lookup of the command palette) at most once per 5 seconds and Analytics at most once per 30 seconds. Prices reads its route each time it opens and never refetches on a change signal. |
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
 | GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, one entry per active issue in a stable order, the list of what needs a person, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
@@ -1917,6 +1917,7 @@ A reverse proxy in front of Sortie must pass on the `Host` header the browser se
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
 | GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, with the cost recorded with each run and that cost per UTC day or month. |
+| GET    | `/api/v1/prices`         | The rates Sortie applies to the next run, per agent kind and model, with the layer each rate comes from and whether that run is priced in full, in part, or not at all, and the state of every price source: your `token_rates`, your own price table, the downloaded table, and the embedded table. It is what the dashboard's Prices screen shows. See [`GET /api/v1/prices`: prices in force](#get-apiv1prices-prices-in-force). |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, lists what Sortie does next for it as condition and sentence pairs, and lists the latest 50 agent events of its running or latest run as `recent_events`. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
 | POST   | `/api/v1/retries/{identifier}/run` | Make an issue's scheduled retry due now; the retry then goes through the same checks as a retry whose time came, and one that still cannot start keeps the time it was due before. Returns 202 Accepted, 404 when no retry is scheduled for the identifier, and 409 Conflict during graceful shutdown. Every 202 and 409 response says in one sentence what it did. |
@@ -3934,6 +3935,136 @@ A client that disconnects during the read gets no response, and the read stops.
 
 Each request opens its own read-only connection to the database and closes it when the report is built. It never uses the connection the orchestrator holds, so a report over a long history does not delay the orchestrator's writes.
 
+#### `GET /api/v1/prices`: prices in force
+
+Returns the rates Sortie applies to the next run, per agent kind and model, the layer each rate comes from, and the state of every price source. It is the data behind the dashboard's Prices screen. The route states rates and prices no run: a recorded run keeps the price it was written with ([Section 4.4](#44-token_rates--cost-estimation)). It takes no query parameters, writes nothing, and answers the same for the same configuration.
+
+The route reads the rates the workflow loader holds, so a successful workflow load, a `token_rates` edit, a table that has just landed, and a failed download try show on the next request, without a restart. Times are RFC 3339 in UTC. A time that is unknown, a string that is empty, and the model count of a source with no table are `null`.
+
+```json
+{
+  "generated_at": "2026-02-24T20:15:30Z",
+  "table_in_force": {"layer": "fetched", "as_of": "2026-02-24T04:00:12Z", "age_days": 0},
+  "token_rates": {"kind_entries": 0, "model_entries": 1, "version": "sha256:3b1f0c8d5a7e2f94b6c1d8e0a3f5b7c9d2e4f6a8b0c1d3e5f7a9b1c3d5e7f9a1"},
+  "operator": null,
+  "fetched": {
+    "status": "loaded",
+    "in_force": true,
+    "off_by": null,
+    "file": null,
+    "address": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+    "version": "sha256:8d2a6c4e0b1f3a5c7e9d1b3f5a7c9e0b2d4f6a8c0e1b3d5f7a9c1e3b5d7f9a0c",
+    "as_of": "2026-02-24T04:00:12Z",
+    "models": 2315,
+    "next_try_at": "2026-02-25T04:00:12Z",
+    "failures": 0,
+    "failed_at": null,
+    "error": null
+  },
+  "embedded": {
+    "status": "loaded",
+    "in_force": true,
+    "off_by": null,
+    "file": null,
+    "address": null,
+    "version": "9f3c2e1a7b4d5c6e8f0a1b2c3d4e5f6a7b8c9d0e",
+    "as_of": "2026-02-20T11:42:07Z",
+    "models": 2290,
+    "next_try_at": null,
+    "failures": 0,
+    "failed_at": null,
+    "error": null
+  },
+  "models": [
+    {
+      "agent_kind": "claude-code",
+      "model": "claude-sonnet-4-5",
+      "table_key": "claude-sonnet-4-5",
+      "layer": "model_entry",
+      "entry_key": "claude-sonnet-4-5",
+      "input": {"per_mtok": 2.7, "layer": "model_entry", "from_input": false},
+      "output": {"per_mtok": 15, "layer": "fetched", "from_input": false},
+      "cache_read": {"per_mtok": 0.3, "layer": "fetched", "from_input": false},
+      "cache_write": {"per_mtok": 3.75, "layer": "fetched", "from_input": false},
+      "cost_status": "estimated",
+      "unrated_classes": [],
+      "last_used_at": "2026-02-24T19:58:41Z",
+      "runs": 12
+    },
+    {
+      "agent_kind": "codex",
+      "model": "acme-1",
+      "table_key": null,
+      "layer": null,
+      "entry_key": null,
+      "input": {"per_mtok": null, "layer": null, "from_input": false},
+      "output": {"per_mtok": null, "layer": null, "from_input": false},
+      "cache_read": {"per_mtok": null, "layer": null, "from_input": false},
+      "cache_write": {"per_mtok": null, "layer": null, "from_input": false},
+      "cost_status": "unpriced",
+      "unrated_classes": ["input", "output", "cache_read", "cache_write"],
+      "last_used_at": null,
+      "runs": 0
+    }
+  ]
+}
+```
+
+**Top-level members.**
+
+| Member | Type | Meaning |
+| ------ | ---- | ------- |
+| `generated_at` | string | The instant of the request. |
+| `table_in_force` | object or `null` | The highest-precedence price table in force: `layer` (`operator_table`, `fetched`, or `embedded`), `as_of` (the date of its prices), and `age_days` (whole days from `as_of` to `generated_at`, never below `0`). `null` while no price table is in force. A model takes its rates from the first table that lists it, so a lower table can price a name this one lacks. |
+| `token_rates` | object | `kind_entries` and `model_entries`, the number of `token_rates` entries in force, and `version`, their version, `null` when there are none. |
+| `operator` | object or `null` | The state of your own table, in the source shape below. `null` unless `price_table.replace_file` or `price_table.replace_url` is set. |
+| `fetched` | object | The state of the shared table downloaded from `price_table.fetch_url`. |
+| `embedded` | object | The state of the table built into the binary. |
+| `models` | array | One row per agent kind and model, below. `[]` when there are none. |
+
+**A price source** (`operator`, `fetched`, and `embedded`):
+
+| Member | Type | Meaning |
+| ------ | ---- | ------- |
+| `status` | string | `off`, `not_loaded`, `loaded`, or `failing`. `off` is the shared download turned off, or `price_table.embedded` set to `false`; it is decided from the settings in force before any download state is read, so an `off` source is never `failing`. Otherwise `failing` while the source has failed tries or its latest workflow load failed on `price_table.replace_file`, else `loaded` once it holds a table, else `not_loaded`. |
+| `in_force` | boolean | The table is one of the tables that price runs. A `price_table.replace_file` table replaces the downloaded and embedded tables. A `price_table.replace_url` table replaces them once a download of it has passed validation, and they price until then. |
+| `off_by` | string or `null` | On `fetched` while `off`: `SORTIE_PRICE_TABLE_FETCH` when the environment variable turned the download off, else `price_table.fetch`. `null` otherwise. |
+| `file` | string or `null` | On `operator` for `price_table.replace_file`: the setting value, after `$VAR` resolution and before `~` expansion and path joining. It is never a path Sortie resolved. |
+| `address` | string or `null` | The download address as its scheme, host, and path only, so a credential or query in the setting never leaves Sortie. `null` when the source has no address or the setting does not parse; a download whose address does not parse reads `failing` with the error `invalid address`. |
+| `version` | string or `null` | The version of the table the source holds: the pinned upstream revision of the embedded table, a content digest of any other table. `null` when it holds none. |
+| `as_of` | string or `null` | The date of the table's prices. For the embedded table, the commit date of its upstream revision. For a downloaded table, the time of the download, and a kept copy returns after a restart with its original download time. For a `price_table.replace_file` table, when this process first loaded the file's current content; a reload that reads unchanged content keeps it. |
+| `models` | integer or `null` | The number of models the table lists. |
+| `next_try_at` | string or `null` | When the next download try is due. `null` while a try is due or running, and for a source that is not downloaded. |
+| `failures` | integer | The consecutive failed download tries since the last accepted one; `0` otherwise. |
+| `failed_at` | string or `null` | When the latest failed try or failed load ended. `null` unless the source is `failing`. |
+| `error` | string or `null` | The error of the latest failed try or failed load, masked as the Health screen masks the error of the workflow check. `null` unless the source is `failing`. |
+
+The download state is kept in memory: a restart keeps the copy of a table that passed validation, with its download time and version, and starts the failure count again at `0`. A `price_table.replace_file` failure shows only while the configuration in effect names `price_table.replace_file`. A workflow load that fails for another reason shows on the Health and Workflow screens, not here. The `fetched` source carries no table facts while it is `off`, because a kept copy never prices while the download is off. The `embedded` source carries the binary's revision, its date, and its model count whether it is on or off.
+
+**A model row.** Rows with a recorded run come first, the latest use first, then rows that only the workflow in effect names, which have `last_used_at` `null` and `runs` `0`. Ties break by `agent_kind` and then `model`, in byte order. A pair is listed when run history records it or when a setting of the workflow in effect names a model for an agent kind: the top-level `agent.kind`, the dispatch default, and each dispatch rule's settings.
+
+| Member | Type | Meaning |
+| ------ | ---- | ------- |
+| `agent_kind` | string | The agent kind. The same model name under two kinds is two rows, because a `token_rates` entry keyed by the kind prices the kind's models first. |
+| `model` | string | The model name, possibly empty for a run that reported none. |
+| `table_key` | string or `null` | The key the model name maps to in the first price table that lists it. `null` when none does. |
+| `layer` | string or `null` | The layer that prices the model: `kind_entry`, `model_entry`, `operator_table`, `fetched`, or `embedded`. `null` when none does. A model entry that takes some rates from a table is `model_entry`, and each class names its own layer. The layer is for display: a recorded run keeps its `operator`, `fetched`, or `embedded` price source ([Section 4.4](#44-token_rates--cost-estimation)), which does not tell your `token_rates` from your own table. |
+| `entry_key` | string or `null` | The `token_rates` key of the kind entry or model entry. `null` otherwise. |
+| `input`, `output`, `cache_read`, `cache_write` | object | `per_mtok`, the rate in USD per 1M tokens; `layer`, the layer that supplies it; and `from_input`. `per_mtok` and `layer` are `null` when no layer rates the class, so an unset rate never reads as zero, and `per_mtok` is `0` when a layer sets a rate of zero. A table rate is served to 10 significant digits. `from_input` is `true` for the cache rate of a kind entry that leaves it unset and so prices it at its input rate. |
+| `cost_status` | string | What the next run of the model records: `estimated` when every token class is priced, `partial` when a class has no rate beside priced ones, `unpriced` when no class is priced. |
+| `unrated_classes` | array | The classes with no rate, from `input`, `output`, `cache_read`, and `cache_write`. `[]` when none. |
+| `last_used_at` | string or `null` | The completion time of the latest recorded run. `null` for a model that only the workflow names. |
+| `runs` | integer | The recorded runs that used the model under the agent kind. |
+
+**Errors:**
+
+| Condition | Status | `error.code` |
+| --------- | ------ | ------------ |
+| The server has no run history to read, or the read fails | 503 | `history_unavailable` |
+| A method other than `GET` | 405 | `method_not_allowed` |
+
+A server that holds no rates answers `200` with every row `unpriced` and the downloaded and embedded tables `off`.
+
 #### `POST /api/v1/refresh`
 
 Triggers an immediate poll+reconciliation cycle. The endpoint is best-effort: repeated requests while a refresh is already pending are coalesced. During graceful shutdown the endpoint rejects requests with `409 Conflict`.
@@ -4381,9 +4512,9 @@ Sortie estimates the cost in USD of every measured run, per model, and shows it 
 
 1. The operator's rates in `token_rates`. A key that names a registered agent kind (for example `claude-code`) prices every model of that kind alike; any other key names a model, matched to the model a run reports, or the model it was configured with when it reports none, by the same name matching the price tables use.
 2. The shared price table downloaded at runtime, unless `price_table.fetch` is `false`, once a downloaded table has passed validation.
-3. The price table embedded in the binary: a snapshot of the published LiteLLM `model_prices_and_context_window.json`, refreshed from upstream regularly; each release embeds the copy its source holds, unless `price_table.embedded` is `false`.
+3. The price table embedded in the binary: a snapshot of the published LiteLLM `model_prices_and_context_window.json`, refreshed from upstream regularly; each release embeds the copy its source holds, unless `price_table.embedded` is `false`. The snapshot carries its upstream revision and the date of that revision's commit, which the Prices screen shows with the age of the prices in force.
 
-`price_table.replace_file` or `price_table.replace_url` names a table of your own, in the same format as the shared table, that replaces layers 2 and 3 entirely; `token_rates` entries still lie over it. A deployment with no `token_rates` and no network access is priced from the embedded table.
+`price_table.replace_file` names a table of your own, in the same format as the shared table, that replaces layers 2 and 3 entirely. `price_table.replace_url` names one that replaces layers 2 and 3 once a download of it has passed validation, and layers 2 and 3 price until then. `token_rates` entries still lie over either. A deployment with no `token_rates` and no network access is priced from the embedded table. The Prices screen of the dashboard shows the rates in force for every model your runs used and every model your workflow configures, the layer that supplies each, and the state of every price source; [`GET /api/v1/prices`](#get-apiv1prices-prices-in-force) serves the same data.
 
 **Matching model names.** Runtimes and tables spell the same model differently (a provider prefix such as `anthropic/claude-sonnet-4-5`, or a dotted version such as `claude-opus-4.6`), and one matching rule maps every runtime's names onto table keys. A name that maps to no key has no rate; matching never guesses, so `claude-sonnet-4` is never priced at the rates of `claude-sonnet-4-5`. A model no layer prices leaves its share unpriced, and one `token_rates` line for that model fixes it.
 
@@ -4417,7 +4548,7 @@ A kind entry that prices its kind (both `input_per_mtok` and `output_per_mtok` s
 | `price_table.fetch` | boolean | `true` | Downloads the shared price table at startup and every 24 hours; `false` turns the download off. Overridden by `SORTIE_PRICE_TABLE_FETCH`. |
 | `price_table.fetch_url` | string | `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` | Address of the shared price table. |
 | `price_table.replace_file` | path | _(not set)_ | A price table of your own, in the shared table's format, that replaces the downloaded and embedded tables. Supports `$VAR` and `~` expansion; a relative path is read from the directory of WORKFLOW.md. |
-| `price_table.replace_url` | string | _(not set)_ | A price table of your own, downloaded like the shared table whenever it is set, whatever `price_table.fetch` says, that replaces the downloaded and embedded tables. |
+| `price_table.replace_url` | string | _(not set)_ | A price table of your own, downloaded like the shared table whenever it is set, whatever `price_table.fetch` says, that replaces the downloaded and embedded tables once a download of it has passed validation; they price until then. |
 
 **Validation rules:**
 
