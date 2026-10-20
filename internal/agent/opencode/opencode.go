@@ -113,14 +113,19 @@ type turnRuntime struct {
 	// spend is the turn's evidence for the shared spend rule, created
 	// with the runtime.
 	spend agentcore.TurnSpend
+
+	// exitedCleanly records that the process ended on its own with
+	// status 0. The runtime does not always print a closing step_finish,
+	// and the export read after such an exit is final.
+	exitedCleanly bool
 }
 
 // spendFor returns the turn's spend evidence given the figure its
 // recovery produced. The export spans the run window, so a figure read
-// after a finished turn settles the whole session total.
+// after a finished turn or a clean exit settles the whole session total.
 func (r *turnRuntime) spendFor(recovered *agentcore.RecoveredUsage) agentcore.TurnSpend {
 	spend := r.spend
-	if recovered != nil && r.turnFinished {
+	if recovered != nil && (r.turnFinished || r.exitedCleanly) {
 		spend.MarkSettled()
 		spend.MarkSessionTotal()
 	}
@@ -669,6 +674,7 @@ func deleteVerificationSession(ctx context.Context, state *sessionState, session
 // a regression because the warning has never actually reached stdout.
 func (a *OpenCodeAdapter) finalizeExitedTurn(ctx context.Context, state *sessionState, runtime *turnRuntime, emit func(domain.AgentEvent), exit waitResult) (domain.TurnResult, error) {
 	recovered := recoverUsage(ctx, state, runWindow(state))
+	runtime.exitedCleanly = !exit.stopped && exit.err == nil && exit.exitCode == 0
 
 	clearActive(state, runtime)
 	stderrLines := runtime.stderrCollector.Lines()

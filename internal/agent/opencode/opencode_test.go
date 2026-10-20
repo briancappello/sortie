@@ -1517,6 +1517,44 @@ cat '`+runPath+`'`)
 	}
 }
 
+// The runtime can end a completed turn without a step_finish line; the
+// export it leaves behind is still final once the process exits on its own.
+func TestRunTurn_CleanExitWithoutStepFinishSettlesSpend(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	runFixture := loadFixture(t, "simple_turn.jsonl")
+	withoutStepFinish := bytes.Join(bytes.SplitAfter(runFixture, []byte("\n"))[:2], nil)
+	runPath := filepath.Join(tmpDir, "run.jsonl")
+	if err := os.WriteFile(runPath, withoutStepFinish, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exportPath := filepath.Join(tmpDir, "export.json")
+	const export = `{"info":{"id":"ses_abc123"},"messages":[{"type":"assistant","finish":"stop","model":{"providerID":"anthropic","id":"claude-sonnet-4-5"},"tokens":{"input":10,"output":20,"total":30,"cache":{"read":0,"write":0}}}]}`
+	if err := os.WriteFile(exportPath, []byte(export), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := writeOpenCodeScript(t, tmpDir, `case "$1 $2" in
+  "session export") cat '`+exportPath+`'; exit 0;;
+esac
+cat '`+runPath+`'`)
+
+	a, _ := NewOpenCodeAdapter()
+	session := mustStartSession(t, a, tmpDir, script)
+
+	_, result, err := collectEvents(t, a, session, "work")
+	if err != nil {
+		t.Fatalf("RunTurn() error = %v", err)
+	}
+
+	if result.SpendUnaccounted {
+		t.Error("RunTurn().SpendUnaccounted = true, want false for a turn whose process exited cleanly after the export recovered its usage")
+	}
+}
+
 // TestRunTurn_UsageMeasured_TrueWhenTheExportIsAGenuineZero is the same
 // property as the test above on the COMPLETION path, for the export shape the
 // value-based check used to throw away: an assistant message whose tokens are
