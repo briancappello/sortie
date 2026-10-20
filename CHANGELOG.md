@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The session view of a finished run now lists the run's cost per model, naming the token classes that had no rate for a model Sortie could not fully price, and run rows of the JSON API carry the same per-model spend as `model_usage`. `GET /api/v1/stats` and `sortie stats --format json` also count the runs recorded with a lower-bound cost as `cost_partial_runs`, in the summary and in every breakdown entry. ([#1421](https://github.com/sortie-ai/sortie/issues/1421))
 
+- Analytics now charts the estimated spend per UTC day for the 7, 30, and 90 day ranges and per UTC month for all time, so you can see which day a cost jumped and compare it with the days and months `agent.max_daily_cost_usd` and `agent.max_monthly_cost_usd` count. A day or month that leaves out runs Sortie could not price or measure is drawn with a diagonal hatch. The summary and every breakdown with a cost column also show the cost per succeeded run. `sortie stats --format json` and `GET /api/v1/stats` serve the same spend as `spend`. ([#1422](https://github.com/sortie-ai/sortie/issues/1422))
+
 ### Changed
 
 - `sortie_tokens_total`, `sortie_agent_runtime_seconds_total`, and `sortie_worker_exits_total` now carry a `model` label, so a dashboard can show token use, agent runtime, and run outcomes per model: the model the agent reported, else the configured `model`, else `<none>`. A query that sums one of these metrics returns what it did before, but a panel or alert on raw series now gets one series per model, and the example Grafana dashboard's Agent Runtime panel plots one line per model. After each restart these metrics report `0` for every configured model and every model an earlier run reported; a query filtered to any other model returns no data until a run reports that model, so an alert on it needs `or vector(0)`. On a default Prometheus, `rate()` and `increase()` miss the first sample of a model sortie has never run before; Prometheus's experimental `created-timestamp-zero-ingestion` feature flag counts it. ([#1343](https://github.com/sortie-ai/sortie/issues/1343))
@@ -36,7 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `token_rates` now reloads with the rest of WORKFLOW.md: an edit applies to the runs that finish after it and to the estimates of running sessions without a restart, and `config.token_rates` in `GET /api/v1/state` serves the rates in force. An edit that gives an entry an invalid rate keeps that entry's previous rates. ([#1410](https://github.com/sortie-ai/sortie/issues/1410))
 
-- The dashboard now marks a cost that is only a lower bound with the words "at least" before the amount, writes a cost above zero and under one cent as "under $0.01" instead of "$0.00", and shows the exact amount of every cost on hover. `GET /api/v1/stats` and `sortie stats --format json` no longer round `cost_usd` to cents. ([#1421](https://github.com/sortie-ai/sortie/issues/1421))
+- The dashboard now marks a cost that is only a lower bound with the words "at least" before the amount (Analytics underlines the amount with dots and says so on hover), writes a cost above zero and under one cent as "under $0.01" instead of "$0.00", and shows the exact amount of a cost on hover on every screen but Analytics. `GET /api/v1/stats` and `sortie stats --format json` no longer round `cost_usd` to cents. ([#1421](https://github.com/sortie-ai/sortie/issues/1421))
+
+- The breakdown by model in `sortie stats`, `GET /api/v1/stats`, and Analytics now counts a run under every model it spent tokens on, with that model's tokens and cost, so a run that used two models appears in both rows and the rows' run counts can add up to more than the runs. `cost_per_succeeded_run_usd` is no longer rounded to cents. ([#1422](https://github.com/sortie-ai/sortie/issues/1422))
 
 ### Removed
 
