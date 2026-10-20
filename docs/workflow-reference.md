@@ -4578,7 +4578,7 @@ Which adapters hand that generated file's servers to the agent process differs b
 
 | Agent kind | Servers reach the agent | How |
 | --- | --- | --- |
-| `claude-code` | Yes | the generated file's path is passed to `--mcp-config` |
+| `claude-code` | Yes | on a local launch, a copy of the generated file that marks `sortie-tools` to load upfront is passed to `--mcp-config`, so the model sees Sortie's tools without first searching for them; a remote launch passes the generated file's path |
 | `copilot-cli` | Yes | the generated file's path is passed to `--additional-mcp-config` as `@<path>` |
 | `codex` | Yes, local launch only | the generated servers are re-expressed as configuration overrides on the app-server command line, which the runtime parses into its own configuration |
 | `opencode` | Yes, local launch only | the generated servers are re-expressed as the runtime's own configuration document, delivered through an inline configuration environment variable |
