@@ -36,7 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `token_rates` now reloads with the rest of WORKFLOW.md: an edit applies to the runs that finish after it and to the estimates of running sessions without a restart, and `config.token_rates` in `GET /api/v1/state` serves the rates in force. An edit that gives an entry an invalid rate keeps that entry's previous rates. ([#1410](https://github.com/sortie-ai/sortie/issues/1410))
 
-- The dashboard now marks a cost that is only a lower bound with the words "at least" before the amount, writes a cost above zero and under one cent as "under $0.01" instead of "$0.00", and shows the exact amount of every cost on hover. ([#1421](https://github.com/sortie-ai/sortie/issues/1421))
+- The dashboard now marks a cost that is only a lower bound with the words "at least" before the amount, writes a cost above zero and under one cent as "under $0.01" instead of "$0.00", and shows the exact amount of every cost on hover. `GET /api/v1/stats` and `sortie stats --format json` no longer round `cost_usd` to cents. ([#1421](https://github.com/sortie-ai/sortie/issues/1421))
 
 ### Removed
 

@@ -3819,7 +3819,7 @@ Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[
 | `duration_seconds`           | object           | `p50`, `p95`, `mean`, and `samples` over the succeeded runs. Each of them is `null` when `samples` is `0`. |
 | `mean_turns_succeeded`       | number or `null` | The mean turns of the succeeded runs. `null` on the `base` tier and when no run succeeded. |
 | `tokens`                     | object or `null` | The sums of `input`, `output`, `total`, `cache_read`, and `cache_write` over the runs that reported usage, and `uncached`, which is `total` less `cache_read`, floored at zero, so `uncached` plus `cache_read` equals `total` and cache writes stay in it. `null` on the `base` tier and when no run reported usage. |
-| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, rounded to cents. `null` on the `base` tier, when no run that spent tokens is priced, and when the runs carry no recorded cost. |
+| `cost_usd`                   | number or `null` | The estimated cost of the priced runs, not rounded to cents, so a total under one cent never reads as zero. `null` on the `base` tier, when no run that spent tokens is priced, and when the runs carry no recorded cost. |
 | `cost_per_succeeded_run_usd` | number or `null` | `cost_usd` divided by the succeeded runs that reported usage. `null` when `cost_usd` is, and when no succeeded run reported usage. |
 | `zero_duration_runs`         | integer          | The runs that completed at the instant they started; each counts as a zero-second sample. |
 | `duration_excluded_runs`     | integer          | The runs left out of every duration figure because their recorded timestamps cannot be read or end before they start. |
