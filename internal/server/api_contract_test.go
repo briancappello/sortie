@@ -284,6 +284,7 @@ func TestAPIContract(t *testing.T) {
 		reflect.TypeFor[acknowledgeResponse](), reflect.TypeFor[errorResponse](),
 		reflect.TypeFor[healthResponse](), reflect.TypeFor[readyResponse](), reflect.TypeFor[runEventsResponse](),
 		agentEventType, reflect.TypeFor[runEndedFrame](), reflect.TypeFor[runResetFrame](),
+		reflect.TypeFor[pricesResponse](),
 	)
 	if err != nil {
 		t.Fatalf("newContract: %v", err)

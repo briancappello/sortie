@@ -6,6 +6,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -275,6 +276,40 @@ func TestListReportedModels(t *testing.T) {
 	slices.Sort(got)
 	if want := []string{"model-a", "model-b", "model-c"}; !slices.Equal(got, want) {
 		t.Errorf("ListReportedModels() = %q, want %q", got, want)
+	}
+}
+
+func TestListModelUse(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	runs := []struct {
+		kind, completedAt string
+	}{
+		{"kind-a", "2026-03-19T10:00:00Z"},
+		{"kind-a", "2026-03-19T11:30:00+03:00"},
+		{"kind-b", "2026-03-19T09:00:00Z"},
+	}
+	for i, r := range runs {
+		run := newTestRun(i + 1)
+		run.AgentAdapter, run.CompletedAt = r.kind, r.completedAt
+		run.ModelUsage = map[string]ModelTokens{"shared-model": {}}
+		appendWithPartsOrFatal(t, s, run)
+	}
+
+	got, err := s.ListModelUse(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelUse: %v", err)
+	}
+
+	slices.SortFunc(got, func(a, b ModelUse) int { return strings.Compare(a.AgentKind, b.AgentKind) })
+	want := []ModelUse{
+		{AgentKind: "kind-a", Model: "shared-model", Runs: 2, LastUsedAt: time.Date(2026, 3, 19, 10, 0, 0, 0, time.UTC)},
+		{AgentKind: "kind-b", Model: "shared-model", Runs: 1, LastUsedAt: time.Date(2026, 3, 19, 9, 0, 0, 0, time.UTC)},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListModelUse() = %+v, want %+v", got, want)
 	}
 }
 

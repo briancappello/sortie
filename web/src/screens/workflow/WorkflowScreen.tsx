@@ -1,12 +1,14 @@
 import { useStateQuery } from "@/api/queries";
 import { hasRateSource } from "@/lib/budget";
-import { fmtCount, fmtMoney, fmtRate, fmtStamp, fmtTokens } from "@/lib/format";
+import { fmtCount, fmtMoney, fmtStamp, fmtTokens } from "@/lib/format";
+import { rateText, UNSET_RATE, UNSET_RATE_FROM_INPUT } from "@/lib/rates";
+import { Code } from "@/components/Code";
 import { Pair, Pairs, Panel } from "@/components/Panel";
 import { StateBadge } from "@/components/StateBadge";
 
 import { DispatchSection } from "./DispatchSection";
 import { ReactionsSection } from "./ReactionsSection";
-import { Code, joinCode, msText, Note, usageText } from "./workflow-text";
+import { joinCode, msText, Note, usageText } from "./workflow-text";
 
 import type { ConfigResponse, TokenRateResponse, WorkflowHealthResponse } from "@/api/types.gen";
 import type { ReactNode } from "react";
@@ -153,10 +155,6 @@ function AgentPanel({ config }: ConfigProps) {
   );
 }
 
-function rateText(rate: number | null, unset: string): string {
-  return rate === null ? unset : `${fmtRate(rate)} per 1M`;
-}
-
 interface RateListProps {
   name: string;
   rate: TokenRateResponse;
@@ -164,13 +162,13 @@ interface RateListProps {
 
 function RateList({ name, rate }: RateListProps) {
   const unsetCache =
-    rate.per_kind && rate.input_per_mtok !== null ? "input rate (not set)" : "not set";
+    rate.per_kind && rate.input_per_mtok !== null ? UNSET_RATE_FROM_INPUT : UNSET_RATE;
   return (
     <div className="flex flex-col gap-xs">
       <p className="font-mono text-body-sm text-ink">{name}</p>
       <Pairs>
-        <Pair label="Input">{rateText(rate.input_per_mtok, "not set")}</Pair>
-        <Pair label="Output">{rateText(rate.output_per_mtok, "not set")}</Pair>
+        <Pair label="Input">{rateText(rate.input_per_mtok, UNSET_RATE)}</Pair>
+        <Pair label="Output">{rateText(rate.output_per_mtok, UNSET_RATE)}</Pair>
         <Pair label="Cache read">{rateText(rate.cache_read_per_mtok, unsetCache)}</Pair>
         <Pair label="Cache write">{rateText(rate.cache_write_per_mtok, unsetCache)}</Pair>
       </Pairs>

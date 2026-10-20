@@ -1,6 +1,7 @@
 import { Pair, Pairs, Panel } from "@/components/Panel";
 import { costText, costTitle, NOT_MEASURED } from "@/lib/figures";
 import { fmtCount, fmtDuration } from "@/lib/format";
+import { unratedText } from "@/lib/rates";
 
 import type { ConfigResponse, ModelUsageResponse, TokenInfo } from "@/api/types.gen";
 import type { SessionRun } from "@/components/use-session-run";
@@ -68,17 +69,6 @@ export function UsagePanel({ session }: UsagePanelProps) {
       </Pairs>
     </Panel>
   );
-}
-
-const CLASS_WORDS: Readonly<Record<string, string>> = {
-  input: "input",
-  output: "output",
-  cache_read: "cache read",
-  cache_write: "cache write",
-};
-
-function unratedText(classes: readonly string[]): string {
-  return classes.map((name) => CLASS_WORDS[name] ?? name).join(", ");
 }
 
 /** Props of {@link ModelCostPanel}. */

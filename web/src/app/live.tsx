@@ -28,6 +28,10 @@ function floorOf(query: Query): number | undefined {
   return typeof floor === "number" ? floor : undefined;
 }
 
+function skipsChangeSignal(query: Query): boolean {
+  return query.meta?.skipsChangeSignal === true;
+}
+
 interface FloorGate {
   /** Refetches a floored query now, after its floor, or after its running fetch ends. */
   request: (query: Query) => void;
@@ -229,7 +233,10 @@ export function LiveProvider({ children }: LiveProviderProps) {
     const others = { type: "active", stale: true } as const;
     void client.refetchQueries({
       ...others,
-      predicate: (query) => query.queryKey[0] !== STATE_KEY_ROOT && floorOf(query) === undefined,
+      predicate: (query) =>
+        query.queryKey[0] !== STATE_KEY_ROOT &&
+        floorOf(query) === undefined &&
+        !skipsChangeSignal(query),
     });
     for (const query of client.getQueryCache().findAll({
       ...others,

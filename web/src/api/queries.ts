@@ -1,6 +1,14 @@
 import { QueryClient, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { ApiError, getIssue, getIssueGroups, getRuns, getState, getStats } from "@/api/client";
+import {
+  ApiError,
+  getIssue,
+  getIssueGroups,
+  getPrices,
+  getRuns,
+  getState,
+  getStats,
+} from "@/api/client";
 import { setServerOffset } from "@/lib/server-clock";
 
 import type { HistoryFilter } from "@/api/client";
@@ -8,6 +16,7 @@ import type {
   IssueDetailResponse,
   IssueGroupResponse,
   IssueGroupsResponse,
+  PricesResponse,
   Report,
   RunsResponse,
   StateResponse,
@@ -37,6 +46,7 @@ export const queryKeys = {
     ["history-runs", issueId, filter] as const,
   issueLookup: (query: string) => ["issue-lookup", query] as const,
   stats: (range: AnalyticsRange) => ["stats", range] as const,
+  prices: () => ["prices"] as const,
 };
 
 /** Issues per History page and runs per page of an expanded group. */
@@ -206,5 +216,19 @@ export function useStatsQuery(range: AnalyticsRange): UseQueryResult<Report> {
     queryKey: queryKeys.stats(range),
     queryFn: ({ signal }) => getStats({ since: SINCE_BY_RANGE[range] }, signal),
     meta: { refetchFloorMs: STATS_REFETCH_FLOOR_MS },
+  });
+}
+
+/**
+ * Reads the rates in force and the price sources. Stale at once, so every
+ * opening of the screen asks the route again; the marker keeps a change signal
+ * from doing so, which would rerun its history read on every poll tick.
+ */
+export function usePricesQuery(): UseQueryResult<PricesResponse> {
+  return useQuery({
+    queryKey: queryKeys.prices(),
+    queryFn: ({ signal }) => getPrices(signal),
+    staleTime: 0,
+    meta: { skipsChangeSignal: true },
   });
 }

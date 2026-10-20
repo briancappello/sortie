@@ -16,6 +16,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server/ui"
 )
 
@@ -372,6 +373,33 @@ type Params struct {
 	// Stats computes the run statistics report. Called on each
 	// GET /api/v1/stats; nil answers 503.
 	Stats StatsFunc
+
+	// ModelUse lists the agent kind and model pairs with a recorded run.
+	// Called on each GET /api/v1/prices; nil answers 503.
+	ModelUse ModelUseFunc
+
+	// ConfiguredModelsFn lists the agent kind and model pairs the workflow
+	// configures. When nil, GET /api/v1/prices lists only models with a
+	// recorded run.
+	ConfiguredModelsFn func() []orchestrator.ConfiguredModel
+
+	// RatesFn returns the rates the next recorded run gets. When nil,
+	// GET /api/v1/prices serves every model unpriced and the fetched and
+	// embedded tables off.
+	RatesFn func() *pricing.Rates
+
+	// PriceDownloads reports the state of the price table downloads. When
+	// nil, GET /api/v1/prices reads an enabled download as not loaded.
+	PriceDownloads *pricing.Downloader
+
+	// WorkflowLoadFn returns when the latest workflow load ended and its
+	// error, nil when it succeeded. When nil, GET /api/v1/prices reports no
+	// load failure.
+	WorkflowLoadFn func() (endedAt time.Time, err error)
+
+	// MaskErrorFn masks an error text before GET /api/v1/prices serves it.
+	// When nil, the route serves no error text.
+	MaskErrorFn func(string) string
 }
 
 // Server is the embedded HTTP server for the JSON API, the dashboard
@@ -399,6 +427,13 @@ type Server struct {
 	runEventsFn      RunEventsFunc
 	runEventsAfterFn RunEventsAfterFunc
 	stats            StatsFunc
+
+	modelUse           ModelUseFunc
+	configuredModelsFn func() []orchestrator.ConfiguredModel
+	ratesFn            func() *pricing.Rates
+	priceDownloads     *pricing.Downloader
+	workflowLoadFn     func() (time.Time, error)
+	maskErrorFn        func(string) string
 
 	changes *changeFeed
 	timing  streamTiming
@@ -445,7 +480,14 @@ func New(params Params) *Server {
 		runEventsFn:      params.RunEventsFn,
 		runEventsAfterFn: params.RunEventsAfterFn,
 		stats:            params.Stats,
-		changes:          newChangeFeed(),
+
+		modelUse:           params.ModelUse,
+		configuredModelsFn: params.ConfiguredModelsFn,
+		ratesFn:            params.RatesFn,
+		priceDownloads:     params.PriceDownloads,
+		workflowLoadFn:     params.WorkflowLoadFn,
+		maskErrorFn:        params.MaskErrorFn,
+		changes:            newChangeFeed(),
 		timing: streamTiming{
 			heartbeat:      15 * time.Second,
 			signalInterval: time.Second,
@@ -472,6 +514,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/runs/issues", s.routeIssueGroups)
 	mux.HandleFunc("/api/v1/runs/{dispatch_id}/events", s.routeRunEvents)
 	mux.HandleFunc("/api/v1/stats", s.routeStats)
+	mux.HandleFunc("/api/v1/prices", s.routePrices)
 	mux.HandleFunc("/api/v1/refresh", s.routeRefresh)
 	mux.HandleFunc("/api/v1/retries/{identifier}/run", s.routeRetryNow)
 	mux.HandleFunc("/api/v1/attention/{id}/acknowledge", s.routeAcknowledge)

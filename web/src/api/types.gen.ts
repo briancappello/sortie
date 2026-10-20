@@ -156,6 +156,12 @@ export interface CheckNowResponse {
   outcome_text: string;
 }
 
+export interface ClassRateResponse {
+  per_mtok: number | null;
+  layer: string | null;
+  from_input: boolean;
+}
+
 export interface ConfigResponse {
   tracker: ShapeTracker;
   polling: ShapePolling;
@@ -336,6 +342,22 @@ export interface LastStageResponse {
   rule: string;
 }
 
+export interface ModelPriceResponse {
+  agent_kind: string;
+  model: string;
+  table_key: string | null;
+  layer: string | null;
+  entry_key: string | null;
+  input: ClassRateResponse;
+  output: ClassRateResponse;
+  cache_read: ClassRateResponse;
+  cache_write: ClassRateResponse;
+  cost_status: string;
+  unrated_classes: string[] | null;
+  last_used_at: string | null;
+  runs: number;
+}
+
 export interface ModelUsageResponse {
   model: string;
   tokens: TokenInfo;
@@ -423,6 +445,16 @@ export interface PollHealthResponse {
 export interface PrLoopStationResponse {
   result: string;
   continuations: number;
+}
+
+export interface PricesResponse {
+  generated_at: string;
+  table_in_force: TableInForceResponse | null;
+  token_rates: TokenRatesSourceResponse;
+  operator: TableSourceResponse | null;
+  fetched: TableSourceResponse;
+  embedded: TableSourceResponse;
+  models: ModelPriceResponse[] | null;
 }
 
 export interface PullRequestResponse {
@@ -959,6 +991,27 @@ export interface Summary {
   tokens_unmeasured_runs: number;
 }
 
+export interface TableInForceResponse {
+  layer: string;
+  as_of: string;
+  age_days: number;
+}
+
+export interface TableSourceResponse {
+  status: string;
+  in_force: boolean;
+  off_by: string | null;
+  file: string | null;
+  address: string | null;
+  version: string | null;
+  as_of: string | null;
+  models: number | null;
+  next_try_at: string | null;
+  failures: number;
+  failed_at: string | null;
+  error: string | null;
+}
+
 export interface TokenInfo {
   input_tokens: number | null;
   output_tokens: number | null;
@@ -974,6 +1027,12 @@ export interface TokenRateResponse {
   cache_write_per_mtok: number | null;
   complete: boolean;
   per_kind: boolean;
+}
+
+export interface TokenRatesSourceResponse {
+  kind_entries: number;
+  model_entries: number;
+  version: string | null;
 }
 
 export interface Tokens {

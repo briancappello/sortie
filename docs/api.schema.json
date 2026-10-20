@@ -688,6 +688,39 @@
       ],
       "type": "object"
     },
+    "ClassRateResponse": {
+      "properties": {
+        "from_input": {
+          "type": "boolean"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "per_mtok": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "per_mtok",
+        "layer",
+        "from_input"
+      ],
+      "type": "object"
+    },
     "ConfigResponse": {
       "properties": {
         "agent": {
@@ -1624,6 +1657,103 @@
       ],
       "type": "object"
     },
+    "ModelPriceResponse": {
+      "properties": {
+        "agent_kind": {
+          "type": "string"
+        },
+        "cache_read": {
+          "$ref": "#/$defs/ClassRateResponse"
+        },
+        "cache_write": {
+          "$ref": "#/$defs/ClassRateResponse"
+        },
+        "cost_status": {
+          "type": "string"
+        },
+        "entry_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {
+          "$ref": "#/$defs/ClassRateResponse"
+        },
+        "last_used_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/ClassRateResponse"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "table_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unrated_classes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agent_kind",
+        "model",
+        "table_key",
+        "layer",
+        "entry_key",
+        "input",
+        "output",
+        "cache_read",
+        "cache_write",
+        "cost_status",
+        "unrated_classes",
+        "last_used_at",
+        "runs"
+      ],
+      "type": "object"
+    },
     "ModelUsageResponse": {
       "properties": {
         "cost_status": {
@@ -2044,6 +2174,65 @@
       "required": [
         "result",
         "continuations"
+      ],
+      "type": "object"
+    },
+    "PricesResponse": {
+      "properties": {
+        "embedded": {
+          "$ref": "#/$defs/TableSourceResponse"
+        },
+        "fetched": {
+          "$ref": "#/$defs/TableSourceResponse"
+        },
+        "generated_at": {
+          "type": "string"
+        },
+        "models": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ModelPriceResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TableSourceResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "table_in_force": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TableInForceResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "token_rates": {
+          "$ref": "#/$defs/TokenRatesSourceResponse"
+        }
+      },
+      "required": [
+        "generated_at",
+        "table_in_force",
+        "token_rates",
+        "operator",
+        "fetched",
+        "embedded",
+        "models"
       ],
       "type": "object"
     },
@@ -4741,6 +4930,143 @@
       ],
       "type": "object"
     },
+    "TableInForceResponse": {
+      "properties": {
+        "age_days": {
+          "type": "integer"
+        },
+        "as_of": {
+          "type": "string"
+        },
+        "layer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "layer",
+        "as_of",
+        "age_days"
+      ],
+      "type": "object"
+    },
+    "TableSourceResponse": {
+      "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failures": {
+          "type": "integer"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "in_force": {
+          "type": "boolean"
+        },
+        "models": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_try_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "off_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "in_force",
+        "off_by",
+        "file",
+        "address",
+        "version",
+        "as_of",
+        "models",
+        "next_try_at",
+        "failures",
+        "failed_at",
+        "error"
+      ],
+      "type": "object"
+    },
     "TokenInfo": {
       "properties": {
         "cache_read_tokens": {
@@ -4859,6 +5185,32 @@
         "cache_write_per_mtok",
         "complete",
         "per_kind"
+      ],
+      "type": "object"
+    },
+    "TokenRatesSourceResponse": {
+      "properties": {
+        "kind_entries": {
+          "type": "integer"
+        },
+        "model_entries": {
+          "type": "integer"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind_entries",
+        "model_entries",
+        "version"
       ],
       "type": "object"
     },

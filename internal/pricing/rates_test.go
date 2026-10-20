@@ -80,6 +80,7 @@ func TestLoadRates(t *testing.T) {
 		kinds          []string
 		prior          map[string]any
 		wantCheck      string
+		wantSetting    string
 		wantAdvisories []string
 		wantNotSet     string
 		wantEntries    []string
@@ -167,15 +168,17 @@ func TestLoadRates(t *testing.T) {
 			wantCheck: "price_table.replace_conflict",
 		},
 		{
-			name:      "replace_file naming a missing file",
-			ext:       map[string]any{"price_table": operatorTable()},
-			wantCheck: "price_table.replace_file",
+			name:        "replace_file naming a missing file",
+			ext:         map[string]any{"price_table": operatorTable()},
+			wantCheck:   "price_table.replace_file",
+			wantSetting: "prices.json",
 		},
 		{
-			name:      "replace_file naming a table no entry of which carries a rate",
-			ext:       map[string]any{"price_table": operatorTable()},
-			files:     map[string]string{"prices.json": `{"empty": {"litellm_provider": "acme"}}`},
-			wantCheck: "price_table.replace_file",
+			name:        "replace_file naming a table no entry of which carries a rate",
+			ext:         map[string]any{"price_table": operatorTable()},
+			files:       map[string]string{"prices.json": `{"empty": {"litellm_provider": "acme"}}`},
+			wantCheck:   "price_table.replace_file",
+			wantSetting: "prices.json",
 		},
 		{
 			name:      "replace_file variable that resolves to an empty string",
@@ -202,6 +205,9 @@ func TestLoadRates(t *testing.T) {
 				}
 				if got := cmp.Or(ce.Check, "config."+ce.Field); got != tt.wantCheck {
 					t.Errorf("LoadRates(%v) check = %q, want %q", tt.ext, got, tt.wantCheck)
+				}
+				if !strings.Contains(ce.Error(), tt.wantSetting) || strings.Contains(ce.Error(), in.WorkflowDir) {
+					t.Errorf("LoadRates(%v) error = %q, want it to name %q and not the workflow directory %q", tt.ext, ce.Error(), tt.wantSetting, in.WorkflowDir)
 				}
 				if rates != nil || advisories != nil {
 					t.Errorf("LoadRates(%v) = %v, %v, want nil rates and advisories on error", tt.ext, rates, advisories)

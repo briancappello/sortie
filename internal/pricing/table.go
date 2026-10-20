@@ -109,6 +109,12 @@ func (t *Table) AsOf() time.Time {
 	return t.asOf
 }
 
+// Len returns the number of entries the table holds, the keys [Table.Lookup]
+// can resolve to.
+func (t *Table) Len() int {
+	return len(t.entries)
+}
+
 // Encode returns the canonical encoding of the table. Parsing it again
 // yields the same entries.
 func (t *Table) Encode() []byte {

@@ -269,6 +269,10 @@ func TestDownloadCopySurvivesRestart(t *testing.T) {
 	f.srv.Close()
 
 	restarted := NewDownloader(path, slog.New(slog.DiscardHandler))
+	state := restarted.State(f.dl)
+	if state.Table == nil || state.Table.Version() != first.Version() || !state.Table.AsOf().Equal(first.AsOf()) || state.Failures != 0 || !state.NextTryAt.IsZero() {
+		t.Errorf("State(%v) after a restart = %+v, want the stored copy %q as of %v, no failures, no next try", f.dl.Role, state, first.Version(), first.AsOf())
+	}
 	got := restarted.Table(f.dl)
 	if got == nil {
 		t.Fatalf("Table(%v) after a restart = nil, want the stored copy", f.dl.Role)
