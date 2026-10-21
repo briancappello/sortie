@@ -4,6 +4,7 @@ import { useParams } from "react-router";
 import { useStateQuery } from "@/api/queries";
 import { useHold, useLive, useNow } from "@/app/live";
 import { useRunEvents } from "@/app/run-events";
+import { AgentStatement } from "@/components/AgentStatement";
 import { TriangleAlertIcon } from "@/components/icons";
 import { Panel } from "@/components/Panel";
 import { ServedText } from "@/components/ServedText";
@@ -13,7 +14,7 @@ import { routeText } from "@/lib/active-rows";
 import { fmtClock, fmtDuration, parseInstant, plural } from "@/lib/format";
 import { agentLabel, modelLabel, startLabel } from "@/lib/labels";
 import { runRouteText } from "@/lib/lane";
-import { runStatus } from "@/lib/run-status";
+import { agentStatement, runOutcome } from "@/lib/run-status";
 
 import { EventPane } from "./EventPane";
 import { ModelCostPanel, SessionPanel, UsagePanel } from "./SessionPanels";
@@ -21,7 +22,7 @@ import { SessionsPanel } from "./SessionsPanel";
 import { timelineOf, turnBarsOf } from "./timeline";
 import { TokensChart, TokensLegend } from "./TokensChart";
 
-import type { ConfigResponse } from "@/api/types.gen";
+import type { ConfigResponse, RunResponse } from "@/api/types.gen";
 import type { RunItem, RunLog } from "@/stream/core";
 import type { ResolvedSession } from "./SessionPanels";
 
@@ -50,8 +51,7 @@ function lastMessageOf(items: readonly RunItem[]): string | null {
 }
 
 interface EndNoticeProps {
-  status: string;
-  error: string;
+  run: RunResponse;
   lastMessage: string | null;
 }
 
@@ -67,29 +67,47 @@ function LastMessage({ message }: { message: string | null }) {
   );
 }
 
-/** Renders why a finished session ended under the page head, alarmed only when the run failed. */
-function EndNotice({ status, error, lastMessage }: EndNoticeProps) {
-  const { word, mark } = runStatus(status);
-  if (mark === "failed") {
+/** Renders why a finished session ended and what its agent said, alarmed only when the run failed. */
+function EndNotice({ run, lastMessage }: EndNoticeProps) {
+  const statement = agentStatement(run);
+  const hasError = !!run.error;
+  if (!hasError && statement === null) {
+    return undefined;
+  }
+  const { word, mark } = runOutcome(run);
+  const isAlarmed = mark === "failed";
+  const content = (
+    <>
+      {hasError ? (
+        <>
+          <strong className={isAlarmed ? "font-bold text-error" : "font-bold text-ink"}>
+            {word}
+          </strong>
+          {` ${run.error}`}
+        </>
+      ) : undefined}
+      {statement === null ? undefined : (
+        <AgentStatement text={statement} className={hasError ? "mt-xs" : undefined} />
+      )}
+      {hasError && lastMessage?.trim() !== statement?.trim() ? (
+        <LastMessage message={lastMessage} />
+      ) : undefined}
+    </>
+  );
+  if (isAlarmed) {
     return (
       <div
         role="status"
         className="mb-lg flex items-start gap-sm rounded-xl bg-error-container p-md text-body-md text-ink"
       >
         <TriangleAlertIcon className="mt-xxs shrink-0 text-error" />
-        <p className="min-w-0 wrap-anywhere">
-          <strong className="font-bold text-error">{word}</strong>
-          {` ${error}`}
-          <LastMessage message={lastMessage} />
-        </p>
+        <p className="min-w-0 wrap-anywhere">{content}</p>
       </div>
     );
   }
   return (
     <p className="mb-lg rounded-xl border border-solid border-line-strong bg-surface px-md py-sm text-body-md text-ink-body wrap-anywhere">
-      <strong className="font-bold text-ink">{word}</strong>
-      {` ${error}`}
-      <LastMessage message={lastMessage} />
+      {content}
     </p>
   );
 }
@@ -122,7 +140,7 @@ function Fact({ mono = false, children }: FactProps) {
 function statusText(session: ResolvedSession, config: ConfigResponse | undefined): string {
   if (session.kind === "finished") {
     const { run } = session;
-    return `${runStatus(run.status).word}, ${plural(run.turns_completed, "turn", "turns")}`;
+    return `${runOutcome(run).word}, ${plural(run.turns_completed, "turn", "turns")}`;
   }
   const turns = session.running.turn_count;
   if (turns < 1) {
@@ -195,12 +213,8 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
       {stallFull === null && stallOff !== null ? (
         <StallNotice text={stallOff} isStalled={false} />
       ) : undefined}
-      {session.kind === "finished" && session.run.error ? (
-        <EndNotice
-          status={session.run.status}
-          error={session.run.error}
-          lastMessage={lastMessageOf(held.items)}
-        />
+      {session.kind === "finished" ? (
+        <EndNotice run={session.run} lastMessage={lastMessageOf(held.items)} />
       ) : undefined}
       <div className="flex flex-col gap-xl xl:grid xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start xl:gap-xxxl">
         <div className="flex min-w-0 flex-col gap-xl">
@@ -209,7 +223,11 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
               timeline={timeline}
               end={
                 session.kind === "finished"
-                  ? { at: session.run.completed_at, status: session.run.status }
+                  ? {
+                      at: session.run.completed_at,
+                      status: session.run.status,
+                      declared_outcome: session.run.declared_outcome,
+                    }
                   : null
               }
               isNotRetained={held.notRetained}

@@ -4,6 +4,7 @@ import { Link, useLocation } from "react-router";
 
 import { useHistoryRunsQuery, useStateQuery } from "@/api/queries";
 import { useNow } from "@/app/live";
+import { AgentStatement } from "@/components/AgentStatement";
 import { ServedText } from "@/components/ServedText";
 import { StatusMark } from "@/components/StatusMark";
 import { Button, buttonStyles } from "@/components/ui/button";
@@ -22,7 +23,7 @@ import { fmtClock, fmtDuration, lowerFirst, parseInstant, plural, pluralVerb } f
 import { sessionLinkOf } from "@/lib/issue-link";
 import { agentLabel, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
 import { numberedRunsOf } from "@/lib/run-number";
-import { runStatus } from "@/lib/run-status";
+import { agentStatement, runOutcome } from "@/lib/run-status";
 
 import type { ReactNode } from "react";
 
@@ -157,14 +158,14 @@ function endWordOf(last: StoryRun): string {
   if (last.kind === "live") {
     return "running";
   }
-  const { stage_result: result, stage_target: target, status } = last.run;
+  const { stage_result: result, stage_target: target } = last.run;
   if (target && (result === "advanced" || result === "partial")) {
     return `moved to ${ruleLabel(target)}`;
   }
   if (target && (result === "failed" || result === "ceiling")) {
     return `hop to ${ruleLabel(target)} not made: ${result}`;
   }
-  return runStatus(status).word.toLowerCase();
+  return runOutcome(last.run).word.toLowerCase();
 }
 
 function foldedLineOf(chapter: Chapter): string {
@@ -202,7 +203,7 @@ interface RunCardProps {
 function RunCard({ item, identifier, now, hasEstimates }: RunCardProps) {
   const location = useLocation();
   const isLive = item.kind === "live";
-  const status = isLive ? { word: "Running", mark: "running" as Mark } : runStatus(item.run.status);
+  const status = isLive ? { word: "Running", mark: "running" as Mark } : runOutcome(item.run);
   const origin = originOf(item);
   const started = parseInstant(startOf(item));
   const end = endOf(item);
@@ -216,6 +217,7 @@ function RunCard({ item, identifier, now, hasEstimates }: RunCardProps) {
     ? costTitle(item.running.cost_status, item.running.estimated_cost_usd)
     : costTitle(item.run.cost_status, item.run.estimated_cost_usd);
   const error = isLive ? null : item.run.error;
+  const statement = isLive ? null : agentStatement(item.run);
   const dispatchId = isLive ? item.running.dispatch_id : item.run.dispatch_id;
   const session = dispatchId ? sessionLinkOf(identifier, dispatchId, location) : undefined;
 
@@ -238,6 +240,9 @@ function RunCard({ item, identifier, now, hasEstimates }: RunCardProps) {
         </span>
       </div>
       {error ? <p className="text-body-md text-ink-body">{error}</p> : undefined}
+      {statement === null ? undefined : (
+        <AgentStatement text={statement} className="text-body-md" />
+      )}
       <p className="mt-xxs flex flex-wrap gap-x-md gap-y-xxs text-body-sm text-ink-muted">
         <span>
           Turns <b className="font-medium text-ink-body tabular-nums">{turns}</b>
