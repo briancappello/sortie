@@ -16,7 +16,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
   secondary:
     "border border-line-medium bg-transparent text-ink focus-visible:-outline-offset-1 not-data-disabled:hover:bg-state-hover not-data-disabled:active:bg-state-pressed data-disabled:border-line data-disabled:bg-disabled data-disabled:text-on-disabled",
   ghost:
-    "bg-transparent text-ink-body focus-visible:-outline-offset-1 not-data-disabled:hover:bg-[var(--ghost-hover,var(--color-state-hover))] not-data-disabled:hover:text-ink not-data-disabled:active:bg-[var(--ghost-pressed,var(--color-state-pressed))] data-disabled:text-on-disabled",
+    "bg-transparent text-ink-body focus-visible:-outline-offset-1 not-data-disabled:hover:bg-(--ghost-hover,var(--color-state-hover)) not-data-disabled:hover:text-ink not-data-disabled:active:bg-(--ghost-pressed,var(--color-state-pressed)) data-disabled:text-on-disabled",
 };
 
 /** Returns the class list of a button variant, for triggers that must look like a button. */

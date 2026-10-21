@@ -25,7 +25,7 @@ export function Table({ title, isWide = false, className, ...props }: TableProps
         <table
           className={cn(
             "w-full text-left text-body-md text-ink-body",
-            isWide && "min-w-[56rem]",
+            isWide && "min-w-4xl",
             className,
           )}
           {...props}

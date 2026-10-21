@@ -95,9 +95,18 @@ type RunningEntry struct {
 	// Identifier is the human-readable ticket key (e.g. "MT-649").
 	Identifier string
 
-	// Issue is the last-known normalized issue snapshot, updated by
-	// reconciliation.
+	// Issue is the last-known normalized issue snapshot. After dispatch,
+	// State and Labels change only through [recordIssueRead].
 	Issue domain.Issue
+
+	// DispatchLabels is the dispatch read's labels, set by [DispatchIssue]
+	// and never reassigned. A stage hop takes its stage labels from here
+	// alone, so a label added during the run is never removed by a hop.
+	DispatchLabels []string
+
+	// IssueReadAt is the instant the read held in Issue.State and
+	// Issue.Labels was started; zero while they hold the dispatch read.
+	IssueReadAt time.Time
 
 	// SessionID is the adapter-assigned session identifier, empty until
 	// the worker reports session_started.
@@ -534,6 +543,33 @@ func EscalatingReactionKinds() []string {
 	}
 	slices.Sort(kinds)
 	return kinds
+}
+
+// readKeepsRun reports whether a tracker read of state leaves the run
+// going: an active state, or the handoff state for a known reaction kind.
+// Both reconcile and the post-transition read gate on it, so a read that
+// would stop the run is never recorded.
+func readKeepsRun(entry *RunningEntry, state string, activeStates []string, handoffState string) bool {
+	if state == "" {
+		return false
+	}
+	if isActiveState(state, activeStates) {
+		return true
+	}
+	return handoffState != "" && strings.EqualFold(state, handoffState) && isKnownReactionKind(entry.ReactionKind)
+}
+
+// recordIssueRead stores read as the entry's state and labels unless an
+// equal or newer read is already recorded. Both instants must be unconverted
+// [time.Now] values: .UTC() strips the monotonic reading that makes the
+// comparison immune to wall-clock steps.
+func recordIssueRead(entry *RunningEntry, read domain.IssueStateAndLabels, startedAt time.Time) {
+	if !startedAt.After(entry.IssueReadAt) {
+		return
+	}
+	entry.Issue.State = read.State
+	entry.Issue.Labels = read.Labels
+	entry.IssueReadAt = startedAt
 }
 
 func isKnownReactionKind(kind string) bool {

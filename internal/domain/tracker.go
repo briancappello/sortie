@@ -72,7 +72,7 @@ type TrackerAdapter interface {
 	// The returned map is keyed by issue ID with the value being the
 	// current state name. Issues not found in the tracker are omitted
 	// from the map (not an error). An empty state means the issue reads no
-	// configured state. Used for active-run reconciliation.
+	// configured state.
 	FetchIssueStatesByIDs(ctx context.Context, issueIDs []string) (map[string]string, error)
 
 	// FetchIssueStatesAndLabelsByIDs returns the current state and labels of
@@ -84,8 +84,7 @@ type TrackerAdapter interface {
 	// query filter is not applied. It sends no request FetchIssueStatesByIDs
 	// would not send for the same IDs, except for further pages of an issue's
 	// labels. An empty issueIDs returns an empty map and sends no request; on
-	// error the map is nil. Used to release parked issues the candidate query
-	// omits.
+	// error the map is nil.
 	FetchIssueStatesAndLabelsByIDs(ctx context.Context, issueIDs []string) (map[string]IssueStateAndLabels, error)
 
 	// FetchIssueStatesByIdentifiers returns the current state for each

@@ -59,11 +59,7 @@ export function OutcomeBar({ summary }: OutcomeBarProps) {
           {segments.map((segment, index) => (
             <div
               key={segment.label}
-              className={cn(
-                "min-w-[4px] basis-0",
-                segment.fill,
-                roundingOf(index, segments.length),
-              )}
+              className={cn("min-w-xxs basis-0", segment.fill, roundingOf(index, segments.length))}
               style={{ flexGrow: segment.count }}
             />
           ))}

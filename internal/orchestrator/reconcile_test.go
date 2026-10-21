@@ -184,9 +184,10 @@ func (m *mockReconcileStore) DeleteReactionFingerprint(_ context.Context, _, _ s
 }
 
 // mockReconcileTracker implements domain.TrackerAdapter for reconcile tests.
-// Only FetchIssueStatesByIDs is exercised; the other methods panic if called.
+// Only the state reads are exercised; the other methods panic if called.
 type mockReconcileTracker struct {
 	states   map[string]string
+	labels   map[string][]string // per-ID labels the reconcile read reports
 	fetchErr error
 
 	calls      int
@@ -195,8 +196,17 @@ type mockReconcileTracker struct {
 
 var _ domain.TrackerAdapter = (*mockReconcileTracker)(nil)
 
-func (m *mockReconcileTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
-	return nil, nil
+func statesWithLabels(states map[string]string, labels map[string][]string) map[string]domain.IssueStateAndLabels {
+	reads := make(map[string]domain.IssueStateAndLabels, len(states))
+	for id, state := range states {
+		reads[id] = domain.IssueStateAndLabels{State: state, Labels: labels[id]}
+	}
+	return reads
+}
+
+func (m *mockReconcileTracker) FetchIssueStatesAndLabelsByIDs(ctx context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error) {
+	states, err := m.FetchIssueStatesByIDs(ctx, ids)
+	return statesWithLabels(states, m.labels), err
 }
 
 func (m *mockReconcileTracker) FetchIssueStatesByIDs(_ context.Context, ids []string) (map[string]string, error) {
@@ -810,31 +820,44 @@ func TestReconcileTrackerState_TerminalSetsPendingCleanup(t *testing.T) {
 	}
 }
 
-func TestReconcileTrackerState_ActiveUpdatesState(t *testing.T) {
+func TestReconcileTrackerState_RecordsReadOnlyWhileRunContinues(t *testing.T) {
 	t.Parallel()
 
-	store := &mockReconcileStore{}
-	tracker := &mockReconcileTracker{
-		states: map[string]string{"ISSUE-1": "In Review"},
+	tests := []struct {
+		name, read string
+		recorded   bool
+	}{
+		{"active reading", "In Review", true},
+		{"terminal reading", "Done", false},
+		{"non-active reading", "Backlog", false},
+		{"first no-state reading", "", false},
 	}
-	params := defaultReconcileParams(t, store, tracker)
-	params.StallTimeoutMS = 0
 
-	state := NewState(5000, 4, 0, nil, AgentTotals{})
-	state.Running["ISSUE-1"] = &RunningEntry{
-		Identifier: "ISSUE-1-ident",
-		StartedAt:  reconcileBaseTime,
-		Issue:      domain.Issue{State: "In Progress"},
-	}
-	state.Claimed["ISSUE-1"] = struct{}{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	ReconcileRunningIssues(state, params)
+			tracker := &mockReconcileTracker{states: map[string]string{"ISSUE-1": tt.read}, labels: map[string][]string{"ISSUE-1": {"ai:in-progress"}}}
+			params := defaultReconcileParams(t, &mockReconcileStore{}, tracker)
+			params.StallTimeoutMS = 0
+			initial := domain.IssueStateAndLabels{State: "In Progress", Labels: []string{"ai:ready"}}
+			entry := &RunningEntry{StartedAt: reconcileBaseTime, CancelFunc: func() {}, Issue: domain.Issue{State: initial.State, Labels: initial.Labels}}
+			state := NewState(5000, 4, 0, nil, AgentTotals{})
+			state.Running["ISSUE-1"] = entry
+			before := time.Now()
 
-	if state.Running["ISSUE-1"].Issue.State != "In Review" {
-		t.Errorf("Issue.State = %q, want %q", state.Running["ISSUE-1"].Issue.State, "In Review")
-	}
-	if state.Running["ISSUE-1"].PendingCleanup {
-		t.Error("PendingCleanup set for active issue")
+			ReconcileRunningIssues(state, params)
+			recordIssueRead(entry, initial, before)
+
+			got := fmt.Sprintf("%s %v", entry.Issue.State, entry.Issue.Labels)
+			want := "In Progress [ai:ready]"
+			if tt.recorded {
+				want = tt.read + " [ai:in-progress]"
+			}
+			if got != want {
+				t.Errorf("ReconcileRunningIssues(%q) then an older worker read: entry = %q, want %q", tt.read, got, want)
+			}
+		})
 	}
 }
 

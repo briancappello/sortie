@@ -83,8 +83,9 @@ func (f *mgcTrackerFake) FetchIssueComments(context.Context, string) ([]domain.C
 	return nil, nil
 }
 
-func (f *mgcTrackerFake) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
-	return nil, nil
+func (f *mgcTrackerFake) FetchIssueStatesAndLabelsByIDs(ctx context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error) {
+	states, err := f.FetchIssueStatesByIDs(ctx, ids)
+	return statesWithLabels(states, nil), err
 }
 
 func (f *mgcTrackerFake) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {

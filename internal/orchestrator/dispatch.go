@@ -781,6 +781,7 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 	state.Running[issue.ID] = &RunningEntry{
 		Identifier:        issue.Identifier,
 		Issue:             issue,
+		DispatchLabels:    slices.Clone(issue.Labels),
 		DispatchID:        dispatchID,
 		RetryAttempt:      attemptCopy,
 		StartedAt:         time.Now().UTC(),

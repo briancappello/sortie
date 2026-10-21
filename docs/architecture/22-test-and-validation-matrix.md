@@ -106,7 +106,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Issue with non-terminal blockers in a non-running active state is not eligible
 - An issue whose blockers could not be resolved is not eligible either
 - Issue with terminal blockers is eligible
-- Active-state issue refresh updates running entry state
+- Active-state issue refresh records the issue's state and labels on the running entry, and a read that started earlier never replaces one that started later
+- A read the running entry cannot take changes nothing: an issue with no running entry, a read carrying another dispatch ID, an entry pending cleanup, and a state that is empty, terminal, or non-active, or the handoff state of a run that is no reaction continuation
 - A named non-active state stops running agent without workspace cleanup
 - A reading of no state keeps the running agent and changes no snapshot or retry on its first consecutive reading and stops it without workspace cleanup on the second, a reading in a configured state between the two clears the first, and a run that ends before the second reading takes the exit disposition of its last configured state
 - Retry handling reschedules an issue that reads no state at the same attempt, keeping its session, continuation context, and reaction kind, releases the claim and deletes the retry entry on the second consecutive reading, and never resets the issue's hop record
@@ -241,6 +242,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Dispatch-time transition failure is non-fatal: the worker continues to workspace preparation
 - Dispatch-time transition is skipped when `tracker.in_progress_state` is absent
 - Dispatch-time transition is skipped (debug log only) when the issue is already in the target state
+- A successful dispatch-time transition is followed by one state-and-labels read of the issue before `session.started`, and the running row then serves that read's state and labels without a reconcile tick
+- No read follows a dispatch-time transition that is skipped, fails, is not configured, or is suppressed because the dispatch drives no issue state; a failed read is logged and the run continues
+- A stage hop removes no stage label that only a recorded read showed and the dispatch read lacked
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 - CI status reconciliation is skipped when `reactions.ci_failure.provider` is not configured

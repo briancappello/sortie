@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The dashboard's status card and the browser tab title no longer read All clear, and Overview no longer reads Nothing needs attention, while an attention item you acknowledged still stands, such as a parked issue; they say it is waiting on a person until the item clears. ([#1441](https://github.com/sortie-ai/sortie/issues/1441))
 
+- A running issue's state and labels now follow the tracker on the dashboard and in the state API: they refresh right after Sortie moves the issue to in progress and on every poll, instead of showing the labels from dispatch for the whole run. ([#1446](https://github.com/sortie-ai/sortie/issues/1446))
+
 ## [1.29.0] - 2026-10-20
 
 ### Added

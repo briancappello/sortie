@@ -340,6 +340,11 @@ type WorkerDeps struct {
 	// the worker goroutine; must be concurrency-safe. Nil disables it.
 	OnTurnStarted func(issueID string, turnsStarted int)
 
+	// OnIssueRead reports the state and labels read right after the
+	// in-progress transition, with the instant the read started. Called from
+	// the worker goroutine; must be concurrency-safe. Nil disables the read.
+	OnIssueRead func(issueID string, read domain.IssueStateAndLabels, startedAt time.Time)
+
 	// OnUnaccountedTurns reports the run's cumulative count of turns that
 	// spent tokens no figure was proven to cover, each time a turn changes it.
 	// Called from the worker goroutine; must be concurrency-safe. Nil
@@ -812,6 +817,17 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 					slog.String("in_progress_state", cfg.Tracker.InProgressState),
 				)
 				deps.Metrics.IncDispatchTransitions(outcomeSuccess)
+				if deps.OnIssueRead != nil {
+					readStartedAt := time.Now()
+					reads, readErr := deps.TrackerAdapter.FetchIssueStatesAndLabelsByIDs(ctx, []string{issue.ID})
+					if readErr != nil {
+						logger.Warn("issue read after in-progress transition failed",
+							slog.Any("error", readErr),
+						)
+					} else if read, ok := reads[issue.ID]; ok {
+						deps.OnIssueRead(issue.ID, read, readStartedAt)
+					}
+				}
 			}
 		}
 	}

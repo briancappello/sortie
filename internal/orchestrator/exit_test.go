@@ -10290,6 +10290,7 @@ func newHopExitFixture(t *testing.T) *hopExitFixture {
 	entry.RuleName = "specify"
 	entry.StageLineage = StageLineage{ChainID: hopExitChain, DispatchedAt: hopExitPassAt}
 	entry.Issue.Labels = []string{"feature", hopExitSourceLabel}
+	entry.DispatchLabels = slices.Clone(entry.Issue.Labels)
 	entry.Issue.DisplayID, entry.Issue.Title, entry.Issue.URL = "acme/web#1", "Add search", "https://example.test/acme/web/issues/1"
 	t.Cleanup(func() { stopRetryTimer(state, hopExitIssueID) })
 
@@ -10358,6 +10359,14 @@ func TestHandleWorkerExit_StageHopOnlyForSuccessfulRun(t *testing.T) {
 	}{
 		{
 			name: "successful run", wantHop: true,
+			wantResults: []recordedStageResult{{1, "implement", "advanced"}}, wantRouted: []routedStage{advanced},
+		},
+		{
+			name: "successful run whose recorded read shows a stage label added during the run", wantHop: true,
+			setup: func(f *hopExitFixture) {
+				f.params.Dispatch.Rules = append(f.params.Dispatch.Rules, config.DispatchRule{Name: "review", Stage: "stage-review"})
+				recordIssueRead(f.state.Running[hopExitIssueID], domain.IssueStateAndLabels{State: "In Progress", Labels: []string{"feature", hopExitSourceLabel, "stage-review"}}, time.Now())
+			},
 			wantResults: []recordedStageResult{{1, "implement", "advanced"}}, wantRouted: []routedStage{advanced},
 		},
 		{
