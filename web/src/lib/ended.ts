@@ -1,6 +1,7 @@
-import { parseInstant, upperFirst } from "@/lib/format";
+import { fmtClock, parseInstant, upperFirst } from "@/lib/format";
 
 import type {
+  IssueDetailResponse,
   IssueOutcomeResponse,
   PrLoopStationResponse,
   RunResponse,
@@ -24,6 +25,15 @@ export function endingWord(outcome: IssueOutcomeResponse): string {
     default:
       return "Ended";
   }
+}
+
+/** Gives the clock time an issue's closing line carries: when its ending was observed once it ended, else now. */
+export function closingClock(
+  detail: Pick<IssueDetailResponse, "status" | "history">,
+  now: number,
+): string {
+  const ending = detail.status === "history" ? detail.history?.issue_outcome : null;
+  return fmtClock(ending ? ending.observed_at : new Date(now));
 }
 
 /** An issue whose newest run today ended with an outcome and which Sortie no longer holds. */

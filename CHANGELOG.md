@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The issue page no longer says that a review or bot review has comments to answer after a fix run was given those comments and the pull request still shows them; it reads waiting until new comments arrive. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
 
+- The issue page and the peek of an ended issue now give its ending the time it happened instead of the current time.
+
 ## [1.29.0] - 2026-10-20
 
 ### Added
