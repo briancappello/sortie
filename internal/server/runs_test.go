@@ -117,6 +117,7 @@ func TestRunsMaskRegisteredValues(t *testing.T) {
 		Status:         "failed",
 		Error:          &failure,
 		ReviewMetadata: &review,
+		AgentText:      "Need " + secret,
 	}}})
 
 	status, got := getJSON[runsResponse](t, ts, "/api/v1/runs")
@@ -125,13 +126,14 @@ func TestRunsMaskRegisteredValues(t *testing.T) {
 		t.Fatalf("GET /api/v1/runs = status %d with %d runs, want 200 with 1", status, len(got.Runs))
 	}
 	run := got.Runs[0]
-	if run.Error == nil || run.SelfReview == nil {
-		t.Fatalf("GET /api/v1/runs run error, self_review = %v, %v, want both present", run.Error, run.SelfReview)
+	if run.Error == nil || run.SelfReview == nil || run.AgentText == nil {
+		t.Fatalf("GET /api/v1/runs run error, self_review, agent_text = %v, %v, %v, want all present", run.Error, run.SelfReview, run.AgentText)
 	}
 	served := map[string]string{
 		"issue_title":               run.IssueTitle,
 		"issue_url":                 run.IssueURL,
 		"error":                     *run.Error,
+		"agent_text":                *run.AgentText,
 		"self_review.final_verdict": run.SelfReview.FinalVerdict,
 	}
 	for field, value := range served {

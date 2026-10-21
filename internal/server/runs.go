@@ -48,6 +48,8 @@ type runResponse struct {
 	Attempt              int                 `json:"attempt"`
 	Status               string              `json:"status"`
 	Error                *string             `json:"error"`
+	DeclaredOutcome      *string             `json:"declared_outcome"`
+	AgentText            *string             `json:"agent_text"`
 	RuleName             string              `json:"rule_name,omitempty"`
 	AgentKind            string              `json:"agent_kind,omitempty"`
 	ConfiguredModel      string              `json:"configured_model,omitempty"`
@@ -288,6 +290,10 @@ func toRunResponse(e RunHistoryEntry, chains [][]string) runResponse {
 		StageChain:           orchestrator.StageChainOf(chains, e.RuleName, e.StagePrevious),
 		DispatchID:           copyText(e.DispatchID),
 		ModelUsage:           toModelUsageResponses(e.ModelUsage),
+		DeclaredOutcome:      textOrNil(e.DeclaredOutcome),
+	}
+	if e.AgentText != "" {
+		resp.AgentText = new(redact.Mask(e.AgentText))
 	}
 	if e.Error != nil {
 		resp.Error = new(redact.Mask(sentence.RunError(*e.Error)))

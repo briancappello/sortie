@@ -250,6 +250,8 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"resume_model_usage", "TEXT", false, 0},
 				{"estimated_cost_usd", "REAL", false, 0},
 				{"cost_status", "TEXT", false, 0},
+				{"declared_outcome", "TEXT", true, 0},
+				{"agent_text", "TEXT", true, 0},
 			},
 		},
 		{

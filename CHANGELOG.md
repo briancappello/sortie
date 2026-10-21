@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A running issue's state and labels now follow the tracker on the dashboard and in the state API: they refresh right after Sortie moves the issue to in progress and on every poll, instead of showing the labels from dispatch for the whole run. ([#1446](https://github.com/sortie-ai/sortie/issues/1446))
 
+- The run history API now says when an agent ended a run with `blocked`, `needs-human-review`, or `no-change-needed` and serves the reason it wrote, so such a run no longer reads as an ordinary success; runs recorded before this release carry neither. ([#1456](https://github.com/sortie-ai/sortie/issues/1456))
+
 ## [1.29.0] - 2026-10-20
 
 ### Added

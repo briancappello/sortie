@@ -2863,6 +2863,16 @@
         "agent_kind": {
           "type": "string"
         },
+        "agent_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "attempt": {
           "type": "integer"
         },
@@ -2880,6 +2890,16 @@
         },
         "cost_status": {
           "type": "string"
+        },
+        "declared_outcome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "dispatch_id": {
           "anyOf": [
@@ -3108,6 +3128,8 @@
         "attempt",
         "status",
         "error",
+        "declared_outcome",
+        "agent_text",
         "started_at",
         "completed_at",
         "dispatched_at",
