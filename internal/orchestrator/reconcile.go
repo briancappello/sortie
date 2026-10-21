@@ -605,7 +605,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 		return
 	}
 
-	refreshed, err := params.TrackerAdapter.FetchIssueStatesByIDs(ctx, ids)
+	readStartedAt := time.Now()
+	refreshed, err := params.TrackerAdapter.FetchIssueStatesAndLabelsByIDs(ctx, ids)
 	if err != nil {
 		log.Warn("tracker state refresh failed, keeping workers running",
 			slog.Any("error", err),
@@ -616,7 +617,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 	activeSet := stateSet(params.ActiveStates)
 	terminalSet := stateSet(params.TerminalStates)
 
-	for issueID, stateName := range refreshed {
+	for issueID, read := range refreshed {
+		stateName := read.State
 		entry := state.Running[issueID]
 		hop := state.StageHops[issueID]
 
@@ -699,8 +701,9 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			continue
 		}
 
-		if isActive {
-			entry.Issue.State = stateName
+		keepsRun := readKeepsRun(entry, stateName, params.ActiveStates, params.HandoffState)
+		if keepsRun && isActive {
+			recordIssueRead(entry, read, readStartedAt)
 			metrics.IncReconciliationActions(actionKeep)
 			entryLog.Debug("refreshed issue state",
 				slog.String("state", stateName),
@@ -708,9 +711,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			continue
 		}
 
-		isHandoff := params.HandoffState != "" && strings.EqualFold(stateName, params.HandoffState)
-		if isHandoff && isKnownReactionKind(entry.ReactionKind) {
-			entry.Issue.State = stateName
+		if keepsRun {
+			recordIssueRead(entry, read, readStartedAt)
 			metrics.IncReconciliationActions(actionKeep)
 			entryLog.Debug("keeping reaction worker running in handoff state",
 				slog.String("state", stateName),

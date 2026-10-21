@@ -124,7 +124,8 @@ function reconcile_running_issues(state):
     state = reconcile_review_comments(state)
     return state
 
-  refreshed = tracker.fetch_issue_states_by_ids(running_ids)
+  read_started_at = now()                              // kept as taken, so reads compare by elapsed time
+  refreshed = tracker.fetch_issue_states_and_labels_by_ids(running_ids)
   if refreshed failed:
     log_debug("keep workers running")
     state = reconcile_ci_status(state)
@@ -143,7 +144,7 @@ function reconcile_running_issues(state):
     if issue.state in terminal_states:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
     else if issue.state in active_states:
-      entry.issue = issue
+      record_issue_read(entry, issue, read_started_at)
     else:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
 
@@ -151,6 +152,32 @@ function reconcile_running_issues(state):
   state = reconcile_review_comments(state)
   return state
 ```
+
+```text
+function record_issue_read(entry, read, started_at):
+  if started_at is not after entry.issue_read_at:
+    return                                             // an older read never replaces a newer one
+  entry.issue.state = read.state
+  entry.issue.labels = read.labels
+  entry.issue_read_at = started_at                     // zero while the entry holds the dispatch read
+
+function read_keeps_run(entry, state):
+  if state is empty:
+    return false
+  if state in active_states:
+    return true
+  return state equals tracker.handoff_state (case-insensitive) and entry.reaction_kind is a known kind
+
+function on_issue_read(state, msg):                    // the event loop's handling of the worker's post-transition read
+  entry = state.running[msg.issue_id]
+  if entry is absent or entry.dispatch_id != msg.dispatch_id or entry.pending_cleanup:
+    return                                             // dropped without a log
+  if not read_keeps_run(entry, msg.read.state):
+    return                                             // only reconciliation stops a run
+  record_issue_read(entry, msg.read, msg.started_at)
+```
+
+After dispatch, `record_issue_read` is the only writer of the entry's state and labels. A read queued ahead of its run's exit is applied before the exit identity is built. The entry also holds `dispatch_labels`, a copy of the dispatch read's labels that no later read changes.
 
 The refresh also reads every issue that holds a stage hop record (§8.5), and a hop record decides a no-state reading through `confirm_no_state` on its own flag: the first reading keeps the record, its count, and its hold, and the second resets it with the `not_active` trigger. A reading in a configured state clears the flag, and an issue missing from the response leaves every flag as it is. A run that ends before the second reading takes the exit disposition of its last configured state, because the exit reads the entry's issue snapshot, which a no-state reading never updates.
 
@@ -543,6 +570,13 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
       else:
         log_info("dispatch in-progress transition succeeded", issue.id)
         metrics.inc_dispatch_transitions("success")
+        // The run continues on every outcome of this read, and the worker's local issue keeps the dispatch read.
+        read_started_at = now()
+        reads, read_err = tracker.fetch_issue_states_and_labels_by_ids([issue.id])
+        if read_err:
+          log_warn("issue read after in-progress transition failed", issue.id, read_err)
+        else if reads[issue.id] is present:
+          send(orchestrator_channel, {issue_read, issue.id, dispatch_id, reads[issue.id], read_started_at})
 
   workspace = workspace_manager.create_for_issue(issue.identifier)
   if workspace failed:
@@ -1109,7 +1143,7 @@ function advance_stage(state, entry, result, declared) -> decision:
     display_identifier: entry.issue.display_id,
     issue_title: entry.issue.title, issue_url: entry.issue.url,
     issue_type: entry.issue.issue_type, issue_state: entry.issue.state,
-    issue_labels: labels_after_hop(entry.issue.labels, cfg.dispatch.rules, target.stage)
+    issue_labels: labels_after_hop(entry.dispatch_labels, cfg.dispatch.rules, target.stage)
   }
   persist_stage_hop(state.stage_hops[issue_id])        // a failure is logged; the runtime record stands
 
@@ -1120,7 +1154,7 @@ function advance_stage(state, entry, result, declared) -> decision:
 
   left = []
   for label in configured_stage_labels(cfg.dispatch):  // list order, deduplicated case-insensitively
-    if label equals target.stage or entry.issue.labels does not contain label:
+    if label equals target.stage or entry.dispatch_labels does not contain label:
       continue                                         // only labels the dispatch read showed
     err = tracker.remove_label(issue_id, label)
     if err: left.append(label)
@@ -1138,7 +1172,7 @@ function report_stage_hop(state, entry, run_id, hop):
   deliver_detached(route(event))                       // on a failed tracker_comment send: log_warn("stage event comment failed")
 ```
 
-`labels_after_hop` returns the labels the removal loop below leaves on the issue: the dispatch read's labels in order, without each stage label of the configured rules other than `target.stage`, followed by `target.stage` lowercased when no kept label matches it. The record is written before the removals run, so a removal that fails leaves a stage label on the issue that the record lacks until a run is dispatched.
+`labels_after_hop` returns the labels the removal loop below leaves on the issue: the dispatch read's labels in order, without each stage label of the configured rules other than `target.stage`, followed by `target.stage` lowercased when no kept label matches it. The hop reads `entry.dispatch_labels` and never `entry.issue.labels`, so a stage label added during the run is neither removed nor recorded. The record is written before the removals run, so a removal that fails leaves a stage label on the issue that the record lacks until a run is dispatched.
 
 `advance_stage` returns a decision whose result is `advanced`, `partial`, `failed`, `ceiling`, or empty when no hop was due, and `made` holds for `advanced` and `partial`. The exit calls `report_stage_hop` for every non-empty result: for a hop not made it records the result and routes the event before the handoff write, and for a made hop after the label removals.
 

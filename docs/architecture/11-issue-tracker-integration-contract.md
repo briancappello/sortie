@@ -20,12 +20,12 @@ A tracker adapter must support these operations:
 4. `fetch_issue_states_by_ids(issue_ids)`
    - Return the current state for each requested issue ID. Issues not found are omitted (not an error).
    - An issue that reads no configured state returns an empty state, which is never active, terminal, or the handoff state.
-   - Callers: active-run reconciliation, the worker's per-turn state refresh, startup pending-reaction recovery, merge-completion reconciliation (reconciliation also reads every issue that holds a stage hop record, Section 8.5), and the exit-time verification read that precedes an orchestrator-initiated handoff transition or stage hop.
+   - Callers: the worker's per-turn state refresh, startup pending-reaction recovery, merge-completion reconciliation, and the exit-time verification read that precedes an orchestrator-initiated handoff transition or stage hop.
 
 5. `fetch_issue_states_and_labels_by_ids(issue_ids)`
    - Return the current state and every label of each requested issue ID. An issue is omitted exactly when `fetch_issue_states_by_ids` omits it. The state has the meaning it has there, and the labels are normalized as Section 11.3 states.
    - Each returned entry carries the issue's complete label set; an adapter that cannot read every label of an issue it would return fails the call. `tracker.query_filter` is not applied. The call sends no request that `fetch_issue_states_by_ids` would not send for the same IDs, except for further pages of an issue's labels. An empty `issue_ids` returns an empty result and sends no request; on error no result is returned.
-   - Caller: the park release step, which reads the parked issues the candidate fetch omitted (Section 8.1).
+   - Callers: active-run reconciliation, which also reads every issue that holds a pending reaction entry or a stage hop record (Section 8.5); the read right after the orchestrator's own in-progress transition succeeds; and the park release step, which reads the parked issues the candidate fetch omitted (Section 8.1).
 
 6. `fetch_issue_states_by_identifiers(identifiers)`
    - Return the current state for each requested issue identifier (human-readable key). Issues not found are omitted. Used for startup terminal workspace cleanup.

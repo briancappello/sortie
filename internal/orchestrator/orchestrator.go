@@ -155,6 +155,16 @@ type turnStartedMsg struct {
 	TurnsStarted int
 }
 
+// issueReadMsg carries a worker's post-transition tracker read for delivery
+// through issueReadCh. DispatchID keeps a read of an earlier run from landing
+// on a later run of the same issue.
+type issueReadMsg struct {
+	IssueID    string
+	DispatchID string
+	Read       domain.IssueStateAndLabels
+	StartedAt  time.Time
+}
+
 // unaccountedTurnsMsg pairs an issue ID with its worker's cumulative
 // unaccounted-turn count for delivery through unaccountedTurnsCh. The count
 // is cumulative, so a later message supersedes an earlier one.
@@ -305,6 +315,7 @@ type Orchestrator struct {
 	agentEventCh       chan agentEventMsg
 	selfReviewCh       chan selfReviewProgressMsg
 	turnStartedCh      chan turnStartedMsg
+	issueReadCh        chan issueReadMsg
 	unaccountedTurnsCh chan unaccountedTurnsMsg
 	snapshotCh         chan snapshotRequest
 	refreshCh          chan struct{}
@@ -478,6 +489,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		agentEventCh:                      make(chan agentEventMsg, eventBuf),
 		selfReviewCh:                      make(chan selfReviewProgressMsg, eventBuf),
 		turnStartedCh:                     make(chan turnStartedMsg, eventBuf),
+		issueReadCh:                       make(chan issueReadMsg, eventBuf),
 		unaccountedTurnsCh:                make(chan unaccountedTurnsMsg, eventBuf),
 		snapshotCh:                        make(chan snapshotRequest, 4),
 		refreshCh:                         make(chan struct{}, 1),
@@ -600,6 +612,21 @@ func (o *Orchestrator) applyTurnStarted(msg turnStartedMsg) {
 	entry.TurnCount = msg.TurnsStarted
 }
 
+// applyIssueRead records a worker's post-transition read on the matching
+// run when the read leaves that run going. It never stops a run or touches a
+// retry: only reconcile does that.
+func (o *Orchestrator) applyIssueRead(msg issueReadMsg) {
+	entry, ok := o.state.Running[msg.IssueID]
+	if !ok || entry.DispatchID != msg.DispatchID || entry.PendingCleanup {
+		return
+	}
+	cfg := o.workflowManager.Config()
+	if !readKeepsRun(entry, msg.Read.State, cfg.Tracker.ActiveStates, cfg.Tracker.HandoffState) {
+		return
+	}
+	recordIssueRead(entry, msg.Read, msg.StartedAt)
+}
+
 // applyUnaccountedTurns records a relayed unaccounted-turn count on the
 // issue's running entry and, once the session's in-flight row exists, writes
 // it at once so the read-only tool server sees the count without waiting for
@@ -629,6 +656,7 @@ func (o *Orchestrator) applyQueuedAheadOfExit(ctx context.Context, exitingIssueI
 	})
 	applyQueued(o.selfReviewCh, o.applySelfReviewProgress)
 	applyQueued(o.turnStartedCh, o.applyTurnStarted)
+	applyQueued(o.issueReadCh, o.applyIssueRead)
 	applyQueued(o.unaccountedTurnsCh, func(msg unaccountedTurnsMsg) {
 		o.applyUnaccountedTurns(ctx, msg)
 	})
@@ -794,6 +822,10 @@ func (o *Orchestrator) Run(ctx context.Context) {
 
 		case msg := <-o.turnStartedCh:
 			o.applyTurnStarted(msg)
+			o.notifyObservers()
+
+		case msg := <-o.issueReadCh:
+			o.applyIssueRead(msg)
 			o.notifyObservers()
 
 		case msg := <-o.unaccountedTurnsCh:
@@ -1379,6 +1411,13 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			OnTurnStarted: func(issueID string, turnsStarted int) {
 				select {
 				case o.turnStartedCh <- turnStartedMsg{IssueID: issueID, TurnsStarted: turnsStarted}:
+				case <-ctx.Done():
+				}
+			},
+			OnIssueRead: func(issueID string, read domain.IssueStateAndLabels, startedAt time.Time) {
+				msg := issueReadMsg{IssueID: issueID, DispatchID: dispatchIDFromContext(ctx), Read: read, StartedAt: startedAt}
+				select {
+				case o.issueReadCh <- msg:
 				case <-ctx.Done():
 				}
 			},
@@ -2306,6 +2345,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 			})
 			applyQueued(o.selfReviewCh, o.applySelfReviewProgress)
 			applyQueued(o.turnStartedCh, o.applyTurnStarted)
+			applyQueued(o.issueReadCh, o.applyIssueRead)
 			applyQueued(o.unaccountedTurnsCh, func(msg unaccountedTurnsMsg) {
 				o.applyUnaccountedTurns(drainCtx, msg)
 			})
@@ -2354,6 +2394,10 @@ func (o *Orchestrator) drainRunningWorkers() {
 
 		case msg := <-o.turnStartedCh:
 			o.applyTurnStarted(msg)
+			o.notifyObservers()
+
+		case msg := <-o.issueReadCh:
+			o.applyIssueRead(msg)
 			o.notifyObservers()
 
 		case msg := <-o.unaccountedTurnsCh:

@@ -1710,6 +1710,50 @@ func TestApplyTurnStarted(t *testing.T) {
 	})
 }
 
+func TestApplyIssueRead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, issueID, dispatchID, state, reactionKind string
+		pendingCleanup, recorded                       bool
+	}{
+		{name: "active state", issueID: "A", dispatchID: "d1", state: "ai:in-progress", recorded: true},
+		{name: "absent entry", issueID: "missing", dispatchID: "d1", state: "ai:in-progress"},
+		{name: "mismatched dispatch", issueID: "A", dispatchID: "d0", state: "ai:in-progress"},
+		{name: "pending cleanup", issueID: "A", dispatchID: "d1", state: "ai:in-progress", pendingCleanup: true},
+		{name: "empty state", issueID: "A", dispatchID: "d1"},
+		{name: "terminal state", issueID: "A", dispatchID: "d1", state: "Done"},
+		{name: "non-active state", issueID: "A", dispatchID: "d1", state: "Backlog"},
+		{name: "handoff without reaction kind", issueID: "A", dispatchID: "d1", state: "Handoff"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wm := &stubWorkflowManager{}
+			wm.config.Tracker.ActiveStates = []string{"ai:in-progress"}
+			wm.config.Tracker.HandoffState = "Handoff"
+			entry := &RunningEntry{DispatchID: "d1", PendingCleanup: tt.pendingCleanup, Issue: domain.Issue{State: "ai:ready", Labels: []string{"ai:ready"}}}
+			state := NewState(1000, 4, 0, nil, AgentTotals{})
+			state.Running["A"] = entry
+			o := &Orchestrator{state: state, workflowManager: wm}
+			startedAt := time.Now()
+
+			o.applyIssueRead(issueReadMsg{IssueID: tt.issueID, DispatchID: tt.dispatchID, Read: domain.IssueStateAndLabels{State: tt.state, Labels: []string{"ai:in-progress"}}, StartedAt: startedAt})
+
+			got := fmt.Sprintf("%s %v %t", entry.Issue.State, entry.Issue.Labels, entry.IssueReadAt.Equal(startedAt))
+			want := "ai:ready [ai:ready] false"
+			if tt.recorded {
+				want = tt.state + " [ai:in-progress] true"
+			}
+			if got != want {
+				t.Errorf("applyIssueRead(%q, %q) entry = %q, want %q", tt.dispatchID, tt.state, got, want)
+			}
+		})
+	}
+}
+
 func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 	t.Parallel()
 

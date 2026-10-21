@@ -1061,6 +1061,31 @@ func TestRuntimeSnapshot_StagePosition(t *testing.T) {
 	}
 }
 
+func TestRecordIssueRead(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	steps := []struct {
+		name      string
+		startedAt time.Time
+		read      string
+		want      string
+	}{
+		{"first read after dispatch", now, "ai:in-progress", "ai:in-progress"},
+		{"equal start is refused", now, "ai:done", "ai:in-progress"},
+		{"older start is refused", now.Add(-time.Second), "ai:done", "ai:in-progress"},
+	}
+	entry := &RunningEntry{Issue: domain.Issue{State: "ai:ready", Labels: []string{"ai:ready"}}}
+
+	for _, step := range steps {
+		recordIssueRead(entry, domain.IssueStateAndLabels{State: step.read, Labels: []string{step.read}}, step.startedAt)
+
+		if entry.Issue.State != step.want || !slices.Equal(entry.Issue.Labels, []string{step.want}) {
+			t.Errorf("%s: recordIssueRead state, labels = %q, %q, want %q for both", step.name, entry.Issue.State, entry.Issue.Labels, step.want)
+		}
+	}
+}
+
 func TestRuntimeSnapshot_PendingReactionWatchEndsAt(t *testing.T) {
 	t.Parallel()
 

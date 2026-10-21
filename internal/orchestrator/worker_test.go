@@ -3124,7 +3124,12 @@ func TestRunWorkerAttempt_DispatchTransition(t *testing.T) {
 		cfg.Tracker.InProgressState = "In Progress"
 
 		spy := &spyMetrics{}
-		tracker := &mockTrackerAdapter{}
+		var fetched []string
+		var reads []domain.IssueStateAndLabels
+		tracker := &mockTrackerAdapter{fetchStatesAndLabelsFn: func(_ context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error) {
+			fetched = append(fetched, ids...)
+			return map[string]domain.IssueStateAndLabels{ids[0]: {Labels: []string{"ai:in-progress"}}}, nil
+		}}
 		ec := newExitCapture()
 
 		deps := WorkerDeps{
@@ -3134,6 +3139,7 @@ func TestRunWorkerAttempt_DispatchTransition(t *testing.T) {
 			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "work on {{ .issue.title }}") },
 			OnEvent:                func(_ string, _ domain.AgentEvent) {},
 			OnExit:                 ec.onExit,
+			OnIssueRead:            func(_ string, read domain.IssueStateAndLabels, _ time.Time) { reads = append(reads, read) },
 			Logger:                 discardLogger(),
 			Metrics:                spy,
 		}
@@ -3151,6 +3157,10 @@ func TestRunWorkerAttempt_DispatchTransition(t *testing.T) {
 		}
 		if got := tracker.transitionCalls[0].TargetState; got != "In Progress" {
 			t.Errorf("TransitionIssue TargetState = %q, want %q", got, "In Progress")
+		}
+
+		if !slices.Equal(fetched, []string{issue.ID}) || len(reads) != 1 || !slices.Equal(reads[0].Labels, []string{"ai:in-progress"}) {
+			t.Errorf("FetchIssueStatesAndLabelsByIDs ids, OnIssueRead reads = %v, %v, want [%q] and one read with the fake's labels", fetched, reads, issue.ID)
 		}
 
 		spy.mu.Lock()
@@ -3171,6 +3181,10 @@ func TestRunWorkerAttempt_DispatchTransition(t *testing.T) {
 
 		spy := &spyMetrics{}
 		tracker := &mockTrackerAdapter{
+			fetchStatesAndLabelsFn: func(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+				t.Error("FetchIssueStatesAndLabelsByIDs called after a failed transition, want none")
+				return nil, nil
+			},
 			transitionIssueFn: func(_ context.Context, _, _ string) error {
 				return errors.New("tracker forbidden")
 			},
@@ -3184,6 +3198,7 @@ func TestRunWorkerAttempt_DispatchTransition(t *testing.T) {
 			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "work on {{ .issue.title }}") },
 			OnEvent:                func(_ string, _ domain.AgentEvent) {},
 			OnExit:                 ec.onExit,
+			OnIssueRead:            func(string, domain.IssueStateAndLabels, time.Time) {},
 			Logger:                 discardLogger(),
 			Metrics:                spy,
 		}
