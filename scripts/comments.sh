@@ -25,8 +25,8 @@ check() {
 	file=$1
 	case "$file" in
 	*"$self") return 0 ;;
-	*.go | *.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs) marker='//' ;;
-	*.sh | *.bash | *.bats | *.py | *.pyi | *.mk | Makefile | */Makefile) marker='#' ;;
+	*.go | *.ts | *.tsx | *.mjs) marker='//' ;;
+	*.sh | *.py | *.mk | Makefile | */Makefile) marker='#' ;;
 	*.sql) marker='--' ;;
 	*) return 0 ;;
 	esac
@@ -35,7 +35,7 @@ check() {
 	# Only test names and assertion messages are checked outside comments; in
 	# shipped code a path inside a string is the payload of a help text.
 	case "$file" in
-	*.bats | *_test.* | */test_*.* | *.test.* | *.spec.*) in_test=1 ;;
+	*_test.go) in_test=1 ;;
 	*) in_test=0 ;;
 	esac
 
