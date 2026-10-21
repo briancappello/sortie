@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.
 
+- Overview's Agents running tile now says how many agents are idle, or that all of them are running, instead of showing the running count against the agent limit.
+
 ### Fixed
 
 - When a bot review's triage command answers `handled`, the issue page, the Pipeline, and the status sentence now say the bot review was handled, also after Sortie restarts, instead of showing comments to answer or waiting on the bot review; a bot review's `last_check` in the state API gains `handled`. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
@@ -17,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The issue page no longer says that a review or bot review has comments to answer after a fix run was given those comments and the pull request still shows them; it reads waiting until new comments arrive. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
 
 - The issue page and the peek of an ended issue now give its ending the time it happened instead of the current time.
+
+- In a workflow with more than one terminal state, Overview's Ended today counts the issues that reached a terminal state as closed instead of done, so a cancelled issue no longer reads as done, and the end station of an ended issue's lane names the state the issue reached, or Merged, instead of End. ([#1440](https://github.com/sortie-ai/sortie/issues/1440))
 
 ## [1.29.0] - 2026-10-20
 

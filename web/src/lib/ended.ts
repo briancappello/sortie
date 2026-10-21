@@ -27,6 +27,13 @@ export function endingWord(outcome: IssueOutcomeResponse): string {
   }
 }
 
+/** Reports whether the workflow lists two or more terminal states. */
+export function hasSeveralTerminalStates(
+  terminalStates: readonly string[] | null | undefined,
+): boolean {
+  return (terminalStates ?? []).length >= 2;
+}
+
 /** Gives the clock time an issue's closing line carries: when its ending was observed once it ended, else now. */
 export function closingClock(
   detail: Pick<IssueDetailResponse, "status" | "history">,

@@ -315,6 +315,7 @@ function OverviewBody({ state }: OverviewBodyProps) {
           runningSince={(view.state.running ?? []).map((entry) => entry.started_at)}
           maxAgents={config?.agent.max_concurrent_agents}
           ended={endedAll}
+          terminalStates={config?.tracker.terminal_states ?? []}
           runs={view.tally?.summary}
           now={view.now}
         />

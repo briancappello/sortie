@@ -263,6 +263,7 @@ export function Lane({
               <span
                 className={cn(
                   "absolute top-[calc(50%+12px)] -translate-x-1/2 whitespace-nowrap text-body-sm",
+                  index === count - 1 && "max-md:-translate-x-full",
                   isCurrent ? "text-ink-body" : "text-ink-body max-md:hidden",
                 )}
                 style={{ left }}

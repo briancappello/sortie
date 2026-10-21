@@ -1,8 +1,9 @@
 import { Link, useLocation } from "react-router";
 
-import { ChartColumnIcon, ClockIcon, HistoryIcon, LoaderCircleIcon } from "@/components/icons";
+import { BotIcon, ChartColumnIcon, ClockIcon, HistoryIcon } from "@/components/icons";
 import { StatusMark } from "@/components/StatusMark";
-import { fmtAgo, fmtClock, fmtCount, fmtDuration, parseInstant } from "@/lib/format";
+import { hasSeveralTerminalStates } from "@/lib/ended";
+import { fmtAgo, fmtClock, fmtCount, fmtDuration, parseInstant, plural } from "@/lib/format";
 import { issueLinkOf } from "@/lib/issue-link";
 
 import type { ReactNode } from "react";
@@ -19,6 +20,8 @@ export interface CalmStateProps {
   maxAgents: number | undefined;
   /** Today's ended issues, newest first. */
   ended: readonly EndedIssue[];
+  /** `config.tracker.terminal_states` as served; empty while the config is not served. */
+  terminalStates: readonly string[];
   /** Today's run tally, or `undefined` while it is unavailable. */
   runs: Summary | undefined;
   /** Server-clock time in epoch milliseconds. */
@@ -75,13 +78,44 @@ function longestRun(runningSince: readonly string[], now: number): string | unde
     : `Longest ${fmtDuration((now - Math.min(...starts)) / 1000)}`;
 }
 
-function endedNote(ended: readonly EndedIssue[]): ReactNode {
+function idleNote(running: number, maxAgents: number): string {
+  const idle = maxAgents - running;
+  if (idle > 0) {
+    return plural(idle, "agent idle", "agents idle");
+  }
+  return maxAgents === 1 ? "The agent is running" : "All agents are running";
+}
+
+function agentsNote(
+  runningSince: readonly string[],
+  maxAgents: number | undefined,
+  now: number,
+): ReactNode {
+  const longest = longestRun(runningSince, now);
+  return maxAgents === undefined ? (
+    longest
+  ) : (
+    <>
+      <span>{idleNote(runningSince.length, maxAgents)}</span>
+      {longest === undefined ? undefined : <span>{longest}</span>}
+    </>
+  );
+}
+
+function endedNote(ended: readonly EndedIssue[], terminalStates: readonly string[]): ReactNode {
   const count = (kind: string) => ended.filter((issue) => issue.outcome.kind === kind).length;
+  const terminal = count("terminal");
   return ended.length === 0 ? undefined : (
     <>
       <Count mark="succeeded" n={count("merged")} word="merged" />
       <Count mark="handed" n={count("handed_off")} word="handed off" />
-      <Count mark="clear" n={count("terminal")} word="done" />
+      {hasSeveralTerminalStates(terminalStates) ? (
+        terminal > 0 ? (
+          <span>{`${fmtCount(terminal)} closed`}</span>
+        ) : undefined
+      ) : (
+        <Count mark="clear" n={terminal} word="done" />
+      )}
     </>
   );
 }
@@ -96,7 +130,14 @@ function runsNote(runs: Summary): ReactNode {
 }
 
 /** Renders the calm line and the stat tiles that follow the headline while nothing needs attention; each tile opens the screen that explains its figure. */
-export function CalmState({ runningSince, maxAgents, ended, runs, now }: CalmStateProps) {
+export function CalmState({
+  runningSince,
+  maxAgents,
+  ended,
+  terminalStates,
+  runs,
+  now,
+}: CalmStateProps) {
   const location = useLocation();
   const last = ended.at(0);
   const lastLink = last === undefined ? undefined : issueLinkOf(last.identifier, location);
@@ -109,17 +150,16 @@ export function CalmState({ runningSince, maxAgents, ended, runs, now }: CalmSta
       <div className="mt-xl grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-md">
         <Tile
           label="Agents running"
-          Glyph={LoaderCircleIcon}
+          Glyph={BotIcon}
           value={fmtCount(runningSince.length)}
-          suffix={maxAgents === undefined ? undefined : `of ${fmtCount(maxAgents)}`}
-          note={longestRun(runningSince, now)}
+          note={agentsNote(runningSince, maxAgents, now)}
           to="/pipeline"
         />
         <Tile
           label="Ended today"
           Glyph={HistoryIcon}
           value={fmtCount(ended.length)}
-          note={endedNote(ended)}
+          note={endedNote(ended, terminalStates)}
           to="/history"
         />
         {last === undefined || lastLink === undefined ? undefined : (
