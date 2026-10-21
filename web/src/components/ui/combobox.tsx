@@ -43,7 +43,7 @@ export type ComboboxListProps = Omit<BaseCombobox.List.Props, "className">;
 export function ComboboxList(props: ComboboxListProps) {
   return (
     <BaseCombobox.List
-      className="max-h-80 min-h-0 overflow-y-auto overscroll-contain py-xxs [scroll-padding-block:4px]"
+      className="max-h-80 min-h-0 overflow-y-auto overscroll-contain py-xxs scroll-py-xxs"
       {...props}
     />
   );

@@ -55,7 +55,7 @@ export type AutocompleteListProps = Omit<BaseAutocomplete.List.Props, "className
 export function AutocompleteList(props: AutocompleteListProps) {
   return (
     <BaseAutocomplete.List
-      className="min-h-0 overflow-y-auto overscroll-contain py-xxs [scroll-padding-block:4px]"
+      className="min-h-0 overflow-y-auto overscroll-contain py-xxs scroll-py-xxs"
       {...props}
     />
   );

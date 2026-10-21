@@ -173,6 +173,7 @@ ui-build: ## Build the dashboard into internal/server/ui/dist
 ui-lint: ## Lint and type-check the dashboard sources
 	cd web && $(NPM) run lint
 	cd web && $(NPM) run typecheck
+	node scripts/tailwind-canonical.mjs web
 
 .PHONY: ui-fmt
 ui-fmt: ## Format the dashboard sources

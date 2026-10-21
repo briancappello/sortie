@@ -33,9 +33,9 @@ const PAGE_ROWS = 20;
  * its stage number and stage name, so its Runs column lines up too.
  */
 export const COLUMN_WIDTH = {
-  name: "w-[240px]",
+  name: "w-nav-rail",
   nameText: "max-w-[208px]",
-  stageNumber: "w-[48px]",
+  stageNumber: "w-xxl",
   stage: "w-[192px]",
   stageText: "max-w-[160px]",
   entryStageText: "max-w-[96px]",

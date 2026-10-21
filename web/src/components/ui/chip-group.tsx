@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
 const ALL_VALUE = "__all__";
 
 const CHIP =
-  "inline-flex h-(--size-chip) items-center gap-xxs rounded-full border border-line-medium bg-surface-raised px-sm text-body-sm font-medium whitespace-nowrap text-ink-body select-none cursor-pointer transition-colors duration-(--duration-feedback) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring not-data-pressed:hover:bg-[image:linear-gradient(var(--color-state-hover),var(--color-state-hover))] not-data-pressed:active:bg-[image:linear-gradient(var(--color-state-pressed),var(--color-state-pressed))] data-pressed:border-primary data-pressed:bg-primary data-pressed:text-on-primary data-pressed:hover:bg-primary-hover data-pressed:active:bg-primary-active";
+  "inline-flex h-(--size-chip) items-center gap-xxs rounded-full border border-line-medium bg-surface-raised px-sm text-body-sm font-medium whitespace-nowrap text-ink-body select-none cursor-pointer transition-colors duration-(--duration-feedback) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring not-data-pressed:hover:bg-[linear-gradient(var(--color-state-hover),var(--color-state-hover))] not-data-pressed:active:bg-[linear-gradient(var(--color-state-pressed),var(--color-state-pressed))] data-pressed:border-primary data-pressed:bg-primary data-pressed:text-on-primary data-pressed:hover:bg-primary-hover data-pressed:active:bg-primary-active";
 
 /** One chip of a {@link ChipGroup}. */
 export interface ChipGroupItem {

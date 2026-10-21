@@ -33,9 +33,9 @@ export function DrawerPopup({ children, className, ...rest }: DrawerPopupProps) 
         <BaseDrawer.Popup
           className={cn(
             "h-full w-[500px] max-w-full overflow-y-auto overscroll-contain border-l border-overlay-line bg-overlay text-ink shadow-2xl outline-hidden max-md:w-full",
-            "[transform:translateX(var(--drawer-swipe-movement-x,0px))] transition-transform duration-(--duration-enter) ease-enter",
+            "transform-[translateX(var(--drawer-swipe-movement-x,0px))] transition-transform duration-(--duration-enter) ease-enter",
             "data-swiping:duration-0 data-ending-style:duration-(--duration-exit) data-ending-style:ease-exit",
-            "data-starting-style:[transform:translateX(100%)] data-ending-style:[transform:translateX(100%)]",
+            "data-starting-style:transform-[translateX(100%)] data-ending-style:transform-[translateX(100%)]",
             className,
           )}
           {...rest}

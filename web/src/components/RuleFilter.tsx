@@ -18,7 +18,7 @@ import type { ConfigResponse } from "@/api/types.gen";
 const RULE_PARAM = "rule";
 
 const TRIGGER =
-  "inline-flex h-(--size-chip) items-center gap-xs rounded-full border border-line-medium bg-surface-raised px-sm text-body-sm font-medium whitespace-nowrap text-ink-body select-none cursor-pointer transition-colors duration-(--duration-feedback) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring hover:bg-[image:linear-gradient(var(--color-state-hover),var(--color-state-hover))] active:bg-[image:linear-gradient(var(--color-state-pressed),var(--color-state-pressed))]";
+  "inline-flex h-(--size-chip) items-center gap-xs rounded-full border border-line-medium bg-surface-raised px-sm text-body-sm font-medium whitespace-nowrap text-ink-body select-none cursor-pointer transition-colors duration-(--duration-feedback) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring hover:bg-[linear-gradient(var(--color-state-hover),var(--color-state-hover))] active:bg-[linear-gradient(var(--color-state-pressed),var(--color-state-pressed))]";
 
 const CAPTION = "px-md pt-xs pb-xxs text-label-caps font-medium text-ink-muted";
 
