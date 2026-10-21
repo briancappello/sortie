@@ -182,6 +182,13 @@ type RunHistory struct {
 	// stop. Only the appends write it; the run-history reads do not select it.
 	AgentBlocked bool
 
+	// DeclaredOutcome is the recognized status token the run's agent ended
+	// it with, and AgentText the masked statement written after it. Both
+	// appends write them and only [Store.QueryRunHistory] reads them; each
+	// is empty when the run ended on no declaration or predates the columns.
+	DeclaredOutcome string
+	AgentText       string
+
 	// ResumeUsage is the figure the run's session held at the run's last
 	// reporting turn; nil writes four NULLs. Only the appends write it; the
 	// run-history reads do not select it. [Store.LatestResumeUsage] reads it.
@@ -355,8 +362,8 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 
 	res, err := ex.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id, agent_blocked, resume_input_tokens, resume_output_tokens, resume_cache_read_tokens, resume_cache_write_tokens, resume_model_usage, estimated_cost_usd, cost_status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id, agent_blocked, resume_input_tokens, resume_output_tokens, resume_cache_read_tokens, resume_cache_write_tokens, resume_model_usage, estimated_cost_usd, cost_status, declared_outcome, agent_text)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
@@ -368,6 +375,7 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 		dispatchIDVal, run.AgentBlocked,
 		resumeInput, resumeOutput, resumeCacheRead, resumeCacheWrite, resumeModelUsage,
 		nullFloat(run.EstimatedCostUSD), nullIfEmpty(run.CostStatus),
+		run.DeclaredOutcome, run.AgentText,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)
@@ -656,7 +664,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 			chain_id, stage_previous, stage_previous_outcome, stage_target, stage_result,
 			issue_title, issue_url, dispatched_at,
 			trigger, reaction_kind, session_id, ssh_host, dispatch_id,
-			estimated_cost_usd, cost_status
+			estimated_cost_usd, cost_status, declared_outcome, agent_text
 		FROM run_history`
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ") //nolint:gosec // conds holds only fixed predicates with ? placeholders; values are bound via args
@@ -684,7 +692,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 			&r.ChainID, &r.StagePrevious, &r.StagePreviousOutcome, &r.StageTarget, &r.StageResult,
 			&r.IssueTitle, &r.IssueURL, &r.DispatchedAt,
 			&triggerVal, &reactionVal, &sessionVal, &hostVal, &dispatchIDVal,
-			&costVal, &costStatusVal,
+			&costVal, &costStatusVal, &r.DeclaredOutcome, &r.AgentText,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}

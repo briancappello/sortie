@@ -137,6 +137,10 @@ type RunHistoryEntry struct {
 	// DispatchID keys the run's retained events: empty on the recorded CI
 	// result, nil for a run recorded before the dispatch ID existed.
 	DispatchID *string
+	// DeclaredOutcome and AgentText are as stored, empty when none.
+	// AgentText is masked when recorded and again by the server at serve time.
+	DeclaredOutcome string
+	AgentText       string
 	// ModelUsage is the run's per-model spend ordered by model; empty when
 	// the run recorded none.
 	ModelUsage []RunModelUsage

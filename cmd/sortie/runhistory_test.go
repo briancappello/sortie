@@ -278,6 +278,7 @@ func TestRunHistoryServesCostAndOrigin(t *testing.T) {
 	measured.EstimatedCostUSD, measured.CostStatus = new(0.010035), "estimated"
 	measured.Trigger, measured.ReactionKind, measured.InputTokens, measured.OutputTokens, measured.TotalTokens, measured.CacheReadTokens, measured.CacheWriteTokens = new("ci_fix"), "ci", 1000, 500, 1500, 200, 100
 	measured.DispatchID = new("d-1")
+	measured.DeclaredOutcome, measured.AgentText = "blocked", "Which one should the API expose?"
 	measured.ModelUsage = map[string]persistence.ModelTokens{"m-a": {InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 200, CacheWriteTokens: 100}}
 	measured.ModelCosts = map[string]persistence.ModelCost{"m-a": {EstimatedCostUSD: new(0.010035), CostStatus: "partial", UnratedClasses: []string{"cache_write"}}}
 	unmeasured := runRow("i-0", "OTHER-0")
@@ -294,12 +295,12 @@ func TestRunHistoryServesCostAndOrigin(t *testing.T) {
 	}
 
 	wants := []map[string]any{
-		{"tokens": tokens(nil, nil, nil, nil, nil), "estimated_cost_usd": nil, "cost_status": "unmeasured", "model_usage": []any{}, "trigger": nil, "reaction_kind": "", "reaction_config_key": ""},
+		{"tokens": tokens(nil, nil, nil, nil, nil), "estimated_cost_usd": nil, "cost_status": "unmeasured", "model_usage": []any{}, "trigger": nil, "reaction_kind": "", "reaction_config_key": "", "declared_outcome": nil, "agent_text": nil},
 		{"tokens": tokens(1000.0, 500.0, 1500.0, 200.0, 100.0), "estimated_cost_usd": 0.010035, "cost_status": "estimated", "trigger": "ci_fix",
 			"model_usage": []any{map[string]any{
 				"model": "m-a", "tokens": tokens(1000.0, 500.0, 1500.0, 200.0, 100.0), "uncached_tokens": 1300.0,
 				"estimated_cost_usd": 0.010035, "cost_status": "partial", "unrated_classes": []any{"cache_write"},
-			}}, "reaction_kind": "ci", "reaction_config_key": "ci_failure"},
+			}}, "reaction_kind": "ci", "reaction_config_key": "ci_failure", "declared_outcome": "blocked", "agent_text": "Which one should the API expose?"},
 	}
 	for i, want := range wants {
 		for member, wantValue := range want {

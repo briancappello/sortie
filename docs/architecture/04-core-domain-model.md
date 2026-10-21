@@ -109,6 +109,10 @@ Fields (logical):
   - True on the first attempt dispatched after the hop `stage_previous` names. False on a later dispatch into that stage while the hop record stands (after a restart, a released hold, or a lost retry), on a retry or reaction continuation, and when `stage_previous` is empty. A row recorded before the flag was kept takes it from the upgrade.
 - `agent_blocked` (boolean)
   - True when the run's agent ended it with a `blocked` soft stop (Section 21.1). False otherwise, and on a row recorded before the flag was kept.
+- `declared_outcome` (string)
+  - The recognized `.sortie/status` token that ended the run (`blocked`, `needs-human-review`, or `no-change-needed`), as the agent wrote it (Section 21.1). Empty when the run ended on no recognized token, and on a row recorded before the field was kept.
+- `agent_text` (string)
+  - The statement that came with the token in `declared_outcome`, normalized and masked as Section 21.1 states. Empty when `declared_outcome` is empty, when the agent wrote no statement, and when normalization empties it.
 - `chain_id` (string)
   - The stage chain identifier frozen with the dispatch selection. A dispatch no hop reached starts a chain with a fresh random value; a dispatch a hop reached inherits the chain of the hop; a retry or reaction continuation carries the chain of the run it continues. Empty only on a row written before the chain was recorded.
 - `dispatched_at` (timestamp)

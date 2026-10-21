@@ -213,5 +213,7 @@ func runHistoryEntry(r persistence.RunHistory) server.RunHistoryEntry {
 		SessionID:            r.SessionID,
 		SSHHost:              r.SSHHost,
 		DispatchID:           r.DispatchID,
+		DeclaredOutcome:      r.DeclaredOutcome,
+		AgentText:            r.AgentText,
 	}
 }

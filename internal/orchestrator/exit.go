@@ -442,6 +442,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		trigger = new(entry.Trigger)
 	}
 
+	declaredToken, declaredStatement := declaredOutcome(workerResult)
+
 	// RunHistory.Attempt is 1-based for display; normalizeAttempt returns the
 	// 0-based retry counter, so add 1.
 	runHistory := persistence.RunHistory{
@@ -483,9 +485,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		SessionID:    sessionID,
 		SSHHost:      entry.SSHHost,
 
-		FirstAfterHop: entry.FirstAfterHop,
-		AgentBlocked:  blockedSoftStop,
-		ResumeUsage:   persistedResumeUsage(workerResult.ResumeUsage, workerResult.ResumeUsageByModel),
+		FirstAfterHop:   entry.FirstAfterHop,
+		AgentBlocked:    blockedSoftStop,
+		DeclaredOutcome: declaredToken,
+		AgentText:       declaredStatement,
+		ResumeUsage:     persistedResumeUsage(workerResult.ResumeUsage, workerResult.ResumeUsageByModel),
 	}
 	// A row recording no measurement must carry zero in all five token
 	// columns. The reconciliation above can populate them from a worker
@@ -1786,6 +1790,15 @@ func buildFailureComment(elapsed time.Duration, retryScheduled bool, nextAttempt
 func buildSoftStopComment(elapsed time.Duration, turnsCompleted int, reason string) string {
 	return fmt.Sprintf("Sortie session completed (agent signaled: %s).\nDuration: %s\nTurns: %d",
 		reason, elapsed.Truncate(time.Second).String(), turnsCompleted)
+}
+
+// declaredOutcome returns the recognized status token that ended the run and
+// its public statement, or two empty strings when the run ended on none.
+func declaredOutcome(result WorkerResult) (token, statement string) {
+	if !result.SoftStop || !workspace.StatusSignal(result.SoftStopReason).IsRecognized() {
+		return "", ""
+	}
+	return result.SoftStopReason, publicStatement(result.SoftStopStatement)
 }
 
 // maxPublicStatementRunes bounds the agent text a destination receives.

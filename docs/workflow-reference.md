@@ -1595,7 +1595,7 @@ A `tracker_comment` entry posts each event it receives as a comment on the event
 
 When an agent stops on `blocked`, `needs-human-review`, or `no-change-needed`, it can write its reason on the lines after the status in `.sortie/status`. The first line is the status and everything after it is the reason. Sortie asks the agent for one in the instructions it adds to the first prompt of every run, and asks it to keep the whole file under 1024 bytes, because Sortie reads no more than that.
 
-Sortie publishes the reason only with the `session.stopped` event. A `session.failed` event never carries one, even when a `needs-human-review` run ended as a failure because its handoff was withheld, and neither does an `agent.message` notification. A reason that comes with an unrecognized status is ignored. When the agent writes a status inside a self-review turn, only a `blocked` there replaces the reason already held, and a `no-change-needed` declaration that self-review retracts takes its reason with it.
+Sortie publishes the reason with the `session.stopped` event. It also stores the reason with the run and serves it on the run's row in the run history API ([run fields](#get-apiv1runs-run-history)), a withheld `needs-human-review` run included. A `session.failed` event never carries one, even when a `needs-human-review` run ended as a failure because its handoff was withheld, and neither does an `agent.message` notification. A reason that comes with an unrecognized status is ignored. When the agent writes a status inside a self-review turn, only a `blocked` there replaces the reason already held, and a `no-change-needed` declaration that self-review retracts takes its reason with it.
 
 Before a reason leaves Sortie, Sortie removes control characters, replaces bytes that are not valid text, masks every secret value it knows from its own configuration and environment (values shorter than 8 bytes are left readable), and, when the file was cut at 1024 bytes, also drops any partial secret left at the cut and ends the reason with an ellipsis. Only those secrets are masked. Sortie does not recognize other credentials or paths, so a statement that quotes one is published as written.
 
@@ -3129,6 +3129,8 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
         "attempt": 1,
         "status": "succeeded",
         "error": null,
+        "declared_outcome": null,
+        "agent_text": null,
         "rule_name": "specify",
         "agent_kind": "claude-code",
         "started_at": "2026-02-24T19:48:20Z",
@@ -3322,6 +3324,8 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
       "attempt": 2,
       "status": "succeeded",
       "error": null,
+      "declared_outcome": "needs-human-review",
+      "agent_text": "The migration needs a decision on the retention period before it can ship.",
       "rule_name": "implement",
       "agent_kind": "claude-code",
       "configured_model": "claude-sonnet-4-20250514",
@@ -3408,6 +3412,8 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `attempt`                | integer            | The attempt number at the time of the run. |
 | `status`                 | string             | The run's disposition. |
 | `error`                  | string or `null`   | The run's error message, `null` when it recorded none. A run whose handoff Sortie withheld because the agent changed nothing, or because Sortie could not tell, reads as a plain sentence saying so, such as `The agent finished without changing anything, so Sortie did not hand the issue off.`; so does a run that ended on an agent error, such as `Sortie stopped the session before the agent finished turn 1.` for a cancelled turn, which keeps any message the agent supplied and never shows Go error-chain prefixes or `context canceled`. The stored text is not served for either. Masked like `issue_title`. |
+| `declared_outcome`       | string or `null`   | The status the agent ended the run on: `blocked`, `needs-human-review`, or `no-change-needed`. It states what the agent declared, and `status` stays the disposition Sortie recorded, so a `needs-human-review` run whose handoff Sortie withheld reads `failed` with its declaration. `null` when the run ended on no recognized status, and for a run recorded before this field existed. Never `""`. |
+| `agent_text`             | string or `null`   | The agent's reason for the status in `declared_outcome`, after the cleanup described in [The agent's reason on a stop](#the-agents-reason-on-a-stop). `null` when the agent wrote none and when `declared_outcome` is `null`. Never `""`. Masked when the response is built, so a secret registered after the run is replaced by the mask marker too. |
 | `rule_name`              | string or absent   | The dispatch rule that routed the run, `default` for `dispatch.default`, omitted when the workflow-wide fallback routed it. |
 | `agent_kind`             | string or absent   | The agent kind the run used. Omitted when empty. |
 | `configured_model`, `configured_effort` | string or absent | The `model` and `effort` the run's resolved settings block carried. Omitted when unset. |

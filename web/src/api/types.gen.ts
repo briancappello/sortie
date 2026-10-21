@@ -592,6 +592,8 @@ export interface RunResponse {
   attempt: number;
   status: string;
   error: string | null;
+  declared_outcome: string | null;
+  agent_text: string | null;
   rule_name?: string;
   agent_kind?: string;
   configured_model?: string;
