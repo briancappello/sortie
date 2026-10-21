@@ -17,6 +17,26 @@ export type Mark =
 /** The marks that state where work stands; `stalled` is a separate marker beside them, never a state. */
 export type StateMark = Exclude<Mark, "stalled">;
 
+const STATE_WORDS: Record<StateMark, string> = {
+  running: "Running",
+  current: "Current",
+  waiting: "Waiting",
+  retry: "Retry",
+  held: "Held",
+  needs: "Attention",
+  stopped: "Stopped",
+  handed: "Handed",
+  succeeded: "Succeeded",
+  failed: "Failed",
+  degraded: "Degraded",
+  clear: "Clear",
+};
+
+/** Gives the one word a status column shows for where work stands. */
+export function stateWord(mark: StateMark): string {
+  return STATE_WORDS[mark];
+}
+
 const RUN_STATUSES: Record<string, { word: string; mark: Mark | null }> = {
   succeeded: { word: "Succeeded", mark: "succeeded" },
   failed: { word: "Failed", mark: "failed" },
@@ -38,19 +58,4 @@ export const RUN_STATUS_NAMES: readonly string[] = Object.keys(RUN_STATUSES);
  */
 export function runStatus(status: string): { word: string; mark: Mark | null } {
   return Object.hasOwn(RUN_STATUSES, status) ? RUN_STATUSES[status] : { word: status, mark: null };
-}
-
-/**
- * Gives the mark of an issue outcome the dashboard marks: a handoff or a
- * merge. Any other kind, and an absent one, carries no mark.
- */
-export function outcomeMark(kind: string | undefined): StateMark | null {
-  switch (kind) {
-    case "handed_off":
-      return "handed";
-    case "merged":
-      return "succeeded";
-    default:
-      return null;
-  }
 }

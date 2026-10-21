@@ -238,7 +238,7 @@ function ReactionLine({ row, detail, state }: ReactionLineProps) {
       ? watchState(row, detail)
       : {
           word: "escalated",
-          mark: rowMark("pending_reactions", detail.issue_id, state?.attention ?? []).mark,
+          mark: rowMark("pending_reactions", detail.issue_id, state?.attention ?? []),
         };
 
   return (

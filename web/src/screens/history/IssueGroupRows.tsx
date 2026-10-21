@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router";
 
 import { useHistoryRunsQuery } from "@/api/queries";
 import { ServedText } from "@/components/ServedText";
+import { StandingMark } from "@/components/Lane";
 import { StatusMark } from "@/components/StatusMark";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,11 +30,11 @@ import {
 import { fmtCount, fmtDuration, fmtStamp, parseInstant, plural } from "@/lib/format";
 import { issueLinkOf } from "@/lib/issue-link";
 import { ruleLabel } from "@/lib/labels";
-import { outcomeMark, runStatus } from "@/lib/run-status";
+import { issueStanding } from "@/lib/lane";
+import { runStatus } from "@/lib/run-status";
 
 import type { HistoryFilter } from "@/api/client";
 import type { IssueGroupResponse, RunResponse, StateResponse } from "@/api/types.gen";
-import type { Mark } from "@/lib/run-status";
 
 const READ_FAILED = "Run history could not be read.";
 
@@ -69,25 +70,6 @@ export function HistoryTableHead({ state }: HistoryTableHeadProps) {
       <TableHead>Finished</TableHead>
     </TableHeader>
   );
-}
-
-function groupMark(group: IssueGroupResponse): Mark | null {
-  switch (group.status) {
-    case "running":
-      return "running";
-    case "retrying":
-      return "retry";
-    case "budget_exhausted":
-    case "parked":
-    case "pending_reactions":
-    case "between_stages":
-      return "waiting";
-    case "history":
-      // Green marks only a success, and "terminal" covers a person's close too.
-      return outcomeMark(group.issue_outcome?.kind);
-    default:
-      return null;
-  }
 }
 
 function runSeconds(run: RunResponse): number | null {
@@ -205,14 +187,19 @@ export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
 
   const key = group.display_identifier || group.issue_identifier;
   const title = group.issue_title || key;
-  const mark = groupMark(group);
+  const standing = issueStanding(
+    group.issue_id,
+    group.status,
+    group.issue_outcome,
+    state?.attention ?? [],
+  );
   const ending = group.status === "history" ? group.issue_outcome : null;
   const cacheReads = totalsCacheReadsText(group.totals);
   const costHover = costTitle(group.totals.cost_status, group.totals.estimated_cost_usd);
   const secondLine = (
     [
       ["key", group.issue_title ? key : undefined],
-      ["status", group.status_text],
+      ["status", standing.word || undefined],
       ["runs", plural(group.totals.run_count, "run", "runs")],
       ["tokens", tokensPart(totalsTokensText(group.totals))],
       ["cache-reads", cacheReads === null ? undefined : `${cacheReads} cache reads`],
@@ -243,8 +230,8 @@ export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
       <TableRow look="group" onClick={() => void navigate(link.to, { state: link.state })}>
         <TableSpanCell colSpan={columns.span}>
           <div className="flex items-start gap-sm">
-            <span className="flex h-6 w-(--size-icon) shrink-0 items-center">
-              {mark === null ? undefined : <StatusMark mark={mark} />}
+            <span className="flex w-(--size-icon) shrink-0 items-center justify-center self-center">
+              {standing.marker === null ? undefined : <StandingMark marker={standing.marker} />}
             </span>
             <div className="min-w-0 flex-1">
               <p className="text-body-md font-medium text-ink wrap-anywhere">
@@ -260,7 +247,7 @@ export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
               <p className="flex flex-wrap gap-x-md text-body-sm text-ink-muted wrap-anywhere">
                 {secondLine.map(([id, part]) => (
                   <span key={id} title={id === "cost" ? costHover : undefined}>
-                    {id === "status" ? <ServedText text={part} /> : part}
+                    {part}
                   </span>
                 ))}
               </p>

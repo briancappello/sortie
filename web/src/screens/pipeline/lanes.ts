@@ -1,6 +1,7 @@
 import { activeRowOf, decidingRowOf } from "@/lib/active-rows";
-import { buildEnded } from "@/lib/ended";
+import { buildEnded, endingWord } from "@/lib/ended";
 import { parseInstant } from "@/lib/format";
+import { stateWord } from "@/lib/run-status";
 import {
   laneOf,
   lastStagePositionOf,
@@ -28,12 +29,10 @@ export interface PipelineLane extends Filterable {
   /** The rule the lane names when it draws no stage meter, or `null`. */
   route: string | null;
   agentKind: string | null;
-  statusText: string;
+  /** The one word the row gives for where the issue is. */
+  word: string;
   statusTextFull: string;
-  stallText: string | null;
-  stallTextFull: string | null;
   marker: LaneMarker;
-  acknowledgedAt: string | null;
   stations: LaneStation[];
   /** The key of the station the issue stands at. */
   station: string;
@@ -76,6 +75,10 @@ function ownPullRequestOf(deciding: Deciding): PullRequestResponse | undefined {
   }
 }
 
+function laneWord(marker: LaneMarker): string {
+  return marker === "ended" ? "Ended" : stateWord(marker);
+}
+
 function activeLanes(state: StateResponse, stations: readonly Station[], now: number) {
   const attention = state.attention ?? [];
   const lanes: PipelineLane[] = [];
@@ -105,12 +108,9 @@ function activeLanes(state: StateResponse, stations: readonly Station[], now: nu
       rule: row.rule,
       route: position === null ? row.route : null,
       agentKind: row.agentKind,
-      statusText: row.statusText,
+      word: laneWord(standing.mark ?? row.mark),
       statusTextFull: row.statusTextFull,
-      stallText: row.stallText,
-      stallTextFull: row.stallTextFull,
       marker: standing.mark ?? row.mark,
-      acknowledgedAt: row.acknowledgedAt,
       stations: laneOf(stations, standing, pending, entry.pr_loop),
       station: standing.station,
       position,
@@ -166,13 +166,10 @@ function endedLanes(
       rule: position?.current ?? issue.rule,
       route: position === null && hasRules ? issue.rule : null,
       agentKind: issue.agentKind,
-      statusText: issue.outcome.status_text,
+      word: endingWord(issue.outcome),
       statusTextFull: issue.outcome.status_text_full,
-      stallText: null,
-      stallTextFull: null,
       marker: "ended",
-      acknowledgedAt: null,
-      stations: laneOf(stations, { ...standing, mark: "ended" }, [], issue.prLoop),
+      stations: laneOf(stations, standing, [], issue.prLoop),
       station: standing.station,
       position,
       progress:

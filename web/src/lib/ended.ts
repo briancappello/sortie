@@ -1,4 +1,4 @@
-import { parseInstant } from "@/lib/format";
+import { parseInstant, upperFirst } from "@/lib/format";
 
 import type {
   IssueOutcomeResponse,
@@ -7,6 +7,24 @@ import type {
   RunsResponse,
   StateResponse,
 } from "@/api/types.gen";
+
+/**
+ * Gives the one word a status column shows for an ending: the tracker state the
+ * issue reached, as the operator configured it with a capital first letter, or Merged.
+ */
+export function endingWord(outcome: IssueOutcomeResponse): string {
+  switch (outcome.kind) {
+    case "merged":
+      return "Merged";
+    case "handed_off":
+    case "terminal":
+      return outcome.state === undefined || outcome.state === ""
+        ? "Ended"
+        : upperFirst(outcome.state);
+    default:
+      return "Ended";
+  }
+}
 
 /** An issue whose newest run today ended with an outcome and which Sortie no longer holds. */
 export interface EndedIssue {
