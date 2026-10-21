@@ -125,7 +125,8 @@ function firstRunLede(state: StateResponse): string {
  * Words the Overview heading and its lede from the served state.
  *
  * A first run, with no run on record, reads as picking up only while an agent
- * runs and nothing needs attention; a failing health check or a critical item
+ * runs and nothing needs attention or waits on a person; a failing health
+ * check or a critical item
  * reads as degraded.
  */
 export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headline {
@@ -136,7 +137,13 @@ export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headli
   const isDegraded = condition(state) === "degraded" || critical > 0;
   const others = items.length - critical;
 
-  if (isFirstRun && state.counts.running > 0 && items.length === 0 && !isDegraded) {
+  if (
+    isFirstRun &&
+    state.counts.running > 0 &&
+    items.length === 0 &&
+    acknowledged === 0 &&
+    !isDegraded
+  ) {
     return {
       heading: [{ text: "Sortie is picking up its first issues." }],
       lede: [{ text: firstRunLede(state) }],
