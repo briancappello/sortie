@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard shows an issue's status as one word with the same mark on every screen.
+
 ### Fixed
 
 - When a bot review's triage command answers `handled`, the issue page, the Pipeline, and the status sentence now say the bot review was handled, also after Sortie restarts, instead of showing comments to answer or waiting on the bot review; a bot review's `last_check` in the state API gains `handled`. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
