@@ -1,7 +1,10 @@
 import type { StateResponse } from "@/api/types.gen";
 
 /** The one state the status card, narrow bar, title, and favicon follow. */
-export type Condition = "degraded" | "needs" | "clear";
+export type Condition = "degraded" | "needs" | "held" | "clear";
+
+/** The word that follows an acknowledged-item count wherever the dashboard shows one. */
+export const ACKNOWLEDGED_WORD = "acknowledged";
 
 const SCM_PROVIDER_NAMES: Record<string, string> = {
   github: "GitHub",
@@ -32,12 +35,23 @@ export function failingChecks(state: StateResponse): string[] {
     .map(({ name }) => name);
 }
 
-/** Derives the condition: a failing check outranks attention items, which outrank all clear. */
+/** Counts the attention items a person has acknowledged. */
+export function acknowledgedCount(state: StateResponse): number {
+  return (state.attention ?? []).filter((item) => item.acknowledged_at !== null).length;
+}
+
+/**
+ * Derives the condition: a failing check outranks unacknowledged attention items,
+ * which outrank acknowledged ones that still stand, which outrank all clear.
+ */
 export function condition(state: StateResponse): Condition {
   if (failingChecks(state).length > 0) {
     return "degraded";
   }
-  return state.counts.attention > 0 ? "needs" : "clear";
+  if (state.counts.attention > 0) {
+    return "needs";
+  }
+  return acknowledgedCount(state) > 0 ? "held" : "clear";
 }
 
 /** Words the condition for the status card and the title. */
@@ -47,6 +61,8 @@ export function conditionWord(c: Condition): string {
       return "Degraded";
     case "needs":
       return "Needs attention";
+    case "held":
+      return "Waiting on a person";
     case "clear":
       return "All clear";
   }

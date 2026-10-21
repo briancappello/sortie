@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - In a workflow with more than one terminal state, Overview's Ended today counts the issues that reached a terminal state as closed instead of done, so a cancelled issue no longer reads as done, and the end station of an ended issue's lane names the state the issue reached, or Merged, instead of End. ([#1440](https://github.com/sortie-ai/sortie/issues/1440))
 
+- The dashboard's status card and the browser tab title no longer read All clear, and Overview no longer reads Nothing needs attention, while an attention item you acknowledged still stands, such as a parked issue; they say it is waiting on a person until the item clears. ([#1441](https://github.com/sortie-ai/sortie/issues/1441))
+
 ## [1.29.0] - 2026-10-20
 
 ### Added

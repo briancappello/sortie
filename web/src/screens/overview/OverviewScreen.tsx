@@ -302,7 +302,6 @@ function OverviewBody({ state }: OverviewBodyProps) {
         <AttentionList
           items={unacknowledged}
           now={view.now}
-          readSet={view.readSet}
           selectedKey={selectedKey}
           showSelection={showSelection}
           pending={actions.pending}
@@ -312,6 +311,7 @@ function OverviewBody({ state }: OverviewBodyProps) {
         />
       ) : view.isFirstRun === false && condition(view.state) !== "degraded" ? (
         <CalmState
+          allClear={condition(view.state) === "clear"}
           runningSince={(view.state.running ?? []).map((entry) => entry.started_at)}
           maxAgents={config?.agent.max_concurrent_agents}
           ended={endedAll}

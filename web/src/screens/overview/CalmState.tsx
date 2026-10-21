@@ -14,6 +14,8 @@ import type { Mark } from "@/lib/run-status";
 
 /** Props of {@link CalmState}. */
 export interface CalmStateProps {
+  /** Whether nothing waits on a person, acknowledged items included; only then does the calm line show. */
+  allClear: boolean;
   /** `started_at` of every running session. */
   runningSince: readonly string[];
   /** The global agent cap, or `undefined` while the config is not served. */
@@ -131,6 +133,7 @@ function runsNote(runs: Summary): ReactNode {
 
 /** Renders the calm line and the stat tiles that follow the headline while nothing needs attention; each tile opens the screen that explains its figure. */
 export function CalmState({
+  allClear,
   runningSince,
   maxAgents,
   ended,
@@ -144,9 +147,11 @@ export function CalmState({
 
   return (
     <section aria-label="Calm" className="mb-md">
-      <p className="text-body-md text-ink-body">
-        Nothing is parked, held, escalated or stopped, and Sortie is healthy.
-      </p>
+      {allClear ? (
+        <p className="text-body-md text-ink-body">
+          Nothing is parked, held, escalated or stopped, and Sortie is healthy.
+        </p>
+      ) : undefined}
       <div className="mt-xl grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-md">
         <Tile
           label="Agents running"

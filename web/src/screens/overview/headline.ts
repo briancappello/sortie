@@ -3,10 +3,10 @@ import { fmtClock, pluralVerb } from "@/lib/format";
 
 import type { StateResponse } from "@/api/types.gen";
 
-/** A run of headline text; `strong` is a bold count, `attention` and `critical` color a lead phrase. */
+/** A run of headline text; `strong` is a bold count, `critical` colors a lead phrase. */
 export interface Segment {
   text: string;
-  emphasis?: "strong" | "attention" | "critical";
+  emphasis?: "strong" | "critical";
 }
 
 /** The page's heading and the lede sentence under it. */
@@ -125,8 +125,8 @@ function firstRunLede(state: StateResponse): string {
  * Words the Overview heading and its lede from the served state.
  *
  * A first run, with no run on record, reads as picking up only while an agent
- * runs and nothing needs attention; a failing health check or a critical item
- * reads as degraded.
+ * runs and nothing needs attention or waits on a person; a failing health
+ * check or a critical item reads as degraded.
  */
 export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headline {
   const items = (state.attention ?? []).filter((item) => item.acknowledged_at === null);
@@ -136,7 +136,13 @@ export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headli
   const isDegraded = condition(state) === "degraded" || critical > 0;
   const others = items.length - critical;
 
-  if (isFirstRun && state.counts.running > 0 && items.length === 0 && !isDegraded) {
+  if (
+    isFirstRun &&
+    state.counts.running > 0 &&
+    items.length === 0 &&
+    acknowledged === 0 &&
+    !isDegraded
+  ) {
     return {
       heading: [{ text: "Sortie is picking up its first issues." }],
       lede: [{ text: firstRunLede(state) }],
@@ -149,11 +155,7 @@ export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headli
       heading: [
         { text: "Sortie is degraded", emphasis: "critical" },
         ...(others > 0
-          ? [
-              { text: ", and " },
-              { text: more.count, emphasis: "attention" as const },
-              { text: ` more ${more.noun} ${more.verb} attention.` },
-            ]
+          ? [{ text: `, and ${more.count} more ${more.noun} ${more.verb} attention.` }]
           : [{ text: ", and nothing else needs attention." }]),
       ],
       lede: lede(clauses, "Everything else is handled: "),
@@ -162,11 +164,19 @@ export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headli
   if (items.length > 0) {
     const needs = pluralVerb(items.length, ["item", "items"], ["needs", "need"]);
     return {
-      heading: [
-        { text: needs.count, emphasis: "attention" },
-        { text: ` ${needs.noun} ${needs.verb} attention.` },
-      ],
+      heading: [{ text: `${needs.count} ${needs.noun} ${needs.verb} attention.` }],
       lede: lede(clauses, "Everything else is handled: "),
+    };
+  }
+  if (acknowledged > 0) {
+    const held = pluralVerb(
+      acknowledged,
+      ["acknowledged item", "acknowledged items"],
+      ["waits", "wait"],
+    );
+    return {
+      heading: [{ text: `${held.count} ${held.noun} ${held.verb} on a person.` }],
+      lede: lede(handledClauses(state, 0), ""),
     };
   }
   return { heading: [{ text: "Nothing needs attention." }], lede: lede(clauses, "") };

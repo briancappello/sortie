@@ -18,8 +18,7 @@ export interface AttentionItemProps {
   navKey: string;
   /** Server-clock time in epoch milliseconds that the item's age measures against. */
   now: number;
-  isUnread: boolean;
-  /** Whether this is the selected item; its action takes the primary style. */
+  /** Whether this is the selected item. */
   isSelected: boolean;
   /** Whether the selected-row look shows, which it does from the first navigation key on. */
   showSelection: boolean;
@@ -40,7 +39,6 @@ export function AttentionItem({
   item,
   navKey,
   now,
-  isUnread,
   isSelected,
   showSelection,
   isPending,
@@ -91,9 +89,7 @@ export function AttentionItem({
           <ServedText text={item.reason_text} />
         </strong>
         {item.issue_title ? (
-          <span className={cn("text-body-md text-ink", isUnread ? "font-bold" : "font-medium")}>
-            {item.issue_title}
-          </span>
+          <span className="text-body-md font-medium text-ink">{item.issue_title}</span>
         ) : undefined}
         {key ? (
           <span
@@ -117,7 +113,7 @@ export function AttentionItem({
         </span>
         <span className="flex flex-wrap gap-xs">
           <Button
-            variant={isSelected && link === null ? "primary" : "secondary"}
+            variant="primary"
             disabled={isPending}
             title={keyTip("Acknowledge", "E")}
             onClick={() => onAcknowledge(item)}
@@ -133,7 +129,7 @@ export function AttentionItem({
               aria-disabled={isPending}
               data-disabled={isPending ? "" : undefined}
               onClick={handleLinkClick}
-              className={buttonStyles(isSelected ? "primary" : "secondary")}
+              className={buttonStyles("secondary")}
             >
               <ExternalLinkIcon />
               {link.label}
