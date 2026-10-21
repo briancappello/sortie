@@ -169,5 +169,16 @@ export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headli
       lede: lede(clauses, "Everything else is handled: "),
     };
   }
+  if (acknowledged > 0) {
+    const held = pluralVerb(
+      acknowledged,
+      ["acknowledged item", "acknowledged items"],
+      ["waits", "wait"],
+    );
+    return {
+      heading: [{ text: `${held.count} ${held.noun} ${held.verb} on a person.` }],
+      lede: lede(handledClauses(state, 0), ""),
+    };
+  }
   return { heading: [{ text: "Nothing needs attention." }], lede: lede(clauses, "") };
 }

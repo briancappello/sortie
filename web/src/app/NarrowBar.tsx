@@ -5,13 +5,13 @@ import { modifierLabel } from "@/app/keys";
 import { SearchIcon } from "@/components/icons";
 import { StatusMark } from "@/components/StatusMark";
 import { Button } from "@/components/ui/button";
-import { condition } from "@/lib/condition";
-import { pluralVerb } from "@/lib/format";
+import { ACKNOWLEDGED_WORD, acknowledgedCount, condition } from "@/lib/condition";
+import { fmtCount, pluralVerb } from "@/lib/format";
 
 import type { StateResponse } from "@/api/types.gen";
-import type { ReactNode } from "react";
+import type { ReactElement } from "react";
 
-function statusLabel(state: StateResponse): ReactNode {
+function statusLabel(state: StateResponse): string | ReactElement {
   const { subject, verb } = pluralVerb(
     state.counts.attention,
     ["item", "items"],
@@ -29,6 +29,8 @@ function statusLabel(state: StateResponse): ReactNode {
       );
     case "needs":
       return needs;
+    case "held":
+      return `${fmtCount(acknowledgedCount(state))} ${ACKNOWLEDGED_WORD}`;
     case "clear":
       return "All clear";
   }

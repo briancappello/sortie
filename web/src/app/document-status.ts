@@ -9,6 +9,7 @@ const BASE_TITLE = "Sortie";
 const DOT_COLORS: Record<Condition, string | null> = {
   degraded: "#EF4444",
   needs: "#EAB308",
+  held: null,
   clear: null,
 };
 
@@ -37,7 +38,7 @@ function titleFor(condition: Condition | undefined, attention: number): string {
     return BASE_TITLE;
   }
   const prefix = attention > 0 ? `(${attention}) ` : "";
-  return `${prefix}${conditionWord(condition)} · ${BASE_TITLE}`;
+  return `${prefix}${conditionWord(condition)} - ${BASE_TITLE}`;
 }
 
 function iconLink(): HTMLLinkElement {
