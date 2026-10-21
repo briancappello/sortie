@@ -252,7 +252,7 @@ type contractWalkedPackage struct {
 }
 
 // contractPackage carries one package's identity and parsed files.
-// Non-test files feed rules BAN, METRICS, and HOOK; test files are parsed
+// Non-test files feed the BAN, METRICS, and HOOK rules; test files are parsed
 // imports-only and feed rule IMPORT alone.
 type contractPackage struct {
 	dirName    string
@@ -2494,8 +2494,8 @@ func contractExempt(dirName string, rule contractRule) bool {
 	return ok
 }
 
-// checkAdapterContractPackage evaluates rules BAN, METRICS, HOOK, IMPORT,
-// and (for an agent-family package) IDENTITY and STOPGRACE against pkg,
+// checkAdapterContractPackage evaluates the BAN, METRICS, HOOK, IMPORT,
+// and (for an agent-family package) IDENTITY and STOPGRACE rules against pkg,
 // honoring pkg.dirName's allowlist entries. Only IMPORT reads test files.
 //
 // A ruleIMPORT allowlist entry is all-or-nothing: it lifts the
@@ -2646,7 +2646,7 @@ func contractWalkRoot(t *testing.T, fset *token.FileSet, dir, importPath string)
 
 // TestCheckAdapterContract walks internal/tracker, internal/scm,
 // internal/agent, and internal/notify and fails when any package breaks
-// rules BAN, METRICS, HOOK, IMPORT, IDENTITY, or STOPGRACE.
+// the BAN, METRICS, HOOK, IMPORT, IDENTITY, or STOPGRACE rule.
 func TestCheckAdapterContract(t *testing.T) {
 	fset := token.NewFileSet()
 
