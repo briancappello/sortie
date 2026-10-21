@@ -157,9 +157,19 @@ function reactionKeyOf(deciding: Deciding): string | undefined {
   }
 }
 
+type PendingReading = Pick<PendingReactionResponse, "config_key" | "escalated_at" | "last_check">;
+
+// A handled triage closes the work its station stands for, so the row waits on nothing there.
+function holdsStation(row: PendingReading): boolean {
+  return row.escalated_at !== null || row.last_check?.handled !== true;
+}
+
 function decidingStation(deciding: Deciding, stations: readonly Station[]): string {
   const reactionKey = reactionKeyOf(deciding);
-  const keyed = stations.find((s) => s.kind === "reaction" && s.key === reactionKey);
+  const keyed =
+    deciding.kind === "pending_reactions" && !holdsStation(deciding.entry)
+      ? undefined
+      : stations.find((s) => s.kind === "reaction" && s.key === reactionKey);
   if (keyed !== undefined) {
     return keyed.key;
   }
@@ -234,10 +244,10 @@ type Reading = Pick<LaneStation, "state" | "continuations">;
 
 function reactionReadingOf(
   station: Station,
-  pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
+  pending: readonly PendingReading[],
   prLoop: PrLoop,
 ): Reading {
-  const rows = pending.filter((r) => r.config_key === station.key);
+  const rows = pending.filter((r) => r.config_key === station.key && holdsStation(r));
   if (rows.length > 0) {
     return {
       state: rows.some((r) => r.escalated_at !== null) ? "escalated" : "waiting",
@@ -262,7 +272,7 @@ function readingOf(
   station: Station,
   index: number,
   current: number,
-  pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
+  pending: readonly PendingReading[],
   prLoop: PrLoop,
 ): Reading {
   if (station.kind === "reaction") {
@@ -284,7 +294,7 @@ function readingOf(
 export function laneOf(
   stations: readonly Station[],
   standing: Standing | null,
-  pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
+  pending: readonly PendingReading[],
   prLoop: PrLoop,
 ): LaneStation[] {
   const current = standing === null ? -1 : stations.findIndex((s) => s.key === standing.station);

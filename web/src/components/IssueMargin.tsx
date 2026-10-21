@@ -211,9 +211,8 @@ function watchState(
     case "review":
     case "bot-review":
       if (row.wait === "debounce") return { word: "comments arriving", mark: "waiting" };
-      if ((check?.actionable_comments ?? 0) > 0) {
-        return { word: "comments to answer", mark: "waiting" };
-      }
+      if (check?.handled === true) return { word: "handled", mark: "succeeded" };
+      if ((check?.new_comments ?? 0) > 0) return { word: "comments to answer", mark: "waiting" };
       break;
     case "merge-conflict":
       if (check?.mergeable === false) return { word: "conflict", mark: "failed" };
