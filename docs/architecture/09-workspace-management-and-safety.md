@@ -123,6 +123,8 @@ Environment variables, in addition to the four every hook receives and the `SORT
 
 Both paths sit in a fresh temporary directory created per run and removed when the run returns. The directory is outside the workspace, so no stale result file from an earlier run can be read as this run's answer and no externally authored text lands where the agent reads.
 
+Sortie records every answer it applies, once per run, in a durable record keyed by the issue, the reaction kind, and the subject's fingerprint, so the dashboard and the API read a `handled` answer after a restart. A recorded answer is never replayed: the record serves only reads, and a subject whose dispatched mark never landed is triaged again from scratch. Runs in flight stay runtime-only.
+
 Triage runs in flight at one time are capped at `max(agent.max_concurrent_agents, 1)` across every issue and kind. An entry that finds the cap reached starts nothing and is reconsidered on the next tick. The cap adds to agent concurrency rather than sharing it: triage runs are not subtracted from agent slots, so a host configured for N agents reaches a worst case of N agent processes and N triage subprocesses at the same time. An operator sizing a host accounts for both. Deriving the cap from the free agent slots instead would drive it to zero exactly when every slot is busy, which is when a triage run that resolves a subject without an agent is worth the most.
 
 Shutdown drains in-flight triage runs. Cancellation reaches the subprocess through the same process-group termination the hooks use, so a script MUST tolerate being killed at any instruction: the same kill also fires on timeout and whenever a pass computes a different fingerprint for the subject.

@@ -246,6 +246,26 @@ Startup recovery and the escalation restore record nothing, so a kind first watc
 
 The run-history reader behind `pr_loop` (Section 13.7.2) reads the rows of the passes a request serves and sums them per kind. It takes the `applied_at` that `schema_migrations` holds for the migration that creates this table as the start of the recorded passes: a pass dispatched before it, a pass without a chain identifier, and a pass without a dispatch time read as unrecorded whatever rows exist. The reader reads `applied_at` before it opens its row query, because the store has one connection.
 
+**`reaction_triage_outcomes`**: the triage answer each pull request reaction applied for each subject
+
+| Column        | Type                       | Notes                                                                                                             |
+| ------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `id`          | INTEGER PRIMARY KEY AUTOINCREMENT | Row identifier; the greatest `id` of a subject is its newest answer                                        |
+| `issue_id`    | TEXT NOT NULL              | Tracker-internal issue ID                                                                                         |
+| `kind`        | TEXT NOT NULL              | Reaction kind, as `reaction_activity.kind` holds it                                                               |
+| `fingerprint` | TEXT NOT NULL              | The subject the triage run was started for; for a comment kind, the digest of the comment set                     |
+| `disposition` | TEXT NOT NULL              | `handled`, `dispatch-agent`, or `escalate`, as applied                                                            |
+| `fallback`    | TEXT NOT NULL              | Why `dispatch-agent` was applied by default; empty when the command answered                                     |
+| `elapsed_ms`  | INTEGER NOT NULL           | How long the command ran, in whole milliseconds                                                                   |
+| `chain_id`    | TEXT NOT NULL              | The stage chain identifier of the entry; empty when it has none                                                   |
+| `recorded_at` | TEXT NOT NULL              | RFC 3339 with nanoseconds, in UTC                                                                                 |
+
+An index on (`issue_id`, `kind`, `fingerprint`) serves the read of the newest answer for a subject.
+
+The table is an append-only record. Nothing updates, deletes, or prunes a row, and the table starts empty on upgrade with no backfill, so an answer applied before the upgrade has no row. The fallback and the duration let a later reader tell a script's `dispatch-agent` answer from a failure fallback, and `chain_id` joins a row to the runs of its pass.
+
+The triage gate writes one row the first time a reaction applies a finished outcome, for every disposition and every kind that offers the `triage` block; a replay of the retained outcome writes none. A failed write logs a warning and does not stop the pass (Section 13.1). The bot review check reads the newest row for the issue, the kind, and the fingerprint of the comment set it found, and compares the recorded disposition rather than the gate's verdict, because the gate replays a retained `escalate` as `handled`. The answer is never replayed from the table: a subject whose dispatched mark never landed is triaged again.
+
 **`reaction_handoffs`**: review comments each issue's runs were given
 
 | Column       | Type | Notes                                                                |

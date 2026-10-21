@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- When a bot review's triage command answers `handled`, the issue page, the Pipeline, and the status sentence now say the bot review was handled, also after Sortie restarts, instead of showing comments to answer or waiting on the bot review; a bot review's `last_check` in the state API gains `handled`. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
+
+- The issue page no longer says that a review or bot review has comments to answer after a fix run was given those comments and the pull request still shows them; it reads waiting until new comments arrive. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
+
 ## [1.29.0] - 2026-10-20
 
 ### Added
