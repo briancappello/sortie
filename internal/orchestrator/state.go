@@ -718,6 +718,9 @@ type CICheck struct {
 type CommentCheck struct {
 	Actionable int
 	New        int
+	// Handled reports that the newest triage answer recorded for this
+	// comment set is handled, so no run is given it.
+	Handled bool
 }
 
 // MergeabilityCheck reports whether the pull request merges without

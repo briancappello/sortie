@@ -17,6 +17,7 @@ import {
   runningTokensText,
   runTokensText,
 } from "@/lib/figures";
+import { closingClock } from "@/lib/ended";
 import { fmtClock, fmtDuration, lowerFirst, parseInstant, plural, pluralVerb } from "@/lib/format";
 import { sessionLinkOf } from "@/lib/issue-link";
 import { agentLabel, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
@@ -418,7 +419,7 @@ interface ChapterBodyProps {
   now: number;
   hasEstimates: boolean;
   /** The served sentence the current chapter ends on. */
-  nowLine?: { text: string; needsAttention: boolean };
+  nowLine?: { text: string; time: string; needsAttention: boolean };
 }
 
 function ChapterBeats({ chapter, identifier, now, hasEstimates, nowLine }: ChapterBodyProps) {
@@ -434,7 +435,7 @@ function ChapterBeats({ chapter, identifier, now, hasEstimates, nowLine }: Chapt
         </Beat>
       ))}
       {nowLine === undefined ? undefined : (
-        <Beat time={fmtClock(new Date(now))} node={nowLine.needsAttention ? "attention" : "now"}>
+        <Beat time={nowLine.time} node={nowLine.needsAttention ? "attention" : "now"}>
           <p className="text-ink">
             <ServedText text={nowLine.text} />
           </p>
@@ -510,7 +511,8 @@ export function IssueStory({ detail, position, progress, needsAttention }: Issue
   const pullRequest =
     detail.pending_reactions?.[0]?.pull_request.number ??
     detail.history?.issue_outcome?.pull_request?.number;
-  const nowLine = { text: detail.status_text_full, needsAttention };
+  const closingTime = closingClock(detail, now);
+  const nowLine = { text: detail.status_text_full, time: closingTime, needsAttention };
 
   return (
     <div className="flex min-w-0 flex-col">
@@ -532,7 +534,7 @@ export function IssueStory({ detail, position, progress, needsAttention }: Issue
       ) : undefined}
       {chapters.length === 0 ? (
         <Beats>
-          <Beat time={fmtClock(new Date(now))} node={needsAttention ? "attention" : "now"}>
+          <Beat time={closingTime} node={needsAttention ? "attention" : "now"}>
             <p className="text-ink">
               <ServedText text={detail.status_text_full} />
             </p>

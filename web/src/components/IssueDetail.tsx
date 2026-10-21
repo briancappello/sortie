@@ -17,6 +17,7 @@ import { useAttentionActions } from "@/components/use-attention-actions";
 import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import { costText, costTitle, NOT_MEASURED, runningTokensText } from "@/lib/figures";
+import { closingClock } from "@/lib/ended";
 import { fmtClock, fmtTokens, plural } from "@/lib/format";
 import { issueLinkOf, latestSessionOf, sessionLinkOf } from "@/lib/issue-link";
 import { agentLabel, modelLabel, ruleLabel } from "@/lib/labels";
@@ -365,7 +366,7 @@ function PeekRuns({ detail, now }: PeekRunsProps) {
       ))}
       <li className="grid grid-cols-[48px_20px_minmax(0,1fr)] gap-x-sm py-xs text-body-md">
         <span className="pt-xxs text-right text-body-sm text-ink-muted tabular-nums">
-          {fmtClock(new Date(now))}
+          {closingClock(detail, now)}
         </span>
         <span
           aria-hidden="true"

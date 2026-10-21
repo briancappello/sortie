@@ -140,6 +140,9 @@ var migration042SQL string
 //go:embed sql/043_run_model_unrated_classes.sql
 var migration043SQL string
 
+//go:embed sql/044_reaction_triage_outcomes.sql
+var migration044SQL string
+
 // reactionActivityMigration is the version of the migration that creates the
 // reaction_activity table.
 const reactionActivityMigration = 38
@@ -188,4 +191,5 @@ var migrations = []Migration{
 	{Version: 41, Description: "recorded run cost and live session estimate", SQL: migration041SQL},
 	{Version: 42, Description: "completed_at index on run_history", SQL: migration042SQL},
 	{Version: 43, Description: "unrated token classes of a run's per-model cost", SQL: migration043SQL},
+	{Version: 44, Description: "reaction triage answers per comment set", SQL: migration044SQL},
 }

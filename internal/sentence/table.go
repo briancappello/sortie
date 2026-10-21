@@ -218,6 +218,10 @@ var table = map[string]parts{
 		short: "Waiting on bot review of #{{.PR}}",
 		long:  "Waiting on bot review of PR #{{.PR}}{{if .Bots}} by {{.Bots}}{{end}}" + commentsOf + "; " + nextCheck + "." + usedCount,
 	},
+	"wait_bot_handled": {
+		short: "Bot review of #{{.PR}} handled",
+		long:  "The triage command handled the bot review of PR #{{.PR}}{{if .Bots}} by {{.Bots}}{{end}}, so Sortie starts no session for it; " + nextCheck + "." + usedCount,
+	},
 	"wait_merge": {
 		short: "Auto-merge waiting on #{{.PR}}",
 		long:  "Auto-merge waits for PR #{{.PR}} to meet its merge conditions{{if .Strategy}} ({{.Strategy}} strategy){{end}}; " + nextCheck + "." + usedCount,

@@ -4,7 +4,6 @@ import { useLocation, useNavigate } from "react-router";
 import { useIssueLookupQuery, useStateQuery } from "@/api/queries";
 import { Kbd } from "@/app/Kbd";
 import { useLive } from "@/app/live";
-import { ServedText } from "@/components/ServedText";
 import {
   Autocomplete,
   AutocompleteCollection,
@@ -20,7 +19,7 @@ import { Dialog, DialogPopup } from "@/components/ui/dialog";
 import { routeText } from "@/lib/active-rows";
 import { fmtStamp, parseInstant } from "@/lib/format";
 import { issueLinkOf, sessionLinkOf } from "@/lib/issue-link";
-import { runRouteText } from "@/lib/lane";
+import { issueStanding, runRouteText } from "@/lib/lane";
 import { numberedRunsOf } from "@/lib/run-number";
 import { runStatus } from "@/lib/run-status";
 import { setTheme } from "@/lib/theme";
@@ -28,6 +27,7 @@ import { setTheme } from "@/lib/theme";
 import type { ScreenEntry } from "@/app/Rail";
 import type {
   ActiveIssueResponse,
+  AttentionItemResponse,
   ConfigResponse,
   IssueGroupResponse,
   RunningEntryResponse,
@@ -46,7 +46,7 @@ interface IssueEntry {
   value: string;
   label: string;
   identifier: string;
-  statusText: string;
+  word: string;
 }
 
 interface SessionEntry {
@@ -70,20 +70,24 @@ const LOOKUP_DEBOUNCE_MS = 250;
 const LOOKUP_FAILED = "Run history could not be read.";
 
 function isIssueEntry(item: PaletteItem): item is IssueEntry {
-  return "statusText" in item;
+  return "word" in item;
 }
 
 function isSessionEntry(item: PaletteItem): item is SessionEntry {
   return "dispatchId" in item;
 }
 
-function issueEntryOf(issue: ActiveIssueResponse | IssueGroupResponse): IssueEntry {
+function issueEntryOf(
+  issue: ActiveIssueResponse | IssueGroupResponse,
+  attention: readonly AttentionItemResponse[],
+): IssueEntry {
   const key = issue.display_identifier || issue.issue_identifier;
+  const outcome = "issue_outcome" in issue ? issue.issue_outcome : null;
   return {
     value: `issue:${issue.issue_id}`,
     label: issue.issue_title ? `${key} ${issue.issue_title}` : key,
     identifier: issue.issue_identifier,
-    statusText: issue.status_text,
+    word: issueStanding(issue.issue_id, issue.status, outcome, attention).word,
   };
 }
 
@@ -218,7 +222,9 @@ export function CommandPalette({
       : (lookup.data ?? [])
           .filter((group) => !activeIds.has(group.issue_id))
           .slice(0, FINISHED_ENTRY_CAP);
-  const issueEntries = [...activeIssues, ...finishedIssues].map(issueEntryOf);
+  const issueEntries = [...activeIssues, ...finishedIssues].map((issue) =>
+    issueEntryOf(issue, state?.attention ?? []),
+  );
   const sessionEntries =
     issueQuery === ""
       ? []
@@ -298,7 +304,7 @@ export function CommandPalette({
                         <span className="flex min-w-0 flex-col">
                           <span className="wrap-anywhere">{item.label}</span>
                           <span className="text-body-sm text-ink-muted wrap-anywhere">
-                            <ServedText text={item.statusText} />
+                            {item.word}
                           </span>
                         </span>
                       </AutocompleteItem>

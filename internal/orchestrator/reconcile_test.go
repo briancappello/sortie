@@ -63,8 +63,27 @@ func (noEscalationRecords) EndReactionEscalation(context.Context, string, string
 func (noEscalationRecords) DeleteReactionEscalations(context.Context, string) error { return nil }
 
 type reactionActivityLog struct {
-	mu       sync.Mutex
-	recorded []persistence.ReactionActivity
+	mu             sync.Mutex
+	recorded       []persistence.ReactionActivity
+	triageOutcomes []persistence.ReactionTriageOutcome
+}
+
+func (l *reactionActivityLog) RecordReactionTriageOutcome(_ context.Context, outcome persistence.ReactionTriageOutcome) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.triageOutcomes = append(l.triageOutcomes, outcome)
+	return nil
+}
+
+func (l *reactionActivityLog) LatestReactionTriageDisposition(_ context.Context, issueID, kind, fingerprint string) (string, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, o := range slices.Backward(l.triageOutcomes) {
+		if o.IssueID == issueID && o.Kind == kind && o.Fingerprint == fingerprint {
+			return o.Disposition, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 func (l *reactionActivityLog) RecordReactionActivity(_ context.Context, records []persistence.ReactionActivity) error {

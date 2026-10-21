@@ -503,6 +503,9 @@ func selectPendingReaction(e *orchestrator.SnapshotPendingReaction, c Context) (
 		}
 		return "wait_review", data
 	case orchestrator.ReactionKindBotReview:
+		if comments != nil && comments.Handled {
+			return "wait_bot_handled", data
+		}
 		return "wait_bot", data
 	case orchestrator.ReactionKindAutoMerge:
 		return "wait_merge", data

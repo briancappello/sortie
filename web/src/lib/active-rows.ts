@@ -57,15 +57,11 @@ export interface ActiveRow {
   kind: RowKind;
   phase: Phase;
   mark: StateMark;
-  statusText: string;
   statusTextFull: string;
-  stallText: string | null;
-  stallTextFull: string | null;
   route: string | null;
   agentKind: string | null;
   rule: string | null;
   timeBase: string | null;
-  acknowledgedAt: string | null;
 }
 
 /** One entry of the Rule menu; `group` is the first rule of the chain a header or member belongs to. */
@@ -114,27 +110,23 @@ export function phaseOf(kind: RowKind, escalatedAt: string | null): Phase {
   }
 }
 
-/** Gives the mark of a row and, while an item of the issue was acknowledged, when. */
+/** Gives the mark of a row: an open attention item outranks an acknowledged one, and both outrank the row's own state. */
 export function rowMark(
   kind: RowKind,
   issueId: string,
   attention: readonly AttentionItemResponse[],
-): { mark: StateMark; acknowledgedAt: string | null } {
+): StateMark {
   const items = attention.filter((item) => item.issue_id === issueId);
   if (items.some((item) => item.acknowledged_at === null)) {
-    return { mark: "needs", acknowledgedAt: null };
+    return "needs";
   }
-  const acknowledged = items.find((item) => item.acknowledged_at !== null);
-  if (acknowledged !== undefined) {
-    return { mark: "held", acknowledgedAt: acknowledged.acknowledged_at };
+  if (items.length > 0) {
+    return "held";
   }
   if (kind === "running") {
-    return { mark: "running", acknowledgedAt: null };
+    return "running";
   }
-  return {
-    mark: kind === "retrying" ? "retry" : "waiting",
-    acknowledgedAt: null,
-  };
+  return kind === "retrying" ? "retry" : "waiting";
 }
 
 /** Words a row's place in a chain or its rule, or `null` when neither is worth showing. */
@@ -178,7 +170,8 @@ export function timeBaseOf(deciding: Deciding): string | null {
   }
 }
 
-function isRowKind(value: string): value is RowKind {
+/** Reports whether a served status is one an active row stands for. */
+export function isRowKind(value: string): value is RowKind {
   switch (value) {
     case "running":
     case "retrying":
@@ -243,7 +236,7 @@ export function decidingRowOf(
 function toRow(entry: ActiveIssueResponse, kind: RowKind, state: StateResponse): ActiveRow {
   const named = namedRow(state, kind, entry);
   const escalatedAt = named?.kind === "pending_reactions" ? named.entry.escalated_at : null;
-  const { mark, acknowledgedAt } = rowMark(kind, entry.issue_id, state.attention ?? []);
+  const mark = rowMark(kind, entry.issue_id, state.attention ?? []);
   return {
     issueId: entry.issue_id,
     identifier: entry.issue_identifier,
@@ -252,15 +245,11 @@ function toRow(entry: ActiveIssueResponse, kind: RowKind, state: StateResponse):
     kind,
     phase: phaseOf(kind, escalatedAt),
     mark,
-    statusText: entry.status_text,
     statusTextFull: entry.status_text_full,
-    stallText: named?.kind === "running" ? named.entry.stall_text : null,
-    stallTextFull: named?.kind === "running" ? named.entry.stall_text_full : null,
     route: routeText(entry, state.config),
     agentKind: entry.agent_kind || null,
     rule: ruleOf(entry),
     timeBase: named === undefined ? null : timeBaseOf(named),
-    acknowledgedAt,
   };
 }
 

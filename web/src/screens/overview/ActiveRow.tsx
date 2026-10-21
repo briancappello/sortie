@@ -1,9 +1,9 @@
-import { ServedText } from "@/components/ServedText";
-import { StatusMark } from "@/components/StatusMark";
+import { StandingMark } from "@/components/Lane";
 import { cn } from "@/lib/cn";
 import { fmtClock, parseInstant } from "@/lib/format";
 import { timeCell } from "@/lib/active-rows";
 import { rowStyles, secondLineColor } from "@/lib/rows";
+import { stateWord } from "@/lib/run-status";
 
 import { activeNavKey } from "./rows";
 
@@ -21,8 +21,8 @@ export interface ActiveRowProps {
 }
 
 /**
- * Renders one active issue on two lines beside its served sentence and a time
- * cell. A click opens the peek of the issue.
+ * Renders one active issue on two lines beside the one word of where it stands
+ * and a time cell. A click opens the peek of the issue.
  */
 export function ActiveRow({ row, now, isSelected, showSelection, onOpen }: ActiveRowProps) {
   const isLook = isSelected && showSelection;
@@ -41,7 +41,9 @@ export function ActiveRow({ row, now, isSelected, showSelection, onOpen }: Activ
         rowStyles(isLook, true),
       )}
     >
-      <StatusMark mark={row.mark} className="h-5" />
+      <span className="flex w-(--size-icon) items-center justify-center self-center">
+        <StandingMark marker={row.mark} />
+      </span>
       <div className="min-w-0">
         <p className="text-body-md font-medium text-ink">{row.title ?? row.displayKey}</p>
         {meta === "" ? undefined : (
@@ -54,15 +56,7 @@ export function ActiveRow({ row, now, isSelected, showSelection, onOpen }: Activ
           row.mark === "needs" ? "text-warning" : "text-ink-body",
         )}
       >
-        {row.stallText === null ? undefined : (
-          <span title={row.stallTextFull?.replace(/`/g, "")} className="mr-sm inline-block">
-            <StatusMark mark="stalled" label={<ServedText text={row.stallText} />} />
-          </span>
-        )}
-        <ServedText text={row.statusText} />
-        {row.mark === "held" && row.acknowledgedAt !== null
-          ? ` · Acknowledged at ${fmtClock(row.acknowledgedAt)}`
-          : undefined}
+        {stateWord(row.mark)}
       </p>
       <p
         className="text-body-md text-ink-body tabular-nums max-md:col-start-2 md:text-right"

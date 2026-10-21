@@ -2274,6 +2274,9 @@
           },
           "type": "array"
         },
+        "handled": {
+          "type": "boolean"
+        },
         "head_sha": {
           "type": "string"
         },

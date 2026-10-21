@@ -1,10 +1,10 @@
 import { Link } from "react-router";
 
-import { ServedText } from "@/components/ServedText";
-import { StatusMark } from "@/components/StatusMark";
+import { StandingMark } from "@/components/Lane";
 import { cn } from "@/lib/cn";
+import { endingWord } from "@/lib/ended";
 import { fmtClock } from "@/lib/format";
-import { outcomeMark } from "@/lib/run-status";
+import { endingMarker } from "@/lib/lane";
 import { rowStyles, secondLineColor } from "@/lib/rows";
 
 import { endedNavKey } from "./rows";
@@ -98,7 +98,7 @@ interface EndedRowProps {
 
 function EndedRow({ issue, isUnread, isSelected, showSelection, onOpen }: EndedRowProps) {
   const isLook = isSelected && showSelection;
-  const mark = outcomeMark(issue.outcome.kind);
+  const marker = endingMarker(issue.outcome.kind);
   const meta = [issue.title === null ? null : issue.displayKey, issue.rule, issue.agentKind]
     .filter((part) => part !== null)
     .join(" · ");
@@ -108,29 +108,23 @@ function EndedRow({ issue, isUnread, isSelected, showSelection, onOpen }: EndedR
       data-nav-key={endedNavKey(issue.issueId)}
       onClick={() => onOpen(issue)}
       className={cn(
-        "grid grid-cols-[auto_auto_minmax(0,1fr)] gap-x-sm gap-y-xxs px-md py-sm md:grid-cols-[auto_auto_minmax(0,1fr)_minmax(0,1fr)_auto] md:gap-x-md wrap-anywhere",
+        "grid grid-cols-[auto_minmax(0,1fr)] gap-x-sm gap-y-xxs px-md py-sm md:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] md:gap-x-md wrap-anywhere",
         rowStyles(isLook, true),
       )}
     >
-      <span className="flex h-5 items-center">
-        <span
-          aria-hidden="true"
-          className={cn("size-xs rounded-full", isUnread ? "bg-primary" : "bg-transparent")}
-        />
-      </span>
-      <span className="flex h-5 w-(--size-icon) items-center">
-        {mark === null ? undefined : <StatusMark mark={mark} />}
+      <span className="flex w-(--size-icon) items-center justify-center self-center">
+        {marker === null ? undefined : <StandingMark marker={marker} />}
       </span>
       <div className="min-w-0">
-        <p className="text-body-md font-medium text-ink">{issue.title ?? issue.displayKey}</p>
+        <p className={cn("text-body-md text-ink", isUnread ? "font-bold" : "font-medium")}>
+          {issue.title ?? issue.displayKey}
+        </p>
         {meta === "" ? undefined : (
           <p className={cn("text-body-sm tabular-nums", secondLineColor(isLook))}>{meta}</p>
         )}
       </div>
-      <p className="text-body-md text-ink-body max-md:col-start-3">
-        <ServedText text={issue.outcome.status_text} />
-      </p>
-      <p className="text-body-md text-ink-body tabular-nums max-md:col-start-3 md:text-right">
+      <p className="text-body-md text-ink-body max-md:col-start-2">{endingWord(issue.outcome)}</p>
+      <p className="text-body-md text-ink-body tabular-nums max-md:col-start-2 md:text-right">
         {fmtClock(issue.outcome.observed_at)}
       </p>
     </li>

@@ -154,6 +154,7 @@ func TestFor(t *testing.T) {
 		},
 		{"review wait", reaction("review", nil), "Waiting on review of #7", ""},
 		{"bot review wait", reaction("bot-review", nil), "Waiting on bot review of #7", ""},
+		{"bot review handled", reaction("bot-review", &orchestrator.ReactionCheck{Comments: &orchestrator.CommentCheck{Handled: true}}), "Bot review of #7 handled", ""},
 		{"auto-merge wait", reaction("merge", nil), "Auto-merge waiting on #7", ""},
 		{"merge conflict found", reaction("merge-conflict", &orchestrator.ReactionCheck{Mergeability: &orchestrator.MergeabilityCheck{Mergeable: new(false)}}), "Merge conflict on #7", ""},
 		{"merge conflict watch", reaction("merge-conflict", nil), "Watching #7 for merge conflicts", ""},

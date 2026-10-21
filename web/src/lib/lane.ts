@@ -1,7 +1,8 @@
-import { routeText, rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
-import { fmtStamp, parseInstant } from "@/lib/format";
+import { isRowKind, routeText, rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
+import { fmtStamp, parseInstant, upperFirst } from "@/lib/format";
 import { reactionLabel, reactionShortLabel } from "@/lib/labels";
-import { outcomeMark, runStatus } from "@/lib/run-status";
+import { endingWord } from "@/lib/ended";
+import { runStatus, stateWord } from "@/lib/run-status";
 
 import type { Deciding } from "@/lib/active-rows";
 import type {
@@ -53,7 +54,7 @@ export function stationsOf(config: ConfigResponse): Station[] {
   ];
   const handoff = config.tracker.handoff_state;
   if (handoff !== undefined && handoff !== "") {
-    stations.push({ key: "handoff", kind: "handoff", label: handoff });
+    stations.push({ key: "handoff", kind: "handoff", label: upperFirst(handoff) });
   }
   const reactions = REACTION_ORDER.filter((key) => config.reactions[key] !== undefined);
   for (const key of reactions) {
@@ -78,7 +79,7 @@ function endLabelOf(config: ConfigResponse): string {
   const terminal = config.tracker.terminal_states ?? [];
   const isEveryMergeTerminal =
     config.reactions.auto_merge === undefined || config.reactions.merge_completion !== undefined;
-  return terminal.length === 1 && isEveryMergeTerminal ? (terminal[0] ?? "End") : "End";
+  return terminal.length === 1 && isEveryMergeTerminal ? upperFirst(terminal[0] ?? "End") : "End";
 }
 
 function pendingEntryOf(
@@ -157,9 +158,19 @@ function reactionKeyOf(deciding: Deciding): string | undefined {
   }
 }
 
+type PendingReading = Pick<PendingReactionResponse, "config_key" | "escalated_at" | "last_check">;
+
+// A handled triage closes the work its station stands for, so the row waits on nothing there.
+function holdsStation(row: PendingReading): boolean {
+  return row.escalated_at !== null || row.last_check?.handled !== true;
+}
+
 function decidingStation(deciding: Deciding, stations: readonly Station[]): string {
   const reactionKey = reactionKeyOf(deciding);
-  const keyed = stations.find((s) => s.kind === "reaction" && s.key === reactionKey);
+  const keyed =
+    deciding.kind === "pending_reactions" && !holdsStation(deciding.entry)
+      ? undefined
+      : stations.find((s) => s.kind === "reaction" && s.key === reactionKey);
   if (keyed !== undefined) {
     return keyed.key;
   }
@@ -191,7 +202,7 @@ export function standingOf(input: StandingInput, stations: readonly Station[]): 
   if (deciding !== null) {
     return {
       station: decidingStation(deciding, stations),
-      mark: rowMark(deciding.kind, issueId, attention).mark,
+      mark: rowMark(deciding.kind, issueId, attention),
       time: timeText(deciding.kind, timeBaseOf(deciding), now),
     };
   }
@@ -203,9 +214,45 @@ export function standingOf(input: StandingInput, stations: readonly Station[]): 
     ? null
     : {
         station: station.key,
-        mark: outcomeMark(outcome.kind),
+        mark: endingMarker(outcome.kind),
         time: fmtStamp(outcome.observed_at),
       };
+}
+
+/** Gives the marker of a recorded ending: a handed-off issue waits on a person, and a merged or closed one has ended. */
+export function endingMarker(kind: string | undefined): LaneMarker | null {
+  switch (kind) {
+    case "handed_off":
+      return "handed";
+    case "merged":
+    case "terminal":
+      return "ended";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Gives the marker and the one word of an issue from its served status: the
+ * row mark while it is active, its ending once its status is `history`.
+ */
+export function issueStanding(
+  issueId: string,
+  status: string,
+  outcome: IssueOutcomeResponse | null,
+  attention: readonly AttentionItemResponse[],
+): { marker: LaneMarker | null; word: string } {
+  if (status === "history") {
+    return {
+      marker: endingMarker(outcome?.kind),
+      word: outcome === null ? "Ended" : endingWord(outcome),
+    };
+  }
+  if (!isRowKind(status)) {
+    return { marker: null, word: "" };
+  }
+  const mark = rowMark(status, issueId, attention);
+  return { marker: mark, word: stateWord(mark) };
 }
 
 /** How a station reads against the issue's standing. */
@@ -214,6 +261,7 @@ export type StationState =
   | "current"
   | "ahead"
   | "waiting"
+  | "needs"
   | "escalated"
   | "acted"
   | "quiet"
@@ -234,13 +282,13 @@ type Reading = Pick<LaneStation, "state" | "continuations">;
 
 function reactionReadingOf(
   station: Station,
-  pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
+  pending: readonly PendingReading[],
   prLoop: PrLoop,
 ): Reading {
-  const rows = pending.filter((r) => r.config_key === station.key);
+  const rows = pending.filter((r) => r.config_key === station.key && holdsStation(r));
   if (rows.length > 0) {
     return {
-      state: rows.some((r) => r.escalated_at !== null) ? "escalated" : "waiting",
+      state: rows.some((r) => r.escalated_at !== null) ? "needs" : "waiting",
       continuations: 0,
     };
   }
@@ -262,7 +310,7 @@ function readingOf(
   station: Station,
   index: number,
   current: number,
-  pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
+  pending: readonly PendingReading[],
   prLoop: PrLoop,
 ): Reading {
   if (station.kind === "reaction") {
@@ -276,15 +324,16 @@ function readingOf(
 
 /**
  * Gives each station its state against the standing: the current station
- * carries the standing's mark and time. A reaction station reads waiting or
- * escalated while a pull request row is pending on it; with none, it reads
- * from the served `prLoop` as escalated, acted, quiet, or idle for no record.
+ * carries the standing's mark and time. A reaction station reads waiting, or
+ * needs once its escalation stands, while a pull request row is pending on it;
+ * with none, it reads from the served `prLoop` as escalated, acted, quiet, or
+ * idle for no record.
  * The rest read passed or ahead.
  */
 export function laneOf(
   stations: readonly Station[],
   standing: Standing | null,
-  pending: readonly Pick<PendingReactionResponse, "config_key" | "escalated_at">[],
+  pending: readonly PendingReading[],
   prLoop: PrLoop,
 ): LaneStation[] {
   const current = standing === null ? -1 : stations.findIndex((s) => s.key === standing.station);

@@ -317,6 +317,11 @@ export function fmtVersion(version: string): string {
   return /^\d/.test(release) ? `v${release}` : release;
 }
 
+/** Capitalizes the first letter of a name an operator configured, such as a tracker state, to match the fixed labels beside it. */
+export function upperFirst(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** Lowercases a leading capital so a capitalized word reads inside a sentence; an acronym such as `CI` stays. */
 export function lowerFirst(text: string): string {
   return /^[A-Z][a-z]/.test(text) ? text.charAt(0).toLowerCase() + text.slice(1) : text;

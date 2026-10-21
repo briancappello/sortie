@@ -77,13 +77,10 @@ export function AttentionItem({
       data-nav-key={navKey}
       onClick={handleClick}
       className={cn(
-        "grid grid-cols-[var(--size-icon)_minmax(0,1fr)_auto] gap-x-md gap-y-xxs p-md max-md:grid-cols-[var(--size-icon)_minmax(0,1fr)]",
+        "grid grid-cols-[minmax(0,1fr)_auto] gap-x-md gap-y-xxs p-md max-md:grid-cols-[minmax(0,1fr)]",
         rowStyles(isLook, isOpenable),
       )}
     >
-      <span className="row-span-3 flex justify-center pt-xs">
-        <span aria-hidden="true" className={cn("size-xs rounded-full", isUnread && "bg-primary")} />
-      </span>
       <p className="flex min-w-0 flex-wrap items-baseline gap-x-sm gap-y-xxs">
         <strong
           className={cn(
@@ -94,7 +91,9 @@ export function AttentionItem({
           <ServedText text={item.reason_text} />
         </strong>
         {item.issue_title ? (
-          <span className="text-body-md font-medium text-ink">{item.issue_title}</span>
+          <span className={cn("text-body-md text-ink", isUnread ? "font-bold" : "font-medium")}>
+            {item.issue_title}
+          </span>
         ) : undefined}
         {key ? (
           <span
@@ -104,13 +103,13 @@ export function AttentionItem({
           </span>
         ) : undefined}
       </p>
-      <p className="col-start-2 text-body-md text-ink-body">
+      <p className="text-body-md text-ink-body">
         <ServedText text={item.why_text} />
       </p>
-      <p className={cn("col-start-2 text-body-sm", secondLineColor(isLook))}>
+      <p className={cn("text-body-sm", secondLineColor(isLook))}>
         <ServedText text={item.clears_text} />
       </p>
-      <div className="col-start-3 row-span-3 row-start-1 flex flex-col items-end justify-between gap-xs max-md:col-start-2 max-md:row-span-1 max-md:row-start-auto max-md:flex-row-reverse max-md:items-center max-md:justify-end">
+      <div className="col-start-2 row-span-3 row-start-1 flex flex-col items-end justify-between gap-xs max-md:col-start-1 max-md:row-span-1 max-md:row-start-auto max-md:flex-row-reverse max-md:items-center max-md:justify-end">
         <span
           className={cn("text-body-sm whitespace-nowrap tabular-nums", secondLineColor(isLook))}
         >
