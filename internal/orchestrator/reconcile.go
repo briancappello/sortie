@@ -41,6 +41,8 @@ type ReconcileStore interface {
 	EndReactionEscalation(ctx context.Context, issueID, kind string) error
 	DeleteReactionEscalations(ctx context.Context, issueID string) error
 	RecordReactionActivity(ctx context.Context, records []persistence.ReactionActivity) error
+	RecordReactionTriageOutcome(ctx context.Context, outcome persistence.ReactionTriageOutcome) error
+	LatestReactionTriageDisposition(ctx context.Context, issueID, kind, fingerprint string) (disposition string, found bool, err error)
 }
 
 var _ ReconcileStore = (*persistence.Store)(nil)

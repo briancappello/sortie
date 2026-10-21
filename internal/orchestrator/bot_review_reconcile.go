@@ -167,6 +167,7 @@ func reconcileBotReviewComments(state *State, params ReconcileParams, log *slog.
 			// Already dispatched for this exact set of comments.
 			pending.PendingRetryAt = now.Add(pollInterval)
 			pending.LastCheck = commentReactionCheck(now, len(actionable), 0)
+			pending.LastCheck.Comments.Handled = triageHandledFor(ctx, params.Store, pending, fingerprint, entryLog)
 			requeueReaction(state, key, pending, waitPollInterval)
 			entryLog.Debug("bot review comments already dispatched for this fingerprint")
 			continue
@@ -249,6 +250,7 @@ func reconcileBotReviewComments(state *State, params ReconcileParams, log *slog.
 		case triageHandled:
 			pending.PendingRetryAt = now.Add(pollInterval)
 			pending.LastCheck.Comments.New = 0
+			pending.LastCheck.Comments.Handled = triageHandledFor(ctx, params.Store, pending, fingerprint, entryLog)
 			requeueReaction(state, key, pending, waitPollInterval)
 			continue
 		case triageEscalate:

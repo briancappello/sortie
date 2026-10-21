@@ -398,9 +398,10 @@ func (c reactionCheckResponse) MarshalJSON() ([]byte, error) {
 	case c.Comments != nil:
 		return json.Marshal(struct {
 			reactionCheckHeader
-			ActionableComments int `json:"actionable_comments"`
-			NewComments        int `json:"new_comments"`
-		}{header, c.Comments.Actionable, c.Comments.New})
+			ActionableComments int  `json:"actionable_comments"`
+			NewComments        int  `json:"new_comments"`
+			Handled            bool `json:"handled,omitempty"`
+		}{header, c.Comments.Actionable, c.Comments.New, c.Comments.Handled})
 	case c.Mergeability != nil:
 		return json.Marshal(struct {
 			reactionCheckHeader

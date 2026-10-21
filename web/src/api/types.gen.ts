@@ -475,6 +475,7 @@ export interface ReactionCheckResponse {
   passing?: number;
   actionable_comments?: number;
   new_comments?: number;
+  handled?: boolean;
   mergeable?: boolean | null;
 }
 
