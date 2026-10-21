@@ -4,7 +4,6 @@ import type { Headline as HeadlineText, Segment } from "./headline";
 
 const EMPHASIS_CLASS = {
   strong: "font-medium text-ink",
-  attention: "text-warning",
   critical: "text-error",
 } as const;
 
