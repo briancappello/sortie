@@ -302,7 +302,6 @@ function OverviewBody({ state }: OverviewBodyProps) {
         <AttentionList
           items={unacknowledged}
           now={view.now}
-          readSet={view.readSet}
           selectedKey={selectedKey}
           showSelection={showSelection}
           pending={actions.pending}

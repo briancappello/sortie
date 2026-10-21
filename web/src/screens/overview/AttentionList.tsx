@@ -1,5 +1,3 @@
-import { attentionKey } from "@/lib/unread";
-
 import { AttentionItem } from "./AttentionItem";
 import { attentionNavKey } from "./rows";
 
@@ -10,7 +8,6 @@ export interface AttentionListProps {
   /** The unacknowledged items in the order the server serves them. */
   items: readonly AttentionItemResponse[];
   now: number;
-  readSet: ReadonlySet<string>;
   /** Navigation key of the selected item, or `undefined`. */
   selectedKey: string | undefined;
   showSelection: boolean;
@@ -24,7 +21,6 @@ export interface AttentionListProps {
 export function AttentionList({
   items,
   now,
-  readSet,
   selectedKey,
   showSelection,
   pending,
@@ -47,7 +43,6 @@ export function AttentionList({
               item={item}
               navKey={navKey}
               now={now}
-              isUnread={!readSet.has(attentionKey(item.id))}
               isSelected={selectedKey === navKey}
               showSelection={showSelection}
               isPending={pending.has(item.id)}
