@@ -126,8 +126,7 @@ function firstRunLede(state: StateResponse): string {
  *
  * A first run, with no run on record, reads as picking up only while an agent
  * runs and nothing needs attention or waits on a person; a failing health
- * check or a critical item
- * reads as degraded.
+ * check or a critical item reads as degraded.
  */
 export function buildHeadline(state: StateResponse, isFirstRun: boolean): Headline {
   const items = (state.attention ?? []).filter((item) => item.acknowledged_at === null);
