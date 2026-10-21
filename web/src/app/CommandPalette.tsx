@@ -21,7 +21,7 @@ import { fmtStamp, parseInstant } from "@/lib/format";
 import { issueLinkOf, sessionLinkOf } from "@/lib/issue-link";
 import { issueStanding, runRouteText } from "@/lib/lane";
 import { numberedRunsOf } from "@/lib/run-number";
-import { runStatus } from "@/lib/run-status";
+import { runOutcome } from "@/lib/run-status";
 import { setTheme } from "@/lib/theme";
 
 import type { ScreenEntry } from "@/app/Rail";
@@ -135,7 +135,7 @@ function finishedSessionEntriesOf(
       identifier: group.issue_identifier,
       dispatchId,
       route: runRouteText(run, config),
-      status: runStatus(run.status).word,
+      status: runOutcome(run).word,
       startedAt: run.started_at,
     }));
 }

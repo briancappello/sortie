@@ -1,3 +1,5 @@
+import type { RunResponse } from "@/api/types.gen";
+
 /** The status marks a row, an outcome, or a run line can carry. */
 export type Mark =
   | "running"
@@ -50,12 +52,43 @@ const RUN_STATUSES: Record<string, { word: string; mark: Mark | null }> = {
 export const RUN_STATUS_NAMES: readonly string[] = Object.keys(RUN_STATUSES);
 
 /**
- * Gives the word and mark of a run status wherever the dashboard shows one: a
- * run line in the peek, a History run row, the History status menu, and the
- * Analytics "By run status" table. A run row serves its status and no wording
- * for it, so the client words the persisted statuses and shows any other value
- * as served with no mark.
+ * Gives the word and mark of a persisted run status. A run row serves its status
+ * and no wording for it, so the client words the persisted statuses and shows any
+ * other value as served with no mark.
  */
 export function runStatus(status: string): { word: string; mark: Mark | null } {
   return Object.hasOwn(RUN_STATUSES, status) ? RUN_STATUSES[status] : { word: status, mark: null };
+}
+
+const DECLARED_OUTCOMES: Record<string, { word: string; mark: Mark }> = {
+  blocked: { word: "Stopped to ask", mark: "stopped" },
+  "needs-human-review": { word: "Ready for human review", mark: "handed" },
+  "no-change-needed": { word: "No change needed", mark: "succeeded" },
+};
+
+/**
+ * Gives the word and mark of a finished run: the outcome its agent declared when
+ * the run is recorded as succeeded, else the word of its recorded status. Any
+ * other status wins over a declaration, so a run whose handoff was withheld still
+ * reads as failed.
+ */
+export function runOutcome(run: Pick<RunResponse, "status" | "declared_outcome">): {
+  word: string;
+  mark: Mark | null;
+} {
+  const declared = run.declared_outcome;
+  if (
+    run.status === "succeeded" &&
+    declared !== null &&
+    Object.hasOwn(DECLARED_OUTCOMES, declared)
+  ) {
+    return DECLARED_OUTCOMES[declared];
+  }
+  return runStatus(run.status);
+}
+
+/** Gives the statement the agent wrote with its declared outcome, or null when there is none to show. */
+export function agentStatement(run: Pick<RunResponse, "agent_text">): string | null {
+  const text = run.agent_text;
+  return text === null || text.trim() === "" ? null : text;
 }

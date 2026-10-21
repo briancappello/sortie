@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The run history API now says when an agent ended a run with `blocked`, `needs-human-review`, or `no-change-needed` and serves the reason it wrote, so such a run no longer reads as an ordinary success; runs recorded before this release carry neither. ([#1456](https://github.com/sortie-ai/sortie/issues/1456))
 
+- A run whose agent stopped to ask for help, asked for a human review, or found that no change was needed no longer reads Succeeded on the issue page, the peek, the session view, History, and the command palette. Those places now name that outcome, and the issue page, the session view, and History show what the agent wrote beside it, or on hover in History. ([#1457](https://github.com/sortie-ai/sortie/issues/1457))
+
 ## [1.29.0] - 2026-10-20
 
 ### Added

@@ -32,7 +32,7 @@ import {
 } from "@/lib/lane";
 import { safeHttpUrl } from "@/lib/links";
 import { numberedRunsOf } from "@/lib/run-number";
-import { runStatus } from "@/lib/run-status";
+import { runOutcome } from "@/lib/run-status";
 
 import type { ReactNode } from "react";
 
@@ -355,7 +355,7 @@ function PeekRuns({ detail, now }: PeekRunsProps) {
           </span>
           <span aria-hidden="true" className={cn(node, "border-ink-body bg-ink-body")} />
           <span className="text-ink-body">
-            {`Run ${number}${run.rule_name ? `${SEP}${ruleLabel(run.rule_name)}` : ""}${SEP}${runStatus(run.status).word.toLowerCase()} at ${fmtClock(run.completed_at)}`}
+            {`Run ${number}${run.rule_name ? `${SEP}${ruleLabel(run.rule_name)}` : ""}${SEP}${runOutcome(run).word.toLowerCase()} at ${fmtClock(run.completed_at)}`}
             {run.stage_result ? (
               <span className="block text-body-sm text-ink-muted">
                 stage result: {run.stage_result}

@@ -7,7 +7,7 @@ import { StatusMark } from "@/components/StatusMark";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { fmtClockSec, fmtCount, fmtDuration, fmtTokens, parseInstant, plural } from "@/lib/format";
-import { runStatus } from "@/lib/run-status";
+import { runOutcome } from "@/lib/run-status";
 import { now } from "@/lib/server-clock";
 
 import type { RunEventResponse } from "@/api/types.gen";
@@ -309,10 +309,12 @@ export interface PaneEnd {
   at: string;
   /** The run's persisted status. */
   status: string;
+  /** The run's declared outcome. */
+  declared_outcome: string | null;
 }
 
 function EndLine({ end }: { end: PaneEnd }) {
-  const { word, mark } = runStatus(end.status);
+  const { word, mark } = runOutcome(end);
   return (
     <Row title="run history" time={end.at}>
       {mark === null ? (

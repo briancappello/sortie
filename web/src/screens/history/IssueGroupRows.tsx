@@ -31,7 +31,7 @@ import { fmtCount, fmtDuration, fmtStamp, parseInstant, plural } from "@/lib/for
 import { issueLinkOf } from "@/lib/issue-link";
 import { ruleLabel } from "@/lib/labels";
 import { issueStanding } from "@/lib/lane";
-import { runStatus } from "@/lib/run-status";
+import { agentStatement, runOutcome } from "@/lib/run-status";
 
 import type { HistoryFilter } from "@/api/client";
 import type { IssueGroupResponse, RunResponse, StateResponse } from "@/api/types.gen";
@@ -113,7 +113,8 @@ function RunRow({ run, columns }: RunRowProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const link = issueLinkOf(run.issue_identifier, location);
-  const status = runStatus(run.status);
+  const status = runOutcome(run);
+  const statement = agentStatement(run);
   const model = run.model_name || run.configured_model;
   const agent = [run.agent_kind, model].filter((part) => part !== undefined && part !== "");
   const isModelDiverged =
@@ -124,7 +125,7 @@ function RunRow({ run, columns }: RunRowProps) {
 
   return (
     <TableRow look="link" onClick={() => void navigate(link.to, { state: link.state })}>
-      <TableCell>
+      <TableCell title={statement === null ? undefined : `\u201C${statement}\u201D`}>
         <Link
           to={link.to}
           state={link.state}

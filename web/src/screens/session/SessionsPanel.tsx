@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { fmtDuration, lowerFirst, parseInstant } from "@/lib/format";
 import { sessionLinkOf } from "@/lib/issue-link";
 import { numberedRunsOf } from "@/lib/run-number";
-import { runStatus } from "@/lib/run-status";
+import { runOutcome } from "@/lib/run-status";
 
 import type { IssueDetailResponse, RunsResponse } from "@/api/types.gen";
 import type { Mark } from "@/lib/run-status";
@@ -40,7 +40,7 @@ function rowsOf(detail: IssueDetailResponse, pages: readonly RunsResponse[]): Se
   const finished = numberedRunsOf(storyRunsOf(history?.runs ?? [], pages), total)
     .reverse()
     .map(({ run, number }): SessionRow => {
-      const { word, mark } = runStatus(run.status);
+      const { word, mark } = runOutcome(run);
       return {
         key: String(run.run_id),
         number,
