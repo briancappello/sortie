@@ -1,7 +1,7 @@
 import { isRowKind, routeText, rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
 import { fmtStamp, parseInstant, upperFirst } from "@/lib/format";
 import { reactionLabel, reactionShortLabel } from "@/lib/labels";
-import { endingWord } from "@/lib/ended";
+import { endingWord, hasSeveralTerminalStates } from "@/lib/ended";
 import { runStatus, stateWord } from "@/lib/run-status";
 
 import type { Deciding } from "@/lib/active-rows";
@@ -28,6 +28,8 @@ export interface Station {
   label: string;
   /** The form a header too narrow for the label uses; absent when the label is already short. */
   short?: string;
+  /** Set on the end station of a workflow that lists two or more terminal states. */
+  labelFromEnding?: true;
 }
 
 const AGENT_KEY = "agent";
@@ -67,7 +69,14 @@ export function stationsOf(config: ConfigResponse): Station[] {
     });
   }
   if (reactions.length > 0) {
-    stations.push({ key: "end", kind: "end", label: endLabelOf(config) });
+    stations.push({
+      key: "end",
+      kind: "end",
+      label: endLabelOf(config),
+      ...(hasSeveralTerminalStates(config.tracker.terminal_states)
+        ? { labelFromEnding: true as const }
+        : {}),
+    });
   }
   return stations;
 }
@@ -144,6 +153,8 @@ export interface Standing {
   station: string;
   mark: LaneMarker | null;
   time: string | null;
+  /** The name the station takes in this issue's lane only; null keeps the station's own. */
+  label: string | null;
 }
 
 function reactionKeyOf(deciding: Deciding): string | undefined {
@@ -192,10 +203,21 @@ function outcomeStation(kind: string, stations: readonly Station[]): Station | u
     : (stations.find((s) => s.kind === wanted) ?? stations.at(-1));
 }
 
+function endingStationLabel(outcome: IssueOutcomeResponse): string | null {
+  if (outcome.kind === "merged") {
+    return "Merged";
+  }
+  return outcome.kind === "terminal" && outcome.state !== undefined && outcome.state !== ""
+    ? upperFirst(outcome.state)
+    : null;
+}
+
 /**
  * Places an issue on the stations. The deciding row wins; an issue with none
  * stands where its recorded ending puts it. It returns `null` when neither
- * exists, so a finished issue without a recorded ending has no marker.
+ * exists, so a finished issue without a recorded ending has no marker. The
+ * `label` of the standing renames the station for this issue only, and only
+ * when the station takes its name from the ending.
  */
 export function standingOf(input: StandingInput, stations: readonly Station[]): Standing | null {
   const { deciding, outcome, issueId, attention, now } = input;
@@ -204,6 +226,7 @@ export function standingOf(input: StandingInput, stations: readonly Station[]): 
       station: decidingStation(deciding, stations),
       mark: rowMark(deciding.kind, issueId, attention),
       time: timeText(deciding.kind, timeBaseOf(deciding), now),
+      label: null,
     };
   }
   if (outcome === null) {
@@ -216,6 +239,7 @@ export function standingOf(input: StandingInput, stations: readonly Station[]): 
         station: station.key,
         mark: endingMarker(outcome.kind),
         time: fmtStamp(outcome.observed_at),
+        label: station.labelFromEnding === true ? endingStationLabel(outcome) : null,
       };
 }
 
@@ -267,7 +291,10 @@ export type StationState =
   | "quiet"
   | "idle";
 
-/** A {@link Station} with its state, and the mark and time of the issue standing on it. */
+/**
+ * A {@link Station} with its state, and the mark and time of the issue standing on it.
+ * On the current station, `label` is the standing's label when it has one.
+ */
 export interface LaneStation extends Station {
   state: StationState;
   mark: LaneMarker | null;
@@ -328,7 +355,8 @@ function readingOf(
  * needs once its escalation stands, while a pull request row is pending on it;
  * with none, it reads from the served `prLoop` as escalated, acted, quiet, or
  * idle for no record.
- * The rest read passed or ahead.
+ * The rest read passed or ahead. The current station takes the standing's
+ * label over its own; no other station is renamed.
  */
 export function laneOf(
   stations: readonly Station[],
@@ -341,6 +369,7 @@ export function laneOf(
     standing !== null && index === current
       ? {
           ...station,
+          label: standing.label ?? station.label,
           state: "current",
           mark: standing.mark,
           time: standing.time,
