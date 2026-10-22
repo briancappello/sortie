@@ -2014,6 +2014,13 @@ func TestOnceExitCode(t *testing.T) {
 	}
 }
 
+func appendRunOutcomeHook(path string) string {
+	if runtime.GOOS == "windows" {
+		return `echo %SORTIE_RUN_OUTCOME%>> "` + path + `"`
+	}
+	return `echo "$SORTIE_RUN_OUTCOME" >> ` + path
+}
+
 func TestRunOnce(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -2040,12 +2047,12 @@ file:
 workspace:
   root: %[1]s/workspaces
 hooks:
-  after_run: 'echo "$SORTIE_RUN_OUTCOME" >> %[1]s/outcomes.txt'
+  after_run: '%[3]s'
 price_table:
   fetch: false
 ---
 Do {{ .issue.title }}.
-`, dir, tt.agent)
+`, dir, tt.agent, appendRunOutcomeHook(filepath.Join(dir, "outcomes.txt")))
 			wfPath := writeCustomWorkflowFile(t, dir, []byte(workflow))
 			ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
 			defer cancel()
