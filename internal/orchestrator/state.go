@@ -198,8 +198,9 @@ type RunningEntry struct {
 	// terminal observation is final for the entry's lifetime.
 	ObservedTerminalState string
 
-	// WorkspacePath is the absolute workspace directory, populated in
-	// [HandleWorkerExit] before cleanup. The PendingCleanup path cleans
+	// WorkspacePath is the absolute workspace directory, populated when the
+	// worker reports it prepared, or in [HandleWorkerExit] before cleanup
+	// when that report never arrived. The PendingCleanup path cleans
 	// this actual directory rather than reconstructing it from config,
 	// which may have changed via reload.
 	WorkspacePath string

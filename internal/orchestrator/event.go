@@ -325,14 +325,22 @@ func cutWord(s string) (word, rest string) {
 }
 
 // workspaceRelative removes the workspace root, with the separator that
-// follows it, from every place it occurs in s, so a path inside the run's
-// workspace reads relative to it and names no directory of the host.
+// follows it, from the start of each ", "-joined path in s, so a path inside
+// the run's workspace reads relative to it and names no directory of the host.
 func workspaceRelative(s, workspace string) string {
 	root := strings.TrimRight(workspace, `/\`)
 	if root == "" {
 		return s
 	}
-	return strings.NewReplacer(root+"/", "", root+`\`, "").Replace(s)
+	paths := strings.Split(s, ", ")
+	for i, p := range paths {
+		if rest, ok := strings.CutPrefix(p, root+"/"); ok {
+			paths[i] = rest
+		} else if rest, ok := strings.CutPrefix(p, root+`\`); ok {
+			paths[i] = rest
+		}
+	}
+	return strings.Join(paths, ", ")
 }
 
 // toolLabel returns the metric and log label of a tool call: the tool's name

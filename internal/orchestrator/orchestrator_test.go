@@ -1895,7 +1895,9 @@ func TestOrchestrator_RunNotifiesObserversAfterAgentLaneMessage(t *testing.T) {
 		name string
 		send func(o *Orchestrator)
 	}{
-		{"token usage event", func(o *Orchestrator) { o.agentEventCh <- agentEventMsg{id, tokenUsageEvent(1, 1, 2, 0)} }},
+		{"token usage event", func(o *Orchestrator) {
+			o.agentEventCh <- agentEventMsg{IssueID: id, Event: tokenUsageEvent(1, 1, 2, 0)}
+		}},
 		{"turn start", func(o *Orchestrator) { o.turnStartedCh <- turnStartedMsg{IssueID: id, TurnsStarted: 2} }},
 		{"self-review progress", func(o *Orchestrator) { o.selfReviewCh <- selfReviewProgressMsg{IssueID: id, Iteration: 1} }},
 		{"unaccounted turns", func(o *Orchestrator) { o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: id, UnaccountedTurns: 3} }},
@@ -11494,5 +11496,26 @@ func TestWriteIncrementalMetadata_LiveEstimate(t *testing.T) {
 					tt.kind, meta.EstimatedCostUSD, meta.CostStatus, tt.wantCost, tt.wantStatus)
 			}
 		})
+	}
+}
+
+// TestApplyAgentEvent_WorkspaceReadyShortensLaterPaths covers a live run:
+// the workspace message arrives before the agent's first tool call, so a read
+// of a file inside the workspace is retained relative to it, not as a path
+// of the host.
+func TestApplyAgentEvent_WorkspaceReadyShortensLaterPaths(t *testing.T) {
+	t.Parallel()
+
+	o, entry := tokenWarningApplyEventOrchestrator(t, 0, 0)
+	entry.events = o.state.RetainedEvents.register("d-ws")
+
+	o.applyAgentEvent(context.Background(), agentEventMsg{IssueID: "id-apply", Workspace: "/ws/ISS-1"}, true)
+	o.applyAgentEvent(context.Background(), agentEventMsg{IssueID: "id-apply", Event: domain.AgentEvent{
+		Type: domain.EventToolResult, ToolName: "Read", ToolKind: domain.ToolKindRead, ToolArgument: "/ws/ISS-1/internal/foo.go",
+	}}, true)
+
+	events := entry.events.snapshot()
+	if len(events) != 1 || events[0].ToolArgument != "internal/foo.go" {
+		t.Fatalf("retained events = %+v, want one tool_result with ToolArgument %q", events, "internal/foo.go")
 	}
 }

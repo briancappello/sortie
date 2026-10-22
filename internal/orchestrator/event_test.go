@@ -2204,6 +2204,7 @@ func TestWorkspaceRelative(t *testing.T) {
 		{"joined paths", "/ws/a/x.go, /ws/a/y.go", "/ws/a", "x.go, y.go"},
 		{"sibling directory with the same prefix", "/ws/ab/x.go", "/ws/a", "/ws/ab/x.go"},
 		{"path outside workspace", "/etc/hosts", "/ws/a", "/etc/hosts"},
+		{"workspace inside a longer path", "/home/u/ws/a/x.go", "/ws/a", "/home/u/ws/a/x.go"},
 		{"already relative", "internal/foo.go", "/ws/a", "internal/foo.go"},
 		{"empty workspace", "/ws/a/x.go", "", "/ws/a/x.go"},
 	}

@@ -336,6 +336,11 @@ type WorkerDeps struct {
 	// the goroutine returns. Must be concurrency-safe.
 	OnExit func(issueID string, result WorkerResult)
 
+	// OnWorkspaceReady reports the prepared workspace path before the agent
+	// starts. Called from the worker goroutine; must be concurrency-safe.
+	// Nil disables it.
+	OnWorkspaceReady func(issueID, path string)
+
 	// OnTurnStarted reports turnsStarted before each turn runs. Called from
 	// the worker goroutine; must be concurrency-safe. Nil disables it.
 	OnTurnStarted func(issueID string, turnsStarted int)
@@ -968,6 +973,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	workspacePath = wsResult.Path
 	logger.Info("workspace prepared", slog.String("workspace", wsResult.Path))
+	if deps.OnWorkspaceReady != nil {
+		deps.OnWorkspaceReady(issue.ID, wsResult.Path)
+	}
 
 	// finishWorkspace runs the after_run hook best-effort on every exit path
 	// after successful preparation.
