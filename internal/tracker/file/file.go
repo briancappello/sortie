@@ -2,9 +2,10 @@
 // fixture file. Issues are read from disk on each operation call,
 // normalized to domain types with labels lowercased, integer-only
 // priority (non-integers become nil), and nil-vs-empty comments
-// semantics. Intended for development and testing where a live
-// tracker API is unavailable. Registered under kind "file" via
-// an init function.
+// semantics. The adapter needs no tracker API, so it is also how a
+// caller hands work to a one-shot run: write the issue to the file,
+// then start Sortie with --once. Registered under kind "file" via an
+// init function.
 package file
 
 import (
@@ -35,11 +36,11 @@ var _ domain.TrackerAdapter = (*FileAdapter)(nil)
 
 // FileAdapter reads issues from a JSON file and implements all seven
 // [domain.TrackerAdapter] operations. The file is re-read on each
-// call to support test scenarios that modify the fixture between
-// operations. State mutations via [FileAdapter.TransitionIssue] are
-// stored in an in-memory override map layered on top of disk reads.
-// Overrides are not persisted to disk; they exist only for the
-// lifetime of the adapter instance. Safe for concurrent use.
+// call, so a caller can add or change issues while Sortie runs. State
+// mutations via [FileAdapter.TransitionIssue] are stored in an
+// in-memory override map layered on top of disk reads. Overrides are
+// not persisted to disk; they exist only for the lifetime of the
+// adapter instance. Safe for concurrent use.
 type FileAdapter struct {
 	*issuekit.StateSource
 	path string

@@ -63,6 +63,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - A workspace directory swapped for a symbolic link after preparation refuses every `.sortie` write, read, and removal for that workspace and leaves the link's target unchanged
 - Every workspace launch, including a per-turn or auxiliary one, refuses a linked workspace path and starts no subprocess
 - Hook environment variables (`SORTIE_ISSUE_ID`, `SORTIE_ISSUE_IDENTIFIER`, `SORTIE_WORKSPACE`, `SORTIE_ATTEMPT`) are set correctly
+- `after_run` receives `SORTIE_RUN_OUTCOME` with the value `succeeded`, `stopped`, `failed`, or `cancelled` that matches the attempt's ending, in both run modes, and the value overrides a same-named variable of the parent environment
+- An attempt whose handoff the evidence policy withholds reads `succeeded` in `after_run` and is recorded as failed, because the hook value is decided before the verdict
 - The periodic sweep excludes workspace keys held by running entries and scheduled retries, and keys held by a pending reaction entry whose kind pins its workspace, while a non-pinning kind leaves its key a candidate
 - Within one sweep pass the terminal check runs before the age bound, and a key removed by the terminal check is not re-evaluated by the age bound
 - The age bound removes a workspace whose latest recorded activity precedes the retention window, anchoring on the later of the recorded completion and the recorded push
@@ -501,6 +503,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
+- `--once` polls candidates once, dispatches them under the usual limits, and returns when nothing is running, claimed, waiting for a retry, or waiting for a slot or a later tick
+- `--once` exits `0` when every issue's latest outcome is `succeeded` or no issue was ready, `1` when startup or the single poll fails, and `2` when a signal interrupts the run or an issue's latest outcome is not `succeeded`
+- Under `--once`, an attempt that fails and recovers on a retry in the same process exits `0`, and a candidate or fired retry that an instance spend ceiling holds exits `2` without waiting for the window to reset, leaving the persisted retry entry in place
+- Under `--once`, no pull request reaction step or label-command step runs while a reaction entry is pending, and an issue that a later fetch returns but the single poll did not is never dispatched
+- `--once` combined with `--dry-run` is rejected with exit status `1` before any workflow file is read
+- Without `--once`, the CLI exits `0` after a signal, as before
 
 ### 17.8 Real Integration Profile (Recommended)
 

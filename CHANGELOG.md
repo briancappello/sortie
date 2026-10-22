@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The dashboard now shows the project or repository a Sortie instance tracks under the Sortie name, in the browser tab title, and on the Workflow screen. The state API reports it too, so a page that links several instances can name each one. ([#1442](https://github.com/sortie-ai/sortie/issues/1442))
 
+- `sortie --once` finishes the issues that are ready when it starts and then exits, with status `0` when each issue's last run succeeded or nothing was ready, `1` when startup or the first poll failed, and `2` when an issue's last run did not succeed or a signal stopped the work; an issue in a stage chain moves one stage forward per run. ([#1470](https://github.com/sortie-ai/sortie/issues/1470))
+
+- `after_run` hooks now receive `SORTIE_RUN_OUTCOME` (`succeeded`, `stopped`, `failed`, `cancelled`), so a hook that commits and pushes can skip an attempt that did not succeed. ([#1470](https://github.com/sortie-ai/sortie/issues/1470))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.
