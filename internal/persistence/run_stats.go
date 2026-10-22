@@ -43,6 +43,10 @@ type RunHistoryCapabilities struct {
 	// HasRecordedCost is outside [RunHistoryCapabilities.Full];
 	// [RunHistoryCapabilities.RecordedCost] depends on it.
 	HasRecordedCost bool
+
+	// HasSkills is outside [RunHistoryCapabilities.Full];
+	// [RunHistoryCapabilities.SkillBreakdown] depends on it.
+	HasSkills bool
 }
 
 // Full reports whether the database carries every optional run_history
@@ -90,6 +94,12 @@ func (c RunHistoryCapabilities) FunnelBreakdown() bool {
 // cost rather than a partial one.
 func (c RunHistoryCapabilities) RecordedCost() bool {
 	return c.FunnelBreakdown() && c.HasRecordedCost
+}
+
+// SkillBreakdown reports whether a read can fold each run's skill calls:
+// RecordedCost plus the skills column.
+func (c RunHistoryCapabilities) SkillBreakdown() bool {
+	return c.RecordedCost() && c.HasSkills
 }
 
 // RunStatsRow is the narrow run_history projection the aggregate read
@@ -159,6 +169,10 @@ type RunStatsRow struct {
 	// UnaccountedTurns is run_history.unaccounted_turns; zero when
 	// [RunHistoryCapabilities.RecordedCost] reports false.
 	UnaccountedTurns int
+
+	// Skills is run_history.skills as stored; nil when the column is NULL or
+	// [RunHistoryCapabilities.SkillBreakdown] reports false.
+	Skills *string
 }
 
 // joinedPart holds the run_model_usage columns of one result row, all NULL
@@ -267,6 +281,7 @@ func (s *Store) RunHistoryCapabilities(ctx context.Context) (RunHistoryCapabilit
 		HasFirstAfterHop: columns["first_after_hop"],
 		HasAgentBlocked:  columns["agent_blocked"],
 		HasRecordedCost:  columns["estimated_cost_usd"] && columns["cost_status"],
+		HasSkills:        columns["skills"],
 	}, nil
 }
 
@@ -301,6 +316,7 @@ func (s *Store) ScanRunHistoryRange(
 	origins := caps.OriginBreakdown()
 	funnels := caps.FunnelBreakdown()
 	recordedCost := caps.RecordedCost()
+	skills := caps.SkillBreakdown()
 	query := runStatsColumnsBase
 	switch {
 	case full && caps.HasCacheWriteTokens:
@@ -333,6 +349,9 @@ func (s *Store) ScanRunHistoryRange(
 		run_model_usage.model, run_model_usage.input_tokens, run_model_usage.output_tokens,
 		run_model_usage.cache_read_tokens, run_model_usage.cache_write_tokens,
 		run_model_usage.estimated_cost_usd, run_model_usage.cost_status`
+	}
+	if skills {
+		query += ", run_history.skills"
 	}
 	query += "\nFROM run_history"
 	if recordedCost {
@@ -367,7 +386,7 @@ func (s *Store) ScanRunHistoryRange(
 	var pendingID int64
 	for rows.Next() {
 		var row RunStatsRow
-		var reviewMeta, displayID, trigger, reactionKind, costStatus sql.NullString
+		var reviewMeta, displayID, trigger, reactionKind, costStatus, skillCalls sql.NullString
 		var cost sql.NullFloat64
 		var runID int64
 		var joined joinedPart
@@ -408,6 +427,9 @@ func (s *Store) ScanRunHistoryRange(
 			dest = append(dest, &cost, &costStatus, &row.UnaccountedTurns, &runID)
 			dest = append(dest, joined.dest()...)
 		}
+		if skills {
+			dest = append(dest, &skillCalls)
+		}
 		if err := rows.Scan(dest...); err != nil {
 			return fmt.Errorf("scan run history range: %w", err)
 		}
@@ -423,6 +445,9 @@ func (s *Store) ScanRunHistoryRange(
 			row.EstimatedCostUSD = new(cost.Float64)
 		}
 		row.CostStatus = costStatus.String
+		if skillCalls.Valid {
+			row.Skills = new(skillCalls.String)
+		}
 
 		if !recordedCost {
 			if err := visit(row); err != nil {

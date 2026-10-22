@@ -291,6 +291,14 @@ func TestHandleAgentEvent_SkillCallsOutliveTheEventBuffer(t *testing.T) {
 			t.Fatalf("skills[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
+
+	noCallState, _ := retainingState()
+	noCallStore := openFileStore(t, t.TempDir()+"/no-skills.db")
+	exitRun(noCallState, noCallStore)
+	noCall, err := noCallStore.QueryRunHistory(context.Background(), persistence.RunHistoryFilter{Limit: 10})
+	if err != nil || len(noCall) != 1 || noCall[0].Skills == nil || *noCall[0].Skills != "[]" {
+		t.Errorf("QueryRunHistory after a run without skill calls = %+v, %v, want one row storing %q", noCall, err, "[]")
+	}
 }
 
 func openFileStore(t *testing.T, path string) *persistence.Store {

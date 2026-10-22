@@ -2543,6 +2543,16 @@
             }
           ]
         },
+        "skill_calls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkillCallReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "spend": {
           "anyOf": [
             {
@@ -2602,6 +2612,7 @@
         "chain_funnels",
         "by_trigger",
         "by_origin",
+        "skill_calls",
         "self_review"
       ],
       "type": "object"
@@ -4344,6 +4355,54 @@
       },
       "required": [
         "skill"
+      ],
+      "type": "object"
+    },
+    "SkillCallReport": {
+      "properties": {
+        "by_skill": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/SkillCount"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unrecorded_runs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "unrecorded_runs",
+        "by_skill"
+      ],
+      "type": "object"
+    },
+    "SkillCount": {
+      "properties": {
+        "calls": {
+          "type": "integer"
+        },
+        "failed_calls": {
+          "type": "integer"
+        },
+        "runs": {
+          "type": "integer"
+        },
+        "skill": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill",
+        "runs",
+        "calls",
+        "failed_calls"
       ],
       "type": "object"
     },

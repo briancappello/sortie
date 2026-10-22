@@ -1920,7 +1920,7 @@ A reverse proxy in front of Sortie must pass on the `Host` header the browser se
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
-| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, with the cost recorded with each run and that cost per UTC day or month. |
+| GET    | `/api/v1/stats`          | Run statistics over the runs completed in a `since` and `until` range: the report `sortie stats --format json` prints, with the issue count, the runs grouped by retry trigger and by what started them, and a funnel for each stage chain, the skill calls of the runs counted per skill, with the cost recorded with each run and that cost per UTC day or month. |
 | GET    | `/api/v1/prices`         | The rates in force when the request is served, per agent kind and model, with the layer each rate comes from and whether that run is priced in full, in part, or not at all, and the state of every price source: your `token_rates`, your own price table, the downloaded table, and the embedded table. It is what the dashboard's Prices screen shows. See [`GET /api/v1/prices`: prices in force](#get-apiv1prices-prices-in-force). |
 | GET    | `/api/v1/{identifier}`   | Per-issue detail for a specific issue identifier, including a parked one, one that only waits on a pending pull request reaction, and one known only through run history, with its runs. Carries a plain English status sentence for the issue, lists what Sortie does next for it as condition and sentence pairs, and lists the latest 50 agent events of its running or latest run as `recent_events`. Returns 404 only when neither the current state nor run history knows the identifier. |
 | POST   | `/api/v1/refresh`        | Trigger an immediate poll+reconciliation cycle. Returns 202 Accepted normally, 409 Conflict during graceful shutdown. Best-effort; repeated requests are coalesced. Every response says in one sentence what it queued. |
@@ -3664,7 +3664,7 @@ A running run keeps its newest 1,000 retained events, within 256 KiB, in memory,
 
 #### `GET /api/v1/stats`: run statistics
 
-Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent, what they cost as recorded with each run, and that cost per UTC day or month, with breakdowns by outcome, agent, dispatch rule, prompt template, model (a run counts under every model it spent tokens on), stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
+Returns the report that `sortie stats --format json` prints, over the finished runs of run history in a range: how many runs and issues there were, how many succeeded and how many failed, stopped, or were cancelled, how long they took, the tokens they spent, what they cost as recorded with each run, and that cost per UTC day or month, with breakdowns by outcome, agent, dispatch rule, prompt template, model (a run counts under every model it spent tokens on), stage chain, retry trigger, and run origin, and a funnel for each stage chain whose stages also count the passes running, retrying, or held by a budget now, and the runs, calls, and failed calls of each skill the runs called. The route computes the report through the aggregation the command uses and serves it unchanged, so for one database, one workflow, and absolute bounds the body equals the command's output except `generated_at`.
 
 **Query parameters.** Every parameter is optional. An empty value is the same as an absent one, and an open bound is unlimited, so a request without parameters covers every run on record.
 
@@ -3805,6 +3805,13 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
       "cost_partial_runs": 1
     }
   ],
+  "skill_calls": {
+    "unrecorded_runs": 1,
+    "by_skill": [
+      {"skill": "plan", "runs": 2, "calls": 2, "failed_calls": 0},
+      {"skill": "test", "runs": 1, "calls": 2, "failed_calls": 1}
+    ]
+  },
   "self_review": {
     "runs_with_metadata": 2,
     "by_final_verdict": [{"verdict": "iterate", "runs": 1}, {"verdict": "pass", "runs": 1}],
@@ -3815,7 +3822,7 @@ A range bound is an RFC 3339 timestamp in any offset (fractions allowed), a date
 }
 ```
 
-The example omits the members of the breakdowns other than `by_status`, `by_chain`, `by_trigger`, and `by_origin`; every breakdown is a list of groups of the same shape. It shows one funnel of two stages.
+The example omits the members of the breakdowns other than `by_status`, `by_chain`, `by_trigger`, and `by_origin`; every breakdown is a list of groups of the same shape. It shows one funnel of two stages. Its `skill_calls` come from runs that called `plan`, `test` (failed), and `test`; `plan`; no skill; and from one run recorded before skill calls were kept.
 
 **Envelope fields:**
 
@@ -3824,7 +3831,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `generated_at`   | string            | The instant of the request, as an RFC 3339 timestamp in UTC. Relative bounds count back from it. |
 | `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
 | `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
-| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `spend` and `self_review` are `null`, and the figures that need the missing columns are `null`. |
+| `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `spend`, `skill_calls`, and `self_review` are `null`, and the figures that need the missing columns are `null`. |
 | `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. A database whose runs carry no recorded cost, because no service start has applied the schema change that records it, names cost among what it leaves out. |
 | `summary`        | object            | The report-wide figures, below. |
 | `spend`          | object or `null`  | The recorded cost per UTC day or month, below. `null` on the `base` tier and on a database whose runs carry no recorded cost. |
@@ -3837,6 +3844,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `chain_funnels`  | array of funnels  | One funnel per stage chain definition, below. It is not a breakdown: its entries are stages, not groups of runs. |
 | `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
 | `by_origin`      | array of groups   | One group per run origin, below. |
+| `skill_calls`    | object or `null`  | The skill calls of the counted runs, below. `null` on the `base` tier and on a database an older Sortie last wrote, which the first `warnings` entry then states. |
 | `self_review`    | object or `null`  | The self-review results, below. `null` on the `base` tier. |
 
 Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[]` rather than `null` when it holds no group.
@@ -3939,6 +3947,8 @@ A pass that is running, queued for a retry, or held by a budget now is counted f
 | `poll_tick` | Every other run the poll tick dispatched, including a later dispatch into a stage a hop led to, as after a restart, a released hold, or a lost retry. |
 
 The groups partition the counted runs, so their `runs` sum to `summary.runs`. A group named by a retry trigger holds the runs of the `by_trigger` group of that name. `by_origin` carries no other names, and is `[]` on a database an older Sortie last wrote, which the first `warnings` entry then states.
+
+**`skill_calls` fields:** `unrecorded_runs`, the counted runs whose row records no skill calls: a run recorded before Sortie kept them, or one whose calls could not be stored; and `by_skill`, one entry per distinct skill name among the other counted runs, by descending `runs` and then ascending `skill` in byte order, `[]` when none of them called a skill or no run is in range. An entry holds `skill`, the name exactly as recorded, with no trimming or case folding; `runs`, the runs that called it at least once; `calls`, every call, repeats included; and `failed_calls`, the calls that failed. `failed_calls` never exceeds `calls`, and `runs` never exceeds `calls` or `summary.runs`. A run that called no skill adds nothing to `unrecorded_runs` or `by_skill`, and a run that called several skills counts in each of their entries, so the `runs` of the entries can add up to more than `summary.runs`. While `unrecorded_runs` is above `0`, read every count as a lower bound. The skill names are the ones stored with each run, masked when they were recorded. The text form of `sortie stats` does not show `skill_calls`.
 
 **`self_review` fields:** `runs_with_metadata`, the runs that carry a self-review record; `by_final_verdict`, a list of `verdict` and `runs` pairs in ascending verdict order, where the verdict is `pass`, `iterate`, or `none` for a record with an empty verdict; `cap_reached_runs`, the runs whose self-review stopped at its iteration cap; `mean_iterations`, `null` when `runs_with_metadata` is `0`; and `unparsed_runs`, the records that could not be read. With no run in range the full tier still serves the object, with zero counts and `mean_iterations` `null`.
 

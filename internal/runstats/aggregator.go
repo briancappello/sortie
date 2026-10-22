@@ -449,6 +449,12 @@ const originBreakdownWarning = "this database was written before sortie recorded
 	"so the report leaves out the breakdown by run origin. " +
 	"Run sortie once with this workflow to add it."
 
+// skillBreakdownWarning explains the missing skill_calls member on a database
+// that records the cost of each run.
+const skillBreakdownWarning = "this database was written before sortie recorded the skill calls of each run, " +
+	"so the report leaves out the breakdown by skill. " +
+	"Run sortie once with this workflow to add it."
+
 const costBreakdownWarning = "this database was written before sortie recorded the cost of each run, " +
 	"so the report leaves out cost. " +
 	"Run sortie once with this workflow to add it."
@@ -482,6 +488,9 @@ type Aggregator struct {
 	stages     Stages
 
 	selfReview selfReviewAccum
+
+	unrecordedRuns int
+	bySkill        map[string]*SkillCount
 }
 
 // New constructs an [Aggregator] for caps. It reads each run's cost as
@@ -503,6 +512,7 @@ func New(caps persistence.RunHistoryCapabilities) *Aggregator {
 		passes:     make(map[passKey]*passAccum),
 		issueIDs:   make(map[string]struct{}),
 		selfReview: selfReviewAccum{byVerdict: make(map[string]int)},
+		bySkill:    make(map[string]*SkillCount),
 	}
 }
 
@@ -609,6 +619,10 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 		if row.ReviewMetadata != nil {
 			foldSelfReview(*row.ReviewMetadata, &a.selfReview)
 		}
+
+		if a.caps.SkillBreakdown() {
+			a.foldSkills(row)
+		}
 	}
 
 	if a.caps.RecordedCost() {
@@ -630,6 +644,33 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 	}
 
 	return nil
+}
+
+// foldSkills folds the skill calls row stores into the per-skill counts. A row
+// that stores none, or a value that does not decode, counts as unrecorded.
+func (a *Aggregator) foldSkills(row persistence.RunStatsRow) {
+	var calls []domain.SkillCall
+	if row.Skills == nil || json.Unmarshal([]byte(*row.Skills), &calls) != nil {
+		a.unrecordedRuns++
+		return
+	}
+
+	counted := make(map[string]struct{}, len(calls))
+	for _, call := range calls {
+		entry, ok := a.bySkill[call.Skill]
+		if !ok {
+			entry = &SkillCount{Skill: call.Skill}
+			a.bySkill[call.Skill] = entry
+		}
+		entry.Calls++
+		if call.ToolError {
+			entry.FailedCalls++
+		}
+		if _, seen := counted[call.Skill]; !seen {
+			counted[call.Skill] = struct{}{}
+			entry.Runs++
+		}
+	}
 }
 
 // foldModels folds row into the by_model group of every model share it
@@ -789,6 +830,9 @@ func (a *Aggregator) Report(
 		}
 		rpt.SelfReview = a.selfReviewReport()
 	}
+	if a.caps.SkillBreakdown() {
+		rpt.SkillCalls = a.skillCallReport()
+	}
 
 	return rpt
 }
@@ -922,6 +966,8 @@ func (a *Aggregator) composeWarnings() []string {
 		list = append(list, a.withCostNotice(funnelBreakdownWarning))
 	case !a.caps.RecordedCost():
 		list = append(list, costBreakdownWarning)
+	case !a.caps.SkillBreakdown():
+		list = append(list, skillBreakdownWarning)
 	}
 	return list
 }
@@ -1014,6 +1060,22 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 		}
 	}
 	return stat
+}
+
+// skillCallReport computes the [SkillCallReport] from a's folded skill state.
+// by_skill is sorted by descending runs, then by ascending skill in byte order.
+func (a *Aggregator) skillCallReport() *SkillCallReport {
+	report := &SkillCallReport{
+		UnrecordedRuns: a.unrecordedRuns,
+		BySkill:        make([]SkillCount, 0, len(a.bySkill)),
+	}
+	for _, entry := range a.bySkill {
+		report.BySkill = append(report.BySkill, *entry)
+	}
+	slices.SortFunc(report.BySkill, func(x, y SkillCount) int {
+		return cmp.Or(cmp.Compare(y.Runs, x.Runs), strings.Compare(x.Skill, y.Skill))
+	})
+	return report
 }
 
 // selfReviewReport computes the derived [SelfReview] from a's folded

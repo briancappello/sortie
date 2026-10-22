@@ -13,25 +13,26 @@ package runstats
 // when the figure it carries is unavailable. Spend is nil unless
 // [persistence.RunHistoryCapabilities.RecordedCost] reports true.
 type Report struct {
-	GeneratedAt  string       `json:"generated_at"`
-	WorkflowPath string       `json:"workflow_path"`
-	DBPath       string       `json:"db_path"`
-	Since        *string      `json:"since"`
-	Until        *string      `json:"until"`
-	SchemaTier   string       `json:"schema_tier"`
-	Warnings     []string     `json:"warnings"`
-	Summary      Summary      `json:"summary"`
-	Spend        *Spend       `json:"spend"`
-	ByStatus     []Group      `json:"by_status"`
-	ByAdapter    []Group      `json:"by_adapter"`
-	ByRule       []Group      `json:"by_rule"`
-	ByTemplate   []Group      `json:"by_template"`
-	ByModel      []Group      `json:"by_model"`
-	ByChain      []ChainGroup `json:"by_chain"`
-	ChainFunnels []Funnel     `json:"chain_funnels"`
-	ByTrigger    []Group      `json:"by_trigger"`
-	ByOrigin     []Group      `json:"by_origin"`
-	SelfReview   *SelfReview  `json:"self_review"`
+	GeneratedAt  string           `json:"generated_at"`
+	WorkflowPath string           `json:"workflow_path"`
+	DBPath       string           `json:"db_path"`
+	Since        *string          `json:"since"`
+	Until        *string          `json:"until"`
+	SchemaTier   string           `json:"schema_tier"`
+	Warnings     []string         `json:"warnings"`
+	Summary      Summary          `json:"summary"`
+	Spend        *Spend           `json:"spend"`
+	ByStatus     []Group          `json:"by_status"`
+	ByAdapter    []Group          `json:"by_adapter"`
+	ByRule       []Group          `json:"by_rule"`
+	ByTemplate   []Group          `json:"by_template"`
+	ByModel      []Group          `json:"by_model"`
+	ByChain      []ChainGroup     `json:"by_chain"`
+	ChainFunnels []Funnel         `json:"chain_funnels"`
+	ByTrigger    []Group          `json:"by_trigger"`
+	ByOrigin     []Group          `json:"by_origin"`
+	SkillCalls   *SkillCallReport `json:"skill_calls"`
+	SelfReview   *SelfReview      `json:"self_review"`
 }
 
 // Summary reports the report-wide figures. MeanTurnsSucceeded,
@@ -222,4 +223,22 @@ type SelfReview struct {
 type VerdictCount struct {
 	Verdict string `json:"verdict"`
 	Runs    int    `json:"runs"`
+}
+
+// SkillCallReport counts the skill calls of the counted runs. Report.SkillCalls
+// is nil when the database lacks the skills column. UnrecordedRuns counts the
+// runs whose row records no skill calls; BySkill is never nil.
+type SkillCallReport struct {
+	UnrecordedRuns int          `json:"unrecorded_runs"`
+	BySkill        []SkillCount `json:"by_skill"`
+}
+
+// SkillCount is one entry of [SkillCallReport.BySkill]. Runs counts the runs
+// that called the skill at least once, Calls every call, and FailedCalls the
+// calls that ended in a tool error.
+type SkillCount struct {
+	Skill       string `json:"skill"`
+	Runs        int    `json:"runs"`
+	Calls       int    `json:"calls"`
+	FailedCalls int    `json:"failed_calls"`
 }

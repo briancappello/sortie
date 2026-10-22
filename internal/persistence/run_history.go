@@ -94,7 +94,7 @@ type RunHistory struct {
 	WorkflowFile   string // Base filename; empty for pre-migration rows.
 	TurnsCompleted int
 	ReviewMetadata *string // JSON ReviewMetadata; nil when self-review did not run.
-	Skills         *string // JSON array of the run's skill calls; nil when it recorded none.
+	Skills         *string // JSON array of the run's skill calls, [] when it called none; nil only when the row records no skill calls.
 	RuleName       string  // Empty for legacy rows and fallback dispatches.
 	TemplateID     string  // Empty for legacy rows and the workflow body template.
 

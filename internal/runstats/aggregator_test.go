@@ -845,6 +845,56 @@ func TestStatsByOrigin(t *testing.T) {
 	}
 }
 
+func skillRow(skills *string) persistence.RunStatsRow {
+	row := modelRow("claude-code", "model-a", "succeeded", 0)
+	row.Skills = skills
+	return row
+}
+
+func TestStatsBySkill(t *testing.T) {
+	t.Parallel()
+
+	skilled := withTriggerBreakdown(fullCaps)
+	skilled.HasRecordedCost, skilled.HasSkills = true, true
+	noColumn := skilled
+	noColumn.HasSkills = false
+	mixed := []persistence.RunStatsRow{
+		skillRow(new(`[{"skill":"plan"},{"skill":"test","tool_error":true},{"skill":"test"}]`)),
+		skillRow(new(`[]`)),
+		skillRow(nil),
+		skillRow(new(`[{"skill":"plan"}]`)),
+	}
+	tests := []struct {
+		name string
+		caps persistence.RunHistoryCapabilities
+		rows []persistence.RunStatsRow
+		want *SkillCallReport
+	}{
+		{"runs count once per skill and a NULL run is unrecorded", skilled, mixed, &SkillCallReport{UnrecordedRuns: 1, BySkill: []SkillCount{
+			{Skill: "plan", Runs: 2, Calls: 2},
+			{Skill: "test", Runs: 1, Calls: 2, FailedCalls: 1},
+		}}},
+		{"a value that does not decode is unrecorded", skilled, []persistence.RunStatsRow{skillRow(new("not json"))}, &SkillCallReport{UnrecordedRuns: 1, BySkill: []SkillCount{}}},
+		{"runs that called nothing leave an empty, non-nil list", skilled, []persistence.RunStatsRow{skillRow(new("[]"))}, &SkillCallReport{BySkill: []SkillCount{}}},
+		{"column absent leaves the report nil", noColumn, mixed, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			agg := New(tt.caps)
+			addRows(t, agg, tt.rows...)
+
+			report := agg.Report(fixedNow, "/wf", "/db", nil, nil)
+
+			if !reflect.DeepEqual(report.SkillCalls, tt.want) {
+				t.Errorf("Report(%+v).SkillCalls = %+v, want %+v", tt.caps, report.SkillCalls, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatsByChain(t *testing.T) {
 	t.Parallel()
 
@@ -893,12 +943,15 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	chainCaps := modelCaps
 	chainCaps.HasStageChains = true
 	triggerCaps := withTriggerBreakdown(fullCaps)
+	triggerCaps.HasSkills = true
 	originlessCaps := triggerCaps
 	originlessCaps.HasFirstAfterHop = false
 	unblockedCaps := triggerCaps
 	unblockedCaps.HasAgentBlocked = false
 	uncostedCaps := triggerCaps
 	uncostedCaps.HasRecordedCost = false
+	unskilledCaps := triggerCaps
+	unskilledCaps.HasSkills = false
 
 	tests := []struct {
 		name    string
@@ -916,6 +969,7 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 		{name: "chain breakdown missing", caps: modelCaps, want: []string{chainBreakdownWarning + costAlso}},
 		{name: "model breakdown missing", caps: fullCaps, want: []string{modelBreakdownWarning + costAlso}},
 		{name: "cost columns missing", caps: uncostedCaps, want: []string{costOnly}},
+		{name: "skills column missing while every earlier tier holds", caps: unskilledCaps, want: []string{skillBreakdownWarning}},
 		{name: "schema not full", caps: persistence.RunHistoryCapabilities{}, want: []string{degradedSchemaWarning(persistence.RunHistoryCapabilities{})}},
 	}
 
