@@ -208,12 +208,6 @@ func (s *sessionState) settleResult(event rawEvent, spend *agentcore.TurnSpend) 
 	}
 }
 
-func (s *sessionState) refreshForkLogger() {
-	if s.forkSession != nil {
-		s.forkSession.SetLogger(s.logger())
-	}
-}
-
 // NewClaudeCodeAdapter creates a [ClaudeCodeAdapter]. Settings and command
 // resolution are deferred to [ClaudeCodeAdapter.StartSession].
 func NewClaudeCodeAdapter() (domain.AgentAdapter, error) {
@@ -316,7 +310,6 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 				case "init":
 					if event.SessionID != "" {
 						state.claudeSessionID = event.SessionID
-						state.refreshForkLogger()
 					}
 					state.restoresTotals = restoresSavedTotals(event.ClaudeCodeVersion)
 					agentcore.EmitSessionStarted(emit, pid, state.claudeSessionID)
@@ -371,7 +364,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 							candidate := usageFromAssistant(meta.Usage)
 							prior, seen := state.turnMessages[meta.ID]
 							state.turnMessages[meta.ID] = agentcore.MaxUsage(prior, candidate)
-							provisional := sumTurnMessages(state.turnMessages)
+							provisional := agentcore.SumUsage(state.turnMessages)
 							snapshot := state.acc.SetTurnProvisional(provisional)
 
 							// Claude Code repeats one message id across every
@@ -506,7 +499,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		EmitSessionStartID: nil, // Claude emits EventSessionStarted from ParseLine on "system/init"
 	}
 
-	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.logger(), state.agentConfig.StopGraceMS)
+	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 
 	return domain.Session{
 		ID:       sessionUUID,
@@ -529,8 +522,6 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 			Message: fmt.Sprintf("unexpected session internal type %T", session.Internal),
 		}
 	}
-
-	state.refreshForkLogger()
 
 	// Reset per-turn scan state before delegation. state.acc, state.resume,
 	// and state.processSpend are constructed once in StartSession and carry

@@ -1796,6 +1796,46 @@ func TestRunTurn_UsageMeasuredPersistsAcrossCancelledTurn(t *testing.T) {
 	}
 }
 
+func TestRunTurn_CancelledTurnReportsJournalUsage(t *testing.T) {
+	t.Setenv("GH_TOKEN", "test-token-for-unit-test")
+	copilotHome := t.TempDir()
+	t.Setenv("COPILOT_HOME", copilotHome)
+
+	const sessionID = "aa778ea0-6eab-4ce9-b87e-11d6d33dab4f"
+	records := strings.Split(strings.TrimRight(loadTestFixture(t, "session_shutdown.jsonl"), "\n"), "\n")
+	path := journalPath(copilotHome, sessionID)
+	writeJournal(t, path, records[0]+"\n")
+	adapter, _ := NewCopilotAdapter()
+	session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+		WorkspacePath:   t.TempDir(),
+		AgentConfig:     domain.AgentConfig{Command: fakeCopilotBinary(t)},
+		ResumeSessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	session.Internal.(*sessionState).target.Command = agenttest.FakeRuntime(t, t.TempDir(), "copilot", agenttest.OutputScenario, agenttest.Output{Hang: true})
+	writeJournal(t, path, strings.Join(records[:2], "\n")+"\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var events []domain.AgentEvent
+	result, err := adapter.RunTurn(ctx, session, domain.RunTurnParams{
+		OnEvent: func(e domain.AgentEvent) {
+			events = append(events, e)
+			cancel()
+		},
+	})
+
+	requireAgentError(t, err, domain.ErrTurnCancelled)
+	want := domain.TokenUsage{InputTokens: 78913, OutputTokens: 100, TotalTokens: 79013, CacheReadTokens: 78279, CacheWriteTokens: 630}
+	if result.Usage != want || !result.UsageMeasured {
+		t.Errorf("RunTurn(cancelled) = usage %+v, measured %v, want %+v, true", result.Usage, result.UsageMeasured, want)
+	}
+	if reported, ok := findEventByType(events, domain.EventTokenUsage); !ok || reported.Usage != want {
+		t.Errorf("token_usage event = %+v (delivered %v), want usage %+v", reported, ok, want)
+	}
+}
+
 // TestRunTurn_SessionStateRecovery_Degradation drives
 // sessionState.recoverUsage directly (bypassing the subprocess) to
 // exercise the three read-skipping conditions: an absent events file,

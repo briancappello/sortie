@@ -49,6 +49,8 @@ var contractBanTable = map[string]string{
 	"toLowerSet":             "typeutil.LowerSet",
 	"lowerSet":               "typeutil.LowerSet",
 	"containsWhitespace":     "typeutil.HasWhitespace",
+	"intFromConfig":          "typeutil.IntFrom",
+	"boolFromConfig":         "typeutil.BoolFrom",
 	"validateStateLabels":    "registry.DiagStateLabelElements",
 	"validateStateOverlap":   "registry.DiagStateOverlap",
 	"sortableEventID":        "scmcore.SortableEventID",
@@ -86,6 +88,7 @@ var contractBanTable = map[string]string{
 	"subtractUsage":          "agentcore.SubtractUsage",
 	"maxUsage":               "agentcore.MaxUsage",
 	"componentwiseMaxUsage":  "agentcore.MaxUsage",
+	"sumTurnMessages":        "agentcore.SumUsage",
 	"truncateLog":            "cilog.Builder",
 	"traceExcerpt":           "cilog.Builder",
 	"truncateLines":          "cilog.TailLines",
@@ -130,6 +133,10 @@ const (
 	ruleANCHOR    contractRule = "ANCHOR"
 	ruleWORKDIR   contractRule = "WORKDIR"
 	ruleHANDLER   contractRule = "HANDLER"
+
+	ruleLIFECYCLE   contractRule = "LIFECYCLE"
+	ruleREADTIMEOUT contractRule = "READTIMEOUT"
+	ruleUSAGESUM    contractRule = "USAGESUM"
 )
 
 // contractWorkspacekitImportPath is resolved per file so an aliased or
@@ -210,6 +217,12 @@ var contractAllowlist = map[string]map[contractRule]string{
 		ruleTEARDOWN:  "owns SetGroupCancel and SetGroupKill, the helpers every other launcher calls",
 		ruleSTOPGRACE: "owns DefaultStopGrace, the fallback every other family reaches through StopGrace",
 		ruleCAPTURE:   "owns StartCapture and RunCapture, the capture every other launcher calls",
+		ruleLIFECYCLE: "owns the process-start primitives every other launcher calls",
+	},
+	"agentcore": {
+		ruleLIFECYCLE:   "owns the fork-per-turn lifecycle built on the process-start primitives",
+		ruleREADTIMEOUT: "owns ReadTimeout and FirstResponseTimeout, the readers of the field",
+		ruleUSAGESUM:    "owns AddUsage, the one place the counters are summed",
 	},
 	"agenttest": {
 		ruleCAPTURE: "test-support package that cmd/sortie does not link",
@@ -2816,6 +2829,10 @@ var contractWorkdirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "runSingleVerification", reason: "workspace verified before launch"},
 }
 
+var contractLifecycleSites = []contractSiteEntry{
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/copilot", name: "deleteVerificationSession", reason: "auxiliary launch answering one framed request on standard input"},
+}
+
 // contractAnchorOwner is the package rule ANCHOR directs every .sortie
 // access through.
 const contractAnchorOwner = "workspacekit"
@@ -3198,6 +3215,212 @@ func checkContractWorkdirFile(fset *token.FileSet, file *ast.File, importPath st
 	})
 
 	return violations
+}
+
+const (
+	contractLifecycleRemedy   = "build a one-process-per-turn kind on agentcore.NewForkPerTurnSession and add what it lacks as a hook; only a persistent session that releases its output through procutil.StartOutputRelease starts its own process"
+	contractReadTimeoutRemedy = "call agentcore.ReadTimeout or agentcore.FirstResponseTimeout"
+	contractUsageSumRemedy    = "call agentcore.AddUsage"
+)
+
+var contractLifecyclePrimitives = map[string]bool{
+	"StartWithOwnedPipes": true,
+	"StartReaper":         true,
+	"NewStdoutReader":     true,
+}
+
+var contractUsageSumFields = map[string]bool{
+	"InputTokens":      true,
+	"OutputTokens":     true,
+	"CacheReadTokens":  true,
+	"CacheWriteTokens": true,
+}
+
+// checkContractLifecycleFile counts only a StartOutputRelease call as
+// releasing, and only for the function that makes it: a func value naming
+// it releases nothing, and a release elsewhere in the file cannot excuse a
+// private turn loop beside it.
+func checkContractLifecycleFile(fset *token.FileSet, file *ast.File, importPath string) []contractViolation {
+	procutilIdent := resolveContractImportName(file, contractProcutilImportPath)
+	if procutilIdent == "" {
+		return nil
+	}
+	if procutilIdent == "." {
+		return []contractViolation{{
+			pos:  fset.Position(importPos(file, contractProcutilImportPath)),
+			text: "dot-imports procutil, which hides a process-start primitive from this rule; import it by name",
+		}}
+	}
+
+	var refs []*ast.SelectorExpr
+	releases := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "StartOutputRelease" {
+				return true
+			}
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == procutilIdent {
+				releases[contractEnclosingFuncName(file, node.Pos())] = true
+			}
+		case *ast.SelectorExpr:
+			ident, ok := node.X.(*ast.Ident)
+			if ok && ident.Name == procutilIdent && contractLifecyclePrimitives[node.Sel.Name] {
+				refs = append(refs, node)
+			}
+		}
+		return true
+	})
+	var violations []contractViolation
+	for _, ref := range refs {
+		fn := contractEnclosingFuncName(file, ref.Pos())
+		if releases[fn] {
+			continue
+		}
+		if contractSiteAllows(contractLifecycleSites, importPath, fn) {
+			continue
+		}
+		violations = append(violations, contractViolation{
+			pos:  fset.Position(ref.Pos()),
+			text: "references procutil." + ref.Sel.Name + " in a function that never calls procutil.StartOutputRelease; " + contractLifecycleRemedy,
+		})
+	}
+	return violations
+}
+
+func checkContractReadTimeoutFile(fset *token.FileSet, file *ast.File) []contractViolation {
+	var violations []contractViolation
+	ast.Inspect(file, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "ReadTimeoutMS" {
+			violations = append(violations, contractViolation{
+				pos:  fset.Position(sel.Pos()),
+				text: "reads ReadTimeoutMS directly; " + contractReadTimeoutRemedy,
+			})
+		}
+		return true
+	})
+	return violations
+}
+
+// contractSameUsageField returns the counter name when both operands are
+// selectors of the same tracked field, seen through a numeric conversion.
+// An operand wrapped in any other call is not a sum of two counters.
+func contractSameUsageField(left, right ast.Expr) string {
+	l, lok := contractUnwrapConversion(left).(*ast.SelectorExpr)
+	r, rok := contractUnwrapConversion(right).(*ast.SelectorExpr)
+	if !lok || !rok || l.Sel.Name != r.Sel.Name || !contractUsageSumFields[l.Sel.Name] {
+		return ""
+	}
+	return l.Sel.Name
+}
+
+var contractNumericTypes = map[string]bool{
+	"int": true, "int32": true, "int64": true, "uint": true, "uint32": true, "uint64": true, "float64": true,
+}
+
+func contractUnwrapConversion(expr ast.Expr) ast.Expr {
+	expr = ast.Unparen(expr)
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return expr
+	}
+	if ident, ok := call.Fun.(*ast.Ident); ok && contractNumericTypes[ident.Name] {
+		return ast.Unparen(call.Args[0])
+	}
+	return expr
+}
+
+func checkContractUsageSumFile(fset *token.FileSet, file *ast.File) []contractViolation {
+	var violations []contractViolation
+	report := func(pos token.Pos, field string) {
+		violations = append(violations, contractViolation{
+			pos:  fset.Position(pos),
+			text: "sums " + field + " by hand; " + contractUsageSumRemedy,
+		})
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.BinaryExpr:
+			if node.Op == token.ADD {
+				if field := contractSameUsageField(node.X, node.Y); field != "" {
+					report(node.Pos(), field)
+				}
+			}
+		case *ast.AssignStmt:
+			if node.Tok == token.ADD_ASSIGN && len(node.Lhs) == 1 && len(node.Rhs) == 1 {
+				if field := contractSameUsageField(node.Lhs[0], node.Rhs[0]); field != "" {
+					report(node.Pos(), field)
+				}
+			}
+		}
+		return true
+	})
+	return violations
+}
+
+// contractCheckLifecycleSitesContainConstruct is
+// contractCheckAnchorSitesContainConstruct for contractLifecycleSites and
+// checkContractLifecycleFile.
+func contractCheckLifecycleSitesContainConstruct(r contractIdentityReporter, walked []contractWalkedPackage) {
+	fset := token.NewFileSet()
+	original := contractLifecycleSites
+	defer func() { contractLifecycleSites = original }()
+
+	for _, entry := range original {
+		contractLifecycleSites = slices.DeleteFunc(slices.Clone(original), func(e contractSiteEntry) bool { return e == entry })
+
+		fires := false
+		for _, w := range walked {
+			if w.pkg.importPath != entry.importPath {
+				continue
+			}
+			for _, file := range w.pkg.files {
+				if len(checkContractLifecycleFile(fset, file, w.pkg.importPath)) > 0 {
+					fires = true
+				}
+			}
+		}
+		if !fires {
+			r.Errorf("removing the LIFECYCLE exemption for %s.%s reported no violation, want its construct still present", entry.importPath, entry.name)
+		}
+	}
+}
+
+func TestContractLifecycleReadTimeoutUsageSumRules_AppliesAndStaysCurrent(t *testing.T) {
+	fset := token.NewFileSet()
+	walked := contractWalkCaptureAndTeardown(t, fset)
+
+	found := map[string]bool{}
+	for _, w := range walked {
+		found[w.pkg.dirName] = true
+	}
+
+	for _, rule := range []contractRule{ruleLIFECYCLE, ruleREADTIMEOUT, ruleUSAGESUM} {
+		contractCheckWideRuleEvaluated(t, rule, walked)
+		contractCheckWideRuleAllowlist(t, rule, found)
+	}
+	contractCheckSiteTableFunctionsExist(t, string(ruleLIFECYCLE), contractLifecycleSites, walked)
+	contractCheckLifecycleSitesContainConstruct(t, walked)
+
+	for _, w := range walked {
+		inAgentFamily := contractPathIsUnder(w.pkg.importPath, contractAgentFamilyPath)
+		for _, file := range w.pkg.files {
+			var violations []contractViolation
+			if !contractExempt(w.pkg.dirName, ruleLIFECYCLE) {
+				violations = append(violations, checkContractLifecycleFile(fset, file, w.pkg.importPath)...)
+			}
+			if inAgentFamily && !contractExempt(w.pkg.dirName, ruleREADTIMEOUT) {
+				violations = append(violations, checkContractReadTimeoutFile(fset, file)...)
+			}
+			if inAgentFamily && !contractExempt(w.pkg.dirName, ruleUSAGESUM) {
+				violations = append(violations, checkContractUsageSumFile(fset, file)...)
+			}
+			for _, v := range violations {
+				t.Errorf("%s: %s", v.pos, v.text)
+			}
+		}
+	}
 }
 
 // TestContractCaptureAndTeardown walks every non-test Go file under cmd/
@@ -5317,7 +5540,7 @@ func TestContractCaptureAndTeardownRule_AppliesAndStaysCurrent(t *testing.T) {
 // package-level contractAllowlist a concurrent fixture test reads, so
 // neither runs in parallel.
 func TestContractCaptureAndTeardownRule_StalenessGuardCatchesRealBreaks(t *testing.T) {
-	for _, rule := range []contractRule{ruleCAPTURE, ruleSINK, ruleTEARDOWN, ruleREAPER, ruleANCHOR, ruleWORKDIR} {
+	for _, rule := range []contractRule{ruleCAPTURE, ruleSINK, ruleTEARDOWN, ruleREAPER, ruleANCHOR, ruleWORKDIR, ruleLIFECYCLE, ruleREADTIMEOUT, ruleUSAGESUM} {
 		t.Run(string(rule)+": zero files evaluated under a required root", func(t *testing.T) {
 			walked := []contractWalkedPackage{
 				{pkg: contractPackage{dirName: "fixture", importPath: "github.com/sortie-ai/sortie/internal/tracker/fixture"}},
@@ -5526,6 +5749,34 @@ func Clean(cmd *exec.Cmd) {
 
 		if len(reporter.errors) == 0 {
 			t.Fatal("staleness guard recorded no failure for a WORKDIR site entry whose construct is gone, want at least one")
+		}
+	})
+
+	t.Run("a LIFECYCLE site entry no longer contains its construct", func(t *testing.T) {
+		fset := token.NewFileSet()
+		const src = `package fixture
+
+func Clean() string { return "nothing to see here" }
+`
+		file, err := parser.ParseFile(fset, "fixture.go", src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse fixture: %v", err)
+		}
+		walked := []contractWalkedPackage{{pkg: contractPackage{
+			dirName:    "fixture",
+			importPath: "example.com/fixture",
+			files:      []*ast.File{file},
+		}}}
+
+		original := contractLifecycleSites
+		contractLifecycleSites = []contractSiteEntry{{importPath: "example.com/fixture", name: "Clean", reason: "test"}}
+		t.Cleanup(func() { contractLifecycleSites = original })
+
+		reporter := &contractStalenessFakeReporter{}
+		contractCheckLifecycleSitesContainConstruct(reporter, walked)
+
+		if len(reporter.errors) == 0 {
+			t.Fatal("staleness guard recorded no failure for a LIFECYCLE site entry whose construct is gone, want at least one")
 		}
 	})
 }
@@ -5922,6 +6173,151 @@ func TestCheckContractWorkdir_AllowlistEntriesHold(t *testing.T) {
 		if !contractExempt(dirName, ruleWORKDIR) {
 			t.Errorf("contractExempt(%q, ruleWORKDIR) = false, want true", dirName)
 		}
+	}
+}
+
+func parseContractFixture(t *testing.T, src string) (*token.FileSet, *ast.File) {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "fixture.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parser.ParseFile: %v", err)
+	}
+	return fset, file
+}
+
+func TestCheckContractLifecycle_DetectsViolations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		importPath string
+		src        string
+		wantCount  int
+	}{
+		{
+			name:       "an aliased call and func value of the primitives beside a release func value are rejected",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/fixture",
+			src: `package fixture
+
+import pu "github.com/sortie-ai/sortie/internal/agent/procutil"
+
+var start = pu.StartWithOwnedPipes
+var release = pu.StartOutputRelease
+
+func launch(cmd *exec.Cmd) {
+	pipes, _, _ := pu.StartWithOwnedPipes(ctx, cmd, nil)
+	pu.NewStdoutReader(pipes.Stdout, nil)
+	pu.StartReaper(cmd, nil)
+}
+`,
+			wantCount: 4,
+		},
+		{
+			name:       "a StartOutputRelease call in the same file releases the primitives",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/fixture",
+			src: `package fixture
+
+import pu "github.com/sortie-ai/sortie/internal/agent/procutil"
+
+func launch(cmd *exec.Cmd) {
+	pipes, _, _ := pu.StartWithOwnedPipes(ctx, cmd, nil)
+	pu.NewStdoutReader(pipes.Stdout, nil)
+	pu.StartReaper(cmd, nil)
+	pu.StartOutputRelease(pu.OutputReleaseParams{})
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name:       "a release in another function does not excuse the primitives",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/fixture",
+			src: `package fixture
+
+import pu "github.com/sortie-ai/sortie/internal/agent/procutil"
+
+func release() { pu.StartOutputRelease(pu.OutputReleaseParams{}) }
+
+func launch(cmd *exec.Cmd) {
+	pu.StartReaper(cmd, nil)
+}
+`,
+			wantCount: 1,
+		},
+		{
+			name:       "a site-table function is exempt",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/copilot",
+			src: `package copilot
+
+import "github.com/sortie-ai/sortie/internal/agent/procutil"
+
+func deleteVerificationSession(cmd *exec.Cmd) {
+	procutil.StartReaper(cmd, nil)
+}
+`,
+			wantCount: 0,
+		},
+		{
+			name:       "a dot import is rejected at the import",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/fixture",
+			src: `package fixture
+
+import . "github.com/sortie-ai/sortie/internal/agent/procutil"
+
+func launch(cmd *exec.Cmd) {
+	StartReaper(cmd, nil)
+}
+`,
+			wantCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fset, file := parseContractFixture(t, tt.src)
+
+			got := checkContractLifecycleFile(fset, file, tt.importPath)
+
+			if len(got) != tt.wantCount {
+				t.Errorf("checkContractLifecycleFile() returned %d violations, want %d: %+v", len(got), tt.wantCount, got)
+			}
+		})
+	}
+}
+
+func TestCheckContractReadTimeoutAndUsageSum_DetectViolations(t *testing.T) {
+	t.Parallel()
+
+	readTimeout, usageSum := checkContractReadTimeoutFile, checkContractUsageSumFile
+	tests := []struct {
+		name      string
+		check     func(*token.FileSet, *ast.File) []contractViolation
+		stmt      string
+		wantCount int
+	}{
+		{"a ReadTimeoutMS selector is rejected", readTimeout, "_ = cfg.ReadTimeoutMS", 1},
+		{"the shared read-timeout helper is legal", readTimeout, "_ = agentcore.ReadTimeout(cfg)", 0},
+		{"same counter added", usageSum, "_ = x.InputTokens + y.InputTokens", 1},
+		{"same counter accumulated", usageSum, "x.OutputTokens += y.OutputTokens", 1},
+		{"different counters are a total", usageSum, "_ = x.InputTokens + x.OutputTokens", 0},
+		{"an untracked field is legal", usageSum, "_ = x.Count + y.Count", 0},
+		{"a numeric conversion does not hide the sum", usageSum, "_ = x.InputTokens + int64(y.InputTokens)", 1},
+		{"an operand from another call is legal", usageSum, "_ = x.InputTokens + f(y.InputTokens)", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fset, file := parseContractFixture(t, "package fixture\n\nfunc f() {\n\t"+tt.stmt+"\n}\n")
+
+			if got := tt.check(fset, file); len(got) != tt.wantCount {
+				t.Errorf("check(%q) returned %d violations, want %d: %+v", tt.stmt, len(got), tt.wantCount, got)
+			}
+		})
 	}
 }
 

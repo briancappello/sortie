@@ -23,28 +23,16 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
-// scenarioOpencodeSSHStandIn names the Go fake runtime registered
-// below into fakeScenarios.
 const scenarioOpencodeSSHStandIn = "opencode.ssh-stand-in"
 
 func init() {
 	fakeScenarios[scenarioOpencodeSSHStandIn] = agenttest.Typed(runOpencodeSSHStandIn)
 }
 
-// sshStandInParams configures [runOpencodeSSHStandIn]: PATH is the
-// PATH value its dropped-environment child receives.
 type sshStandInParams struct {
 	PATH string
 }
 
-// runOpencodeSSHStandIn is a stand-in "ssh" runtime: it ignores every
-// argument ahead of the last one, the remote command
-// sshutil.BuildSSHLaunch produced, and runs that command through sh -c
-// with its own environment dropped and replaced by params.PATH alone,
-// and its standard input, output, and error inherited. Dropping the
-// environment is what proves a carried variable or setting reaches the
-// remote command only through the SSH session's standard input, never
-// through this process's own inherited environment.
 func runOpencodeSSHStandIn(args []string, params sshStandInParams) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "ssh stand-in: no arguments")
@@ -56,6 +44,8 @@ func runOpencodeSSHStandIn(args []string, params sshStandInParams) int {
 		return 2
 	}
 
+	// The dropped environment proves carried values reach the remote command
+	// only through standard input.
 	remoteCommand := args[len(args)-1]
 	cmd := exec.Command(shPath, "-c", remoteCommand) //nolint:gosec // remoteCommand is the launch this test built
 	cmd.Env = []string{"PATH=" + params.PATH}
@@ -73,13 +63,6 @@ func runOpencodeSSHStandIn(args []string, params sshStandInParams) int {
 	return 0
 }
 
-// sshStandInEnvPath returns the PATH value the ssh stand-in's dropped-
-// environment child should receive: a directory holding only a
-// symlink to sh, and, when includeDD is true, a symlink to dd as well.
-// Building an isolated directory rather than reusing sh's own
-// directory matters because a real sh and a real dd usually share one
-// directory (/usr/bin, /bin), so reusing it for the no-dd case would
-// resolve dd anyway.
 func sshStandInEnvPath(t *testing.T, includeDD bool) string {
 	t.Helper()
 
@@ -88,6 +71,8 @@ func sshStandInEnvPath(t *testing.T, includeDD bool) string {
 		t.Skipf("sh not found on PATH: %v", err)
 	}
 
+	// A private directory: sh and dd usually share /usr/bin, so reusing sh's
+	// own directory would resolve dd in the no-dd case too.
 	dir := t.TempDir()
 	if err := os.Symlink(shPath, filepath.Join(dir, "sh")); err != nil {
 		t.Fatalf("Symlink(sh): %v", err)
@@ -105,11 +90,6 @@ func sshStandInEnvPath(t *testing.T, includeDD bool) string {
 	return dir
 }
 
-// writeSSHCaptureScript writes a script that answers a leading
-// --version argument for StartSession's own version query, and
-// otherwise captures carriedName's value and the
-// OPENCODE_DISABLE_AUTOUPDATE managed setting's value, each to its own
-// file, then exits 0.
 func writeSSHCaptureScript(t *testing.T, dir, carriedName, envCapturePath, settingCapturePath string) string {
 	t.Helper()
 	content := "case \"$1\" in\n  --version) echo 'opencode v2.0.18'; exit 0;;\nesac\n" +
@@ -118,9 +98,6 @@ func writeSSHCaptureScript(t *testing.T, dir, carriedName, envCapturePath, setti
 	return agenttest.WriteScript(t, dir, "fake-opencode-ssh", content)
 }
 
-// pollOpencodePIDAndAssertGone polls path for a positive PID, then
-// polls until kill(pid, 0) reports an error (process gone), failing t
-// if either bound is exceeded.
 func pollOpencodePIDAndAssertGone(t *testing.T, path string) {
 	t.Helper()
 
@@ -149,10 +126,6 @@ func pollOpencodePIDAndAssertGone(t *testing.T, path string) {
 	t.Errorf("descendant %d still answers signal 0, want it gone", pid)
 }
 
-// TestQueryExportUsage_HeldDescendantHoldingOutput asserts that with
-// a held descendant holding the export query's output, queryExportUsage
-// returns within its timer with the export's usage, and the descendant
-// is gone.
 func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	fixturePath := filepath.Join(tmpDir, "export_usage.json")
@@ -171,11 +144,11 @@ func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("queryExportUsage() took %v, want within 3s", elapsed)
 	}
-	if usage.InputTokens != 1750 {
-		t.Errorf("InputTokens = %d, want 1750", usage.InputTokens)
+	if usage.Usage.InputTokens != 1750 {
+		t.Errorf("InputTokens = %d, want 1750", usage.Usage.InputTokens)
 	}
-	if usage.OutputTokens != 300 {
-		t.Errorf("OutputTokens = %d, want 300", usage.OutputTokens)
+	if usage.Usage.OutputTokens != 300 {
+		t.Errorf("OutputTokens = %d, want 300", usage.Usage.OutputTokens)
 	}
 
 	pollOpencodePIDAndAssertGone(t, pidPath)
@@ -212,37 +185,6 @@ func testExportState(command, workspace string) *sessionState {
 
 func TestQueryExportSubprocess(t *testing.T) {
 	t.Parallel()
-
-	t.Run("a_cancelled_turn_context_does_not_cost_the_recovery", func(t *testing.T) {
-		t.Parallel()
-
-		// Every terminal path hands `recoverUsage` the TURN's context, and on
-		// the cancel path that context is the thing that just fired. The read
-		// timeout and the process-exit path can reach it after a cancellation
-		// too. The export is terminal work about a turn that already ran, so
-		// it must not inherit the caller's cancellation.
-		tmpDir := t.TempDir()
-		script, _ := writeExportScript(t, tmpDir, "export_usage.json", 0)
-		state := testExportState(script, tmpDir)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		// The hazard, measured rather than assumed: an attached query on this
-		// context recovers nothing at all.
-		if usage := queryExportUsage(ctx, state, 0); hasUsage(usage) {
-			t.Fatal("queryExportUsage recovered on a cancelled context; this test's premise is gone")
-		}
-
-		recovered := recoverUsage(ctx, state, 0)
-		if recovered == nil {
-			t.Fatal("recoverUsage = nil on a cancelled turn context, want the export's figures")
-		}
-		if recovered.Run.InputTokens != 1750 || recovered.Run.OutputTokens != 300 {
-			t.Errorf("Run = in:%d out:%d, want in:1750 out:300",
-				recovered.Run.InputTokens, recovered.Run.OutputTokens)
-		}
-	})
 
 	t.Run("the_warning_reports_an_export_that_recovered_nothing", func(t *testing.T) {
 		t.Parallel()
@@ -286,14 +228,14 @@ func TestQueryExportSubprocess(t *testing.T) {
 		state := testExportState(script, tmpDir)
 
 		usage := queryExportUsage(context.Background(), state, 0)
-		if usage.InputTokens != 1750 {
-			t.Errorf("InputTokens = %d, want 1750", usage.InputTokens)
+		if usage.Usage.InputTokens != 1750 {
+			t.Errorf("InputTokens = %d, want 1750", usage.Usage.InputTokens)
 		}
-		if usage.OutputTokens != 300 {
-			t.Errorf("OutputTokens = %d, want 300", usage.OutputTokens)
+		if usage.Usage.OutputTokens != 300 {
+			t.Errorf("OutputTokens = %d, want 300", usage.Usage.OutputTokens)
 		}
-		if usage.CacheReadTokens != 200 {
-			t.Errorf("CacheReadTokens = %d, want 200", usage.CacheReadTokens)
+		if usage.Usage.CacheReadTokens != 200 {
+			t.Errorf("CacheReadTokens = %d, want 200", usage.Usage.CacheReadTokens)
 		}
 
 		args, err := os.ReadFile(argsPath)
@@ -341,14 +283,14 @@ func TestQueryExportSubprocess(t *testing.T) {
 		state.target.SSHHost = "example.test"
 
 		usage := queryExportUsage(context.Background(), state, 0)
-		if usage.InputTokens != 1750 {
-			t.Errorf("InputTokens = %d, want 1750", usage.InputTokens)
+		if usage.Usage.InputTokens != 1750 {
+			t.Errorf("InputTokens = %d, want 1750", usage.Usage.InputTokens)
 		}
-		if usage.OutputTokens != 300 {
-			t.Errorf("OutputTokens = %d, want 300", usage.OutputTokens)
+		if usage.Usage.OutputTokens != 300 {
+			t.Errorf("OutputTokens = %d, want 300", usage.Usage.OutputTokens)
 		}
-		if usage.CacheReadTokens != 200 {
-			t.Errorf("CacheReadTokens = %d, want 200", usage.CacheReadTokens)
+		if usage.Usage.CacheReadTokens != 200 {
+			t.Errorf("CacheReadTokens = %d, want 200", usage.Usage.CacheReadTokens)
 		}
 
 		args, err := os.ReadFile(argsPath)
@@ -365,16 +307,8 @@ func TestQueryExportSubprocess(t *testing.T) {
 	})
 }
 
-// TestQueryExportUsage_SSH_CarriesEnvironmentVariableAndSetting drives
-// queryExportUsage's remote branch through a stand-in ssh runtime and
-// asserts that the fake remote command observes both a carried
-// variable's value and the OPENCODE_DISABLE_AUTOUPDATE managed setting,
-// delivered only through the SSH session's standard input rather than
-// through the stand-in's own inherited environment.
-//
-// Not run with t.Parallel(): sets PATH and the carried variable via
-// t.Setenv.
 func TestQueryExportUsage_SSH_CarriesEnvironmentVariableAndSetting(t *testing.T) {
+	// Not parallel: sets PATH and the carried variable via t.Setenv.
 	tmpDir := t.TempDir()
 	sshDir := t.TempDir()
 
@@ -413,15 +347,8 @@ func TestQueryExportUsage_SSH_CarriesEnvironmentVariableAndSetting(t *testing.T)
 	}
 }
 
-// TestRunTurn_SSH_CarriesEnvironmentVariableAndSetting drives
-// OpenCodeAdapter.RunTurn's remote branch through a stand-in ssh
-// runtime and asserts that the fake remote command observes both a
-// carried variable's value and the OPENCODE_DISABLE_AUTOUPDATE
-// managed setting.
-//
-// Not run with t.Parallel(): sets PATH and the carried variable via
-// t.Setenv.
 func TestRunTurn_SSH_CarriesEnvironmentVariableAndSetting(t *testing.T) {
+	// Not parallel: sets PATH and the carried variable via t.Setenv.
 	tmpDir := t.TempDir()
 	sshDir := t.TempDir()
 
@@ -447,10 +374,6 @@ func TestRunTurn_SSH_CarriesEnvironmentVariableAndSetting(t *testing.T) {
 		t.Fatalf("StartSession() error = %v, want nil", err)
 	}
 
-	// The turn's own disposition is not this test's subject: the fake
-	// remote command emits no opencode JSON at all, so whatever
-	// RunTurn reports for that is exercised elsewhere. Only the
-	// carried variable and setting matter here.
 	a.RunTurn(context.Background(), session, domain.RunTurnParams{ //nolint:errcheck // disposition not under test here
 		Prompt:  "work",
 		OnEvent: func(domain.AgentEvent) {},
@@ -473,9 +396,6 @@ func TestRunTurn_SSH_CarriesEnvironmentVariableAndSetting(t *testing.T) {
 	}
 }
 
-// writeExportScriptWithStdinCapture is [writeExportScript] extended to
-// record the whole of standard input the subprocess received, ahead
-// of recording its argument vector.
 func writeExportScriptWithStdinCapture(t *testing.T, dir, fixtureName string, exitCode int, stdinPath string) (string, string) {
 	t.Helper()
 
@@ -496,14 +416,6 @@ cat '` + fixturePath + `'`
 	return agenttest.WriteScript(t, dir, "fake-export", body), argsPath
 }
 
-// TestQueryExportUsage_LocalLaunchIgnoresSSHEnvNames asserts that a
-// local export query (RemoteCommand empty) sends the same argument
-// vector and empty standard input whether or not
-// LaunchTarget.SSHEnvNames names a set variable: queryExportUsage's
-// local branch never consults it. This reddens if that branch starts
-// treating a non-empty SSHEnvNames as a signal to take the remote
-// path, which would replace the local argument vector with an SSH
-// option vector and attach a non-empty preamble to standard input.
 func TestQueryExportUsage_LocalLaunchIgnoresSSHEnvNames(t *testing.T) {
 	// Not parallel: sets the carried variable via t.Setenv.
 	const varName = "SORTIE_OPENCODE_EXPORT_LOCAL_INVARIANCE"
@@ -523,7 +435,7 @@ func TestQueryExportUsage_LocalLaunchIgnoresSSHEnvNames(t *testing.T) {
 		state.target.SSHEnvNames = tc.sshEnvNames
 
 		usage := queryExportUsage(context.Background(), state, 0)
-		if usage.InputTokens != 1750 || usage.OutputTokens != 300 {
+		if usage.Usage.InputTokens != 1750 || usage.Usage.OutputTokens != 300 {
 			t.Errorf("%s: usage = %+v, want InputTokens=1750 OutputTokens=300", tc.name, usage)
 		}
 

@@ -197,16 +197,6 @@ func restoresSavedTotals(version string) bool {
 	return semver.Compare("v"+version, "v"+firstRestoringRelease) >= 0
 }
 
-// sumTurnMessages sums every stored per-message-id usage into one
-// turn-provisional [domain.TokenUsage].
-func sumTurnMessages(turnMessages map[string]domain.TokenUsage) domain.TokenUsage {
-	var sum domain.TokenUsage
-	for _, usage := range turnMessages {
-		sum = agentcore.AddUsage(sum, usage)
-	}
-	return sum
-}
-
 // contentBlocks extracts the content array from an assistant message
 // event. Returns nil if the message field is absent or unparseable.
 func (e rawEvent) contentBlocks() []rawContentBlock {

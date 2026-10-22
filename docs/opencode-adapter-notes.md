@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's OpenCode adapter in `internal/agent/opencode`.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-22
 
 ## Where to get the volatile facts
 
@@ -33,15 +33,23 @@ On every launch the runtime imports sessions stored by older releases, in the ba
 
 A fresh data root has a one-time race: the first launch wins a schema-creation lock, and every concurrent launch on the same root exits early. At the adapter this looks like any other early exit. It goes away on retry once the schema exists.
 
-## Why this adapter owns its own loop
+## Turn lifecycle
 
-Every other fork-per-turn adapter uses `agentcore.ForkPerTurnSession`. This one starts the process itself and runs its own reader, wait goroutine, and select loop. It needs two things the skeleton does not offer: a deadline on the first JSON event, and a query against the same binary after exit to recover usage.
+Turns run on `agentcore.ForkPerTurnSession`, the skeleton Claude Code and Copilot CLI use. Launch, output reading, the reap, the stop, the order in which a turn's possible endings win, and the logger belong to the skeleton, so a lifecycle change goes there and reaches every kind. This package supplies only what is OpenCode's own, through the skeleton's hooks:
 
-This is a maintenance hazard. Fixes to the shared skeleton do not reach this adapter, so where the two should behave alike, keep them alike by hand. The terminal decision is still shared through `agentcore.FinalizeTurn`.
+- `BuildArgs` returns the run argument vector. The prompt is not an argument, so `PromptOnStdin` is set and the skeleton writes the prompt to standard input after the SSH preamble on a remote launch.
+- `FirstEventTimeout` is `agentcore.FirstResponseTimeout` of the agent configuration.
+- `TurnEnv` returns the scrubbed environment for a local launch and, for a remote one, the managed variables with the inline configuration document.
+- `ParseLine` maps each envelope to events. A line that is not JSON is malformed. A session ID that differs from the adopted one returns `agentcore.EndTurn` with `response_error`. A turn-ending `step_finish` and an `error` event return a non-nil result.
+- `SettleUsage` runs the session export and hands the figure to the turn-end report. The skeleton calls it on every ending of a started turn except the mismatch, so a cancelled turn, a read failure, and a missed deadline recover usage like a clean exit does.
+- `OnFinalize` raises the permission notices from standard error, settles the spend on a clean exit, and builds the turn evidence, including the free-tier refusal clause.
+- `GetUsage` and `GetSessionID` read the session state. `EmitSessionStartID` is nil because `ParseLine` emits `session_started` itself on the first envelope that carries an ID.
 
-The first-JSON deadline is the larger of the read timeout and `agentcore.CredentialExchangeBound`. OpenCode prints nothing until the provider starts answering, and the free hosted model can take much longer than the 5-second default read timeout. The deadline stops at the first envelope, so it catches a process that never talks, not a stall in the middle of a turn. Stalls belong to the orchestrator.
+`StopSession` calls the skeleton's stop, then deletes the verification session when the session is a credential verification.
 
-The adapter owns both pipe read ends, so the reap does not depend on the stdout reader. The wait goroutine reaps first and only then waits, bounded, for stderr. A descendant that holds stderr open cannot delay the reap. It can delay the published turn result, and if the bound fires, the permission-refusal warning is lost. For that reason nothing that must react to process exit reads the result channel; the stdout reader's own bound starts from the reap. The early-return paths also bound their drain of the stdout reader, so a descendant holding only stdout cannot block them.
+The first-event deadline is the larger of the read timeout and `agentcore.CredentialExchangeBound`. OpenCode prints nothing until the provider starts answering, and the free hosted model can take much longer than the 5-second default read timeout. The deadline stops at the first envelope, so it catches a process that never talks, not a stall in the middle of a turn. Stalls belong to the orchestrator.
+
+The export runs after the reap, on a context that outlives the turn's cancellation, and bounds itself with `agentcore.AuxiliaryTimeout`. A slow export delays the turn's result, never the stop.
 
 ## Session identity and the dir-scoped resume
 
@@ -79,7 +87,7 @@ A message counts only once its `finish` field is set. The runtime saves an assis
 
 The configuration document disables the runtime's title agent. Its request is billed but recorded in no message, so the sum would miss it.
 
-A failed or empty export must never lower a figure the run has already reported. The finalize path skips the update entirely rather than replacing a settled value with zero.
+A failed or empty export must never lower a figure the run has already reported. The settle step skips the update entirely rather than replacing a settled value with zero.
 
 ## Failure detection
 

@@ -137,6 +137,15 @@ type sessionState struct {
 	// payload marked them as autopilot continuations. Diagnostic only;
 	// never consulted by the turn disposition.
 	turnContinuations int
+
+	// turnResultSeen is true once the turn's result event has arrived.
+	turnResultSeen bool
+
+	// turnResume and turnResumeByModel are the session's own usage the
+	// turn's journal read left for hand-over to a later run; nil when the
+	// read produced none.
+	turnResume        *domain.TokenUsage
+	turnResumeByModel map[string]domain.TokenUsage
 }
 
 func (s *sessionState) logger() *slog.Logger {
@@ -144,12 +153,6 @@ func (s *sessionState) logger() *slog.Logger {
 		return s.baseLogger
 	}
 	return logging.WithSession(s.baseLogger, s.copilotSessionID)
-}
-
-func (s *sessionState) refreshForkLogger() {
-	if s.forkSession != nil {
-		s.forkSession.SetLogger(s.logger())
-	}
 }
 
 // recoverUsage reads the runtime's session-state journal after the
@@ -471,6 +474,10 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				state.logger().Debug("copilot event logged only", slog.String("event_type", event.Type))
 
 			case "result":
+				if event.SessionID != "" {
+					state.copilotSessionID = event.SessionID
+				}
+				state.turnResultSeen = true
 				return new(event), nil
 
 			default:
@@ -484,23 +491,20 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 			return state.usage.Snapshot(), state.usage.ByModel(), state.usage.Measured()
 		},
 		GetSessionID: func() string { return state.copilotSessionID },
-		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
-			lastResult, _ := lastParsed.(*rawEvent)
-
-			// Capture session ID from result event for subsequent turns.
-			if lastResult != nil && lastResult.SessionID != "" {
-				state.copilotSessionID = lastResult.SessionID
-				state.refreshForkLogger()
-			}
-
+		SettleUsage: func(_ context.Context, emit func(domain.AgentEvent), spend *agentcore.TurnSpend) {
 			recovered, estimated, resume, resumeByModel := state.recoverUsage(state.logger())
-			if lastResult != nil && recovered != nil {
+			state.usage.Settle(emit, recovered)
+			state.turnResume, state.turnResumeByModel = resume, resumeByModel
+			if state.turnResultSeen && recovered != nil {
 				spend.MarkSettled()
 				spend.MarkSessionTotal()
 			}
 			if estimated {
 				spend.MarkEstimated()
 			}
+		},
+		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
+			lastResult, _ := lastParsed.(*rawEvent)
 
 			ev := agentcore.TurnEvidence{
 				ExitObserved: true,
@@ -540,9 +544,9 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				}
 			}
 
-			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, recovered, *spend)
-			result.ResumeUsage = resume
-			result.ResumeUsageByModel = resumeByModel
+			result, agentErr := state.usage.Finalize(emit, state.logger(), ev, state.copilotSessionID, apiDurationMS, nil, *spend)
+			result.ResumeUsage = state.turnResume
+			result.ResumeUsageByModel = state.turnResumeByModel
 			return result, agentErr
 		},
 		// Copilot emits EventSessionStarted before the scan loop using the
@@ -550,7 +554,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 		EmitSessionStartID: func() string { return state.copilotSessionID },
 	}
 
-	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.logger(), state.agentConfig.StopGraceMS)
+	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 
 	return domain.Session{
 		ID:       copilotSessionID,
@@ -571,8 +575,6 @@ func (a *CopilotAdapter) RunTurn(ctx context.Context, session domain.Session, pa
 		return domain.TurnResult{}, fmt.Errorf("unexpected session internal type %T", session.Internal)
 	}
 
-	state.refreshForkLogger()
-
 	// Reset per-turn scan state before delegation. state.usage is
 	// constructed once in StartSession and carries the run-cumulative
 	// snapshot across turns, so it is not reset here.
@@ -583,6 +585,9 @@ func (a *CopilotAdapter) RunTurn(ctx context.Context, session domain.Session, pa
 	state.turnCompletionSummary = ""
 	state.turnErrorMessage = ""
 	state.turnContinuations = 0
+	state.turnResultSeen = false
+	state.turnResume = nil
+	state.turnResumeByModel = nil
 
 	return state.forkSession.RunTurn(ctx, params.Prompt, params.OnEvent)
 }
