@@ -337,7 +337,7 @@ type moneyCeilingSetting struct {
 }
 
 // moneyCeilingSettings returns each money setting of agent above 0, in the
-// order per-issue, daily, monthly.
+// order per-issue, daily, weekly, monthly.
 func moneyCeilingSettings(agent config.AgentConfig) []moneyCeilingSetting {
 	var settings []moneyCeilingSetting
 	if agent.MaxCostUSD > 0 {
@@ -346,17 +346,13 @@ func moneyCeilingSettings(agent config.AgentConfig) []moneyCeilingSetting {
 			NoUsage: "the per-issue money ceiling can never be reached for it",
 		})
 	}
-	if agent.MaxDailyCostUSD > 0 {
-		settings = append(settings, moneyCeilingSetting{
-			Key:     "agent.max_daily_cost_usd",
-			NoUsage: "the daily spend ceiling counts none of its spend",
-		})
-	}
-	if agent.MaxMonthlyCostUSD > 0 {
-		settings = append(settings, moneyCeilingSetting{
-			Key:     "agent.max_monthly_cost_usd",
-			NoUsage: "the monthly spend ceiling counts none of its spend",
-		})
+	for _, def := range spendWindowDefs {
+		if def.ceiling(agent) > 0 {
+			settings = append(settings, moneyCeilingSetting{
+				Key:     def.setting,
+				NoUsage: "the " + string(def.window) + " spend ceiling counts none of its spend",
+			})
+		}
 	}
 	return settings
 }

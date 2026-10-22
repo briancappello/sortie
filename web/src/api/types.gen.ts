@@ -916,6 +916,7 @@ export interface SpendBucket {
 
 export interface SpendCeilingResponse {
   daily: SpendWindowResponse | null;
+  weekly: SpendWindowResponse | null;
   monthly: SpendWindowResponse | null;
 }
 

@@ -35,20 +35,35 @@ function SpendMeter({ name, window }: SpendMeterProps) {
   );
 }
 
-/** Renders the Spend section: one meter per configured instance spend window, daily first. */
+// Record forces a label for every window the API serves, so a new member fails tsc here.
+// Key order is the render order.
+const SPEND_LABELS: Record<keyof SpendCeilingResponse, string> = {
+  daily: "Daily spend",
+  weekly: "Weekly spend",
+  monthly: "Monthly spend",
+};
+
+// Object.keys widens to string[]; the keys are exactly those of SPEND_LABELS.
+const SPEND_WINDOWS = Object.keys(SPEND_LABELS) as (keyof SpendCeilingResponse)[];
+
+/** Renders the Spend section: one meter per configured instance spend window, shortest window first. */
 export function SpendCeilings({ ceiling }: SpendCeilingsProps) {
-  if (ceiling === undefined || (ceiling.daily === null && ceiling.monthly === null)) {
+  if (ceiling === undefined) {
+    return undefined;
+  }
+  const meters = SPEND_WINDOWS.flatMap((key) => {
+    const window = ceiling[key];
+    return window === null
+      ? []
+      : [<SpendMeter key={key} name={SPEND_LABELS[key]} window={window} />];
+  });
+  if (meters.length === 0) {
     return undefined;
   }
   return (
     <section className="flex flex-col gap-sm">
       <h2 className="font-heading text-h7 font-semibold text-ink">Spend</h2>
-      {ceiling.daily === null ? undefined : (
-        <SpendMeter name="Daily spend" window={ceiling.daily} />
-      )}
-      {ceiling.monthly === null ? undefined : (
-        <SpendMeter name="Monthly spend" window={ceiling.monthly} />
-      )}
+      {meters}
     </section>
   );
 }

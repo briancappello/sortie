@@ -128,11 +128,10 @@ type HandleRetryTimerParams struct {
 	// reaches it.
 	MaxCostUSD float64
 
-	// MaxDailyCostUSD and MaxMonthlyCostUSD are the instance spend
-	// ceilings. While either window has reached its ceiling the retry is
-	// kept scheduled instead of dispatching.
-	MaxDailyCostUSD   float64
-	MaxMonthlyCostUSD float64
+	// SpendCeilings holds the instance spend ceiling of each window; a
+	// window absent or at 0 is off. While any window has reached its ceiling
+	// the retry is kept scheduled instead of dispatching.
+	SpendCeilings map[SpendWindow]float64
 
 	// PollIntervalMS is the recheck delay of a retry held by a spend
 	// ceiling.
@@ -397,13 +396,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	// Held retries keep their attempt, error, and persisted row so the hold
 	// costs no backoff and no budget; only the due time moves.
 	if hold := evaluateSpendCeiling(state, spendCeilingParams{
-		Ctx:        ctx,
-		Store:      params.Store,
-		DailyUSD:   params.MaxDailyCostUSD,
-		MonthlyUSD: params.MaxMonthlyCostUSD,
-		Rates:      state.Rates,
-		Now:        retryClock(params),
-		Logger:     params.Logger,
+		Ctx:      ctx,
+		Store:    params.Store,
+		Ceilings: params.SpendCeilings,
+		Rates:    state.Rates,
+		Now:      retryClock(params),
+		Logger:   params.Logger,
 	}); hold != SkipNone {
 		if params.ReleaseSpendHeld {
 			delete(state.Claimed, issueID)

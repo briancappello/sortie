@@ -839,8 +839,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				HandoffEvidencePolicy:  cfg.Tracker.HandoffEvidence,
 				MaxTokens:              cfg.Agent.MaxTokens,
 				MaxCostUSD:             cfg.Agent.MaxCostUSD,
-				MaxDailyCostUSD:        cfg.Agent.MaxDailyCostUSD,
-				MaxMonthlyCostUSD:      cfg.Agent.MaxMonthlyCostUSD,
+				SpendCeilings:          spendCeilingsOf(cfg.Agent),
 				PollIntervalMS:         cfg.Polling.IntervalMS,
 				Metrics:                o.metrics,
 				HostPool:               o.hostPool,
@@ -1136,13 +1135,12 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	}
 
 	spendHold := evaluateSpendCeiling(o.state, spendCeilingParams{
-		Ctx:        ctx,
-		Store:      o.store,
-		DailyUSD:   cfg.Agent.MaxDailyCostUSD,
-		MonthlyUSD: cfg.Agent.MaxMonthlyCostUSD,
-		Rates:      o.state.Rates,
-		Now:        time.Now(),
-		Logger:     o.logger,
+		Ctx:      ctx,
+		Store:    o.store,
+		Ceilings: spendCeilingsOf(cfg.Agent),
+		Rates:    o.state.Rates,
+		Now:      time.Now(),
+		Logger:   o.logger,
 	})
 
 	// On preflight failure, skip dispatch but still notify observers.

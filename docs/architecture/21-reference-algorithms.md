@@ -110,7 +110,7 @@ on_tick(state, once):
 
   # Runs whether or not validation passed, so the figures and the hold
   # edges stay current; reads nothing while neither ceiling is above 0.
-  spend_hold = evaluate_spend_ceiling(state, now())    // Section 8.4: none, daily_spend_ceiling, or monthly_spend_ceiling
+  spend_hold = evaluate_spend_ceiling(state, now())    // Section 8.4: none, daily_spend_ceiling, weekly_spend_ceiling, or monthly_spend_ceiling
 
   if validation is not ok:
     log_validation_error(validation)

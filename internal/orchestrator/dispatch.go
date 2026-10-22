@@ -269,6 +269,7 @@ const (
 	SkipBlockersIncomplete SkipReason = "blockers_incomplete"
 
 	SkipDailySpendCeiling   SkipReason = "daily_spend_ceiling"
+	SkipWeeklySpendCeiling  SkipReason = "weekly_spend_ceiling"
 	SkipMonthlySpendCeiling SkipReason = "monthly_spend_ceiling"
 )
 

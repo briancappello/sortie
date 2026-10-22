@@ -304,6 +304,11 @@ type AgentConfig struct {
 	// finite.
 	MaxDailyCostUSD float64
 
+	// MaxWeeklyCostUSD is the instance ceiling in USD on the estimated cost of
+	// the current UTC week, Monday 00:00 to the next Monday 00:00; 0 disables
+	// it. Non-negative and finite.
+	MaxWeeklyCostUSD float64
+
 	// MaxMonthlyCostUSD is the instance ceiling in USD on the estimated
 	// cost of the current UTC calendar month; 0 disables it.
 	// Non-negative and finite.
@@ -1278,6 +1283,11 @@ func buildAgentConfig(m map[string]any) (AgentConfig, error) {
 		return AgentConfig{}, err
 	}
 
+	maxWeeklyCostUSD, err := coerceNonNegativeFiniteFloat(m, "max_weekly_cost_usd", "agent.max_weekly_cost_usd")
+	if err != nil {
+		return AgentConfig{}, err
+	}
+
 	maxMonthlyCostUSD, err := coerceNonNegativeFiniteFloat(m, "max_monthly_cost_usd", "agent.max_monthly_cost_usd")
 	if err != nil {
 		return AgentConfig{}, err
@@ -1332,6 +1342,7 @@ func buildAgentConfig(m map[string]any) (AgentConfig, error) {
 		MaxTokens:              maxTokens,
 		MaxCostUSD:             maxCostUSD,
 		MaxDailyCostUSD:        maxDailyCostUSD,
+		MaxWeeklyCostUSD:       maxWeeklyCostUSD,
 		MaxMonthlyCostUSD:      maxMonthlyCostUSD,
 		TokenWarningPercent:    tokenWarningPercent,
 		MaxConsecutiveAbsences: maxConsecutiveAbsences,

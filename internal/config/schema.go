@@ -100,6 +100,7 @@ var knownFieldsRegistry = map[string]SectionSchema{
 			{Name: "max_tokens", Type: FieldInt},
 			{Name: "max_cost_usd", Type: FieldNumber},
 			{Name: "max_daily_cost_usd", Type: FieldNumber},
+			{Name: "max_weekly_cost_usd", Type: FieldNumber},
 			{Name: "max_monthly_cost_usd", Type: FieldNumber},
 			{Name: "token_warning_percent", Type: FieldInt},
 			{Name: "max_consecutive_absences", Type: FieldInt},

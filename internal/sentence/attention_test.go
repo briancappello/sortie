@@ -2,6 +2,7 @@ package sentence
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -414,6 +415,38 @@ func TestAttentionTexts(t *testing.T) {
 				if part.want != "" && part.got != part.want {
 					t.Errorf("Attention(%s) %s = %q, want %q", tt.name, part.name, part.got, part.want)
 				}
+			}
+		})
+	}
+}
+
+func TestAttentionSpendWordingPerWindow(t *testing.T) {
+	t.Parallel()
+
+	for _, window := range orchestrator.SpendWindows() {
+		t.Run(string(window), func(t *testing.T) {
+			t.Parallel()
+
+			snap := orchestrator.RuntimeSnapshotResult{SpendCeilings: []orchestrator.SpendCeilingStatus{
+				{Window: window, BudgetUSD: 7, UsedUSD: 7, Holding: true, ResetsAt: attentionAt},
+			}}
+
+			got := Attention(snap, nil, Context{})
+
+			if len(got) != 1 {
+				t.Fatalf("Attention(%s hold) = %d items, want 1", window, len(got))
+			}
+			wantPrefix := strings.ToUpper(string(window)[:1]) + string(window)[1:] + " "
+			if !strings.HasPrefix(got[0].ReasonText, wantPrefix) {
+				t.Errorf("Attention(%s hold) ReasonText = %q, want prefix %q", window, got[0].ReasonText, wantPrefix)
+			}
+			for _, text := range []string{got[0].WhyText, got[0].ClearsText} {
+				if text == fallbackText {
+					t.Errorf("Attention(%s hold) text = %q, want the window's wording", window, text)
+				}
+			}
+			if !strings.Contains(got[0].ClearsText, window.Setting()) {
+				t.Errorf("Attention(%s hold) ClearsText = %q, want it to name %q", window, got[0].ClearsText, window.Setting())
 			}
 		})
 	}

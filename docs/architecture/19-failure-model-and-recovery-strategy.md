@@ -148,5 +148,5 @@ Operators can control behavior by:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
   - no state (on a label-derived tracker, removing the issue's state label) -> the same stop without cleanup, taken at the second consecutive reconciliation that reads no state; a run that finishes first hands its work off as usual, and labeling the issue again makes it a candidate at the next poll
-- Raising or removing `agent.max_daily_cost_usd` or `agent.max_monthly_cost_usd` in `WORKFLOW.md`, which lifts an instance spend hold at the next poll tick or retry timer fire.
+- Raising or removing `agent.max_daily_cost_usd`, `agent.max_weekly_cost_usd`, or `agent.max_monthly_cost_usd` in `WORKFLOW.md`, which lifts an instance spend hold at the next poll tick or retry timer fire.
 - Restarting the service for process recovery or deployment (not as the normal path for applying workflow config changes).
