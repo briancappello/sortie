@@ -3832,7 +3832,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `workflow_path`, `db_path` | string  | The host paths of the `WORKFLOW.md` and the database the report reads, as the command prints them. |
 | `since`, `until` | string or `null`  | The resolved bounds in UTC, `null` when open. |
 | `schema_tier`    | string            | `full`, or `base` for a database that lacks columns the full report needs. On `base`, `by_rule`, `by_template`, `by_model`, `by_chain`, `chain_funnels`, `by_trigger`, and `by_origin` are `[]`, `spend`, `skill_calls`, and `self_review` are `null`, and the figures that need the missing columns are `null`. |
-| `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. The first entry names what an older database leaves out and how to get it, when it leaves anything out. A database whose runs carry no recorded cost, because no service start has applied the schema change that records it, names cost among what it leaves out. |
+| `warnings`       | array of strings  | Always present, `[]` when there is nothing to report. For an older database it holds one entry that names every part of the report the database leaves out and how to get it. A database whose runs carry no recorded cost, because no service start has applied the schema change that records it, names cost among what it leaves out. |
 | `summary`        | object            | The report-wide figures, below. |
 | `spend`          | object or `null`  | The recorded cost per UTC day or month, below. `null` on the `base` tier and on a database whose runs carry no recorded cost. |
 | `by_status`      | array of groups   | One group per run status. |

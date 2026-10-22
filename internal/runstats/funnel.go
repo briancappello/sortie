@@ -7,11 +7,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/persistence"
 )
 
-// funnelBreakdownWarning explains the missing chain_funnels.
-const funnelBreakdownWarning = "this database was written before sortie recorded which runs stopped to wait for a person, " +
-	"so the report leaves out the funnel of each stage chain. " +
-	"Run sortie once with this workflow to add it."
-
 const (
 	stageResultAdvanced = "advanced"
 	stageResultPartial  = "partial"

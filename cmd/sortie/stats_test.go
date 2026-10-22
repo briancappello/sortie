@@ -926,7 +926,7 @@ func TestStatsByChain_TextListsTheBusiestChainsOnly(t *testing.T) {
 func TestRunStatsByModelAgainstDatabases(t *testing.T) {
 	t.Parallel()
 
-	const warning = "this database was written before sortie recorded the model of each run, so the report leaves out the breakdown by model. Run sortie once with this workflow to add it. The report also leaves out cost until then."
+	const warningStart = "this database was written before sortie recorded the model of each run"
 	runOf := func(adapter, model, status string) persistence.RunHistory {
 		return persistence.RunHistory{IssueID: "I-" + status, Identifier: "P-" + status, Attempt: 1, AgentAdapter: adapter, Workspace: "/tmp/ws", StartedAt: "2026-01-01T00:00:00Z", CompletedAt: "2026-01-01T00:10:00Z", Status: status, ConfiguredModel: model}
 	}
@@ -960,7 +960,7 @@ func TestRunStatsByModelAgainstDatabases(t *testing.T) {
 					t.Errorf("by_model group %q Runs = %d, want %d", name, got, runs)
 				}
 			}
-			if len(report.ByModel) != len(tt.wantRuns) || report.ByModel == nil || slices.Contains(report.Warnings, warning) != tt.wantWarning {
+			if len(report.ByModel) != len(tt.wantRuns) || report.ByModel == nil || slices.ContainsFunc(report.Warnings, func(w string) bool { return strings.HasPrefix(w, warningStart) }) != tt.wantWarning {
 				t.Errorf("ByModel, Warnings = %#v, %q, want %d groups (non-nil) and the configured-model warning present: %v", report.ByModel, report.Warnings, len(tt.wantRuns), tt.wantWarning)
 			}
 		})

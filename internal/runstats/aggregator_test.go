@@ -936,21 +936,16 @@ func TestStatsByChain(t *testing.T) {
 func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	t.Parallel()
 
-	const costAlso = " The report also leaves out cost until then."
-	const costOnly = "this database was written before sortie recorded the cost of each run, so the report leaves out cost. Run sortie once with this workflow to add it."
+	const funnelMissing = "this database was written before sortie recorded which runs stopped to wait for a person, so the report leaves out the funnel of each stage chain, cost, and the breakdown by skill. Run sortie once with this workflow to add them."
+	const funnelMissingWithoutChains = "this database was written before sortie recorded which runs stopped to wait for a person, so the report leaves out cost and the breakdown by skill. Run sortie once with this workflow to add them."
+	const everyLaterTierMissing = "this database was written before sortie recorded the model of each run, stage chains, what started each run, the first run after each stage hop, and the skill calls of each run, so the report leaves out the breakdown by model, the breakdown by stage chain, the breakdown by retry trigger, the breakdown by run origin, cost, and the breakdown by skill. Run sortie once with this workflow to add them."
+	const skillsMissing = "this database was written before sortie recorded the skill calls of each run, so the report leaves out the breakdown by skill. Run sortie once with this workflow to add it."
 
-	modelCaps := withModelBreakdown(fullCaps)
-	chainCaps := modelCaps
-	chainCaps.HasStageChains = true
-	triggerCaps := withTriggerBreakdown(fullCaps)
-	triggerCaps.HasSkills = true
-	originlessCaps := triggerCaps
-	originlessCaps.HasFirstAfterHop = false
-	unblockedCaps := triggerCaps
+	supportedCaps := withTriggerBreakdown(fullCaps)
+	supportedCaps.HasSkills = true
+	unblockedCaps := supportedCaps
 	unblockedCaps.HasAgentBlocked = false
-	uncostedCaps := triggerCaps
-	uncostedCaps.HasRecordedCost = false
-	unskilledCaps := triggerCaps
+	unskilledCaps := supportedCaps
 	unskilledCaps.HasSkills = false
 
 	tests := []struct {
@@ -960,16 +955,12 @@ func TestAggregatorReport_WarningsComposition(t *testing.T) {
 		want    []string
 		funnels bool
 	}{
-		{name: "every breakdown supported", caps: triggerCaps, want: []string{}},
-		{name: "chains configured and every breakdown supported", caps: triggerCaps, stages: threeStageChain, want: []string{}, funnels: true},
-		{name: "funnel breakdown missing while chains exist", caps: unblockedCaps, stages: threeStageChain, want: []string{funnelBreakdownWarning + costAlso}},
-		{name: "funnel breakdown missing without chains", caps: unblockedCaps, want: []string{costOnly}},
-		{name: "trigger breakdown missing", caps: chainCaps, want: []string{triggerBreakdownWarning + costAlso}},
-		{name: "origin breakdown missing", caps: originlessCaps, want: []string{originBreakdownWarning + costAlso}},
-		{name: "chain breakdown missing", caps: modelCaps, want: []string{chainBreakdownWarning + costAlso}},
-		{name: "model breakdown missing", caps: fullCaps, want: []string{modelBreakdownWarning + costAlso}},
-		{name: "cost columns missing", caps: uncostedCaps, want: []string{costOnly}},
-		{name: "skills column missing while every earlier tier holds", caps: unskilledCaps, want: []string{skillBreakdownWarning}},
+		{name: "every breakdown supported", caps: supportedCaps, want: []string{}},
+		{name: "chains configured and every breakdown supported", caps: supportedCaps, stages: threeStageChain, want: []string{}, funnels: true},
+		{name: "funnel column missing while chains exist", caps: unblockedCaps, stages: threeStageChain, want: []string{funnelMissing}},
+		{name: "funnel column missing without chains", caps: unblockedCaps, want: []string{funnelMissingWithoutChains}},
+		{name: "every column after the full tier missing", caps: fullCaps, want: []string{everyLaterTierMissing}},
+		{name: "skills column missing while every earlier tier holds", caps: unskilledCaps, want: []string{skillsMissing}},
 		{name: "schema not full", caps: persistence.RunHistoryCapabilities{}, want: []string{degradedSchemaWarning(persistence.RunHistoryCapabilities{})}},
 	}
 
