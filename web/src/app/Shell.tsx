@@ -65,7 +65,11 @@ function ShellFrame({ screens }: ShellFrameProps) {
   const noticedVersion = useRef<string | null>(null);
   const isOverlayOpen = isPaletteOpen || isShortcutsOpen;
 
-  useDocumentStatus(data === undefined ? undefined : condition(data), data?.counts.attention ?? 0);
+  useDocumentStatus(
+    data === undefined ? undefined : condition(data),
+    data?.counts.attention ?? 0,
+    data?.config?.tracker.project,
+  );
 
   useEffect(() => {
     if (versionNotice === null || noticedVersion.current === versionNotice) {
