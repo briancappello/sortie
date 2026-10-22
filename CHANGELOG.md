@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Tool lines in the session view now show what each call ran: an icon for its kind, then the command of a shell call, the tool and path of a file call, the tool and skill of a skill call, or the name of any other tool, with MCP tools named as `server.tool`, such as `github.get_issue`. A long line is cut at the pane's width and shows in full on hover, and a folded group of calls reads as counts such as `3 commands, 2 file reads`. The event log and the live event stream carry the same line with secrets masked, and the `tool` label of the tool call metric names MCP tools the same way. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
 
+- An OpenCode CLI turn whose output Sortie cannot read now fails with error kind `port_exit` instead of `response_error`, and one whose runtime exits with status 127 after writing output fails with `agent_not_found`, which is not retried, instead of `port_exit`.
+
 ### Fixed
 
 - When a bot review's triage command answers `handled`, the issue page, the Pipeline, and the status sentence now say the bot review was handled, also after Sortie restarts, instead of showing comments to answer or waiting on the bot review; a bot review's `last_check` in the state API gains `handled`. ([#1439](https://github.com/sortie-ai/sortie/issues/1439))
