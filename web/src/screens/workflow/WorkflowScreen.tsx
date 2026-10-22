@@ -63,6 +63,7 @@ function TrackerPanel({ config }: ConfigProps) {
     <Panel title="Tracker">
       <Pairs>
         <Pair label="Kind">{tracker.kind}</Pair>
+        {tracker.project ? <Pair label="Project">{tracker.project}</Pair> : undefined}
         <Pair label="Active">
           <StateList states={tracker.active_states} />
         </Pair>

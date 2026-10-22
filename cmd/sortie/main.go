@@ -893,6 +893,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		State:                             state,
 		Logger:                            br.logger,
 		TrackerAdapter:                    br.trackerAdapter,
+		TrackerKind:                       br.cfg.Tracker.Kind,
+		TrackerProject:                    br.cfg.Tracker.Project,
 		Router:                            route.NewRouter(br.trackerAdapter, registry.Notifiers.Get),
 		AgentAdapter:                      agentAdapter,
 		AgentAdapterByKind:                agentAdapterByKind,

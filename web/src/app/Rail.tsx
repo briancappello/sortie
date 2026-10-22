@@ -149,6 +149,7 @@ export function Rail({ screens, onOpenShortcuts }: RailProps) {
   const [query, setQuery] = useState("");
   const shown = matching(screens, query);
   const groups = groupsOf(shown);
+  const project = data?.config?.tracker.project;
 
   return (
     <aside
@@ -156,15 +157,23 @@ export function Rail({ screens, onOpenShortcuts }: RailProps) {
       aria-label="Sortie navigation"
       className="sticky top-0 hidden h-screen flex-col bg-surface px-sm py-lg text-ink [--ghost-hover:var(--color-item-hover-panel)] [--ghost-pressed:var(--color-item-selected-panel)] md:flex"
     >
-      <div className="flex items-center gap-sm px-sm pb-md">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-sm px-sm pb-md">
         <BrandMark />
         <span className="font-heading text-h7 font-semibold">Sortie</span>
         {data === undefined ? undefined : (
           <span
             title={data.version}
-            className="ml-auto whitespace-nowrap text-body-sm text-ink-muted"
+            className="justify-self-end whitespace-nowrap text-body-sm text-ink-muted"
           >
             {fmtVersion(data.version)}
+          </span>
+        )}
+        {project === undefined || project === "" ? undefined : (
+          <span
+            title={project}
+            className="col-span-2 col-start-2 truncate text-body-sm text-ink-muted"
+          >
+            {project}
           </span>
         )}
       </div>

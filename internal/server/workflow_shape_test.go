@@ -143,6 +143,8 @@ func newShapeHarness(t *testing.T, frontMatter string) *shapeHarness {
 		State:                             orchestrator.NewState(cfg.Polling.IntervalMS, cfg.Agent.MaxConcurrentAgents, 0, nil, orchestrator.AgentTotals{}),
 		Logger:                            logger,
 		WorkflowManager:                   mgr,
+		TrackerKind:                       cfg.Tracker.Kind,
+		TrackerProject:                    cfg.Tracker.Project,
 		PreflightParams:                   orchestrator.PreflightParams{AgentRegistry: shapeAgentRegistry{"claude-code": reportingAgentMeta(), "codex": reportingAgentMeta()}},
 		SCMAdapter:                        shapeSCMAdapter{},
 		ReviewConfig:                      review,
@@ -246,6 +248,7 @@ func TestStateConfig_DispatchShape(t *testing.T) {
 		{
 			name: "no rules and no reaction",
 			want: map[string]string{
+				"tracker.project":               pathAbsent,
 				"dispatch.rules":                "[]",
 				"dispatch.chains":               "[]",
 				"dispatch.default":              "null",
@@ -421,15 +424,17 @@ reactions:
 	}
 }
 
-func TestStateConfig_ReloadKeepsConstructedReactions(t *testing.T) {
+func TestStateConfig_ReloadKeepsConstructedShape(t *testing.T) {
 	t.Parallel()
 
-	h := newShapeHarness(t, shapeBaseYAML+`
+	h := newShapeHarness(t, `
+tracker: {kind: jira, project: PROJ, active_states: [To Do, In Progress], terminal_states: [Done], handoff_state: In Review}
 reactions:
   ci_failure: {provider: github, max_retries: 1}
   bot_review: {provider: github, poll_interval_ms: 45000}
 `)
-	writeShapeWorkflow(t, h.path, shapeBaseYAML+`
+	writeShapeWorkflow(t, h.path, `
+tracker: {kind: github, project: acme/widgets, active_states: [Open], terminal_states: [Closed], handoff_state: In Review}
 reactions:
   ci_failure: {provider: github, max_retries: 5}
   merge_conflicts: {provider: github}
@@ -441,6 +446,9 @@ reactions:
 	_, cfg := h.state(t)
 
 	assertConfigPaths(t, cfg, map[string]string{
+		"tracker.kind":                          `"jira"`,
+		"tracker.project":                       `"PROJ"`,
+		"tracker.active_states":                 `["Open"]`,
 		"reactions.bot_review.poll_interval_ms": "45000",
 		"reactions.ci_failure.max_retries":      "5",
 		"reactions.merge_conflicts":             pathAbsent,

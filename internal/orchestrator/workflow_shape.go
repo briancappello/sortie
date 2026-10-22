@@ -18,9 +18,11 @@ type WorkflowShape struct {
 	Reactions ShapeReactions `json:"reactions"`
 }
 
-// ShapeTracker reports the tracker kind and the states the workflow acts on.
+// ShapeTracker reports the tracker kind and project the poll loop's adapter was
+// built with, and the states the workflow acts on.
 type ShapeTracker struct {
 	Kind            string   `json:"kind"`
+	Project         string   `json:"project,omitempty"`
 	ActiveStates    []string `json:"active_states"`
 	InProgressState string   `json:"in_progress_state,omitempty"`
 	HandoffState    string   `json:"handoff_state,omitempty"`
@@ -174,14 +176,17 @@ type ShapeLabelCommands struct {
 // WorkflowShape returns the effective workflow shape. Safe for concurrent use.
 //
 // Reaction entries other than the CI failure members come from fields set at
-// construction, so a reload neither adds nor removes one.
+// construction, so a reload neither adds nor removes one. The tracker kind and
+// project are fixed at construction too, because the adapter is not rebuilt on
+// reload.
 func (o *Orchestrator) WorkflowShape() WorkflowShape {
 	cfg := o.workflowManager.Config()
 	worker, remote := o.shapeWorker(cfg)
 
 	return WorkflowShape{
 		Tracker: ShapeTracker{
-			Kind:            cfg.Tracker.Kind,
+			Kind:            o.trackerKind,
+			Project:         o.trackerProject,
 			ActiveStates:    copyStrings(cfg.Tracker.ActiveStates),
 			InProgressState: cfg.Tracker.InProgressState,
 			HandoffState:    cfg.Tracker.HandoffState,

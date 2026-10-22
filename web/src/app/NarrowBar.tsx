@@ -5,6 +5,7 @@ import { modifierLabel } from "@/app/keys";
 import { SearchIcon } from "@/components/icons";
 import { StatusMark } from "@/components/StatusMark";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/cn";
 import { ACKNOWLEDGED_WORD, acknowledgedCount, condition } from "@/lib/condition";
 import { fmtCount, pluralVerb } from "@/lib/format";
 
@@ -44,11 +45,20 @@ export interface NarrowBarProps {
 /** Renders the sticky bar that replaces the rail below 768 px: brand, condition, and the Menu button. */
 export function NarrowBar({ onOpenPalette }: NarrowBarProps) {
   const { data } = useStateQuery();
+  const project = data?.config?.tracker.project;
+  const hasProject = project !== undefined && project !== "";
 
   return (
     <header className="sticky top-0 z-(--z-sticky) flex items-center gap-sm border-b border-line bg-canvas px-md py-sm md:hidden">
       <BrandMark />
-      <span className="font-heading font-semibold">Sortie</span>
+      <div className={cn("flex flex-col", hasProject && "min-w-0")}>
+        <span className="font-heading font-semibold">Sortie</span>
+        {hasProject ? (
+          <span title={project} className="truncate text-body-sm text-ink-muted">
+            {project}
+          </span>
+        ) : undefined}
+      </div>
       {data === undefined ? undefined : (
         <span className="min-w-0 text-body-sm wrap-anywhere">
           <StatusMark mark={condition(data)} label={statusLabel(data)} />

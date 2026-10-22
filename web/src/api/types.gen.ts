@@ -849,6 +849,7 @@ export interface ShapeSelection {
 
 export interface ShapeTracker {
   kind: string;
+  project?: string;
   active_states: string[] | null;
   in_progress_state?: string;
   handoff_state?: string;

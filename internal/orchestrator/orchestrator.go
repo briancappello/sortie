@@ -179,14 +179,16 @@ type OrchestratorParams struct {
 	State           *State
 	Logger          *slog.Logger
 	TrackerAdapter  domain.TrackerAdapter
+	TrackerKind     string
+	TrackerProject  string
 	AgentAdapter    domain.AgentAdapter
 	WorkflowManager WorkflowManager
 	Store           OrchestratorStore
 	PreflightParams PreflightParams
-	Observers       []Observer           // may be nil/empty
-	Metrics         domain.Metrics       // may be nil; defaults to NoopMetrics
-	ToolRegistry    *domain.ToolRegistry // may be nil
-	HostPool        *HostPool            // may be nil; defaults to local-mode pool
+	Observers       []Observer
+	Metrics         domain.Metrics
+	ToolRegistry    *domain.ToolRegistry
+	HostPool        *HostPool
 
 	// Rates are the rates in force at startup. Nil prices nothing.
 	Rates *pricing.Rates
@@ -300,6 +302,8 @@ type Orchestrator struct {
 	logger *slog.Logger
 
 	trackerAdapter     domain.TrackerAdapter
+	trackerKind        string
+	trackerProject     string
 	router             *route.Router
 	agentAdapter       domain.AgentAdapter
 	agentAdapterByKind func(kind string) (domain.AgentAdapter, error)
@@ -477,6 +481,8 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		state:                             params.State,
 		logger:                            logger,
 		trackerAdapter:                    params.TrackerAdapter,
+		trackerKind:                       params.TrackerKind,
+		trackerProject:                    params.TrackerProject,
 		router:                            params.Router,
 		agentAdapter:                      params.AgentAdapter,
 		agentAdapterByKind:                agentAdapterByKind,
