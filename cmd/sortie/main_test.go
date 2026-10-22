@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,8 +83,6 @@ func writeWorkflowFile(t *testing.T, dir string) string {
 	return p
 }
 
-// writeIssuesFixture creates a minimal issues.json fixture in dir for
-// the file tracker adapter.
 func writeIssuesFixture(t *testing.T, dir string) {
 	t.Helper()
 	issues := []map[string]any{
@@ -2060,11 +2060,24 @@ Do {{ .issue.title }}.
 			defer cancel()
 			var stderr lockedBuf
 
-			code := run(ctx, []string{"--once", "--port", "0", wfPath}, io.Discard, &stderr)
+			resultPath := filepath.Join(dir, "result.json")
+			code := run(ctx, []string{"--once", "--once-result", resultPath, "--port", "0", wfPath}, io.Discard, &stderr)
 
 			recorded, _ := os.ReadFile(filepath.Join(dir, "outcomes.txt"))
 			if got := strings.TrimSpace(string(recorded)); code != tt.wantCode || got != tt.wantOutcome {
 				t.Errorf("run(--once) = %d with after_run outcome %q, want %d and %q; stderr:\n%s", code, got, tt.wantCode, tt.wantOutcome, stderr.String())
+			}
+			raw, err := os.ReadFile(resultPath)
+			if err != nil {
+				t.Fatalf("run(--once) result file: %v; stderr:\n%s", err, stderr.String())
+			}
+			var result map[string][]map[string]string
+			if err := json.Unmarshal(raw, &result); err != nil {
+				t.Fatalf("decoding result file %s: %v", raw, err)
+			}
+			want := map[string]string{"identifier": "PROJ-1", "outcome": tt.wantOutcome}
+			if !slices.ContainsFunc(result["issues"], func(entry map[string]string) bool { return maps.Equal(entry, want) }) {
+				t.Errorf("run(--once) result file = %s, want an issues entry %v", raw, want)
 			}
 		})
 	}

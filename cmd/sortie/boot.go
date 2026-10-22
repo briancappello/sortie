@@ -75,6 +75,7 @@ type bootResult struct {
 	portIsImplicit  bool
 	dryRun          bool
 	once            bool
+	onceResultPath  string
 	effectiveLevel  slog.Level
 	effectiveFormat logging.Format
 }
@@ -106,6 +107,7 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 	logLevel := fs.String("log-level", "", `Log verbosity: "debug", "info", "warn", "error" (default "info")`)
 	dryRun := fs.Bool("dry-run", false, "Run one poll cycle without spawning agents or writing to the database, then exit")
 	once := fs.Bool("once", false, "Poll once, finish the issues found, then exit")
+	onceResult := fs.String("once-result", "", "With --once, write each issue's latest outcome to this JSON file")
 	port := fs.Int("port", defaultServerPort, "HTTP server port (0 to disable)")
 	host := fs.String("host", defaultServerHost, "HTTP server bind address (IP address)")
 	envFile := fs.String("env-file", "", "Path to .env file for config overrides")
@@ -132,6 +134,11 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 
 	if *once && *dryRun {
 		fmt.Fprintln(p.stderr, "sortie: --once and --dry-run cannot be used together") //nolint:errcheck // stderr write failure is unrecoverable
+		return bootResult{}, 1
+	}
+
+	if *onceResult != "" && !*once {
+		fmt.Fprintln(p.stderr, "sortie: --once-result requires --once") //nolint:errcheck // stderr write failure is unrecoverable
 		return bootResult{}, 1
 	}
 
@@ -313,6 +320,7 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 		portIsImplicit:  !portFlagSet && !hasServerPortExtension(cfg.ExtensionSection("server")),
 		dryRun:          *dryRun,
 		once:            *once,
+		onceResultPath:  *onceResult,
 		effectiveLevel:  effectiveLevel,
 		effectiveFormat: effectiveFormat,
 	}, 0

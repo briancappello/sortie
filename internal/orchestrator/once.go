@@ -28,6 +28,20 @@ type OnceResult struct {
 
 	// NotRun counts the single poll's candidates with no recorded outcome.
 	NotRun int
+
+	// Outcomes lists, sorted by identifier, the latest outcome of every
+	// issue with a recorded outcome. It is nil when none was recorded.
+	Outcomes []OnceOutcome
+}
+
+// OnceOutcome is the latest outcome once mode recorded for one issue.
+type OnceOutcome struct {
+	// Identifier is the issue identifier, or the issue ID when the
+	// identifier is empty.
+	Identifier string
+
+	// Outcome is the latest recorded outcome.
+	Outcome RunOutcome
 }
 
 // deferKind says what a deferred single-poll candidate waits for.
@@ -40,11 +54,6 @@ const (
 	deferTick
 )
 
-type onceOutcome struct {
-	identifier string
-	outcome    RunOutcome
-}
-
 // onceState is the bookkeeping of a once-mode run. The event-loop goroutine
 // owns it; [Orchestrator.OnceResult] reads it only after Run returns. An
 // orchestrator outside once mode holds a nil *onceState, and the methods the
@@ -55,14 +64,14 @@ type onceState struct {
 	interrupted bool
 	candidates  map[string]struct{}
 	deferred    map[string]deferKind
-	outcomes    map[string]onceOutcome
+	outcomes    map[string]OnceOutcome
 }
 
 func newOnceState() *onceState {
 	return &onceState{
 		candidates: make(map[string]struct{}),
 		deferred:   make(map[string]deferKind),
-		outcomes:   make(map[string]onceOutcome),
+		outcomes:   make(map[string]OnceOutcome),
 	}
 }
 
@@ -70,7 +79,7 @@ func (s *onceState) record(issueID, identifier string, outcome RunOutcome) {
 	if s == nil {
 		return
 	}
-	s.outcomes[issueID] = onceOutcome{identifier: identifier, outcome: outcome}
+	s.outcomes[issueID] = OnceOutcome{Identifier: identifier, Outcome: outcome}
 }
 
 func (s *onceState) hasOutcome(issueID string) bool {
@@ -200,11 +209,14 @@ func (s *onceState) result() OnceResult {
 		Issues:      len(s.outcomes),
 	}
 	for issueID, recorded := range s.outcomes {
-		if recorded.outcome != RunOutcomeSucceeded {
-			result.NotSucceeded = append(result.NotSucceeded, cmp.Or(recorded.identifier, issueID))
+		identifier := cmp.Or(recorded.Identifier, issueID)
+		result.Outcomes = append(result.Outcomes, OnceOutcome{Identifier: identifier, Outcome: recorded.Outcome})
+		if recorded.Outcome != RunOutcomeSucceeded {
+			result.NotSucceeded = append(result.NotSucceeded, identifier)
 		}
 	}
 	slices.Sort(result.NotSucceeded)
+	slices.SortFunc(result.Outcomes, func(a, b OnceOutcome) int { return cmp.Compare(a.Identifier, b.Identifier) })
 	for issueID := range s.candidates {
 		if !s.hasOutcome(issueID) {
 			result.NotRun++

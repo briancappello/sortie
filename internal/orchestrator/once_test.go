@@ -104,16 +104,18 @@ func TestOnce_RunReturnsWhenTheWorkSettles(t *testing.T) {
 		setup         func(*runHarness)
 		wantStarted   []string
 		want          OnceResult
+		wantOutcomes  []OnceOutcome
 		wantRetryKept bool
 	}{
 		{name: "an empty poll"},
 		{name: "one succeeded issue", candidates: []domain.Issue{first}, wantStarted: []string{"A-1"}, want: OnceResult{Issues: 1}},
 		{
-			name:        "a failed attempt whose retry succeeds",
-			candidates:  []domain.Issue{first},
-			setup:       func(h *runHarness) { failFirstAttempt(h, first, nil) },
-			wantStarted: []string{"A-1", "A-1"},
-			want:        OnceResult{Issues: 1},
+			name:         "a failed attempt whose retry succeeds",
+			candidates:   []domain.Issue{first},
+			setup:        func(h *runHarness) { failFirstAttempt(h, first, nil) },
+			wantStarted:  []string{"A-1", "A-1"},
+			want:         OnceResult{Issues: 1},
+			wantOutcomes: []OnceOutcome{{Identifier: "A-1", Outcome: RunOutcomeSucceeded}},
 		},
 		{
 			name:        "two candidates under one slot",
@@ -178,6 +180,10 @@ func TestOnce_RunReturnsWhenTheWorkSettles(t *testing.T) {
 
 			got := runUntilSettled(t, h)
 
+			if tt.wantOutcomes != nil && !slices.Equal(got.Outcomes, tt.wantOutcomes) {
+				t.Errorf("OnceResult().Outcomes = %+v, want %+v", got.Outcomes, tt.wantOutcomes)
+			}
+			got.Outcomes = nil
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("OnceResult() = %+v, want %+v", got, tt.want)
 			}
