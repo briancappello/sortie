@@ -682,15 +682,15 @@ func processToolBlocks(
 	for _, block := range blocks {
 		if block.Type == "tool_use" && block.ID != "" {
 			work.ObserveToolActivity()
-			inFlight.Begin(block.ID, block.Name)
+			inFlight.Begin(block.ID, toolCallOf(block.Name, block.Input))
 		}
 		if block.Type == "tool_result" {
 			work.ObserveToolActivity()
-			toolName, durationMS, ok := inFlight.End(block.ToolUseID)
-			if !ok {
-				toolName = "unknown"
+			call, durationMS, _ := inFlight.End(block.ToolUseID)
+			msg := "tool_result"
+			if call.Name != "" {
+				msg += ": " + call.Name
 			}
-			msg := "tool_result: " + toolName
 			if block.IsError {
 				if errText := toolResultText(block); errText != "" {
 					msg = truncateToolError(redact.Mask(stripClaudeMarkup(errText)), maxToolErrorLen)
@@ -699,7 +699,9 @@ func processToolBlocks(
 			onEvent(domain.AgentEvent{
 				Type:           domain.EventToolResult,
 				Timestamp:      wallTime,
-				ToolName:       toolName,
+				ToolName:       call.Name,
+				ToolKind:       call.Kind,
+				ToolArgument:   call.Argument,
 				ToolDurationMS: durationMS,
 				ToolError:      block.IsError,
 				Message:        msg,

@@ -354,6 +354,8 @@ func TestRunHistoryErrorAndReviewMetadata_RoundTrip(t *testing.T) {
 	run := newTestRun(1)
 	run.Error = new("transient network error")
 	run.ReviewMetadata = &meta
+	skills := `[{"skill":"ce-plan"},{"skill":"ce-work","tool_error":true}]`
+	run.Skills = &skills
 	appendOrFatal(t, s, run)
 
 	recent := queryAllRuns(t, s, 1)
@@ -379,6 +381,26 @@ func TestRunHistoryErrorAndReviewMetadata_RoundTrip(t *testing.T) {
 	}
 	if recovery[0].ReviewMetadata == nil || *recovery[0].ReviewMetadata != meta {
 		t.Errorf("LoadLatestSuccessfulRunsForReactionRecovery ReviewMetadata = %v, want %q", recovery[0].ReviewMetadata, meta)
+	}
+
+	byIssue, err := s.QueryRunHistoryByIssue(ctx, "ISS-1")
+	if err != nil {
+		t.Fatalf("QueryRunHistoryByIssue(ISS-1): %v", err)
+	}
+	for name, rows := range map[string][]RunHistory{
+		"QueryRunHistory":                             recent,
+		"QueryRunHistoryByIssue":                      byIssue,
+		"LoadLatestSuccessfulRunsForReactionRecovery": recovery,
+	} {
+		if len(rows) != 1 || rows[0].Skills == nil || *rows[0].Skills != skills {
+			t.Errorf("%s Skills = %+v, want %q", name, rows, skills)
+		}
+	}
+
+	appendOrFatal(t, s, newTestRun(2))
+	none, err := s.QueryRunHistoryByIssue(ctx, "ISS-2")
+	if err != nil || len(none) != 1 || none[0].Skills != nil {
+		t.Errorf("QueryRunHistoryByIssue(ISS-2) = %+v, %v, want one row with nil Skills", none, err)
 	}
 }
 

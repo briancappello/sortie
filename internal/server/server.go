@@ -122,6 +122,9 @@ type RunHistoryEntry struct {
 	// ReviewMetadata is the self-review JSON as recorded; nil when
 	// self-review did not run.
 	ReviewMetadata *string
+	// Skills is the JSON array of the run's skill calls as recorded; nil when
+	// the run recorded none.
+	Skills *string
 	// OriginRecorded is false for a run recorded before the origin fields
 	// existed; Trigger, ReactionKind, SessionID, and SSHHost are then unknown.
 	OriginRecorded bool

@@ -1725,9 +1725,6 @@ func TestHandleAgentEvent_CombinedTimingAccumulation(t *testing.T) {
 	}
 }
 
-// TestHandleAgentEvent_ToolCallMetric verifies that HandleAgentEvent
-// increments the IncToolCalls metric for EventToolResult events with
-// non-empty ToolName, using the correct result label based on ToolError.
 func TestHandleAgentEvent_ToolCallMetric(t *testing.T) {
 	t.Parallel()
 
@@ -1756,10 +1753,11 @@ func TestHandleAgentEvent_ToolCallMetric(t *testing.T) {
 			wantResult: "error",
 		},
 		{
-			name:      "empty ToolName skips metric",
-			toolName:  "",
-			toolError: false,
-			wantCalls: 0,
+			name:       "empty ToolName counts under other",
+			toolName:   "",
+			wantCalls:  1,
+			wantTool:   "other",
+			wantResult: "success",
 		},
 	}
 
@@ -1903,7 +1901,7 @@ func TestHandleAgentEvent_ToolCallLogging(t *testing.T) {
 		}
 	})
 
-	t.Run("empty ToolName emits no log", func(t *testing.T) {
+	t.Run("empty ToolName logs the other label", func(t *testing.T) {
 		t.Parallel()
 
 		var buf bytes.Buffer
@@ -1922,8 +1920,8 @@ func TestHandleAgentEvent_ToolCallLogging(t *testing.T) {
 		}, logger, spy)
 
 		out := buf.String()
-		if strings.Contains(out, "tool call completed") {
-			t.Errorf("log output contains 'tool call completed' for empty ToolName\ngot: %s", out)
+		if !strings.Contains(out, "tool=other") {
+			t.Errorf("log output missing %q for empty ToolName\ngot: %s", "tool=other", out)
 		}
 	})
 }
@@ -2130,5 +2128,124 @@ func TestHandleAgentEvent_NoneArrivalDiscardsFigures(t *testing.T) {
 	}
 	if !noneEntry.LastAgentTimestamp.Equal(incEntry.LastAgentTimestamp) {
 		t.Errorf("none-arrival LastAgentTimestamp = %v, want %v", noneEntry.LastAgentTimestamp, incEntry.LastAgentTimestamp)
+	}
+}
+
+func TestToolText(t *testing.T) {
+	t.Parallel()
+
+	secret := eventTestSecret(t)
+	redact.Add("test.event tool text", secret)
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"skill name", "ce-plan", "ce-plan"},
+		{"qualified name", "plugin:name", "plugin:name"},
+		{"C0, DEL, and C1 runes become spaces", "a\x01b\x7fc\u0085d", "a b c d"},
+		{"bidi override and zero-width runes are removed", "x\u202ey\u200bz", "xyz"},
+		{"white space only", " \t\n\x01 ", ""},
+		{"1,200 runes are cut to 999 and an ellipsis", strings.Repeat("é", 1200), strings.Repeat("é", 999) + "…"},
+		{"registered secret is masked", "token " + secret, "token [redacted]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := toolText(tt.input); got != tt.want {
+				t.Errorf("toolText(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnwrapShell(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"single quotes", "bash -lc 'git status'", "git status"},
+		{"path and double quotes", `/bin/zsh -lc "make test"`, "make test"},
+		{"unquoted script", "sh -c ls", "ls"},
+		{"plain command", "git status", "git status"},
+		{"script file", "bash build.sh", "bash build.sh"},
+		{"flag without script", "bash -lc", "bash -lc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := unwrapShell(tt.input); got != tt.want {
+				t.Errorf("unwrapShell(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRelative(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     string
+		workspace string
+		want      string
+	}{
+		{"path in workspace", "/ws/a/internal/foo.go", "/ws/a", "internal/foo.go"},
+		{"workspace with trailing separator", "/ws/a/internal/foo.go", "/ws/a/", "internal/foo.go"},
+		{"backslash separators", `\ws\a\internal\foo.go`, `\ws\a`, `internal\foo.go`},
+		{"joined paths", "/ws/a/x.go, /ws/a/y.go", "/ws/a", "x.go, y.go"},
+		{"sibling directory with the same prefix", "/ws/ab/x.go", "/ws/a", "/ws/ab/x.go"},
+		{"path outside workspace", "/etc/hosts", "/ws/a", "/etc/hosts"},
+		{"already relative", "internal/foo.go", "/ws/a", "internal/foo.go"},
+		{"empty workspace", "/ws/a/x.go", "", "/ws/a/x.go"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := workspaceRelative(tt.input, tt.workspace); got != tt.want {
+				t.Errorf("workspaceRelative(%q, %q) = %q, want %q", tt.input, tt.workspace, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestToolLabel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		toolName string
+		kind     domain.ToolKind
+		want     string
+	}{
+		{"plain name", "Bash", "", "Bash"},
+		{"qualified MCP name", "github.get_issue", "", "github.get_issue"},
+		{"plugin name", "plugin:name", "", "plugin:name"},
+		{"no name uses the kind", "", domain.ToolKindEdit, "edit"},
+		{"no name and no kind", "", "", "other"},
+		{"name with a space", "ls -la", "", "other"},
+		{"name with a slash", "./build.sh", "", "other"},
+		{"masked name", "tool [redacted]", "", "other"},
+		{"cut name", "tool…", "", "other"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := toolLabel(tt.toolName, tt.kind); got != tt.want {
+				t.Errorf("toolLabel(%q, %q) = %q, want %q", tt.toolName, tt.kind, got, tt.want)
+			}
+		})
 	}
 }

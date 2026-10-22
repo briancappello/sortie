@@ -77,9 +77,34 @@ type rawContentBlock struct {
 	Text      string          `json:"text,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	ID        string          `json:"id,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+}
+
+// toolMappings gives the kind and main-argument member of each Claude Code
+// tool the adapter reports an argument for.
+var toolMappings = map[string]agentcore.ToolMapping{
+	"Bash":         {Kind: domain.ToolKindShell, Key: "command"},
+	"Read":         {Kind: domain.ToolKindRead, Key: "file_path"},
+	"Write":        {Kind: domain.ToolKindEdit, Key: "file_path"},
+	"Edit":         {Kind: domain.ToolKindEdit, Key: "file_path"},
+	"NotebookEdit": {Kind: domain.ToolKindEdit, Key: "notebook_path"},
+	"Skill":        {Kind: domain.ToolKindSkill, Key: "skill"},
+}
+
+const mcpToolPrefix = "mcp__"
+
+// toolCallOf maps a tool_use block's name and input to a tool call. An MCP
+// tool is named {server}.{tool} and carries no kind or argument.
+func toolCallOf(name string, input json.RawMessage) agentcore.ToolCall {
+	if rest, ok := strings.CutPrefix(name, mcpToolPrefix); ok {
+		if server, tool, ok := strings.Cut(rest, "__"); ok {
+			return agentcore.ToolCall{Name: agentcore.QualifiedToolName(server, tool)}
+		}
+	}
+	return agentcore.MapToolCall(toolMappings, name, input)
 }
 
 // rawAssistantMessage is the nested message object inside an

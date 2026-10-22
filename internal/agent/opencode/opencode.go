@@ -448,10 +448,13 @@ func (a *OpenCodeAdapter) RunTurn(ctx context.Context, session domain.Session, p
 			}
 			runtime.work.ObserveToolActivity()
 			runtime.spend.MarkModelReached()
+			call := agentcore.MapToolCall(toolMappings, part.Tool, part.State.Input)
 			emit(domain.AgentEvent{
 				Type:           domain.EventToolResult,
 				Timestamp:      now,
-				ToolName:       part.Tool,
+				ToolName:       call.Name,
+				ToolKind:       call.Kind,
+				ToolArgument:   call.Argument,
 				ToolDurationMS: toolDuration(part.State.Time),
 				ToolError:      strings.EqualFold(part.State.Status, "error"),
 				Message:        redact.Truncate(part.State.Error, 500),

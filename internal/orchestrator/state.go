@@ -165,6 +165,10 @@ type RunningEntry struct {
 	// until the first token_usage event carrying a model name arrives.
 	RequestsByModel map[string]int
 
+	// Skills holds every skill call of the run in completion order. Only the
+	// event loop appends to it.
+	Skills []domain.SkillCall
+
 	// RetryAttempt is nil for first dispatch, non-nil and >= 1 for retries
 	// and continuations.
 	RetryAttempt *int
@@ -1655,6 +1659,7 @@ type SnapshotRunningEntry struct {
 	ModelName           string                    `json:"model_name,omitempty"`
 	APIRequestCount     int                       `json:"api_request_count"`
 	RequestsByModel     map[string]int            `json:"requests_by_model,omitempty"`
+	Skills              []domain.SkillCall        `json:"skills,omitempty"`
 	APIRequestsMeasured bool                      `json:"api_requests_measured"`
 	WorkspacePath       string                    `json:"workspace_path"`
 	SSHHost             string                    `json:"ssh_host,omitempty"`
@@ -2081,6 +2086,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			ModelName:           entry.ModelName,
 			APIRequestCount:     entry.APIRequestCount,
 			RequestsByModel:     modelRequests,
+			Skills:              slices.Clone(entry.Skills),
 			APIRequestsMeasured: requestsMeasured,
 			WorkspacePath:       entry.WorkspacePath,
 			SSHHost:             entry.SSHHost,

@@ -688,7 +688,6 @@ func TestEmitToolResult_ErrorResult(t *testing.T) {
 		t.Fatalf("parseEvent() error = %v", err)
 	}
 
-	// Empty tracker simulates orphaned tool_result.
 	tracker := agentcore.NewToolTracker()
 	now := time.Now().UTC()
 	events := collectToolEvents(t, ev, tracker, now)
@@ -698,8 +697,8 @@ func TestEmitToolResult_ErrorResult(t *testing.T) {
 	}
 
 	got := events[0]
-	if got.ToolName != "unknown" {
-		t.Errorf("event.ToolName = %q, want %q", got.ToolName, "unknown")
+	if got.ToolName != "" {
+		t.Errorf("event.ToolName = %q, want empty for an orphaned result", got.ToolName)
 	}
 	if !got.ToolError {
 		t.Error("event.ToolError = false, want true")
@@ -722,33 +721,27 @@ func TestEmitToolResult_ParallelToolUse(t *testing.T) {
 	now := time.Now().UTC()
 	events := collectToolEvents(t, ev, tracker, now)
 
-	// No tool_result blocks -> no EventToolResult events.
 	if len(events) != 0 {
 		t.Errorf("collectToolEvents() = %d events, want 0", len(events))
 	}
 
-	// Tracker should have both tool_use entries; verify via End.
-	name1, _, ok1 := tracker.End("toolu_par_01")
+	call1, _, ok1 := tracker.End("toolu_par_01")
 	if !ok1 {
 		t.Fatal("tracker missing entry \"toolu_par_01\"")
 	}
-	if name1 != "Read" {
-		t.Errorf("tracker[\"toolu_par_01\"].Name = %q, want %q", name1, "Read")
+	if call1.Name != "Read" {
+		t.Errorf("tracker[\"toolu_par_01\"].Name = %q, want %q", call1.Name, "Read")
 	}
 
-	name2, _, ok2 := tracker.End("toolu_par_02")
+	call2, _, ok2 := tracker.End("toolu_par_02")
 	if !ok2 {
 		t.Fatal("tracker missing entry \"toolu_par_02\"")
 	}
-	if name2 != "Read" {
-		t.Errorf("tracker[\"toolu_par_02\"].Name = %q, want %q", name2, "Read")
+	if call2.Name != "Read" {
+		t.Errorf("tracker[\"toolu_par_02\"].Name = %q, want %q", call2.Name, "Read")
 	}
 }
 
-// TestEmitToolResult_UserEventCorrelation verifies that tool_result blocks
-// in user-type events correlate correctly with tool_use blocks from
-// preceding assistant events. This is a regression test for the bug where
-// user-event tool_result blocks were silently dropped.
 func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 	t.Parallel()
 
@@ -770,7 +763,6 @@ func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 		if parseErr != nil {
 			t.Fatalf("parseEvent() error = %v", parseErr)
 		}
-		// Process both assistant and user events to mirror RunTurn logic.
 		switch ev.Type {
 		case "assistant", "user":
 			now := base.Add(time.Duration(msgIndex) * time.Second)
@@ -782,7 +774,6 @@ func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 		t.Fatalf("scanner error: %v", err)
 	}
 
-	// Exactly one tool_result expected (Read, from user event).
 	if len(toolEvents) != 1 {
 		t.Fatalf("total EventToolResult events = %d, want 1", len(toolEvents))
 	}
@@ -801,7 +792,6 @@ func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 		t.Errorf("toolEvents[0].Message = %q, want %q", got.Message, "tool_result: Read")
 	}
 
-	// Tracker should be empty after correlation (toolu_u01 was resolved).
 	_, _, stillTracked := tracker.End("toolu_u01")
 	if stillTracked {
 		t.Error("tracker still has entry \"toolu_u01\" after correlation")

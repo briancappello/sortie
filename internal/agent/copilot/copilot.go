@@ -378,7 +378,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 					toolData, dataErr := parseToolExecutionData(event.Data)
 					if dataErr == nil {
 						state.work.ObserveToolActivity()
-						state.inFlight.Begin(toolData.ToolCallID, toolData.ToolName)
+						state.inFlight.Begin(toolData.ToolCallID, toolData.toolCall())
 						agentcore.EmitNotification(emit, "")
 					}
 				}
@@ -388,14 +388,13 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 					toolData, dataErr := parseToolExecutionData(event.Data)
 					if dataErr == nil {
 						state.work.ObserveToolActivity()
-						toolName, durationMS, ok := state.inFlight.End(toolData.ToolCallID)
-						if !ok {
-							toolName = toolData.ToolName
-						}
+						call, durationMS, _ := state.inFlight.End(toolData.ToolCallID)
 						emit(domain.AgentEvent{
 							Type:           domain.EventToolResult,
 							Timestamp:      now,
-							ToolName:       toolName,
+							ToolName:       call.Name,
+							ToolKind:       call.Kind,
+							ToolArgument:   call.Argument,
 							ToolDurationMS: durationMS,
 							ToolError:      !toolData.Success,
 						})

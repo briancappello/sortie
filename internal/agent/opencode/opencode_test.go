@@ -2269,14 +2269,8 @@ func TestRunTurn_CompletedTurnReturnsUntypedNilError(t *testing.T) {
 	}
 }
 
-// TestRunTurn_ToolOnlyNoTerminalCompletes drives the committed
-// tool_success.jsonl fixture, which carries a completed tool_use part and
-// no text or reasoning part at all. opencode's normal path sets no
-// terminal report, so DecideTurn genuinely consults Work here: reporting
-// turn_completed is proof the observer's ToolActivity field fired from
-// this shape of the committed fixture corpus, and it doubles as the
-// tool-activity-only case among the DecideTurn conformance checks the
-// committed fixture corpus exercises.
+// The fixture has a tool_use part and no text or reasoning, and opencode sets
+// no terminal report, so DecideTurn must take its completion from tool activity.
 func TestRunTurn_ToolOnlyNoTerminalCompletes(t *testing.T) {
 	t.Parallel()
 
@@ -2295,6 +2289,44 @@ func TestRunTurn_ToolOnlyNoTerminalCompletes(t *testing.T) {
 	}
 
 	dispositiontest.AssertWorkEvidenceConsistent(t, events, result, err)
+}
+
+func TestRunTurn_ToolUseMapsKindAndArgument(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	script := writeRunFixtureScript(t, tmpDir, "tool_calls_mapped.jsonl")
+
+	a, _ := NewOpenCodeAdapter()
+	session := mustStartSession(t, a, tmpDir, script)
+
+	events, _, err := collectEvents(t, a, session, "work")
+	if err != nil {
+		t.Fatalf("RunTurn() error = %v", err)
+	}
+
+	type call struct {
+		name     string
+		kind     domain.ToolKind
+		argument string
+	}
+	want := []call{
+		{"shell", domain.ToolKindShell, "go test ./..."},
+		{"read", domain.ToolKindRead, "/tmp/work/main.go"},
+		{"write", domain.ToolKindEdit, "/tmp/work/notes.md"},
+		{"edit", domain.ToolKindEdit, "/tmp/work/main.go"},
+		{"skill", domain.ToolKindSkill, "demo-skill"},
+		{"grep", "", ""},
+	}
+	var got []call
+	for _, e := range events {
+		if e.Type == domain.EventToolResult {
+			got = append(got, call{e.ToolName, e.ToolKind, e.ToolArgument})
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("tool_result calls = %+v, want %+v", got, want)
+	}
 }
 
 func TestRunTurn_SecondTurnFailsAfterFirstTurnBothSignals(t *testing.T) {

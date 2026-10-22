@@ -3720,10 +3720,11 @@ func TestLastStageOf(t *testing.T) {
 }
 
 type servedEvent struct {
-	Seq     int64  `json:"seq"`
-	Event   string `json:"event"`
-	Message string `json:"message"`
-	Text    string `json:"text"`
+	Seq      int64  `json:"seq"`
+	Event    string `json:"event"`
+	Message  string `json:"message"`
+	Text     string `json:"text"`
+	ToolLine string `json:"tool_line"`
 }
 
 type servedEventsBody struct {
@@ -3810,6 +3811,27 @@ func TestRunEventsServed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunEventsServeToolLine(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	retained := func(string) ([]orchestrator.RunEvent, bool) {
+		return []orchestrator.RunEvent{
+			{Seq: 1, At: at, Event: domain.EventToolResult, ToolName: "Bash", ToolKind: domain.ToolKindShell, ToolArgument: "go test ./..."},
+		}, true
+	}
+	ts := eventsServer(t, orchestrator.RuntimeSnapshotResult{}, &fakeRunHistory{}, retained)
+
+	status, body := getJSON[servedEventsBody](t, ts, "/api/v1/runs/d-1/events")
+
+	if status != http.StatusOK || len(body.Events) != 1 {
+		t.Fatalf("GET /api/v1/runs/d-1/events = %d with %d events, want 200 with 1", status, len(body.Events))
+	}
+	if got, want := body.Events[0].ToolLine, "go test ./..."; got != want {
+		t.Errorf("GET /api/v1/runs/d-1/events tool_line = %q, want %q", got, want)
 	}
 }
 

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -16,7 +17,8 @@ import (
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
-func retainingState(issueID, dispatchID string) (*State, *RunningEntry) {
+func retainingState() (*State, *RunningEntry) {
+	const issueID, dispatchID = "ISS-1", "d-1"
 	state := NewState(5000, 4, 0, nil, AgentTotals{})
 	entry := &RunningEntry{
 		Identifier: issueID + "-ident",
@@ -95,7 +97,7 @@ func TestHandleAgentEvent_RetainsNewestEventsInOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			state, entry := retainingState("ISS-1", "d-1")
+			state, entry := retainingState()
 
 			for _, event := range tt.events {
 				HandleAgentEvent(state, "ISS-1", event, discardLogger(), nil)
@@ -127,7 +129,7 @@ func TestHandleAgentEvent_BufferStaysWithinBothBounds(t *testing.T) {
 	t.Parallel()
 
 	const phaseLength = 1250
-	state, entry := retainingState("ISS-1", "d-1")
+	state, entry := retainingState()
 	buffer := entry.events
 	live := func() int { return len(buffer.events) - buffer.head }
 
@@ -167,13 +169,13 @@ func TestHandleWorkerExit_PersistedRunEventsReadBackEqual(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/events.db"
 	store := openFileStore(t, dbPath)
-	state, _ := retainingState("ISS-1", "d-1")
+	state, _ := retainingState()
 
 	for _, event := range []domain.AgentEvent{
 		{Type: domain.EventSessionStarted, Timestamp: baseTime.Add(1 * time.Second), SessionID: "sess-1", Message: "Session started"},
 		{Type: domain.EventTurnCompleted, Timestamp: baseTime.Add(2 * time.Second), Message: "turn one"},
 		{Type: domain.EventTokenUsage, Timestamp: baseTime.Add(3 * time.Second), Usage: domain.TokenUsage{InputTokens: 100, OutputTokens: 40, TotalTokens: 140}},
-		{Type: domain.EventToolResult, Timestamp: baseTime.Add(4 * time.Second), ToolName: "Bash", ToolDurationMS: 2400, ToolError: true, Message: "exit 1"},
+		{Type: domain.EventToolResult, Timestamp: baseTime.Add(4 * time.Second), ToolName: "Bash", ToolKind: domain.ToolKindRead, ToolArgument: "internal/foo.go", ToolDurationMS: 2400, ToolError: true, Message: "exit 1"},
 		{Type: domain.EventTurnCompleted, Timestamp: baseTime.Add(5 * time.Second), Message: "turn two"},
 	} {
 		HandleAgentEvent(state, "ISS-1", event, discardLogger(), nil)
@@ -183,16 +185,7 @@ func TestHandleWorkerExit_PersistedRunEventsReadBackEqual(t *testing.T) {
 		t.Fatalf("Events(%q) = %d events, ok %v, want 4 events and true", "d-1", len(want), ok)
 	}
 
-	HandleWorkerExit(state, WorkerResult{
-		IssueID: "ISS-1", Identifier: "ISS-1-ident", ExitKind: WorkerExitNormal, AgentAdapter: "mock",
-	}, HandleWorkerExitParams{
-		Store:             store,
-		MaxRetryBackoffMS: 300_000,
-		OnRetryFire:       noopRetryFire,
-		NowFunc:           func() time.Time { return baseTime.Add(60 * time.Second) },
-		Logger:            discardLogger(),
-		Ctx:               ctx,
-	})
+	exitRun(state, store)
 
 	if _, ok := state.RetainedEvents.Events("d-1"); ok {
 		t.Errorf("Events(%q) ok = true after the exit, want false", "d-1")
@@ -213,6 +206,11 @@ func TestHandleWorkerExit_PersistedRunEventsReadBackEqual(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("RunEventsFromRows returned %d events, want %d", len(got), len(want))
 	}
+	for _, event := range got {
+		if event.Event == domain.EventToolResult && (event.ToolKind != domain.ToolKindRead || event.ToolArgument != "internal/foo.go") {
+			t.Errorf("tool_result kind, argument = %q, %q, want %q, %q", event.ToolKind, event.ToolArgument, domain.ToolKindRead, "internal/foo.go")
+		}
+	}
 	for i := range want {
 		if !bytes.Equal(got[i].Payload(), want[i].Payload()) {
 			t.Errorf("event %d Payload() = %s, want %s", i, got[i].Payload(), want[i].Payload())
@@ -228,6 +226,70 @@ func TestHandleWorkerExit_PersistedRunEventsReadBackEqual(t *testing.T) {
 	}
 	if len(history) != 1 || history[0].DispatchID == nil || *history[0].DispatchID != "d-1" {
 		t.Errorf("run_history rows = %+v, want one row with dispatch ID %q", history, "d-1")
+	}
+}
+
+func exitRun(state *State, store *persistence.Store) {
+	HandleWorkerExit(state, WorkerResult{
+		IssueID: "ISS-1", Identifier: "ISS-1-ident", ExitKind: WorkerExitNormal, AgentAdapter: "mock",
+	}, HandleWorkerExitParams{
+		Store:             store,
+		MaxRetryBackoffMS: 300_000,
+		OnRetryFire:       noopRetryFire,
+		NowFunc:           func() time.Time { return baseTime.Add(60 * time.Second) },
+		Logger:            discardLogger(),
+		Ctx:               context.Background(),
+	})
+}
+
+func TestHandleAgentEvent_SkillCallsOutliveTheEventBuffer(t *testing.T) {
+	t.Parallel()
+
+	const calls = 1001
+	state, entry := retainingState()
+	store := openFileStore(t, t.TempDir()+"/skills.db")
+	want := make([]domain.SkillCall, calls)
+
+	for i := range calls {
+		skill := fmt.Sprintf("skill-%d", i+1)
+		argument := skill
+		if i == 1 {
+			argument += "\u202E"
+		}
+		want[i] = domain.SkillCall{Skill: skill, ToolError: i == 0}
+		HandleAgentEvent(state, "ISS-1", domain.AgentEvent{
+			Type: domain.EventToolResult, Timestamp: baseTime.Add(time.Duration(2*i+1) * time.Second),
+			ToolName: "Skill", ToolKind: domain.ToolKindSkill, ToolArgument: argument, ToolError: i == 0,
+		}, discardLogger(), nil)
+		if i == calls/2 {
+			HandleAgentEvent(state, "ISS-1", domain.AgentEvent{
+				Type: domain.EventToolResult, Timestamp: baseTime.Add(time.Duration(2*i+2) * time.Second),
+				ToolName: "Bash", ToolKind: domain.ToolKindShell, ToolArgument: "ls",
+			}, discardLogger(), nil)
+		}
+	}
+
+	if live := len(entry.events.events) - entry.events.head; live > 1000 {
+		t.Errorf("buffer holds %d events, want at most 1000", live)
+	}
+
+	exitRun(state, store)
+
+	history, err := store.QueryRunHistory(context.Background(), persistence.RunHistoryFilter{Limit: 10})
+	if err != nil || len(history) != 1 || history[0].Skills == nil {
+		t.Fatalf("QueryRunHistory = %+v, %v, want one row holding skills", history, err)
+	}
+	var got []domain.SkillCall
+	if err := json.Unmarshal([]byte(*history[0].Skills), &got); err != nil {
+		t.Fatalf("Unmarshal(skills): %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("skills = %d calls, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("skills[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 

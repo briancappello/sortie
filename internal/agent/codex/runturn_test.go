@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1179,19 +1180,26 @@ func TestRunTurn_ItemStartedAndCompletedEmitsToolResult(t *testing.T) {
 		t.Errorf("ExitReason = %v, want EventTurnCompleted", result.ExitReason)
 	}
 
-	wantToolError := map[string]bool{"ls -la": false, "mcpToolCall": true, "rm -rf build": true}
-	results := filterEventsOfType(events, domain.EventToolResult)
-	if len(results) != len(wantToolError) {
-		t.Fatalf("EventToolResult count = %d, want %d", len(results), len(wantToolError))
+	type toolResult struct {
+		name, argument string
+		kind           domain.ToolKind
+		failed         bool
 	}
-	for _, e := range results {
-		if want, ok := wantToolError[e.ToolName]; !ok || e.ToolError != want {
-			t.Errorf("ToolResult %q: ToolError = %v, want %v (expected and unseen: %v)", e.ToolName, e.ToolError, want, ok)
-		}
-		delete(wantToolError, e.ToolName)
+	want := []toolResult{
+		{"", "ls -la", domain.ToolKindShell, false},
+		{"github.get_issue", "", "", true},
+		{"", "rm -rf build", domain.ToolKindShell, true},
+		{"", "a.go", domain.ToolKindEdit, false},
+		{"", "a.go, b.go", domain.ToolKindEdit, false},
+		{"sortie.status", "", "", false},
+		{"lookup", "", "", false},
 	}
-	if len(wantToolError) != 0 {
-		t.Errorf("missing ToolResult for %v", wantToolError)
+	var got []toolResult
+	for _, e := range filterEventsOfType(events, domain.EventToolResult) {
+		got = append(got, toolResult{e.ToolName, e.ToolArgument, e.ToolKind, e.ToolError})
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("tool_result events (name, argument, kind, failed) = %+v, want %+v", got, want)
 	}
 }
 

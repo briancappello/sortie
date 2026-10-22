@@ -28,8 +28,9 @@ const (
 	EventOtherMessage AgentEventType = "other_message"
 	EventMalformed    AgentEventType = "malformed"
 
-	// EventToolResult indicates a tool call completed, with ToolName and
-	// ToolDurationMS populated when the adapter can observe them.
+	// EventToolResult indicates a tool call completed, with ToolName,
+	// ToolKind, ToolArgument, and ToolDurationMS populated when the adapter
+	// can observe them.
 	EventToolResult AgentEventType = "tool_result"
 )
 
@@ -65,6 +66,24 @@ type TokenUsage struct {
 // Cache writes stay in the result.
 func (u TokenUsage) Uncached() int64 {
 	return max(u.TotalTokens-u.CacheReadTokens, 0)
+}
+
+// ToolKind is the kind of work a tool call does. It picks the call's icon and
+// fold phrase and whether the call has a main argument; empty for any other
+// tool.
+type ToolKind string
+
+const (
+	ToolKindShell ToolKind = "shell"
+	ToolKindRead  ToolKind = "read"
+	ToolKindEdit  ToolKind = "edit"
+	ToolKindSkill ToolKind = "skill"
+)
+
+// SkillCall is one skill call of a run.
+type SkillCall struct {
+	Skill     string `json:"skill"`
+	ToolError bool   `json:"tool_error,omitempty"`
 }
 
 // AgentEvent is a normalized event emitted by an agent adapter over the
@@ -110,8 +129,21 @@ type AgentEvent struct {
 	// time. Zero when unavailable.
 	APIDurationMS int64
 
-	// ToolName is the tool that completed, for tool_result events.
+	// ToolName is the name the runtime gives the tool that completed, or
+	// "{server}.{tool}" for an MCP or dynamic tool, for tool_result events.
+	// Empty when the runtime names none; never argument text or a protocol
+	// item type.
 	ToolName string
+
+	// ToolKind is the kind of work the completed tool call did, for
+	// tool_result events. Empty for any other tool.
+	ToolKind ToolKind
+
+	// ToolArgument is the call's one main argument as the runtime sent it: a
+	// shell call's command, a read or edit call's path (several joined by
+	// ", "), a skill call's skill. Empty for any other tool and when the
+	// runtime gives none.
+	ToolArgument string
 
 	// ToolDurationMS is the tool call's wall-clock time in milliseconds,
 	// for tool_result events. Zero when unavailable.

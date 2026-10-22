@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
@@ -94,6 +95,7 @@ type runningEntryResponse struct {
 	PullRequest         *pullRequestResponse   `json:"pull_request,omitempty"`
 	APIRequestCount     *int                   `json:"api_request_count"`
 	RequestsByModel     map[string]int         `json:"requests_by_model,omitempty"`
+	Skills              []domain.SkillCall     `json:"skills,omitempty"`
 	ToolTimePercent     *float64               `json:"tool_time_percent"`
 	APITimePercent      *float64               `json:"api_time_percent"`
 	TokensMeasured      bool                   `json:"tokens_measured"`
@@ -596,6 +598,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 		ReactionKind:        e.ReactionKind,
 		ReactionConfigKey:   e.ReactionConfigKey,
 		RequestsByModel:     e.RequestsByModel,
+		Skills:              e.Skills,
 		TokensMeasured:      e.UsageMeasured,
 		UsageArrival:        string(e.UsageArrival),
 		UsageAttribution:    string(e.UsageAttribution),

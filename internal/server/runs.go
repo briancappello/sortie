@@ -86,6 +86,10 @@ type runResponse struct {
 	// ModelUsage is the run's cost per model; [] when the run recorded none.
 	ModelUsage []modelUsageResponse `json:"model_usage"`
 
+	// Skills is every skill call of the run in completion order; absent when
+	// the run recorded none.
+	Skills []domain.SkillCall `json:"skills,omitempty"`
+
 	// StageChain is the chain the run's rule stood on; null when the run has
 	// no rule, its rule is on no chain, or no workflow shape is held.
 	StageChain []string `json:"stage_chain"`
@@ -290,6 +294,7 @@ func toRunResponse(e RunHistoryEntry, chains [][]string) runResponse {
 		StageChain:           orchestrator.StageChainOf(chains, e.RuleName, e.StagePrevious),
 		DispatchID:           copyText(e.DispatchID),
 		ModelUsage:           toModelUsageResponses(e.ModelUsage),
+		Skills:               toSkillCalls(e.Skills),
 		DeclaredOutcome:      textOrNil(e.DeclaredOutcome),
 	}
 	if e.AgentText != "" {
@@ -374,6 +379,19 @@ func toSelfReviewResponse(metadata *string) *selfReviewResponse {
 		TotalIterations: review.TotalIterations,
 		CapReached:      review.CapReached,
 	}
+}
+
+// toSkillCalls decodes the recorded skill calls; a value that is absent, empty,
+// or does not decode reads as none.
+func toSkillCalls(skills *string) []domain.SkillCall {
+	if skills == nil {
+		return nil
+	}
+	var calls []domain.SkillCall
+	if err := json.Unmarshal([]byte(*skills), &calls); err != nil || len(calls) == 0 {
+		return nil
+	}
+	return calls
 }
 
 func toRunResponses(rows []RunHistoryEntry, chains [][]string) []runResponse {
