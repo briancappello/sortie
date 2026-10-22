@@ -179,16 +179,16 @@ type OrchestratorParams struct {
 	State           *State
 	Logger          *slog.Logger
 	TrackerAdapter  domain.TrackerAdapter
-	TrackerKind     string // the tracker.kind TrackerAdapter was built with
-	TrackerProject  string // the tracker.project TrackerAdapter was built with
+	TrackerKind     string
+	TrackerProject  string
 	AgentAdapter    domain.AgentAdapter
 	WorkflowManager WorkflowManager
 	Store           OrchestratorStore
 	PreflightParams PreflightParams
-	Observers       []Observer           // may be nil/empty
-	Metrics         domain.Metrics       // may be nil; defaults to NoopMetrics
-	ToolRegistry    *domain.ToolRegistry // may be nil
-	HostPool        *HostPool            // may be nil; defaults to local-mode pool
+	Observers       []Observer
+	Metrics         domain.Metrics
+	ToolRegistry    *domain.ToolRegistry
+	HostPool        *HostPool
 
 	// Rates are the rates in force at startup. Nil prices nothing.
 	Rates *pricing.Rates
