@@ -13,11 +13,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
-type parsedLine struct {
-	Event     *rawRunEvent
-	PlainText string
-}
-
 type rawRunEvent struct {
 	Type      string          `json:"type"`
 	Timestamp int64           `json:"timestamp"`
@@ -131,12 +126,8 @@ type rawCacheUsage struct {
 }
 
 type exportUsage struct {
-	InputTokens      int64
-	OutputTokens     int64
-	TotalTokens      int64
-	CacheReadTokens  int64
-	CacheWriteTokens int64
-	Model            string
+	Usage domain.TokenUsage
+	Model string
 
 	// ByModel splits the totals by each kept message's `providerID/modelID`;
 	// a message missing either part adds to no entry.
@@ -308,10 +299,7 @@ func parseSessionExport(data []byte, sessionID string, sinceUnixMS int64) export
 			CacheReadTokens:  cacheReadTokens,
 			CacheWriteTokens: cacheWriteTokens,
 		}
-		sum.InputTokens += messageUsage.InputTokens
-		sum.OutputTokens += messageUsage.OutputTokens
-		sum.CacheReadTokens += messageUsage.CacheReadTokens
-		sum.CacheWriteTokens += messageUsage.CacheWriteTokens
+		sum.Usage = agentcore.AddUsage(sum.Usage, messageUsage)
 		kept = true
 
 		model := mapFromAny(message["model"])
@@ -329,7 +317,6 @@ func parseSessionExport(data []byte, sessionID string, sinceUnixMS int64) export
 		return exportUsage{}
 	}
 
-	sum.TotalTokens = sum.InputTokens + sum.OutputTokens
 	sum.Recovered = true
 	return sum
 }

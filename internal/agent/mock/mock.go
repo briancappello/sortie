@@ -15,6 +15,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/typeutil"
 )
 
 func init() {
@@ -29,7 +30,7 @@ func init() {
 				// Shares the session's own read of report_token_usage so
 				// the two cannot disagree.
 				When: func(passthrough map[string]any, remote bool) bool {
-					return !boolFromConfig(passthrough, "report_token_usage", true)
+					return !typeutil.BoolFrom(passthrough, "report_token_usage", true)
 				},
 				Arrival:     registry.UsageArrivalNone,
 				Attribution: registry.UsageAttributionNone,
@@ -168,12 +169,12 @@ func parseSettings(config map[string]any) mockSettings {
 		}
 	}
 
-	m.eventsPerTurn = intFromConfig(config, "events_per_turn", m.eventsPerTurn)
-	m.inputTokensPerTurn = intFromConfig(config, "input_tokens_per_turn", m.inputTokensPerTurn)
-	m.outputTokensPerTurn = intFromConfig(config, "output_tokens_per_turn", m.outputTokensPerTurn)
-	m.cacheReadTokensPerTurn = intFromConfig(config, "cache_read_tokens_per_turn", m.cacheReadTokensPerTurn)
-	m.turnDelayMS = intFromConfig(config, "turn_delay_ms", m.turnDelayMS)
-	m.reportTokenUsage = boolFromConfig(config, "report_token_usage", m.reportTokenUsage)
+	m.eventsPerTurn = typeutil.IntFrom(config, "events_per_turn", m.eventsPerTurn)
+	m.inputTokensPerTurn = typeutil.IntFrom(config, "input_tokens_per_turn", m.inputTokensPerTurn)
+	m.outputTokensPerTurn = typeutil.IntFrom(config, "output_tokens_per_turn", m.outputTokensPerTurn)
+	m.cacheReadTokensPerTurn = typeutil.IntFrom(config, "cache_read_tokens_per_turn", m.cacheReadTokensPerTurn)
+	m.turnDelayMS = typeutil.IntFrom(config, "turn_delay_ms", m.turnDelayMS)
+	m.reportTokenUsage = typeutil.BoolFrom(config, "report_token_usage", m.reportTokenUsage)
 	if v, ok := config["model_name"].(string); ok {
 		m.modelName = v
 	}
@@ -410,44 +411,6 @@ func outcomeToEvent(outcome string) (domain.AgentEventType, domain.AgentErrorKin
 	default:
 		return domain.EventTurnCompleted, "", false
 	}
-}
-
-// intFromConfig extracts an integer value from a config map, accepting
-// both int and float64 (JSON unmarshalling yields float64). Fractional
-// float64 values are rejected to prevent silent truncation. Returns
-// the fallback if the key is missing or has an unexpected type.
-func intFromConfig(config map[string]any, key string, fallback int) int {
-	v, ok := config[key]
-	if !ok {
-		return fallback
-	}
-	switch n := v.(type) {
-	case int:
-		return n
-	case float64:
-		if n != float64(int(n)) {
-			return fallback
-		}
-		return int(n)
-	default:
-		return fallback
-	}
-}
-
-// boolFromConfig extracts a boolean value from a config map, accepting
-// a Go bool (the type a YAML boolean reaches the constructor as).
-// Returns the fallback if the key is missing or has an unexpected
-// type.
-func boolFromConfig(config map[string]any, key string, fallback bool) bool {
-	v, ok := config[key]
-	if !ok {
-		return fallback
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return fallback
-	}
-	return b
 }
 
 // int64FromConfig extracts an int64 value from a config map, accepting

@@ -20,11 +20,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 )
 
-// exportHeldDescendantScenario names the fake opencode binary the
-// export query test uses: on a "session export" invocation it starts an already-built
-// descendant inheriting its own standard output and standard error,
-// records the descendant's pid, then prints the configured fixture
-// body and exits 0.
 const exportHeldDescendantScenario = "opencode.export-held-descendant"
 
 type exportHeldDescendantParams struct {
@@ -59,9 +54,6 @@ func init() {
 	fakeScenarios[exportHeldDescendantScenario] = agenttest.Typed(runExportHeldDescendant)
 }
 
-// pollOpencodeWinPIDAndAssertGone polls path for a positive PID, then
-// polls until the process can no longer be opened or reports exited,
-// failing t if either bound is exceeded.
 func pollOpencodeWinPIDAndAssertGone(t *testing.T, path string) {
 	t.Helper()
 
@@ -96,10 +88,6 @@ func pollOpencodeWinPIDAndAssertGone(t *testing.T, path string) {
 	t.Errorf("descendant %d still running after 3s, want gone", pid)
 }
 
-// TestQueryExportUsage_HeldDescendantHoldingOutput covers the export
-// query on the Windows job: with a held descendant holding the export query's
-// output, queryExportUsage returns within its timer with the export's
-// usage, and the descendant is gone.
 func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "child.pid")
@@ -134,11 +122,11 @@ func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("queryExportUsage() took %v, want within 3s", elapsed)
 	}
-	if oc.usage.InputTokens != 1750 {
-		t.Errorf("InputTokens = %d, want 1750", oc.usage.InputTokens)
+	if oc.usage.Usage.InputTokens != 1750 {
+		t.Errorf("InputTokens = %d, want 1750", oc.usage.Usage.InputTokens)
 	}
-	if oc.usage.OutputTokens != 300 {
-		t.Errorf("OutputTokens = %d, want 300", oc.usage.OutputTokens)
+	if oc.usage.Usage.OutputTokens != 300 {
+		t.Errorf("OutputTokens = %d, want 300", oc.usage.Usage.OutputTokens)
 	}
 
 	pollOpencodeWinPIDAndAssertGone(t, pidPath)

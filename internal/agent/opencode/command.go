@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -173,17 +172,6 @@ func buildRunArgs(state *sessionState, pt passthroughConfig) []string {
 		args = append(args, "--dangerously-skip-permissions")
 	}
 	return args
-}
-
-// buildTurnStdin returns the reader a turn's subprocess reads from:
-// prompt, preceded by preamble (nil on a local launch, the SSH preamble
-// otherwise).
-func buildTurnStdin(prompt string, preamble io.Reader) io.Reader {
-	promptReader := strings.NewReader(prompt)
-	if preamble == nil {
-		return promptReader
-	}
-	return io.MultiReader(preamble, promptReader)
 }
 
 // exportArgs returns the usage-recovery invocation's argument vector.

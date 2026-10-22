@@ -106,7 +106,7 @@ func NewResumeBaseline(resume *domain.TokenUsage, resumeByModel map[string]domai
 		return b
 	}
 	seed := NormalizeUsageByModel(resumeByModel)
-	if seed != nil && sameCounted(sumByModel(seed), start) {
+	if seed != nil && sameCounted(SumUsage(seed), start) {
 		b.modelBaseline, b.modelLatest, b.modelKnown = seed, maps.Clone(seed), true
 	}
 	return b
@@ -190,7 +190,7 @@ func (b *ResumeBaseline) Resume() (*domain.TokenUsage, map[string]domain.TokenUs
 		return nil, nil
 	}
 	latest := b.latest
-	if !b.modelKnown || !sameCounted(sumByModel(b.modelLatest), latest) {
+	if !b.modelKnown || !sameCounted(SumUsage(b.modelLatest), latest) {
 		return &latest, nil
 	}
 	return &latest, maps.Clone(b.modelLatest)
@@ -230,9 +230,10 @@ func AddUsageByModel(a, b map[string]domain.TokenUsage) map[string]domain.TokenU
 	return sum
 }
 
-func sumByModel(m map[string]domain.TokenUsage) domain.TokenUsage {
+// SumUsage returns the sum of every entry of parts.
+func SumUsage(parts map[string]domain.TokenUsage) domain.TokenUsage {
 	var total domain.TokenUsage
-	for _, usage := range m {
+	for _, usage := range parts {
 		total = AddUsage(total, usage)
 	}
 	return total
