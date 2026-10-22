@@ -1101,6 +1101,7 @@ func TestRuntimeSnapshot_PendingReactionWatchEndsAt(t *testing.T) {
 		{"ci without a recorded head counts from creation", PendingReaction{Kind: ReactionKindCI}, at(24 * time.Hour)},
 		{"review counts from the restart", PendingReaction{Kind: ReactionKindReview, WatchRestartedAt: created.Add(20 * time.Minute)}, at(50 * time.Minute)},
 		{"kind without a window", PendingReaction{Kind: ReactionKindMergeCompletion}, nil},
+		{"review awaiting approval has no end", PendingReaction{Kind: ReactionKindReview, LastCheck: &ReactionCheck{Comments: &CommentCheck{AwaitingApproval: true}}}, nil},
 	}
 
 	for _, tt := range tests {

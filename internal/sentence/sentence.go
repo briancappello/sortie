@@ -501,6 +501,9 @@ func selectPendingReaction(e *orchestrator.SnapshotPendingReaction, c Context) (
 		if e.Wait == "debounce" && comments != nil {
 			return "wait_review_debounce", data
 		}
+		if comments != nil && comments.AwaitingApproval {
+			return "wait_review_approval", data
+		}
 		return "wait_review", data
 	case orchestrator.ReactionKindBotReview:
 		if comments != nil && comments.Handled {

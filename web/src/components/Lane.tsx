@@ -20,6 +20,7 @@ const MARKER: Record<LaneMarker, string> = {
   running: "size-3.5 bg-track-done",
   current: "size-3.5 bg-track-done",
   waiting: "size-2.75 border-[1.5px] border-dashed border-track-done bg-canvas",
+  approval: "size-2.75 border-[1.5px] border-dashed border-track-done bg-canvas",
   retry: "size-3.5 border-2 border-ink-muted bg-canvas",
   held: "size-3.5 border-[1.5px] border-dashed border-ink-muted bg-canvas",
   stopped: "size-3.5 border-[1.5px] border-dashed border-ink-muted bg-canvas",
@@ -43,6 +44,7 @@ const DOT: Record<StationState, string> = {
   needs: "border-warning-fill bg-warning-fill",
   current: "border-track-done bg-track-done",
   waiting: "border-dashed border-track-done bg-canvas",
+  approval: "border-dashed border-track-done bg-canvas",
   ahead: "border-track-todo bg-canvas",
   idle: "border-track-todo bg-canvas",
 };
@@ -60,6 +62,7 @@ const STATE_WORD: Partial<Record<StationState, string>> = {
   acted: "Sortie acted",
   quiet: "nothing to act on",
   needs: "needs attention",
+  approval: "waiting on approval",
 };
 
 // Sortie keeps working an issue after its handoff, so the track runs on through every
@@ -365,6 +368,7 @@ export function StandingMark({ marker, className }: StandingMarkProps) {
     <span
       role="img"
       aria-label={laneMarkerWord(marker)}
+      title={laneMarkerWord(marker)}
       className={cn(
         "inline-grid shrink-0 place-items-center rounded-full",
         MARKER[marker],

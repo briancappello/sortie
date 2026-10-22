@@ -213,6 +213,8 @@ function watchState(
       if (row.wait === "debounce") return { word: "comments arriving", mark: "waiting" };
       if (check?.handled === true) return { word: "handled", mark: "succeeded" };
       if ((check?.new_comments ?? 0) > 0) return { word: "comments to answer", mark: "waiting" };
+      if (check?.awaiting_approval === true)
+        return { word: "waiting on approval", mark: "waiting" };
       break;
     case "merge-conflict":
       if (check?.mergeable === false) return { word: "conflict", mark: "failed" };

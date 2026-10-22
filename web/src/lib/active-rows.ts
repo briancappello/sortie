@@ -110,11 +110,27 @@ export function phaseOf(kind: RowKind, escalatedAt: string | null): Phase {
   }
 }
 
+/** Tells whether the deciding row is a review watch whose pull request waits only on a required approval. */
+export function awaitsApproval(deciding: Deciding | undefined): boolean {
+  return (
+    deciding?.kind === "pending_reactions" &&
+    deciding.entry.escalated_at === null &&
+    deciding.entry.last_check?.awaiting_approval === true
+  );
+}
+
+/** Tells whether an active issue's deciding row awaits a required approval. */
+export function issueAwaitsApproval(state: StateResponse | undefined, issueId: string): boolean {
+  const entry = state?.active?.find((active) => active.issue_id === issueId);
+  return state !== undefined && entry !== undefined && awaitsApproval(decidingRowOf(state, entry));
+}
+
 /** Gives the mark of a row: an open attention item outranks an acknowledged one, and both outrank the row's own state. */
 export function rowMark(
   kind: RowKind,
   issueId: string,
   attention: readonly AttentionItemResponse[],
+  awaitingApproval = false,
 ): StateMark {
   const items = attention.filter((item) => item.issue_id === issueId);
   if (items.some((item) => item.acknowledged_at === null)) {
@@ -126,7 +142,10 @@ export function rowMark(
   if (kind === "running") {
     return "running";
   }
-  return kind === "retrying" ? "retry" : "waiting";
+  if (kind === "retrying") {
+    return "retry";
+  }
+  return awaitingApproval ? "approval" : "waiting";
 }
 
 /** Words a row's place in a chain or its rule, or `null` when neither is worth showing. */
@@ -236,7 +255,7 @@ export function decidingRowOf(
 function toRow(entry: ActiveIssueResponse, kind: RowKind, state: StateResponse): ActiveRow {
   const named = namedRow(state, kind, entry);
   const escalatedAt = named?.kind === "pending_reactions" ? named.entry.escalated_at : null;
-  const mark = rowMark(kind, entry.issue_id, state.attention ?? []);
+  const mark = rowMark(kind, entry.issue_id, state.attention ?? [], awaitsApproval(named));
   return {
     issueId: entry.issue_id,
     identifier: entry.issue_identifier,

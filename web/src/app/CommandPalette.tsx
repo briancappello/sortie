@@ -16,7 +16,7 @@ import {
   useAutocompleteFilter,
 } from "@/components/ui/autocomplete";
 import { Dialog, DialogPopup } from "@/components/ui/dialog";
-import { routeText } from "@/lib/active-rows";
+import { issueAwaitsApproval, routeText } from "@/lib/active-rows";
 import { fmtStamp, parseInstant } from "@/lib/format";
 import { issueLinkOf, sessionLinkOf } from "@/lib/issue-link";
 import { issueStanding, runRouteText } from "@/lib/lane";
@@ -80,6 +80,7 @@ function isSessionEntry(item: PaletteItem): item is SessionEntry {
 function issueEntryOf(
   issue: ActiveIssueResponse | IssueGroupResponse,
   attention: readonly AttentionItemResponse[],
+  awaitingApproval: boolean,
 ): IssueEntry {
   const key = issue.display_identifier || issue.issue_identifier;
   const outcome = "issue_outcome" in issue ? issue.issue_outcome : null;
@@ -87,7 +88,7 @@ function issueEntryOf(
     value: `issue:${issue.issue_id}`,
     label: issue.issue_title ? `${key} ${issue.issue_title}` : key,
     identifier: issue.issue_identifier,
-    word: issueStanding(issue.issue_id, issue.status, outcome, attention).word,
+    word: issueStanding(issue.issue_id, issue.status, outcome, attention, awaitingApproval).word,
   };
 }
 
@@ -223,7 +224,7 @@ export function CommandPalette({
           .filter((group) => !activeIds.has(group.issue_id))
           .slice(0, FINISHED_ENTRY_CAP);
   const issueEntries = [...activeIssues, ...finishedIssues].map((issue) =>
-    issueEntryOf(issue, state?.attention ?? []),
+    issueEntryOf(issue, state?.attention ?? [], issueAwaitsApproval(state, issue.issue_id)),
   );
   const sessionEntries =
     issueQuery === ""

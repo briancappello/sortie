@@ -1,4 +1,11 @@
-import { isRowKind, routeText, rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
+import {
+  awaitsApproval,
+  isRowKind,
+  routeText,
+  rowMark,
+  timeBaseOf,
+  timeText,
+} from "@/lib/active-rows";
 import { fmtStamp, parseInstant, upperFirst } from "@/lib/format";
 import { reactionLabel, reactionShortLabel } from "@/lib/labels";
 import { endingWord, hasSeveralTerminalStates } from "@/lib/ended";
@@ -224,7 +231,7 @@ export function standingOf(input: StandingInput, stations: readonly Station[]): 
   if (deciding !== null) {
     return {
       station: decidingStation(deciding, stations),
-      mark: rowMark(deciding.kind, issueId, attention),
+      mark: rowMark(deciding.kind, issueId, attention, awaitsApproval(deciding)),
       time: timeText(deciding.kind, timeBaseOf(deciding), now),
       label: null,
     };
@@ -265,6 +272,7 @@ export function issueStanding(
   status: string,
   outcome: IssueOutcomeResponse | null,
   attention: readonly AttentionItemResponse[],
+  awaitingApproval: boolean,
 ): { marker: LaneMarker | null; word: string } {
   if (status === "history") {
     return {
@@ -275,7 +283,7 @@ export function issueStanding(
   if (!isRowKind(status)) {
     return { marker: null, word: "" };
   }
-  const mark = rowMark(status, issueId, attention);
+  const mark = rowMark(status, issueId, attention, awaitingApproval);
   return { marker: mark, word: stateWord(mark) };
 }
 
@@ -285,6 +293,7 @@ export type StationState =
   | "current"
   | "ahead"
   | "waiting"
+  | "approval"
   | "needs"
   | "escalated"
   | "acted"
@@ -307,6 +316,13 @@ type PrLoop = Record<string, PrLoopStationResponse> | null;
 
 type Reading = Pick<LaneStation, "state" | "continuations">;
 
+function holdingStateOf(rows: readonly PendingReading[]): StationState {
+  if (rows.some((r) => r.escalated_at !== null)) {
+    return "needs";
+  }
+  return rows.some((r) => r.last_check?.awaiting_approval === true) ? "approval" : "waiting";
+}
+
 function reactionReadingOf(
   station: Station,
   pending: readonly PendingReading[],
@@ -314,10 +330,7 @@ function reactionReadingOf(
 ): Reading {
   const rows = pending.filter((r) => r.config_key === station.key && holdsStation(r));
   if (rows.length > 0) {
-    return {
-      state: rows.some((r) => r.escalated_at !== null) ? "needs" : "waiting",
-      continuations: 0,
-    };
+    return { state: holdingStateOf(rows), continuations: 0 };
   }
   const served: PrLoopStationResponse | undefined =
     prLoop !== null && Object.hasOwn(prLoop, station.key) ? prLoop[station.key] : undefined;
@@ -352,7 +365,8 @@ function readingOf(
 /**
  * Gives each station its state against the standing: the current station
  * carries the standing's mark and time. A reaction station reads waiting, or
- * needs once its escalation stands, while a pull request row is pending on it;
+ * needs once its escalation stands, while a pull request row is pending on it,
+ * and approval while the row awaits a required approval;
  * with none, it reads from the served `prLoop` as escalated, acted, quiet, or
  * idle for no record.
  * The rest read passed or ahead. The current station takes the standing's
