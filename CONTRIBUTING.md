@@ -100,7 +100,7 @@ The linter config in [.golangci.yml](.golangci.yml) catches most issues. Beyond 
 - **Errors:** wrap with context (`fmt.Errorf("operation: %w", err)`), no capitals, no trailing punctuation. Use the error categories in `internal/domain/errors.go`.
 - **Logging:** `log/slog` with typed `slog.Attr` constructors. Derive loggers via `logging.WithIssue` and `logging.WithSession`.
 - **Templates:** `Option("missingkey=error")` on every `text/template` - strict mode is mandatory.
-- **Shared adapter helpers:** don't re-implement a helper already extracted to a shared package (`internal/httpkit`, `internal/typeutil`, `internal/issuekit`, or an adapter-family package like `internal/scm/scmcore`). A contract test in `internal/adaptertest` fails `make test` if a tracker, SCM, agent, or notifier package re-declares one of these under a local name.
+- **Shared adapter helpers:** don't re-implement a helper already extracted to a shared package (`internal/httpkit`, `internal/typeutil`, `internal/issuekit`, or an adapter-family package like `internal/scm/scmcore` or the agent family's `internal/agent/agentcore` and `internal/agent/procutil`). A contract test in `internal/adaptertest` fails `make test` if a tracker, SCM, agent, or notifier package re-declares one of the listed names under a local name. For agent packages it also fails a private per-turn subprocess lifecycle (rule `LIFECYCLE`), a direct read of `ReadTimeoutMS` (rule `READTIMEOUT`), and token counters added by hand (rule `USAGESUM`). A kind that runs one process per turn builds on `agentcore.NewForkPerTurnSession` and adds what it lacks as a hook.
 
 ## Testing conventions
 

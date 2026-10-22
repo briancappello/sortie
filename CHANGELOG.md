@@ -50,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A Codex run no longer shows shell commands with secrets unmasked in the event log and debug logs, its tool calls no longer give the tool call metric a new series for every distinct command, and its MCP tool calls show the tool they called. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
 
+- OpenCode CLI turns now follow the Claude Code and Copilot CLI lifecycle: a turn cancelled before it starts is reported as cancelled, a turn that fails to start keeps the token usage already measured, a stop is no longer overridden by a failure the runtime reported, and every turn, over SSH too, reports its process ID. Copilot CLI now also reports token usage for cancelled and failed turns when the runtime recorded it.
+
 ## [1.29.0] - 2026-10-20
 
 ### Added
