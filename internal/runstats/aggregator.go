@@ -396,6 +396,7 @@ func degradedSchemaWarning(caps persistence.RunHistoryCapabilities) string {
 		{caps.HasTrigger, "what started each run"},
 		{caps.HasFirstAfterHop, "the first run after each stage hop"},
 		{caps.HasAgentBlocked, "which runs stopped to wait for a person"},
+		{caps.HasSkills, "the skill calls of each run"},
 	}
 
 	var unrecorded, dropped []string
