@@ -179,6 +179,8 @@ type OrchestratorParams struct {
 	State           *State
 	Logger          *slog.Logger
 	TrackerAdapter  domain.TrackerAdapter
+	TrackerKind     string // the tracker.kind TrackerAdapter was built with
+	TrackerProject  string // the tracker.project TrackerAdapter was built with
 	AgentAdapter    domain.AgentAdapter
 	WorkflowManager WorkflowManager
 	Store           OrchestratorStore
@@ -300,6 +302,8 @@ type Orchestrator struct {
 	logger *slog.Logger
 
 	trackerAdapter     domain.TrackerAdapter
+	trackerKind        string
+	trackerProject     string
 	router             *route.Router
 	agentAdapter       domain.AgentAdapter
 	agentAdapterByKind func(kind string) (domain.AgentAdapter, error)
@@ -477,6 +481,8 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		state:                             params.State,
 		logger:                            logger,
 		trackerAdapter:                    params.TrackerAdapter,
+		trackerKind:                       params.TrackerKind,
+		trackerProject:                    params.TrackerProject,
 		router:                            params.Router,
 		agentAdapter:                      params.AgentAdapter,
 		agentAdapterByKind:                agentAdapterByKind,

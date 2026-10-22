@@ -4247,6 +4247,9 @@
         "no_change_state": {
           "type": "string"
         },
+        "project": {
+          "type": "string"
+        },
         "terminal_states": {
           "anyOf": [
             {
