@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 )
 
@@ -200,6 +201,40 @@ func TestFor(t *testing.T) {
 			}
 			if !strings.HasSuffix(got.Long, ".") || strings.HasSuffix(got.Short, ".") {
 				t.Errorf("For(%s) = %+v, want a long form ending in a period and a short form without", tt.name, got)
+			}
+		})
+	}
+}
+
+func TestToolLine(t *testing.T) {
+	t.Parallel()
+
+	tool := func(name string, kind domain.ToolKind, argument string) orchestrator.RunEvent {
+		return orchestrator.RunEvent{Event: domain.EventToolResult, ToolName: name, ToolKind: kind, ToolArgument: argument}
+	}
+
+	tests := []struct {
+		name  string
+		event orchestrator.RunEvent
+		want  string
+	}{
+		{"named shell call reads as its command", tool("Bash", domain.ToolKindShell, "git status"), "git status"},
+		{"named read call", tool("Read", domain.ToolKindRead, "internal/foo.go"), "Read internal/foo.go"},
+		{"nameless edit call", tool("", domain.ToolKindEdit, "internal/foo.go"), "Edit internal/foo.go"},
+		{"nameless shell call without an argument", tool("", domain.ToolKindShell, ""), "Command"},
+		{"name without a kind", tool("github.get_issue", "", ""), "github.get_issue"},
+		{"neither name nor kind", tool("", "", ""), "Tool"},
+		{"another event type", orchestrator.RunEvent{Event: domain.EventNotification, ToolName: "Bash"}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ToolLine(tt.event)
+
+			if got != tt.want {
+				t.Errorf("ToolLine(%+v) = %q, want %q", tt.event, got, tt.want)
 			}
 		})
 	}

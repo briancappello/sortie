@@ -2319,14 +2319,12 @@ func TestStopSession_RunningProcess(t *testing.T) {
 	<-done
 }
 
-// TestRunTurn_ToolResultInUserEvent is a regression test verifying that
-// tool_result content blocks in user-type JSONL events (not assistant)
-// produce correlated EventToolResult events with the correct ToolName.
-// Prior to the fix, user-event tool_result blocks were silently dropped.
 func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 	t.Parallel()
 
-	fixture := loadFixture(t, "tool_use_result_user_event.jsonl")
+	const argsSentinel = "SENTINEL-skill-args-must-not-leak"
+
+	fixture := loadFixture(t, "tool_use_mapped_calls.jsonl")
 
 	tmpDir := t.TempDir()
 	script := fakeClaude(t, tmpDir, agenttest.Output{Stdout: string(fixture)})
@@ -2342,7 +2340,7 @@ func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 
 	var events []domain.AgentEvent
 	result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
-		Prompt: "read main.go",
+		Prompt: "map the calls",
 		OnEvent: func(e domain.AgentEvent) {
 			events = append(events, e)
 		},
@@ -2354,7 +2352,6 @@ func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 		t.Errorf("ExitReason = %q, want %q", result.ExitReason, domain.EventTurnCompleted)
 	}
 
-	// Collect all EventToolResult events.
 	var toolResults []domain.AgentEvent
 	for _, e := range events {
 		if e.Type == domain.EventToolResult {
@@ -2362,34 +2359,48 @@ func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 		}
 	}
 
-	if len(toolResults) != 1 {
-		eventTypes := make([]string, len(events))
-		for i, e := range events {
-			eventTypes[i] = string(e.Type)
+	want := []struct {
+		name     string
+		kind     domain.ToolKind
+		argument string
+	}{
+		{"Bash", domain.ToolKindShell, "go test ./..."},
+		{"Read", domain.ToolKindRead, "/workspace/internal/foo.go"},
+		{"Edit", domain.ToolKindEdit, "/workspace/internal/foo.go"},
+		{"Skill", domain.ToolKindSkill, "demo-skill"},
+		{"Grep", "", ""},
+		{"github.get_issue", "", ""},
+	}
+	if len(toolResults) != len(want) {
+		t.Fatalf("EventToolResult count = %d, want %d", len(toolResults), len(want))
+	}
+	for i, w := range want {
+		got := toolResults[i]
+		if got.ToolName != w.name || got.ToolKind != w.kind || got.ToolArgument != w.argument {
+			t.Errorf("toolResults[%d] (name, kind, argument) = (%q, %q, %q), want (%q, %q, %q)",
+				i, got.ToolName, got.ToolKind, got.ToolArgument, w.name, w.kind, w.argument)
 		}
-		t.Fatalf("EventToolResult count = %d, want 1; all events = %v", len(toolResults), eventTypes)
+		if got.ToolError {
+			t.Errorf("toolResults[%d].ToolError = true, want false", i)
+		}
+		if got.ToolDurationMS < 0 {
+			t.Errorf("toolResults[%d].ToolDurationMS = %d, want >= 0", i, got.ToolDurationMS)
+		}
 	}
 
-	got := toolResults[0]
-	if got.ToolName != "Read" {
-		t.Errorf("ToolName = %q, want %q", got.ToolName, "Read")
-	}
-	if got.ToolError {
-		t.Error("ToolError = true, want false")
-	}
-	if got.ToolDurationMS < 0 {
-		t.Errorf("ToolDurationMS = %d, want >= 0", got.ToolDurationMS)
-	}
-	if got.Message != "tool_result: Read" {
-		t.Errorf("Message = %q, want %q", got.Message, "tool_result: Read")
+	for i, e := range events {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("json.Marshal(events[%d]): %v", i, err)
+		}
+		if strings.Contains(string(raw), argsSentinel) {
+			t.Errorf("events[%d] (%s) carries the Skill args sentinel: %s", i, e.Type, raw)
+		}
 	}
 
 	dispositiontest.AssertWorkEvidenceConsistent(t, events, result, err)
 }
 
-// TestRunTurn_ToolResultInAssistantEvent validates that the original
-// assistant-only tool_result correlation path still works after the
-// user-event fix. Uses the tool_use_result_separate.jsonl fixture.
 func TestRunTurn_ToolResultInAssistantEvent(t *testing.T) {
 	t.Parallel()
 
@@ -2421,7 +2432,6 @@ func TestRunTurn_ToolResultInAssistantEvent(t *testing.T) {
 		t.Errorf("ExitReason = %q, want %q", result.ExitReason, domain.EventTurnCompleted)
 	}
 
-	// Collect all EventToolResult events.
 	var toolResults []domain.AgentEvent
 	for _, e := range events {
 		if e.Type == domain.EventToolResult {
@@ -2429,7 +2439,6 @@ func TestRunTurn_ToolResultInAssistantEvent(t *testing.T) {
 		}
 	}
 
-	// tool_use_result_separate.jsonl has 2 tool uses with results in assistant events.
 	if len(toolResults) != 2 {
 		eventTypes := make([]string, len(events))
 		for i, e := range events {
@@ -2764,7 +2773,7 @@ func TestProcessToolBlocks_XMLStripping(t *testing.T) {
 		},
 	}
 	tracker := agentcore.NewToolTracker()
-	tracker.Begin("toolu_test01", "Edit")
+	tracker.Begin("toolu_test01", agentcore.ToolCall{Name: "Edit"})
 	work := agentcore.NewWorkObserver(agentcore.WorkSignals{ToolActivity: true})
 
 	var events []domain.AgentEvent
@@ -2824,7 +2833,7 @@ func TestProcessToolBlocks_TailTruncation(t *testing.T) {
 		},
 	}
 	tracker := agentcore.NewToolTracker()
-	tracker.Begin("toolu_tail01", "Bash")
+	tracker.Begin("toolu_tail01", agentcore.ToolCall{Name: "Bash"})
 	work := agentcore.NewWorkObserver(agentcore.WorkSignals{ToolActivity: true})
 
 	var events []domain.AgentEvent

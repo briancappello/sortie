@@ -88,14 +88,24 @@ type rawToolPart struct {
 	State     rawToolState `json:"state"`
 }
 
+// toolMappings gives the kind and main-argument member of each OpenCode 2.x
+// tool the adapter reports an argument for.
+var toolMappings = map[string]agentcore.ToolMapping{
+	"shell": {Kind: domain.ToolKindShell, Key: "command"},
+	"read":  {Kind: domain.ToolKindRead, Key: "path"},
+	"write": {Kind: domain.ToolKindEdit, Key: "path"},
+	"edit":  {Kind: domain.ToolKindEdit, Key: "path"},
+	"skill": {Kind: domain.ToolKindSkill, Key: "id"},
+}
+
 type rawToolState struct {
-	Status   string      `json:"status"`
-	Input    any         `json:"input,omitempty"`
-	Output   any         `json:"output,omitempty"`
-	Metadata any         `json:"metadata,omitempty"`
-	Error    string      `json:"error,omitempty"`
-	Title    string      `json:"title,omitempty"`
-	Time     rawPartTime `json:"time,omitempty"`
+	Status   string          `json:"status"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Output   any             `json:"output,omitempty"`
+	Metadata any             `json:"metadata,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	Title    string          `json:"title,omitempty"`
+	Time     rawPartTime     `json:"time,omitempty"`
 }
 
 type rawStepFinishPart struct {

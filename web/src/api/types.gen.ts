@@ -38,8 +38,11 @@ export interface AgentEventFrame {
   event: string;
   message: string;
   text: string;
+  tool_line?: string;
   session_id?: string;
   tool_name?: string;
+  tool_kind?: string;
+  tool_argument?: string;
   duration_ms?: number;
   tool_error?: boolean;
   usage?: TokenInfo | null;
@@ -564,8 +567,11 @@ export interface RunEventResponse {
   event: string;
   message: string;
   text: string;
+  tool_line?: string;
   session_id?: string;
   tool_name?: string;
+  tool_kind?: string;
+  tool_argument?: string;
   duration_ms?: number;
   tool_error?: boolean;
   usage?: TokenInfo | null;
@@ -625,6 +631,7 @@ export interface RunResponse {
   ssh_host: string | null;
   dispatch_id: string | null;
   model_usage: ModelUsageResponse[] | null;
+  skills?: SkillCall[];
   stage_chain: string[] | null;
   issue_outcome: IssueOutcomeResponse | null;
   pr_loop: Record<string, PrLoopStationResponse> | null;
@@ -666,6 +673,7 @@ export interface RunningEntryResponse {
   pull_request?: PullRequestResponse;
   api_request_count: number | null;
   requests_by_model?: Record<string, number>;
+  skills?: SkillCall[];
   tool_time_percent: number | null;
   api_time_percent: number | null;
   tokens_measured: boolean;
@@ -860,6 +868,11 @@ export interface ShapeTracker {
 export interface ShapeWorker {
   ssh_hosts: string[] | null;
   max_concurrent_agents_per_host: number | null;
+}
+
+export interface SkillCall {
+  skill: string;
+  tool_error?: boolean;
 }
 
 export interface SnapshotAgentTotals {

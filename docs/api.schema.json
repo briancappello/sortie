@@ -155,8 +155,17 @@
         "text": {
           "type": "string"
         },
+        "tool_argument": {
+          "type": "string"
+        },
         "tool_error": {
           "type": "boolean"
+        },
+        "tool_kind": {
+          "type": "string"
+        },
+        "tool_line": {
+          "type": "string"
         },
         "tool_name": {
           "type": "string"
@@ -2781,8 +2790,17 @@
         "text": {
           "type": "string"
         },
+        "tool_argument": {
+          "type": "string"
+        },
         "tool_error": {
           "type": "boolean"
+        },
+        "tool_kind": {
+          "type": "string"
+        },
+        "tool_line": {
+          "type": "string"
         },
         "tool_name": {
           "type": "string"
@@ -3046,6 +3064,12 @@
               "type": "null"
             }
           ]
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillCall"
+          },
+          "type": "array"
         },
         "ssh_host": {
           "anyOf": [
@@ -3363,6 +3387,12 @@
         },
         "session_id": {
           "type": "string"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillCall"
+          },
+          "type": "array"
         },
         "ssh_host": {
           "type": "string"
@@ -4300,6 +4330,20 @@
       "required": [
         "ssh_hosts",
         "max_concurrent_agents_per_host"
+      ],
+      "type": "object"
+    },
+    "SkillCall": {
+      "properties": {
+        "skill": {
+          "type": "string"
+        },
+        "tool_error": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "skill"
       ],
       "type": "object"
     },

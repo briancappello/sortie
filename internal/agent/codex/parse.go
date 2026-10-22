@@ -3,7 +3,9 @@ package codex
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -56,12 +58,50 @@ type turnError struct {
 // notifications.
 type itemParams struct {
 	Item struct {
-		ID      string `json:"id"`
-		Type    string `json:"type"`
-		Text    string `json:"text,omitempty"`
-		Command string `json:"command,omitempty"`
-		Status  string `json:"status,omitempty"`
+		ID        string          `json:"id"`
+		Type      string          `json:"type"`
+		Text      string          `json:"text,omitempty"`
+		Command   string          `json:"command,omitempty"`
+		Status    string          `json:"status,omitempty"`
+		Changes   json.RawMessage `json:"changes,omitempty"`
+		Server    string          `json:"server,omitempty"`
+		Tool      string          `json:"tool,omitempty"`
+		Namespace string          `json:"namespace,omitempty"`
 	} `json:"item"`
+}
+
+// toolCall maps a tool item to a tool call and reports whether the item is a
+// tool item at all. Built-in items name no tool; MCP and dynamic tool items
+// are named by the tool they called. A malformed changes list gives an edit
+// with no argument.
+func (p itemParams) toolCall() (agentcore.ToolCall, bool) {
+	item := p.Item
+	switch item.Type {
+	case "commandExecution":
+		return agentcore.ToolCall{Kind: domain.ToolKindShell, Argument: item.Command}, true
+	case "fileChange":
+		return agentcore.ToolCall{Kind: domain.ToolKindEdit, Argument: changedPaths(item.Changes)}, true
+	case "mcpToolCall":
+		return agentcore.ToolCall{Name: agentcore.QualifiedToolName(item.Server, item.Tool)}, true
+	case "dynamicToolCall":
+		return agentcore.ToolCall{Name: agentcore.QualifiedToolName(item.Namespace, item.Tool)}, true
+	}
+	return agentcore.ToolCall{}, false
+}
+
+// changedPaths joins the path of each fileChange change with ", " in order.
+func changedPaths(changes json.RawMessage) string {
+	var list []struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(changes, &list) != nil {
+		return ""
+	}
+	paths := make([]string, 0, len(list))
+	for _, change := range list {
+		paths = append(paths, change.Path)
+	}
+	return strings.Join(paths, ", ")
 }
 
 // mcpServerStartupStatus is the params payload of an

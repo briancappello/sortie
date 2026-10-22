@@ -17,7 +17,7 @@ import { runRouteText } from "@/lib/lane";
 import { agentStatement, runOutcome } from "@/lib/run-status";
 
 import { EventPane } from "./EventPane";
-import { ModelCostPanel, SessionPanel, UsagePanel } from "./SessionPanels";
+import { ModelCostPanel, SessionPanel, SkillsPanel, UsagePanel } from "./SessionPanels";
 import { SessionsPanel } from "./SessionsPanel";
 import { timelineOf, turnBarsOf } from "./timeline";
 import { TokensChart, TokensLegend } from "./TokensChart";
@@ -201,6 +201,7 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
   const stallFull = isLive ? session.running.stall_text_full : null;
   const stallOff = isLive ? session.running.stall_off_text : null;
   const modelUsage = session.kind === "finished" ? (session.run.model_usage ?? []) : [];
+  const skills = (session.kind === "live" ? session.running.skills : session.run.skills) ?? [];
 
   return (
     <>
@@ -244,6 +245,7 @@ function SessionBody({ identifier, dispatchId, session, log, config }: SessionBo
         <div className="flex min-w-0 flex-col gap-xl">
           <UsagePanel session={session} />
           {modelUsage.length > 0 ? <ModelCostPanel parts={modelUsage} /> : undefined}
+          {skills.length > 0 ? <SkillsPanel skills={skills} /> : undefined}
           <SessionPanel session={session} config={config} />
           <SessionsPanel identifier={identifier} dispatchId={dispatchId} />
         </div>

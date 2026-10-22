@@ -991,12 +991,10 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					continue
 				}
 				item := ip.Item
-				switch item.Type {
-				case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
-					toolName := cmp.Or(item.Command, item.Type)
-					inFlight.Begin(item.ID, toolName)
+				if call, isTool := ip.toolCall(); isTool {
+					inFlight.Begin(item.ID, call)
 					spend.MarkModelReached()
-				case "reasoning":
+				} else if item.Type == "reasoning" {
 					spend.MarkModelReached()
 				}
 				agentcore.EmitNotification(params.OnEvent, "")
@@ -1008,11 +1006,13 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					continue
 				}
 				item := ip.Item
-				if toolName, durationMS, ok := inFlight.End(item.ID); ok {
+				if call, durationMS, ok := inFlight.End(item.ID); ok {
 					params.OnEvent(domain.AgentEvent{
 						Type:           domain.EventToolResult,
 						Timestamp:      now,
-						ToolName:       toolName,
+						ToolName:       call.Name,
+						ToolKind:       call.Kind,
+						ToolArgument:   call.Argument,
 						ToolDurationMS: durationMS,
 						ToolError:      item.Status == "failed" || item.Status == "declined",
 					})

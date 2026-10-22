@@ -74,7 +74,7 @@ A single stdout line can carry a whole file body, because a tool result embeds i
 
 Tool error text arrives wrapped in a runtime-specific envelope and salted with terminal color codes. The adapter unwraps and strips it so log fields stay greppable, then bounds it first-line-plus-tail rather than head-truncating, because the useful part of a failing build is at the end and the exit-code header is at the start.
 
-An uncorrelated tool result reports the tool name as unknown. That means the matching tool-use block never reached the tracker, usually because the result arrived in a message position the scan does not walk. The adapter scans content blocks in both the assistant and the user positions for exactly this reason.
+An uncorrelated tool result reports no tool name. That means the matching tool-use block never reached the tracker, usually because the result arrived in a message position the scan does not walk. The adapter scans content blocks in both the assistant and the user positions for exactly this reason.
 
 Session transcripts live under the user's home directory, not in the workspace. Removing a workspace does not reclaim them, and a long-running fleet accumulates them.
 

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -851,7 +852,7 @@ func TestRunTurn_ToolUseEvents(t *testing.T) {
 
 	adapter, session := newTestSession(t, t.TempDir())
 	state := session.Internal.(*sessionState)
-	state.target.Command = fakeCopilotBinaryWithOutput(t, loadTestFixture(t, "tool_use_session.jsonl"), 0)
+	state.target.Command = fakeCopilotBinaryWithOutput(t, loadTestFixture(t, "tool_calls_mapped.jsonl"), 0)
 
 	var events []domain.AgentEvent
 	result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
@@ -865,29 +866,34 @@ func TestRunTurn_ToolUseEvents(t *testing.T) {
 		t.Errorf("result.ExitReason = %q, want %q", result.ExitReason, domain.EventTurnCompleted)
 	}
 
-	var toolEvent *domain.AgentEvent
-	for i := range events {
-		if events[i].Type == domain.EventToolResult {
-			toolEvent = &events[i]
-			break
+	type call struct {
+		name     string
+		kind     domain.ToolKind
+		argument string
+	}
+	want := []call{
+		{"bash", domain.ToolKindShell, "go test ./..."},
+		{"view", domain.ToolKindRead, "/tmp/copilot-test/main.go"},
+		{"edit", domain.ToolKindEdit, "/tmp/copilot-test/main.go"},
+		{"skill", domain.ToolKindSkill, "demo-skill"},
+		{"github-mcp-server.get_issue", "", ""},
+		{"grep", "", ""},
+	}
+	var got []call
+	for _, e := range events {
+		if e.Type == domain.EventToolResult {
+			got = append(got, call{e.ToolName, e.ToolKind, e.ToolArgument})
 		}
 	}
-	if toolEvent == nil {
-		t.Fatal("EventToolResult not delivered for tool use session")
-	}
-	if toolEvent.ToolName == "" {
-		t.Error("EventToolResult.ToolName is empty")
+	if !slices.Equal(got, want) {
+		t.Errorf("tool_result calls = %+v, want %+v", got, want)
 	}
 
 	dispositiontest.AssertWorkEvidenceConsistent(t, events, result, err)
 }
 
-// TestRunTurn_ToolDeniedContinuesTurn drives a tool.execution_complete
-// event whose error.code is "denied", the CLI's own non-interactive
-// permission policy refusing a tool call and continuing the session. With
-// --no-ask-user closing the human-question path unconditionally, every
-// recognized request here is a permission request with no reply channel,
-// so the turn must continue rather than end.
+// With --no-ask-user every recognized request is a permission request with
+// no reply channel, so the runtime's own refusal must not end the turn.
 func TestRunTurn_ToolDeniedContinuesTurn(t *testing.T) {
 	// t.Setenv is incompatible with t.Parallel.
 	t.Setenv("GH_TOKEN", "test-token-for-unit-test")

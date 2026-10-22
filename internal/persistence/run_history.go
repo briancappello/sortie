@@ -94,6 +94,7 @@ type RunHistory struct {
 	WorkflowFile   string // Base filename; empty for pre-migration rows.
 	TurnsCompleted int
 	ReviewMetadata *string // JSON ReviewMetadata; nil when self-review did not run.
+	Skills         *string // JSON array of the run's skill calls; nil when it recorded none.
 	RuleName       string  // Empty for legacy rows and fallback dispatches.
 	TemplateID     string  // Empty for legacy rows and the workflow body template.
 
@@ -334,6 +335,11 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 		reviewMetaVal = sql.NullString{String: *run.ReviewMetadata, Valid: true}
 	}
 
+	skillsVal := sql.NullString{}
+	if run.Skills != nil {
+		skillsVal = sql.NullString{String: *run.Skills, Valid: true}
+	}
+
 	triggerVal := sql.NullString{}
 	if run.Trigger != nil {
 		triggerVal = sql.NullString{String: *run.Trigger, Valid: true}
@@ -362,8 +368,8 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 
 	res, err := ex.ExecContext(ctx,
 		`INSERT INTO run_history
-			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id, agent_blocked, resume_input_tokens, resume_output_tokens, resume_cache_read_tokens, resume_cache_write_tokens, resume_model_usage, estimated_cost_usd, cost_status, declared_outcome, agent_text)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(issue_id, identifier, display_identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns, configured_model, configured_effort, reported_model, stage_previous, stage_previous_outcome, chain_id, stage_target, stage_result, issue_title, issue_url, dispatched_at, trigger, reaction_kind, session_id, ssh_host, first_after_hop, dispatch_id, agent_blocked, resume_input_tokens, resume_output_tokens, resume_cache_read_tokens, resume_cache_write_tokens, resume_model_usage, estimated_cost_usd, cost_status, declared_outcome, agent_text, skills)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.IssueID, run.Identifier, dispIDVal, run.Attempt, run.AgentAdapter,
 		run.Workspace, run.StartedAt, run.CompletedAt, run.Status, errVal, wfVal,
 		run.TurnsCompleted, reviewMetaVal, run.RuleName, run.TemplateID,
@@ -375,7 +381,7 @@ func insertRunHistory(ctx context.Context, ex statementExecer, run RunHistory) (
 		dispatchIDVal, run.AgentBlocked,
 		resumeInput, resumeOutput, resumeCacheRead, resumeCacheWrite, resumeModelUsage,
 		nullFloat(run.EstimatedCostUSD), nullIfEmpty(run.CostStatus),
-		run.DeclaredOutcome, run.AgentText,
+		run.DeclaredOutcome, run.AgentText, skillsVal,
 	)
 	if err != nil {
 		return RunHistory{}, fmt.Errorf("append run history for %q: %w", run.IssueID, err)
@@ -396,7 +402,7 @@ func (s *Store) QueryRunHistoryByIssue(ctx context.Context, issueID string) ([]R
 		`SELECT id, issue_id, identifier, display_identifier, attempt, agent_adapter, workspace,
 			started_at, completed_at, status, error, workflow_file, turns_completed, review_metadata, rule_name, template_id,
 			input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens, tokens_measured, unaccounted_turns,
-			configured_model, configured_effort, reported_model
+			configured_model, configured_effort, reported_model, skills
 		FROM run_history
 		WHERE issue_id = ?
 		ORDER BY id DESC`, issueID)
@@ -408,13 +414,13 @@ func (s *Store) QueryRunHistoryByIssue(ctx context.Context, issueID string) ([]R
 	entries := []RunHistory{}
 	for rows.Next() {
 		var r RunHistory
-		var errVal, wfVal, dispIDVal, reviewMetaVal sql.NullString
+		var errVal, wfVal, dispIDVal, reviewMetaVal, skillsVal sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.IssueID, &r.Identifier, &dispIDVal, &r.Attempt, &r.AgentAdapter,
 			&r.Workspace, &r.StartedAt, &r.CompletedAt, &r.Status, &errVal, &wfVal,
 			&r.TurnsCompleted, &reviewMetaVal, &r.RuleName, &r.TemplateID,
 			&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.TokensMeasured,
-			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel,
+			&r.UnaccountedTurns, &r.ConfiguredModel, &r.ConfiguredEffort, &r.ReportedModel, &skillsVal,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}
@@ -429,6 +435,9 @@ func (s *Store) QueryRunHistoryByIssue(ctx context.Context, issueID string) ([]R
 		}
 		if reviewMetaVal.Valid {
 			r.ReviewMetadata = new(reviewMetaVal.String)
+		}
+		if skillsVal.Valid {
+			r.Skills = new(skillsVal.String)
 		}
 		entries = append(entries, r)
 	}
@@ -446,12 +455,12 @@ const reactionRecoveryRunColumns = `r.id, r.issue_id, r.identifier, r.display_id
 			r.input_tokens, r.output_tokens, r.total_tokens, r.cache_read_tokens, r.cache_write_tokens, r.tokens_measured,
 			r.unaccounted_turns, r.configured_model, r.configured_effort, r.reported_model,
 			r.stage_previous, r.stage_previous_outcome, r.chain_id,
-			r.issue_title, r.issue_url, r.dispatched_at`
+			r.issue_title, r.issue_url, r.dispatched_at, r.skills`
 
 // scanRecoveryRun reads one row selected with [reactionRecoveryRunColumns].
 func scanRecoveryRun(rows *sql.Rows) (RunHistory, error) {
 	var run RunHistory
-	var errVal, wfVal, dispIDVal, reviewMetaVal sql.NullString
+	var errVal, wfVal, dispIDVal, reviewMetaVal, skillsVal sql.NullString
 	if err := rows.Scan(
 		&run.ID, &run.IssueID, &run.Identifier, &dispIDVal, &run.Attempt, &run.AgentAdapter,
 		&run.Workspace, &run.StartedAt, &run.CompletedAt, &run.Status, &errVal, &wfVal,
@@ -459,7 +468,7 @@ func scanRecoveryRun(rows *sql.Rows) (RunHistory, error) {
 		&run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.CacheReadTokens, &run.CacheWriteTokens, &run.TokensMeasured,
 		&run.UnaccountedTurns, &run.ConfiguredModel, &run.ConfiguredEffort, &run.ReportedModel,
 		&run.StagePrevious, &run.StagePreviousOutcome, &run.ChainID,
-		&run.IssueTitle, &run.IssueURL, &run.DispatchedAt,
+		&run.IssueTitle, &run.IssueURL, &run.DispatchedAt, &skillsVal,
 	); err != nil {
 		return RunHistory{}, err
 	}
@@ -474,6 +483,9 @@ func scanRecoveryRun(rows *sql.Rows) (RunHistory, error) {
 	}
 	if reviewMetaVal.Valid {
 		run.ReviewMetadata = new(reviewMetaVal.String)
+	}
+	if skillsVal.Valid {
+		run.Skills = new(skillsVal.String)
 	}
 	return run, nil
 }
@@ -664,7 +676,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 			chain_id, stage_previous, stage_previous_outcome, stage_target, stage_result,
 			issue_title, issue_url, dispatched_at,
 			trigger, reaction_kind, session_id, ssh_host, dispatch_id,
-			estimated_cost_usd, cost_status, declared_outcome, agent_text
+			estimated_cost_usd, cost_status, declared_outcome, agent_text, skills
 		FROM run_history`
 	if len(conds) > 0 {
 		query += " WHERE " + strings.Join(conds, " AND ") //nolint:gosec // conds holds only fixed predicates with ? placeholders; values are bound via args
@@ -681,7 +693,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 	entries := []RunHistory{}
 	for rows.Next() {
 		var r RunHistory
-		var errVal, wfVal, dispIDVal, reviewMetaVal, triggerVal, reactionVal, sessionVal, hostVal, dispatchIDVal, costStatusVal sql.NullString
+		var errVal, wfVal, dispIDVal, reviewMetaVal, skillsVal, triggerVal, reactionVal, sessionVal, hostVal, dispatchIDVal, costStatusVal sql.NullString
 		var costVal sql.NullFloat64
 		if err := rows.Scan(
 			&r.ID, &r.IssueID, &r.Identifier, &dispIDVal, &r.Attempt, &r.AgentAdapter,
@@ -692,7 +704,7 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 			&r.ChainID, &r.StagePrevious, &r.StagePreviousOutcome, &r.StageTarget, &r.StageResult,
 			&r.IssueTitle, &r.IssueURL, &r.DispatchedAt,
 			&triggerVal, &reactionVal, &sessionVal, &hostVal, &dispatchIDVal,
-			&costVal, &costStatusVal, &r.DeclaredOutcome, &r.AgentText,
+			&costVal, &costStatusVal, &r.DeclaredOutcome, &r.AgentText, &skillsVal,
 		); err != nil {
 			return nil, fmt.Errorf("scan run history: %w", err)
 		}
@@ -707,6 +719,9 @@ func (s *Store) QueryRunHistory(ctx context.Context, f RunHistoryFilter) ([]RunH
 		}
 		if reviewMetaVal.Valid {
 			r.ReviewMetadata = new(reviewMetaVal.String)
+		}
+		if skillsVal.Valid {
+			r.Skills = new(skillsVal.String)
 		}
 		if triggerVal.Valid {
 			r.Trigger = new(triggerVal.String)

@@ -55,10 +55,11 @@ function uncachedOf(usage: TokenInfo | null): number | null {
 }
 
 /**
- * Arranges retained events into lines: consecutive tool results fold into one,
- * a gap becomes a count of missing events, and a turn end carries its number,
- * its own tokens, and its duration. A figure is set only when no event it
- * counts is missing, so nothing is attributed across a gap.
+ * Arranges retained events into lines: consecutive tool results fold into one
+ * except skill calls, which each stand alone, a gap becomes a count of missing
+ * events, and a turn end carries its number, its own tokens, and its duration.
+ * A figure is set only when no event it counts is missing, so nothing is
+ * attributed across a gap.
  */
 export function timelineOf(items: readonly RunItem[]): Timeline {
   const lines: TimelineLine[] = [];
@@ -91,7 +92,7 @@ export function timelineOf(items: readonly RunItem[]): Timeline {
 
     const { event } = item;
     const key = `e${event.seq}`;
-    if (event.event === "tool_result") {
+    if (event.event === "tool_result" && event.tool_kind !== "skill") {
       group.push(event);
       continue;
     }

@@ -142,10 +142,13 @@ const (
 )
 
 // agentEventMsg pairs an issue ID with an agent event for delivery through
-// agentEventCh.
+// agentEventCh. A message with Workspace set carries the prepared workspace
+// path instead of an event; it travels on the same channel so it is applied
+// before any event the agent emits afterwards.
 type agentEventMsg struct {
-	IssueID string
-	Event   domain.AgentEvent
+	IssueID   string
+	Event     domain.AgentEvent
+	Workspace string
 }
 
 // turnStartedMsg pairs an issue ID with the worker's started-turn count,
@@ -594,6 +597,12 @@ func applyQueued[T any](ch <-chan T, apply func(T)) {
 // ceilings. The money ceiling is evaluated first, so a money stop wins when
 // one event reaches both.
 func (o *Orchestrator) applyAgentEvent(ctx context.Context, msg agentEventMsg, enforceCeiling bool) {
+	if msg.Workspace != "" {
+		if entry, ok := o.state.Running[msg.IssueID]; ok {
+			entry.WorkspacePath = msg.Workspace
+		}
+		return
+	}
 	HandleAgentEvent(o.state, msg.IssueID, msg.Event, o.logger, o.metrics)
 	if enforceCeiling {
 		evaluateTokenWarning(o.state, msg.IssueID, msg.Event, o.logger)
@@ -1480,6 +1489,12 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 					logger.Warn("agent event channel full, dropping event",
 						slog.Any("event_type", event.Type),
 					)
+				}
+			},
+			OnWorkspaceReady: func(issueID, path string) {
+				select {
+				case o.agentEventCh <- agentEventMsg{IssueID: issueID, Workspace: path}:
+				case <-ctx.Done():
 				}
 			},
 			OnExit: func(issueID string, result WorkerResult) {

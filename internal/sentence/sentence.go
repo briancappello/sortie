@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
@@ -178,11 +179,42 @@ func Event(e orchestrator.RunEvent) string {
 	return render(name, "text", map[string]any{
 		"Raw":         message,
 		"Message":     cleaned,
-		"Tool":        cmp.Or(e.ToolName, "a tool"),
+		"Tool":        ToolLine(e),
 		"HasDuration": e.DurationMS > 0,
 		"Duration":    float64(e.DurationMS) / 1000,
 		"ToolError":   e.ToolError,
 	})
+}
+
+// ToolLine returns the line text of a tool_result event, and "" for any other
+// event. A shell call reads as its command alone; any other call with an
+// argument reads as its name and the argument.
+func ToolLine(e orchestrator.RunEvent) string {
+	if e.Event != domain.EventToolResult {
+		return ""
+	}
+	name := cmp.Or(e.ToolName, toolKindWord(e.ToolKind))
+	if e.ToolKind == domain.ToolKindShell && e.ToolArgument != "" {
+		return e.ToolArgument
+	}
+	if e.ToolArgument != "" {
+		return name + " " + e.ToolArgument
+	}
+	return name
+}
+
+func toolKindWord(kind domain.ToolKind) string {
+	switch kind {
+	case domain.ToolKindShell:
+		return "Command"
+	case domain.ToolKindRead:
+		return "Read"
+	case domain.ToolKindEdit:
+		return "Edit"
+	case domain.ToolKindSkill:
+		return "Skill"
+	}
+	return "Tool"
 }
 
 // Stall returns a running row's stall sentence, and false when its stall

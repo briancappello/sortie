@@ -207,6 +207,7 @@ func runHistoryEntry(r persistence.RunHistory) server.RunHistoryEntry {
 		CostStatus:           r.CostStatus,
 		StagePreviousOutcome: r.StagePreviousOutcome,
 		ReviewMetadata:       r.ReviewMetadata,
+		Skills:               r.Skills,
 		OriginRecorded:       r.OriginRecorded,
 		Trigger:              r.Trigger,
 		ReactionKind:         r.ReactionKind,
