@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Agent events now name the skill an agent ran. When a Claude Code, Copilot CLI, or OpenCode agent calls a skill, the event log, the live event stream, and the session view show which one, and a Skills panel in the session view lists every skill call of the run in order and marks each one that failed, while the run is live and after it ends. The state and run history APIs serve the same list. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
 
+- History now lists each run's skill calls in order with failed calls marked, and Analytics adds a By skill table that counts, for the chosen range, the runs that called each skill, its calls, and its failed calls; `sortie stats --format json` reports the same counts. Runs recorded before this release have no skill calls on record, so Analytics shows its skill counts as "at least" while a range holds such runs. ([#1473](https://github.com/sortie-ai/sortie/issues/1473))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.

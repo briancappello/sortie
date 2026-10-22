@@ -8,14 +8,12 @@ import {
 } from "@/components/ui/table";
 import { fmtCount, fmtDuration } from "@/lib/format";
 
-import { COLUMN_WIDTH, CountBar } from "./GroupTable";
+import { COLUMN_WIDTH } from "./GroupTable";
 
 import type { ConfigResponse, Funnel, FunnelStage } from "@/api/types.gen";
 import type { ReactNode } from "react";
 
 const MONO = "font-mono text-body-sm";
-const ENTRY_TAG =
-  "inline-block border border-line-medium rounded px-xxs text-label-caps font-medium uppercase text-ink-muted";
 
 const REASON_WORDS: Record<string, string> = {
   run_failed: "failed run",
@@ -49,11 +47,10 @@ function CountCell({ value }: CountCellProps) {
 interface StageRowProps {
   stage: FunnelStage;
   index: number;
-  widest: number;
   targets: string | undefined;
 }
 
-function StageRow({ stage, index, widest, targets }: StageRowProps) {
+function StageRow({ stage, index, targets }: StageRowProps) {
   const { arrivals, outcomes } = stage;
   const reasons = stage.no_hop_reasons ?? [];
   const reasonsTitle =
@@ -67,21 +64,13 @@ function StageRow({ stage, index, widest, targets }: StageRowProps) {
       <TableCell>
         <span
           title={stage.rule}
-          className={`inline-block truncate align-bottom ${MONO} ${stage.entry ? COLUMN_WIDTH.entryStageText : COLUMN_WIDTH.stageText}`}
+          className={`inline-block truncate align-bottom ${MONO} ${COLUMN_WIDTH.stageText}`}
         >
           {stage.rule}
         </span>
-        {stage.entry ? (
-          <>
-            {" "}
-            <span className={ENTRY_TAG}>entry</span>
-          </>
-        ) : undefined}
       </TableCell>
       <TableCell look={stage.runs === 0 ? "muted" : "text"}>{fmtCount(stage.runs)}</TableCell>
-      <TableCell>
-        <CountBar value={stage.entered} max={widest} />
-      </TableCell>
+      <TableCell>{fmtCount(stage.entered)}</TableCell>
       <TableCell look="number">
         {arrivals.label === 0 ? undefined : fmtCount(arrivals.label)}
       </TableCell>
@@ -129,7 +118,6 @@ export interface ChainFunnelProps {
 /** Renders one chain definition of the report: a row per stage with the passes that reached it and how each one left it. */
 export function ChainFunnel({ funnel, config }: ChainFunnelProps) {
   const stages = funnel.stages ?? [];
-  const widest = Math.max(1, ...stages.map((stage) => stage.entered));
   const targets = handoffTargets(config);
 
   return (
@@ -175,13 +163,7 @@ export function ChainFunnel({ funnel, config }: ChainFunnelProps) {
       </TableHeader>
       <TableBody>
         {stages.map((stage, index) => (
-          <StageRow
-            key={stage.rule}
-            stage={stage}
-            index={index}
-            widest={widest}
-            targets={targets}
-          />
+          <StageRow key={stage.rule} stage={stage} index={index} targets={targets} />
         ))}
       </TableBody>
     </Table>

@@ -11,6 +11,7 @@ import { ChainFunnel } from "./ChainFunnel";
 import { GroupTable } from "./GroupTable";
 import { OutcomeBar } from "./OutcomeBar";
 import { RangePicker } from "./RangePicker";
+import { SkillTable } from "./SkillTable";
 import { SpendChart } from "./SpendChart";
 import { SummaryTiles } from "./SummaryTiles";
 import { useAnalyticsRange } from "./analytics-range";
@@ -91,6 +92,7 @@ function Breakdowns({ report, hasRules, hasRates }: BreakdownsProps) {
   const byStatus = report.by_status ?? [];
   const byTrigger = report.by_trigger ?? [];
   const byOrigin = report.by_origin ?? [];
+  const skillCalls = report.skill_calls;
   const showByRule =
     hasRules && byRule.some((group) => byRule.length > 1 || isNamedRuleGroup(group.name));
 
@@ -150,6 +152,9 @@ function Breakdowns({ report, hasRules, hasRates }: BreakdownsProps) {
           rows={byOrigin}
           {...common}
         />
+      ) : undefined}
+      {skillCalls !== null && (skillCalls.by_skill ?? []).length > 0 ? (
+        <SkillTable report={skillCalls} />
       ) : undefined}
     </>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/hint";
@@ -27,6 +27,67 @@ import type { ReactNode } from "react";
 
 const PAGE_ROWS = 20;
 
+/** What {@link usePaging} hands a table. */
+export interface Paging<Row> {
+  /** The rows shown so far. */
+  visible: readonly Row[];
+  hasMore: boolean;
+  /** Goes on the table body's `ref`, so focus can move to the first row a page adds. */
+  attachBody: (element: HTMLTableSectionElement | null) => void;
+  handleShowMore: () => void;
+}
+
+/**
+ * Shows rows 20 at a time. The shown count lives in state, so mount the table
+ * with a key that changes with the range.
+ */
+export function usePaging<Row>(rows: readonly Row[]): Paging<Row> {
+  const [shown, setShown] = useState(PAGE_ROWS);
+  const body = useRef<HTMLTableSectionElement | null>(null);
+  const focusRow = useRef<number | null>(null);
+  const attachBody = useCallback((element: HTMLTableSectionElement | null) => {
+    body.current = element;
+  }, []);
+
+  useEffect(() => {
+    if (focusRow.current !== null) {
+      body.current?.rows[focusRow.current]?.focus();
+      focusRow.current = null;
+    }
+  }, [shown]);
+
+  function handleShowMore() {
+    const next = shown + PAGE_ROWS;
+    // The button leaves with the last rows, so focus moves to the first row added.
+    if (next >= rows.length) {
+      focusRow.current = shown;
+    }
+    setShown(next);
+  }
+
+  return {
+    visible: rows.slice(0, shown),
+    hasMore: shown < rows.length,
+    attachBody,
+    handleShowMore,
+  };
+}
+
+/** Props of {@link ShowMore}. */
+export interface ShowMoreProps {
+  hasMore: boolean;
+  onShowMore: () => void;
+}
+
+/** Renders the button that shows the next page of rows, until none is left. */
+export function ShowMore({ hasMore, onShowMore }: ShowMoreProps) {
+  return hasMore ? (
+    <div>
+      <Button onClick={onShowMore}>Show more</Button>
+    </div>
+  ) : undefined;
+}
+
 /**
  * Column widths every Analytics table shares, so the columns line up from table
  * to table; Duration takes the rest. A chain table splits the name width into
@@ -38,11 +99,10 @@ export const COLUMN_WIDTH = {
   stageNumber: "w-xxl",
   stage: "w-[192px]",
   stageText: "max-w-[160px]",
-  entryStageText: "max-w-[96px]",
-  runs: "w-[140px]",
-  measure: "w-[124px]",
+  runs: "w-[96px]",
+  measure: "w-[112px]",
   turns: "w-[120px]",
-  figure: "w-[156px]",
+  figure: "w-[112px]",
 } as const;
 
 function durationText(duration: Duration): string {
@@ -52,83 +112,6 @@ function durationText(duration: Duration): string {
   const low = fmtDuration(duration.p50);
   const high = fmtDuration(duration.p95);
   return low === high ? low : `${low} to ${high}`;
-}
-
-/** Props of {@link CountBar}. */
-export interface CountBarProps {
-  value: number;
-  /** The largest value of the table. */
-  max: number;
-}
-
-/** Renders a count after a bar as wide as its share of the table's largest count. */
-export function CountBar({ value, max }: CountBarProps) {
-  return (
-    <span className="inline-grid grid-cols-[48px_auto] items-center gap-xs">
-      <span aria-hidden="true" className="block h-2 bg-transparent">
-        <span
-          className="block h-full rounded-r bg-viz-1"
-          style={{ width: `${(value / Math.max(max, 1)) * 100}%` }}
-        />
-      </span>
-      {fmtCount(value)}
-    </span>
-  );
-}
-
-interface RateBarProps {
-  ratio: number;
-}
-
-function RateBar({ ratio }: RateBarProps) {
-  return (
-    <span className="inline-grid grid-cols-[40px_auto] items-center gap-xs">
-      <span aria-hidden="true" className="block h-1 overflow-hidden rounded-full bg-viz-1-track">
-        <span
-          className="block h-full rounded-full bg-viz-1"
-          style={{ width: `${Math.min(1, Math.max(0, ratio)) * 100}%` }}
-        />
-      </span>
-      {fmtPercent(ratio)}
-    </span>
-  );
-}
-
-const RANGE_WIDTH = 64;
-const RANGE_INSET = 2;
-
-interface DurationRangeProps {
-  duration: Duration;
-  /** The largest p95 of the table. */
-  maxP95: number;
-}
-
-function DurationRange({ duration, maxP95 }: DurationRangeProps) {
-  const { p50, p95, samples } = duration;
-  const x = (seconds: number) =>
-    RANGE_INSET + (maxP95 > 0 ? seconds / maxP95 : 0) * (RANGE_WIDTH - 2 * RANGE_INSET);
-
-  return (
-    <span className="inline-grid grid-cols-[64px_auto] items-center gap-xs">
-      <span aria-hidden="true" className="block h-3">
-        {samples > 0 && p50 !== null && p95 !== null ? (
-          <svg width={RANGE_WIDTH} height={12} className="block overflow-visible">
-            <line
-              x1={x(p50)}
-              x2={x(p95)}
-              y1={6}
-              y2={6}
-              strokeWidth={2}
-              strokeLinecap="round"
-              className="stroke-ink-muted"
-            />
-            <circle cx={x(p50)} cy={6} r={4} strokeWidth={2} className="fill-ink stroke-canvas" />
-          </svg>
-        ) : undefined}
-      </span>
-      <span className="text-body-sm text-ink-muted">{durationText(duration)}</span>
-    </span>
-  );
 }
 
 interface NotedFigureProps {
@@ -208,39 +191,16 @@ export function GroupTable<Row extends Group>({
   hasRates,
   measure = "success",
 }: GroupTableProps<Row>) {
-  const [shown, setShown] = useState(PAGE_ROWS);
-  const maxRuns = Math.max(1, ...rows.map((row) => row.runs));
-  const maxP95 = Math.max(
-    0,
-    ...rows.map((row) => (row.duration_seconds.samples > 0 ? (row.duration_seconds.p95 ?? 0) : 0)),
-  );
-  const body = useRef<HTMLTableSectionElement>(null);
-  const focusRow = useRef<number | null>(null);
   const { rows: ordered, sort } = useTableSort(
     rows,
     sortColumns(nameColumns, tier, measure),
     sortParam,
   );
-
-  useEffect(() => {
-    if (focusRow.current !== null) {
-      body.current?.rows[focusRow.current]?.focus();
-      focusRow.current = null;
-    }
-  }, [shown]);
-
-  function handleShowMore() {
-    const next = shown + PAGE_ROWS;
-    // The button leaves with the last rows, so focus moves to the first row added.
-    if (next >= rows.length) {
-      focusRow.current = shown;
-    }
-    setShown(next);
-  }
+  const { visible, hasMore, attachBody, handleShowMore } = usePaging(ordered);
 
   return (
     <section className="flex flex-col gap-sm">
-      <Table title={title} className={hasRates ? "table-fixed min-w-326" : "table-fixed min-w-248"}>
+      <Table title={title} className={hasRates ? "table-fixed min-w-264" : "table-fixed min-w-208"}>
         <TableHeader>
           {nameColumns.map((column, index) => (
             <SortableHead
@@ -287,14 +247,15 @@ export function GroupTable<Row extends Group>({
               columnId="cost-per-succeeded"
               sort={sort}
               align="right"
+              help="Estimated cost per succeeded run"
               className={COLUMN_WIDTH.figure}
             >
-              Per succeeded run
+              Per run
             </SortableHead>
           ) : undefined}
         </TableHeader>
-        <TableBody ref={body}>
-          {ordered.slice(0, shown).map((row, index) => (
+        <TableBody ref={attachBody}>
+          {visible.map((row, index) => (
             <TableRow key={index} tabIndex={-1}>
               {nameColumns.map((column) => (
                 <TableCell key={column.header}>
@@ -306,15 +267,11 @@ export function GroupTable<Row extends Group>({
                   </span>
                 </TableCell>
               ))}
+              <TableCell>{fmtCount(row.runs)}</TableCell>
               <TableCell>
-                <CountBar value={row.runs} max={maxRuns} />
+                {fmtPercent(measure === "share" ? row.share : row.success_rate)}
               </TableCell>
-              <TableCell>
-                <RateBar ratio={measure === "share" ? row.share : row.success_rate} />
-              </TableCell>
-              <TableCell>
-                <DurationRange duration={row.duration_seconds} maxP95={maxP95} />
-              </TableCell>
+              <TableCell>{durationText(row.duration_seconds)}</TableCell>
               <TableCell look="number">
                 {row.mean_turns === null ? "not recorded" : fmtMean(row.mean_turns)}
               </TableCell>
@@ -339,11 +296,7 @@ export function GroupTable<Row extends Group>({
           ))}
         </TableBody>
       </Table>
-      {shown < rows.length ? (
-        <div>
-          <Button onClick={handleShowMore}>Show more</Button>
-        </div>
-      ) : undefined}
+      <ShowMore hasMore={hasMore} onShowMore={handleShowMore} />
     </section>
   );
 }
