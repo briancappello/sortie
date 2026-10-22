@@ -81,7 +81,7 @@ export function useDocumentStatus(
       title: titleFor(condition, attention, project),
       icon: faviconUrl(condition),
     };
-    applied.current = next;
+    applied.current = condition === undefined ? null : next;
     document.title = next.title;
     iconLink().href = next.icon;
   }, [condition, attention, project, frozen]);
