@@ -5,9 +5,11 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/pricing"
@@ -33,6 +35,7 @@ func TestSpendWindowBounds(t *testing.T) {
 	t.Parallel()
 
 	utcPlus3 := time.FixedZone("UTC+3", 3*60*60)
+	utcPlus2 := time.FixedZone("UTC+2", 2*60*60)
 	leapNoon := time.Date(2028, 2, 29, 12, 0, 0, 0, time.UTC)
 	newYearsEve := time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC)
 	tests := []struct {
@@ -47,6 +50,11 @@ func TestSpendWindowBounds(t *testing.T) {
 		{"daily reads an offset instant in UTC", SpendWindowDaily, time.Date(2026, 3, 14, 1, 30, 0, 0, utcPlus3), utcDate(2026, 3, 13), utcDate(2026, 3, 14)},
 		{"daily on a leap day", SpendWindowDaily, leapNoon, utcDate(2028, 2, 29), utcDate(2028, 3, 1)},
 		{"daily on 31 December", SpendWindowDaily, newYearsEve, utcDate(2026, 12, 31), utcDate(2027, 1, 1)},
+		{"weekly on the last nanosecond of a Sunday across a month end", SpendWindowWeekly, utcDate(2026, 11, 2).Add(-time.Nanosecond), utcDate(2026, 10, 26), utcDate(2026, 11, 2)},
+		{"weekly at Monday midnight", SpendWindowWeekly, utcDate(2026, 11, 2), utcDate(2026, 11, 2), utcDate(2026, 11, 9)},
+		{"weekly reads Monday locally as Sunday in UTC", SpendWindowWeekly, time.Date(2026, 11, 2, 1, 0, 0, 0, utcPlus2), utcDate(2026, 10, 26), utcDate(2026, 11, 2)},
+		{"weekly on 31 December", SpendWindowWeekly, time.Date(2026, 12, 31, 12, 0, 0, 0, time.UTC), utcDate(2026, 12, 28), utcDate(2027, 1, 4)},
+		{"weekly on 1 January in ISO week 53", SpendWindowWeekly, utcDate(2027, 1, 1), utcDate(2026, 12, 28), utcDate(2027, 1, 4)},
 		{"monthly one nanosecond before the first", SpendWindowMonthly, utcDate(2026, 11, 1).Add(-time.Nanosecond), utcDate(2026, 10, 1), utcDate(2026, 11, 1)},
 		{"monthly on the first", SpendWindowMonthly, utcDate(2026, 11, 1), utcDate(2026, 11, 1), utcDate(2026, 12, 1)},
 		{"monthly reads an offset instant in UTC", SpendWindowMonthly, time.Date(2026, 11, 1, 1, 0, 0, 0, utcPlus3), utcDate(2026, 10, 1), utcDate(2026, 11, 1)},
@@ -70,7 +78,7 @@ func TestSpendWindowBounds(t *testing.T) {
 func TestEvaluateSpendCeiling(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	defaultNow := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	floatSum := 0.7
 	floatSum += 0.1
 	recorded := func(usd float64) persistence.IssueTokenUsage {
@@ -82,7 +90,10 @@ func TestEvaluateSpendCeiling(t *testing.T) {
 
 	tests := []struct {
 		name         string
+		now          time.Time
+		window       SpendWindow
 		daily        float64
+		weekly       float64
 		monthly      float64
 		rows         persistence.IssueTokenUsage
 		running      *RunningEntry
@@ -95,28 +106,47 @@ func TestEvaluateSpendCeiling(t *testing.T) {
 		{name: "float sum of 0.7 and 0.1 holds against 0.8", daily: 0.8, rows: recorded(floatSum), wantSkip: SkipDailySpendCeiling, wantUsed: floatSum, wantComplete: true},
 		{name: "one cent below the ceiling does not hold", daily: 5, rows: recorded(4.99), wantUsed: 4.99, wantComplete: true},
 		{name: "running estimate carries the window to the ceiling", daily: 5.5, rows: recorded(3), running: live(250_000, true), wantSkip: SkipDailySpendCeiling, wantUsed: 5.5, wantComplete: true},
-		{name: "raising the ceiling above the spend releases", daily: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.DailyUSD = 6 }, wantUsed: 5, wantComplete: true},
-		{name: "setting the ceiling to zero releases", daily: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.DailyUSD = 0 }},
+		{name: "raising the ceiling above the spend releases", daily: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.Ceilings[SpendWindowDaily] = 6 }, wantUsed: 5, wantComplete: true},
+		{name: "setting the ceiling to zero releases", daily: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.Ceilings[SpendWindowDaily] = 0 }},
 		{name: "a now in the next window releases", daily: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.Now = p.Now.Add(24 * time.Hour) }, wantComplete: true},
 		{name: "a failed read keeps the last result", daily: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.Store.(*fakeSpendStore).err = errors.New("db down") }, wantSkip: SkipDailySpendCeiling, wantUsed: 5, wantComplete: true},
 		{name: "an unpriced row leaves the spend unchanged and incomplete", daily: 5, rows: persistence.IssueTokenUsage{RecordedCostUSD: 3, PricedSessions: 1, Sessions: 2, UnpricedSessions: 1}, wantUsed: 3},
 		{name: "an unmeasured row leaves the spend unchanged and incomplete", daily: 5, rows: persistence.IssueTokenUsage{RecordedCostUSD: 3, PricedSessions: 1, Sessions: 2, UnmeasuredSessions: 1}, wantUsed: 3},
 		{name: "a running session that reported nothing keeps the spend complete", daily: 5, rows: recorded(3), running: live(0, false), wantUsed: 3, wantComplete: true},
 		{name: "no setting reads nothing", rows: recorded(5)},
-		{name: "both windows holding return the monthly reason", daily: 5, monthly: 5, rows: recorded(5), wantSkip: SkipMonthlySpendCeiling, wantUsed: 5, wantComplete: true},
+		{name: "both windows holding return the monthly reason", window: SpendWindowMonthly, daily: 5, monthly: 5, rows: recorded(5), wantSkip: SkipMonthlySpendCeiling, wantUsed: 5, wantComplete: true},
+		{name: "a weekly ceiling at the week's spend holds", window: SpendWindowWeekly, weekly: 5, rows: recorded(5), wantSkip: SkipWeeklySpendCeiling, wantUsed: 5, wantComplete: true},
+		{name: "Monday midnight releases the weekly hold", now: time.Date(2026, 11, 1, 23, 59, 59, 999_999_999, time.UTC), window: SpendWindowWeekly, weekly: 5, rows: recorded(5), then: func(p *spendCeilingParams) { p.Now = utcDate(2026, 11, 2) }, wantComplete: true},
+		{name: "daily and weekly resetting together return the weekly reason", now: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), window: SpendWindowWeekly, daily: 5, weekly: 5, rows: recorded(5), wantSkip: SkipWeeklySpendCeiling, wantUsed: 5, wantComplete: true},
+		{name: "weekly resetting before monthly returns the weekly reason", now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), window: SpendWindowWeekly, weekly: 5, monthly: 5, rows: recorded(5), wantSkip: SkipWeeklySpendCeiling, wantUsed: 5, wantComplete: true},
+		{name: "monthly resetting after weekly returns the monthly reason", now: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), window: SpendWindowMonthly, weekly: 5, monthly: 5, rows: recorded(5), wantSkip: SkipMonthlySpendCeiling, wantUsed: 5, wantComplete: true},
+		{name: "all three resetting together return the monthly reason", now: time.Date(2027, 1, 31, 12, 0, 0, 0, time.UTC), window: SpendWindowMonthly, daily: 5, weekly: 5, monthly: 5, rows: recorded(5), wantSkip: SkipMonthlySpendCeiling, wantUsed: 5, wantComplete: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			now, window := tt.now, tt.window
+			if now.IsZero() {
+				now = defaultNow
+			}
+			if window == "" {
+				window = SpendWindowDaily
+			}
+			ceilings := map[SpendWindow]float64{SpendWindowDaily: tt.daily, SpendWindowWeekly: tt.weekly, SpendWindowMonthly: tt.monthly}
 			state := NewState(1000, 1, 0, nil, AgentTotals{})
 			state.Rates = fixtureRates(t, 10)
 			if tt.running != nil {
 				state.Running["R-1"] = tt.running
 			}
-			store := &fakeSpendStore{byStart: map[int64]persistence.IssueTokenUsage{utcDate(2026, 10, 20).Unix(): tt.rows, utcDate(2026, 10, 1).Unix(): tt.rows}}
-			params := spendCeilingParams{Store: store, DailyUSD: tt.daily, MonthlyUSD: tt.monthly, Rates: state.Rates, Now: now, Logger: discardLogger()}
+			store := &fakeSpendStore{byStart: map[int64]persistence.IssueTokenUsage{}}
+			for w, ceiling := range ceilings {
+				if start, _ := spendWindowBounds(w, now); ceiling > 0 {
+					store.byStart[start.Unix()] = tt.rows
+				}
+			}
+			params := spendCeilingParams{Store: store, Ceilings: ceilings, Rates: state.Rates, Now: now, Logger: discardLogger()}
 
 			got := evaluateSpendCeiling(state, params)
 			if tt.then != nil {
@@ -124,19 +154,58 @@ func TestEvaluateSpendCeiling(t *testing.T) {
 				got = evaluateSpendCeiling(state, params)
 			}
 
-			var daily SpendCeilingStatus
-			if len(state.SpendCeilings) > 0 {
-				daily = state.SpendCeilings[0]
-			}
+			status, _ := findSpendStatus(state.SpendCeilings, window)
 			wantHolding := tt.wantSkip != SkipNone
-			if tt.daily == 0 && tt.monthly == 0 && (store.calls != 0 || state.SpendCeilings != nil) {
+			if tt.daily == 0 && tt.weekly == 0 && tt.monthly == 0 && (store.calls != 0 || state.SpendCeilings != nil) {
 				t.Errorf("evaluateSpendCeiling() with no setting = %d reads, %v, want 0 reads, nil", store.calls, state.SpendCeilings)
 			}
-			if got != tt.wantSkip || daily.UsedUSD != tt.wantUsed || daily.UsedComplete != tt.wantComplete || daily.Holding != wantHolding {
-				t.Errorf("evaluateSpendCeiling() = %q with daily (UsedUSD, UsedComplete, Holding) = (%v, %v, %v), want %q with (%v, %v, %v)",
-					got, daily.UsedUSD, daily.UsedComplete, daily.Holding, tt.wantSkip, tt.wantUsed, tt.wantComplete, wantHolding)
+			if got != tt.wantSkip || status.UsedUSD != tt.wantUsed || status.UsedComplete != tt.wantComplete || status.Holding != wantHolding {
+				t.Errorf("evaluateSpendCeiling() = %q with %s (UsedUSD, UsedComplete, Holding) = (%v, %v, %v), want %q with (%v, %v, %v)",
+					got, window, status.UsedUSD, status.UsedComplete, status.Holding, tt.wantSkip, tt.wantUsed, tt.wantComplete, wantHolding)
 			}
 		})
+	}
+}
+
+func TestSpendWindowDefs_EveryWindowReadsItsOwnSetting(t *testing.T) {
+	for _, def := range spendWindowDefs {
+		if def.setting != "agent.max_"+string(def.window)+"_cost_usd" || def.reason != SkipReason(def.window+"_spend_ceiling") || def.ceiling == nil || def.bounds == nil {
+			t.Errorf("spendWindowDefs row %q = (%q, %q, ceiling set %t, bounds set %t), want its setting and reason named after the window, with both functions",
+				def.window, def.setting, def.reason, def.ceiling != nil, def.bounds != nil)
+		}
+		key := strings.TrimPrefix(def.setting, "agent.")
+		envName := "SORTIE_" + strings.ToUpper(strings.ReplaceAll(def.setting, ".", "_"))
+
+		for _, source := range []string{"front matter", "environment"} {
+			t.Run(string(def.window)+" via "+source, func(t *testing.T) {
+				raw := map[string]any{}
+				if source == "front matter" {
+					raw["agent"] = map[string]any{key: 7}
+				} else {
+					t.Setenv(envName, "7")
+				}
+
+				cfg, err := config.NewServiceConfig(raw)
+				if err != nil {
+					t.Fatalf("NewServiceConfig() error = %v", err)
+				}
+
+				for window, got := range spendCeilingsOf(cfg.Agent) {
+					want := 0.0
+					if window == def.window {
+						want = 7
+					}
+					if got != want {
+						t.Errorf("spendCeilingsOf()[%q] with only %s set via %s = %v, want %v", window, def.setting, source, got, want)
+					}
+				}
+				for _, w := range config.ValidateFrontMatter(raw, cfg) {
+					if w.Check == "unknown_sub_key" || w.Check == "type_mismatch" {
+						t.Errorf("ValidateFrontMatter() warning = %+v, want none for %s", w, def.setting)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -158,7 +227,7 @@ func TestEvaluateSpendCeiling_IndependentOfRatesAndRestart(t *testing.T) {
 	}
 	evaluate := func(store spendStore, rates *pricing.Rates) SpendCeilingStatus {
 		state := NewState(1000, 1, 0, nil, AgentTotals{})
-		evaluateSpendCeiling(state, spendCeilingParams{Store: store, DailyUSD: 3, Rates: rates, Now: now, Logger: discardLogger()})
+		evaluateSpendCeiling(state, spendCeilingParams{Store: store, Ceilings: map[SpendWindow]float64{SpendWindowDaily: 3}, Rates: rates, Now: now, Logger: discardLogger()})
 		if len(state.SpendCeilings) != 1 {
 			t.Fatalf("evaluateSpendCeiling() left %d windows, want 1", len(state.SpendCeilings))
 		}
@@ -248,7 +317,7 @@ func TestHandleRetryTimer_ReleaseSpendHeld(t *testing.T) {
 			state := frozenRetryState(id, RetryEntry{Attempt: 3, Error: "agent exited"})
 			store := &mockRetryStore{windowUsage: persistence.IssueTokenUsage{RecordedCostUSD: 5, PricedSessions: 1, Sessions: 1}}
 			params := defaultRetryParams(t, store, &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")})
-			params.MaxDailyCostUSD = 5
+			params.SpendCeilings = map[SpendWindow]float64{SpendWindowDaily: 5}
 			params.PollIntervalMS = 60_000
 			params.ReleaseSpendHeld = tt.release
 			t.Cleanup(func() { stopRetryTimer(state, id) })

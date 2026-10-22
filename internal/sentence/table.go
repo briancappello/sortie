@@ -295,6 +295,12 @@ var table = map[string]parts{
 			"so it starts no agent session for any issue while sessions already running finish.",
 		clears: "Clears once the UTC day ends, or after `agent.max_daily_cost_usd` is raised above the day's spend or removed.",
 	},
+	"attn_spend_weekly": {
+		reason: "Weekly spend ceiling reached",
+		why: "Sortie has spent {{if .AtLeast}}at least {{end}}{{usd .Used}} in estimated cost this UTC week against the weekly ceiling of {{usd .Budget}}, " +
+			"so it starts no agent session for any issue while sessions already running finish.",
+		clears: "Clears once the UTC week ends at the start of Monday, or after `agent.max_weekly_cost_usd` is raised above the week's spend or removed.",
+	},
 	"attn_spend_monthly": {
 		reason: "Monthly spend ceiling reached",
 		why: "Sortie has spent {{if .AtLeast}}at least {{end}}{{usd .Used}} in estimated cost this UTC month against the monthly ceiling of {{usd .Budget}}, " +

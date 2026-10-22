@@ -141,10 +141,10 @@ func (s *onceState) drop(issueID string) {
 // tick; a spend window hold ends the issue's part of the run as stopped;
 // every other reason is final.
 func (s *onceState) declined(issue domain.Issue, reason SkipReason) {
-	switch reason {
-	case SkipBlockersNotRead, SkipBlockersUnresolved:
+	switch {
+	case reason == SkipBlockersNotRead || reason == SkipBlockersUnresolved:
 		s.deferFor(issue.ID, deferTick)
-	case SkipDailySpendCeiling, SkipMonthlySpendCeiling:
+	case isSpendCeilingReason(reason):
 		s.drop(issue.ID)
 		s.record(issue.ID, issue.Identifier, RunOutcomeStopped)
 	default:

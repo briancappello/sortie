@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - History now lists each run's skill calls in order with failed calls marked, and Analytics adds a By skill table that counts, for the chosen range, the runs that called each skill, its calls, and its failed calls; `sortie stats --format json` reports the same counts. Runs recorded before this release have no skill calls on record, so Analytics shows its skill counts as "at least" while a range holds such runs. ([#1473](https://github.com/sortie-ai/sortie/issues/1473))
 
+- `agent.max_weekly_cost_usd` (or `SORTIE_AGENT_MAX_WEEKLY_COST_USD`) caps what the whole instance spends in estimated cost in a UTC week, from Monday 00:00 UTC to the next Monday, the way the daily and monthly limits cap a day and a month: once the week's spend reaches it, Sortie starts no new agent session until the week resets or you raise the limit, and sessions already running finish. You can set it alone or with the other limits; while more than one is reached, Sortie starts nothing until every one of them clears. Overview shows the week's spend against the limit and when it resets. ([#1453](https://github.com/sortie-ai/sortie/issues/1453))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.

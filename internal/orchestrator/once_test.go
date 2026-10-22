@@ -158,6 +158,13 @@ func TestOnce_RunReturnsWhenTheWorkSettles(t *testing.T) {
 			want:       OnceResult{Issues: 1, NotSucceeded: []string{"A-1"}},
 		},
 		{
+			name:       "a weekly spend ceiling hold at the poll",
+			tune:       func(cfg *config.ServiceConfig) { cfg.Agent.MaxWeeklyCostUSD = 5 },
+			candidates: []domain.Issue{first},
+			setup:      func(h *runHarness) { setWindowUsage(h, 5) },
+			want:       OnceResult{Issues: 1, NotSucceeded: []string{"A-1"}},
+		},
+		{
 			name:          "a retry that fires under a spend ceiling hold",
 			tune:          withCeiling,
 			candidates:    []domain.Issue{first},

@@ -4533,10 +4533,21 @@
               "type": "null"
             }
           ]
+        },
+        "weekly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpendWindowResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "daily",
+        "weekly",
         "monthly"
       ],
       "type": "object"

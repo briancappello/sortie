@@ -4492,7 +4492,7 @@ func TestHandleRetryTimer_SpendCeilingKeepsTheRetry(t *testing.T) {
 			var dispatched []dispatchedWorker
 			params := capturingRetryParams(t, store, tracker, &dispatched)
 			params.HandoffState = "Ready For Review"
-			params.MaxDailyCostUSD = 5
+			params.SpendCeilings = map[SpendWindow]float64{SpendWindowDaily: 5}
 			params.PollIntervalMS = 60_000
 			t.Cleanup(func() {
 				stopRetryTimer(state, id)
@@ -4525,7 +4525,7 @@ func TestHandleRetryTimer_SpendCeilingKeepsTheRetry(t *testing.T) {
 				t.Errorf("fire under the hold (saved entries, deleted entries, tracker fetches) = (%d, %d, %d), want all 0", len(store.savedEntries), len(store.deletedIssueID), tracker.fetchCount)
 			}
 
-			params.MaxDailyCostUSD = 10
+			params.SpendCeilings = map[SpendWindow]float64{SpendWindowDaily: 10}
 			fire()
 
 			requireKept("with the ceiling raised and every slot taken")

@@ -1460,6 +1460,23 @@ func TestToStateResponse(t *testing.T) {
 		})
 	})
 
+	for _, window := range orchestrator.SpendWindows() {
+		t.Run("spend window "+string(window)+" serves under its own member", func(t *testing.T) {
+			t.Parallel()
+
+			snap := orchestrator.RuntimeSnapshotResult{SpendCeilings: []orchestrator.SpendCeilingStatus{{Window: window, BudgetUSD: 7}}}
+
+			got := jsonObject(t, toStateResponse(snap, sentence.Context{}, nil))
+
+			members, _ := got["spend_ceiling"].(map[string]any)
+			for _, member := range orchestrator.SpendWindows() {
+				if served := members[string(member)] != nil; served != (member == window) {
+					t.Errorf("toStateResponse(%s only).spend_ceiling[%q] = %v, want an object only under %q", window, member, members[string(member)], window)
+				}
+			}
+		})
+	}
+
 	t.Run("tokens_measured reflects each running entry's own flag", func(t *testing.T) {
 		t.Parallel()
 

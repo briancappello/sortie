@@ -1483,7 +1483,7 @@ type State struct {
 	MoneyBudgetIncomplete map[string]struct{}
 
 	// SpendCeilings holds the latest evaluation of each configured instance
-	// spend window, daily first. Nil while neither window is configured.
+	// spend window, daily first. Nil while no window is configured.
 	// Written only by evaluateSpendCeiling on the event loop.
 	SpendCeilings []SpendCeilingStatus
 }

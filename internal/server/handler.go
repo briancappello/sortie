@@ -40,8 +40,8 @@ type stateResponse struct {
 	// configured; omitted otherwise.
 	CostUnpricedRunning *int `json:"cost_unpriced_running,omitempty"`
 
-	// SpendCeiling carries the instance spend windows. Omitted while
-	// neither agent.max_daily_cost_usd nor agent.max_monthly_cost_usd is set.
+	// SpendCeiling carries the instance spend windows. Omitted while no
+	// instance spend window is set.
 	SpendCeiling *spendCeilingResponse `json:"spend_ceiling,omitempty"`
 
 	Config *configResponse `json:"config,omitempty"`
@@ -321,6 +321,7 @@ type attentionActionResponse struct {
 // a window whose setting is 0 is null.
 type spendCeilingResponse struct {
 	Daily   *spendWindowResponse `json:"daily"`
+	Weekly  *spendWindowResponse `json:"weekly"`
 	Monthly *spendWindowResponse `json:"monthly"`
 }
 
@@ -1089,10 +1090,15 @@ func spendCeilingOf(statuses []orchestrator.SpendCeilingStatus) *spendCeilingRes
 			HoldsDispatch:   status.Holding,
 			ResetsAt:        status.ResetsAt.UTC(),
 		}
-		if status.Window == orchestrator.SpendWindowMonthly {
-			ceiling.Monthly = window
-		} else {
+		switch status.Window {
+		case orchestrator.SpendWindowDaily:
 			ceiling.Daily = window
+		case orchestrator.SpendWindowWeekly:
+			ceiling.Weekly = window
+		case orchestrator.SpendWindowMonthly:
+			ceiling.Monthly = window
+		default:
+			panic("server: no spend ceiling member for window " + string(status.Window))
 		}
 	}
 	return &ceiling
