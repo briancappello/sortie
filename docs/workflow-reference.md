@@ -3844,7 +3844,7 @@ The example omits the members of the breakdowns other than `by_status`, `by_chai
 | `chain_funnels`  | array of funnels  | One funnel per stage chain definition, below. It is not a breakdown: its entries are stages, not groups of runs. |
 | `by_trigger`     | array of groups   | One group per stored retry trigger, below. |
 | `by_origin`      | array of groups   | One group per run origin, below. |
-| `skill_calls`    | object or `null`  | The skill calls of the counted runs, below. `null` on the `base` tier and on a database an older Sortie last wrote, which the first `warnings` entry then states. |
+| `skill_calls`    | object or `null`  | The skill calls of the counted runs, below. `null` on a database that lacks the skills column or a column an earlier tier needs, which the `warnings` entry then states; a database with the column counts runs written before Sortie kept skill calls in `unrecorded_runs`. |
 | `self_review`    | object or `null`  | The self-review results, below. `null` on the `base` tier. |
 
 Every breakdown is sorted by descending `runs`, then ascending `name`, and is `[]` rather than `null` when it holds no group.
