@@ -2016,9 +2016,11 @@ func TestOnceExitCode(t *testing.T) {
 
 func appendRunOutcomeHook(path string) string {
 	if runtime.GOOS == "windows" {
-		return `echo %SORTIE_RUN_OUTCOME%>> "` + path + `"`
+		// exec escapes an embedded quote as \", which cmd.exe keeps literally,
+		// so a quoted redirection target becomes an invalid file name.
+		return `echo %SORTIE_RUN_OUTCOME%>> ` + path
 	}
-	return `echo "$SORTIE_RUN_OUTCOME" >> ` + path
+	return `echo "$SORTIE_RUN_OUTCOME" >> "` + path + `"`
 }
 
 func TestRunOnce(t *testing.T) {
