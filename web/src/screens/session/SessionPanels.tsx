@@ -1,9 +1,12 @@
 import { Pair, Pairs, Panel } from "@/components/Panel";
+import { StatusMark } from "@/components/StatusMark";
 import { costText, costTitle, NOT_MEASURED } from "@/lib/figures";
 import { fmtCount, fmtDuration } from "@/lib/format";
 import { unratedText } from "@/lib/rates";
 
-import type { ConfigResponse, ModelUsageResponse, TokenInfo } from "@/api/types.gen";
+import { ToolText } from "./ToolLine";
+
+import type { ConfigResponse, ModelUsageResponse, SkillCall, TokenInfo } from "@/api/types.gen";
 import type { SessionRun } from "@/components/use-session-run";
 import type { ReactNode } from "react";
 
@@ -100,6 +103,37 @@ export function ModelCostPanel({ parts }: ModelCostPanelProps) {
           </Pairs>
         </div>
       ))}
+    </Panel>
+  );
+}
+
+/** Props of {@link SkillsPanel}. */
+export interface SkillsPanelProps {
+  skills: readonly SkillCall[];
+}
+
+/** Renders every skill call of a run in order, each under its position, a failed call inside the failed mark. */
+export function SkillsPanel({ skills }: SkillsPanelProps) {
+  return (
+    <Panel title="Skills">
+      <ol className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-md gap-y-xs text-body-md">
+        {skills.map((call, index) => (
+          <li key={index} className="contents">
+            <span className="text-right text-ink-muted tabular-nums">{index + 1}</span>
+            {call.tool_error === true ? (
+              <StatusMark
+                mark="failed"
+                label={<ToolText text={call.skill} />}
+                className="min-w-0 *:min-w-0"
+              />
+            ) : (
+              <span className="min-w-0 text-ink">
+                <ToolText text={call.skill} />
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
     </Panel>
   );
 }
