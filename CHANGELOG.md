@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - When a pull request has passed its checks and waits only for the approval your branch rules require, the dashboard now says it is waiting on approval, and the issue stays on the Pipeline until someone approves, merges, or closes it. The state API marks it with `awaiting_approval`. ([#1444](https://github.com/sortie-ai/sortie/issues/1444))
 
+- The dashboard now shows the project or repository a Sortie instance tracks under the Sortie name, in the browser tab title, and on the Workflow screen. The state API reports it too, so a page that links several instances can name each one. ([#1442](https://github.com/sortie-ai/sortie/issues/1442))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.
@@ -35,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A run whose agent stopped to ask for help, asked for a human review, or found that no change was needed no longer reads Succeeded on the issue page, the peek, the session view, History, and the command palette. Those places now name that outcome, and the issue page, the session view, and History show what the agent wrote beside it, or on hover in History. ([#1457](https://github.com/sortie-ai/sortie/issues/1457))
 
 - On Gitea, auto-merge now waits for the approvals the target branch requires instead of trying to merge before they arrive. ([#1444](https://github.com/sortie-ai/sortie/issues/1444))
+
+- After an edit of the workflow file changed the tracker kind, Sortie showed the new kind while it kept polling the tracker it started with. It now shows the tracker it polls, and the workflow reference says a change of tracker kind, project, address, API key, query filter, or Jira API version takes effect at the next restart. ([#1442](https://github.com/sortie-ai/sortie/issues/1442))
 
 ## [1.29.0] - 2026-10-20
 
