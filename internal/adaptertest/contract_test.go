@@ -3237,8 +3237,9 @@ var contractUsageSumFields = map[string]bool{
 }
 
 // checkContractLifecycleFile counts only a StartOutputRelease call as
-// releasing: a func value naming it releases nothing, so it cannot excuse
-// the primitives beside it.
+// releasing, and only for the function that makes it: a func value naming
+// it releases nothing, and a release elsewhere in the file cannot excuse a
+// private turn loop beside it.
 func checkContractLifecycleFile(fset *token.FileSet, file *ast.File, importPath string) []contractViolation {
 	procutilIdent := resolveContractImportName(file, contractProcutilImportPath)
 	if procutilIdent == "" {
@@ -3252,7 +3253,7 @@ func checkContractLifecycleFile(fset *token.FileSet, file *ast.File, importPath 
 	}
 
 	var refs []*ast.SelectorExpr
-	releases := false
+	releases := map[string]bool{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.CallExpr:
@@ -3261,7 +3262,7 @@ func checkContractLifecycleFile(fset *token.FileSet, file *ast.File, importPath 
 				return true
 			}
 			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == procutilIdent {
-				releases = true
+				releases[contractEnclosingFuncName(file, node.Pos())] = true
 			}
 		case *ast.SelectorExpr:
 			ident, ok := node.X.(*ast.Ident)
@@ -3271,18 +3272,18 @@ func checkContractLifecycleFile(fset *token.FileSet, file *ast.File, importPath 
 		}
 		return true
 	})
-	if releases {
-		return nil
-	}
-
 	var violations []contractViolation
 	for _, ref := range refs {
-		if contractSiteAllows(contractLifecycleSites, importPath, contractEnclosingFuncName(file, ref.Pos())) {
+		fn := contractEnclosingFuncName(file, ref.Pos())
+		if releases[fn] {
+			continue
+		}
+		if contractSiteAllows(contractLifecycleSites, importPath, fn) {
 			continue
 		}
 		violations = append(violations, contractViolation{
 			pos:  fset.Position(ref.Pos()),
-			text: "references procutil." + ref.Sel.Name + " in a file that never calls procutil.StartOutputRelease; " + contractLifecycleRemedy,
+			text: "references procutil." + ref.Sel.Name + " in a function that never calls procutil.StartOutputRelease; " + contractLifecycleRemedy,
 		})
 	}
 	return violations
@@ -3303,15 +3304,31 @@ func checkContractReadTimeoutFile(fset *token.FileSet, file *ast.File) []contrac
 }
 
 // contractSameUsageField returns the counter name when both operands are
-// selectors of the same tracked field. An operand wrapped in a conversion
-// or call is deliberately not a sum of two counters.
+// selectors of the same tracked field, seen through a numeric conversion.
+// An operand wrapped in any other call is not a sum of two counters.
 func contractSameUsageField(left, right ast.Expr) string {
-	l, lok := ast.Unparen(left).(*ast.SelectorExpr)
-	r, rok := ast.Unparen(right).(*ast.SelectorExpr)
+	l, lok := contractUnwrapConversion(left).(*ast.SelectorExpr)
+	r, rok := contractUnwrapConversion(right).(*ast.SelectorExpr)
 	if !lok || !rok || l.Sel.Name != r.Sel.Name || !contractUsageSumFields[l.Sel.Name] {
 		return ""
 	}
 	return l.Sel.Name
+}
+
+var contractNumericTypes = map[string]bool{
+	"int": true, "int32": true, "int64": true, "uint": true, "uint32": true, "uint64": true, "float64": true,
+}
+
+func contractUnwrapConversion(expr ast.Expr) ast.Expr {
+	expr = ast.Unparen(expr)
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 {
+		return expr
+	}
+	if ident, ok := call.Fun.(*ast.Ident); ok && contractNumericTypes[ident.Name] {
+		return ast.Unparen(call.Args[0])
+	}
+	return expr
 }
 
 func checkContractUsageSumFile(fset *token.FileSet, file *ast.File) []contractViolation {
@@ -6214,6 +6231,21 @@ func launch(cmd *exec.Cmd) {
 			wantCount: 0,
 		},
 		{
+			name:       "a release in another function does not excuse the primitives",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/fixture",
+			src: `package fixture
+
+import pu "github.com/sortie-ai/sortie/internal/agent/procutil"
+
+func release() { pu.StartOutputRelease(pu.OutputReleaseParams{}) }
+
+func launch(cmd *exec.Cmd) {
+	pu.StartReaper(cmd, nil)
+}
+`,
+			wantCount: 1,
+		},
+		{
 			name:       "a site-table function is exempt",
 			importPath: "github.com/sortie-ai/sortie/internal/agent/copilot",
 			src: `package copilot
@@ -6272,7 +6304,8 @@ func TestCheckContractReadTimeoutAndUsageSum_DetectViolations(t *testing.T) {
 		{"same counter accumulated", usageSum, "x.OutputTokens += y.OutputTokens", 1},
 		{"different counters are a total", usageSum, "_ = x.InputTokens + x.OutputTokens", 0},
 		{"an untracked field is legal", usageSum, "_ = x.Count + y.Count", 0},
-		{"a converted operand is legal", usageSum, "_ = x.InputTokens + int64(y.InputTokens)", 0},
+		{"a numeric conversion does not hide the sum", usageSum, "_ = x.InputTokens + int64(y.InputTokens)", 1},
+		{"an operand from another call is legal", usageSum, "_ = x.InputTokens + f(y.InputTokens)", 0},
 	}
 
 	for _, tt := range tests {
