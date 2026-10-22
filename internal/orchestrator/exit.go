@@ -506,13 +506,16 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 			runHistory.ReviewMetadata = new(string(data))
 		}
 	}
-	if len(entry.Skills) > 0 {
-		data, marshalErr := json.Marshal(entry.Skills)
-		if marshalErr != nil {
-			log.Warn("failed to marshal skill calls", slog.Any("error", marshalErr))
-		} else {
-			runHistory.Skills = new(string(data))
-		}
+	// A nil slice marshals to null, which would read as a row that recorded
+	// no skill calls.
+	calls := entry.Skills
+	if calls == nil {
+		calls = []domain.SkillCall{}
+	}
+	if data, marshalErr := json.Marshal(calls); marshalErr != nil {
+		log.Warn("failed to marshal skill calls", slog.Any("error", marshalErr))
+	} else {
+		runHistory.Skills = new(string(data))
 	}
 
 	// The entry lags the worker's tally when the context ended before a

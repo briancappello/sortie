@@ -396,6 +396,7 @@ func degradedSchemaWarning(caps persistence.RunHistoryCapabilities) string {
 		{caps.HasTrigger, "what started each run"},
 		{caps.HasFirstAfterHop, "the first run after each stage hop"},
 		{caps.HasAgentBlocked, "which runs stopped to wait for a person"},
+		{caps.HasSkills, "the skill calls of each run"},
 	}
 
 	var unrecorded, dropped []string
@@ -427,35 +428,61 @@ func modelOf(row persistence.RunStatsRow) string {
 	return cmp.Or(row.ReportedModel, row.ConfiguredModel)
 }
 
-// modelBreakdownWarning explains the missing by_model breakdown.
-const modelBreakdownWarning = "this database was written before sortie recorded the model of each run, " +
-	"so the report leaves out the breakdown by model. " +
-	"Run sortie once with this workflow to add it."
+// laterTiers lists, oldest first, the columns added after the full tier and
+// what the report leaves out without each. The tiers are cumulative, so the
+// first missing column also takes every later part of the report with it.
+var laterTiers = []struct {
+	has      func(persistence.RunHistoryCapabilities) bool
+	recorded string
+	leftOut  string
+	// chainsOnly marks a part the report holds only for a workflow with stage
+	// chains.
+	chainsOnly bool
+}{
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasConfiguredSettings }, recorded: "the model of each run", leftOut: "the breakdown by model"},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasStageChains }, recorded: "stage chains", leftOut: "the breakdown by stage chain"},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasTrigger }, recorded: "what started each run", leftOut: "the breakdown by retry trigger"},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasFirstAfterHop }, recorded: "the first run after each stage hop", leftOut: "the breakdown by run origin"},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasAgentBlocked }, recorded: "which runs stopped to wait for a person", leftOut: "the funnel of each stage chain", chainsOnly: true},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasRecordedCost }, recorded: "the cost of each run", leftOut: "cost"},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasSkills }, recorded: "the skill calls of each run", leftOut: "the breakdown by skill"},
+}
 
-// chainBreakdownWarning explains the missing by_chain breakdown.
-const chainBreakdownWarning = "this database was written before sortie recorded stage chains, " +
-	"so the report leaves out the breakdown by stage chain. " +
-	"Run sortie once with this workflow to add it."
+// laterTiersWarning names every column of laterTiers the database lacks and
+// every part of the report that leaves out, or returns "" when none is missing.
+func laterTiersWarning(caps persistence.RunHistoryCapabilities, hasChains bool) string {
+	var unrecorded, leftOut []string
+	for _, tier := range laterTiers {
+		if !tier.has(caps) {
+			unrecorded = append(unrecorded, tier.recorded)
+		}
+		if len(unrecorded) > 0 && (!tier.chainsOnly || hasChains) {
+			leftOut = append(leftOut, tier.leftOut)
+		}
+	}
+	if len(unrecorded) == 0 {
+		return ""
+	}
+	pronoun := "it"
+	if len(leftOut) > 1 {
+		pronoun = "them"
+	}
+	return fmt.Sprintf(
+		"this database was written before sortie recorded %s, so the report leaves out %s. "+
+			"Run sortie once with this workflow to add %s.",
+		englishList(unrecorded), englishList(leftOut), pronoun)
+}
 
-// triggerBreakdownWarning explains the missing by_trigger and by_origin
-// breakdowns.
-const triggerBreakdownWarning = "this database was written before sortie recorded what started each run, " +
-	"so the report leaves out the breakdowns by retry trigger and by run origin. " +
-	"Run sortie once with this workflow to add them."
-
-// originBreakdownWarning explains the missing by_origin breakdown on a
-// database that does record what started each run.
-const originBreakdownWarning = "this database was written before sortie recorded the first run after each stage hop, " +
-	"so the report leaves out the breakdown by run origin. " +
-	"Run sortie once with this workflow to add it."
-
-const costBreakdownWarning = "this database was written before sortie recorded the cost of each run, " +
-	"so the report leaves out cost. " +
-	"Run sortie once with this workflow to add it."
-
-// costAlsoOmittedNotice closes the warning of an earlier missing group on a
-// database that also lacks the cost columns.
-const costAlsoOmittedNotice = "The report also leaves out cost until then."
+func englishList(items []string) string {
+	switch len(items) {
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
+}
 
 // Aggregator folds a stream of [persistence.RunStatsRow] values, via
 // [Aggregator.Add], into the totals and per-dimension groups
@@ -482,6 +509,9 @@ type Aggregator struct {
 	stages     Stages
 
 	selfReview selfReviewAccum
+
+	unrecordedRuns int
+	bySkill        map[string]*SkillCount
 }
 
 // New constructs an [Aggregator] for caps. It reads each run's cost as
@@ -503,6 +533,7 @@ func New(caps persistence.RunHistoryCapabilities) *Aggregator {
 		passes:     make(map[passKey]*passAccum),
 		issueIDs:   make(map[string]struct{}),
 		selfReview: selfReviewAccum{byVerdict: make(map[string]int)},
+		bySkill:    make(map[string]*SkillCount),
 	}
 }
 
@@ -609,6 +640,10 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 		if row.ReviewMetadata != nil {
 			foldSelfReview(*row.ReviewMetadata, &a.selfReview)
 		}
+
+		if a.caps.SkillBreakdown() {
+			a.foldSkills(row)
+		}
 	}
 
 	if a.caps.RecordedCost() {
@@ -630,6 +665,33 @@ func (a *Aggregator) Add(row persistence.RunStatsRow) error {
 	}
 
 	return nil
+}
+
+// foldSkills folds the skill calls row stores into the per-skill counts. A row
+// that stores none, or a value that does not decode, counts as unrecorded.
+func (a *Aggregator) foldSkills(row persistence.RunStatsRow) {
+	var calls []domain.SkillCall
+	if row.Skills == nil || json.Unmarshal([]byte(*row.Skills), &calls) != nil {
+		a.unrecordedRuns++
+		return
+	}
+
+	counted := make(map[string]struct{}, len(calls))
+	for _, call := range calls {
+		entry, ok := a.bySkill[call.Skill]
+		if !ok {
+			entry = &SkillCount{Skill: call.Skill}
+			a.bySkill[call.Skill] = entry
+		}
+		entry.Calls++
+		if call.ToolError {
+			entry.FailedCalls++
+		}
+		if _, seen := counted[call.Skill]; !seen {
+			counted[call.Skill] = struct{}{}
+			entry.Runs++
+		}
+	}
 }
 
 // foldModels folds row into the by_model group of every model share it
@@ -789,6 +851,9 @@ func (a *Aggregator) Report(
 		}
 		rpt.SelfReview = a.selfReviewReport()
 	}
+	if a.caps.SkillBreakdown() {
+		rpt.SkillCalls = a.skillCallReport()
+	}
 
 	return rpt
 }
@@ -901,36 +966,16 @@ func (a *Aggregator) spend(generatedAt time.Time, since, until *time.Time) *Spen
 	return out
 }
 
-// composeWarnings returns the non-nil warning list: the one warning that
-// names what a's capabilities leave out, if any. A database that lacks the
-// cost columns together with an earlier group gets cost named on that
-// group's warning, so the list never holds two.
+// composeWarnings returns the non-nil warning list: at most one warning,
+// naming everything a's capabilities leave out.
 func (a *Aggregator) composeWarnings() []string {
-	list := []string{}
-	switch {
-	case !a.caps.Full():
-		list = append(list, degradedSchemaWarning(a.caps))
-	case !a.caps.ModelBreakdown():
-		list = append(list, a.withCostNotice(modelBreakdownWarning))
-	case !a.caps.ChainBreakdown():
-		list = append(list, a.withCostNotice(chainBreakdownWarning))
-	case !a.caps.TriggerBreakdown():
-		list = append(list, a.withCostNotice(triggerBreakdownWarning))
-	case !a.caps.OriginBreakdown():
-		list = append(list, a.withCostNotice(originBreakdownWarning))
-	case len(a.stages.Chains) > 0 && !a.caps.FunnelBreakdown():
-		list = append(list, a.withCostNotice(funnelBreakdownWarning))
-	case !a.caps.RecordedCost():
-		list = append(list, costBreakdownWarning)
+	if !a.caps.Full() {
+		return []string{degradedSchemaWarning(a.caps)}
 	}
-	return list
-}
-
-func (a *Aggregator) withCostNotice(warning string) string {
-	if a.caps.RecordedCost() {
-		return warning
+	if warning := laterTiersWarning(a.caps, len(a.stages.Chains) > 0); warning != "" {
+		return []string{warning}
 	}
-	return warning + " " + costAlsoOmittedNotice
+	return []string{}
 }
 
 // summary computes the report-wide [Summary].
@@ -1014,6 +1059,22 @@ func (a *Aggregator) groupStat(g *groupAccum, full bool) Group {
 		}
 	}
 	return stat
+}
+
+// skillCallReport computes the [SkillCallReport] from a's folded skill state.
+// by_skill is sorted by descending runs, then by ascending skill in byte order.
+func (a *Aggregator) skillCallReport() *SkillCallReport {
+	report := &SkillCallReport{
+		UnrecordedRuns: a.unrecordedRuns,
+		BySkill:        make([]SkillCount, 0, len(a.bySkill)),
+	}
+	for _, entry := range a.bySkill {
+		report.BySkill = append(report.BySkill, *entry)
+	}
+	slices.SortFunc(report.BySkill, func(x, y SkillCount) int {
+		return cmp.Or(cmp.Compare(y.Runs, x.Runs), strings.Compare(x.Skill, y.Skill))
+	})
+	return report
 }
 
 // selfReviewReport computes the derived [SelfReview] from a's folded

@@ -489,6 +489,7 @@ func handleCIFailure(
 		DispatchedAt:   formatDispatchedAt(pending.StageLineage.DispatchedAt),
 		Trigger:        new(""),
 		DispatchID:     new(""),
+		Skills:         new("[]"),
 	}
 	recordRunCost(&ciRunHistory, state.Rates)
 	if _, err := params.Store.AppendRunHistory(ctx, ciRunHistory); err != nil {

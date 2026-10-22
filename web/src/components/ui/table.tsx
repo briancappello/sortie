@@ -1,5 +1,6 @@
 import { ArrowDownIcon, ArrowUpIcon, ChevronsUpDownIcon } from "@/components/icons";
 import { Card } from "@/components/ui/card";
+import { HelpHint } from "@/components/ui/hint";
 import { cn } from "@/lib/cn";
 
 import type { TableSort } from "@/components/use-table-sort";
@@ -114,6 +115,8 @@ export interface SortableHeadProps extends TableHeadProps {
   /** The column's id in the sort. */
   columnId: string;
   sort: TableSort;
+  /** A note behind a question-mark icon after the header, for a definition too long for the header itself. */
+  help?: string;
 }
 
 /** Renders the header cell of a column that sorts: a button that sorts by the column, with `aria-sort` on the cell. */
@@ -122,6 +125,7 @@ export function SortableHead({
   sort,
   align = "left",
   title,
+  help,
   className,
   children,
 }: SortableHeadProps) {
@@ -155,6 +159,11 @@ export function SortableHead({
         {children}
         <Arrow className={cn("size-3", direction === undefined && "text-line-strong")} />
       </button>
+      {help === undefined ? undefined : (
+        <span className="ml-xxs inline-flex align-middle">
+          <HelpHint hint={help} label="About this column" />
+        </span>
+      )}
     </th>
   );
 }

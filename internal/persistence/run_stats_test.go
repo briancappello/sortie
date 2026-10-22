@@ -175,20 +175,30 @@ func TestRunHistoryCapabilities_Breakdowns(t *testing.T) {
 	withTrigger.HasTrigger = true
 	chainsWithoutSettings := full
 	chainsWithoutSettings.HasStageChains = true
+	recorded := withTrigger
+	recorded.HasFirstAfterHop, recorded.HasAgentBlocked, recorded.HasRecordedCost = true, true, true
+	withSkills := recorded
+	withSkills.HasSkills = true
+	skillsWithoutCost := withTrigger
+	skillsWithoutCost.HasSkills = true
 	tests := []struct {
 		name        string
 		caps        RunHistoryCapabilities
 		wantModel   bool
 		wantChain   bool
 		wantTrigger bool
+		wantSkills  bool
 	}{
-		{"full tier with settings, stage chains and trigger", withTrigger, true, true, true},
-		{"full tier with configured settings and stage chains", withChains, true, true, false},
-		{"full tier with configured settings", withSettings, true, false, false},
-		{"full tier without configured settings", full, false, false, false},
-		{"stage chains without configured settings", chainsWithoutSettings, false, false, false},
-		{"trigger without stage chains", RunHistoryCapabilities{HasTrigger: true}, false, false, false},
-		{"configured settings without the full tier", RunHistoryCapabilities{HasConfiguredSettings: true, HasStageChains: true, HasTrigger: true}, false, false, false},
+		{"recorded cost and the skills column", withSkills, true, true, true, true},
+		{"recorded cost without the skills column", recorded, true, true, true, false},
+		{"skills column without recorded cost", skillsWithoutCost, true, true, true, false},
+		{"full tier with settings, stage chains and trigger", withTrigger, true, true, true, false},
+		{"full tier with configured settings and stage chains", withChains, true, true, false, false},
+		{"full tier with configured settings", withSettings, true, false, false, false},
+		{"full tier without configured settings", full, false, false, false, false},
+		{"stage chains without configured settings", chainsWithoutSettings, false, false, false, false},
+		{"trigger without stage chains", RunHistoryCapabilities{HasTrigger: true}, false, false, false, false},
+		{"configured settings without the full tier", RunHistoryCapabilities{HasConfiguredSettings: true, HasStageChains: true, HasTrigger: true}, false, false, false, false},
 	}
 
 	for _, tt := range tests {
@@ -203,6 +213,9 @@ func TestRunHistoryCapabilities_Breakdowns(t *testing.T) {
 			}
 			if got := tt.caps.TriggerBreakdown(); got != tt.wantTrigger {
 				t.Errorf("%+v.TriggerBreakdown() = %v, want %v", tt.caps, got, tt.wantTrigger)
+			}
+			if got := tt.caps.SkillBreakdown(); got != tt.wantSkills {
+				t.Errorf("%+v.SkillBreakdown() = %v, want %v", tt.caps, got, tt.wantSkills)
 			}
 		})
 	}
@@ -634,6 +647,18 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 			"no-error||no-error|||||<nil>||false|false|false|true",
 			"not-failed||not-failed|||||<nil>||false|false|false|true",
 		}},
+		{"skills read back as stored, and NULL as nil, beside the model column", func(t *testing.T, s *Store) {
+			migrateOrFatal(t, s)
+			stored := runAt("stored", "2026-01-01T00:00:00Z")
+			stored.ConfiguredModel, stored.Skills = "provider/cheap", new(`[{"skill":"plan"}]`)
+			unrecorded := runAt("unrecorded", "2026-01-02T00:00:00Z")
+			unrecorded.ConfiguredModel = "provider/cheap"
+			appendOrFatal(t, s, stored)
+			appendOrFatal(t, s, unrecorded)
+		}, []string{
+			`stored|provider/cheap|stored|||||<nil>||false|false|false|true|[{"skill":"plan"}]`,
+			"unrecorded|provider/cheap|unrecorded|||||<nil>||false|false|false|true",
+		}},
 		{"a legacy table with only the base columns still scans", createLegacyRunHistoryTable, nil},
 	}
 
@@ -655,7 +680,11 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 				if row.Trigger != nil {
 					trigger = strconv.Quote(*row.Trigger)
 				}
-				got = append(got, strings.Join([]string{row.IssueID, row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult, trigger, row.ReactionKind, strconv.FormatBool(row.FirstAfterHop), strconv.FormatBool(row.AgentBlocked), strconv.FormatBool(row.HandoffWithheld), strconv.FormatBool(caps.FunnelBreakdown())}, "|"))
+				entry := strings.Join([]string{row.IssueID, row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult, trigger, row.ReactionKind, strconv.FormatBool(row.FirstAfterHop), strconv.FormatBool(row.AgentBlocked), strconv.FormatBool(row.HandoffWithheld), strconv.FormatBool(caps.FunnelBreakdown())}, "|")
+				if row.Skills != nil {
+					entry += "|" + *row.Skills
+				}
+				got = append(got, entry)
 				return nil
 			})
 

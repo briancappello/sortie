@@ -1,5 +1,7 @@
 import { Popover as BasePopover } from "@base-ui/react/popover";
 
+import { CircleHelpIcon } from "@/components/icons";
+
 import type { ReactNode } from "react";
 
 /** Props of {@link Hint}. */
@@ -22,13 +24,42 @@ export function Hint({ hint, children }: HintProps) {
       >
         {children}
       </BasePopover.Trigger>
-      <BasePopover.Portal>
-        <BasePopover.Positioner side="top" sideOffset={4} className="z-(--z-tooltip)">
-          <BasePopover.Popup className="max-w-72 rounded bg-surface-inverse px-xs py-xxs text-body-sm text-on-dark shadow-lg outline-hidden transition-opacity duration-(--duration-enter-small) data-ending-style:opacity-0 data-starting-style:opacity-0">
-            {hint}
-          </BasePopover.Popup>
-        </BasePopover.Positioner>
-      </BasePopover.Portal>
+      <HintPopup hint={hint} />
     </BasePopover.Root>
+  );
+}
+
+/** Props of {@link HelpHint}. */
+export interface HelpHintProps {
+  hint: ReactNode;
+  /** Names the icon for a screen reader. */
+  label: string;
+}
+
+/** Renders a small question-mark icon that opens a short note the way {@link Hint} does. */
+export function HelpHint({ hint, label }: HelpHintProps) {
+  return (
+    <BasePopover.Root>
+      <BasePopover.Trigger
+        openOnHover
+        aria-label={label}
+        className="inline-flex cursor-help text-line-strong transition-colors duration-(--duration-feedback) outline-none hover:text-ink-body focus-visible:rounded-full focus-visible:outline-2 focus-visible:outline-focus-ring data-popup-open:text-ink-body"
+      >
+        <CircleHelpIcon className="size-3" />
+      </BasePopover.Trigger>
+      <HintPopup hint={hint} />
+    </BasePopover.Root>
+  );
+}
+
+function HintPopup({ hint }: { hint: ReactNode }) {
+  return (
+    <BasePopover.Portal>
+      <BasePopover.Positioner side="top" sideOffset={4} className="z-(--z-tooltip)">
+        <BasePopover.Popup className="max-w-72 rounded bg-surface-inverse px-xs py-xxs text-body-sm text-on-dark shadow-lg outline-hidden transition-opacity duration-(--duration-enter-small) data-ending-style:opacity-0 data-starting-style:opacity-0">
+          {hint}
+        </BasePopover.Popup>
+      </BasePopover.Positioner>
+    </BasePopover.Portal>
   );
 }

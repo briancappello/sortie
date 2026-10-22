@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 
 import { useHistoryRunsQuery } from "@/api/queries";
@@ -35,9 +35,12 @@ import { issueStanding } from "@/lib/lane";
 import { agentStatement, runOutcome } from "@/lib/run-status";
 
 import type { HistoryFilter } from "@/api/client";
-import type { IssueGroupResponse, RunResponse, StateResponse } from "@/api/types.gen";
+import type { IssueGroupResponse, RunResponse, SkillCall, StateResponse } from "@/api/types.gen";
 
 const READ_FAILED = "Run history could not be read.";
+
+// The column takes the width the others leave.
+const SKILLS_WIDTH = "w-full min-w-48";
 
 interface Columns {
   hasRule: boolean;
@@ -48,7 +51,7 @@ interface Columns {
 function columnsOf(state: StateResponse | undefined): Columns {
   const hasRule = (state?.config?.dispatch.rules ?? []).length > 0;
   const hasCost = hasRateSource(state);
-  return { hasRule, hasCost, span: 6 + (hasRule ? 1 : 0) + (hasCost ? 1 : 0) };
+  return { hasRule, hasCost, span: 7 + (hasRule ? 1 : 0) + (hasCost ? 1 : 0) };
 }
 
 /** Props of {@link HistoryTableHead}. */
@@ -64,6 +67,7 @@ export function HistoryTableHead({ state }: HistoryTableHeadProps) {
       <TableHead>Status</TableHead>
       {hasRule ? <TableHead>Rule</TableHead> : undefined}
       <TableHead>Agent</TableHead>
+      <TableHead className={SKILLS_WIDTH}>Skills</TableHead>
       <TableHead>Duration</TableHead>
       <TableHead>Turns</TableHead>
       <TableHead title="Cache reads not included">Tokens</TableHead>
@@ -103,6 +107,47 @@ function costPart(text: string): string {
     return "cost unpriced";
   }
   return text === NOT_MEASURED ? "cost not measured" : `${text} estimated`;
+}
+
+function skillsTitle(skills: readonly SkillCall[]): string {
+  return skills
+    .map((call) => (call.tool_error === true ? `${call.skill} (failed)` : call.skill))
+    .join(", ");
+}
+
+interface SkillsCellProps {
+  skills: readonly SkillCall[] | undefined;
+}
+
+function SkillsCell({ skills }: SkillsCellProps) {
+  const calls = skills ?? [];
+
+  return (
+    <TableCell className={cn(SKILLS_WIDTH, "max-w-0")}>
+      {calls.length === 0 ? undefined : (
+        <span title={skillsTitle(calls)} className="block truncate">
+          {calls.map((call, index) => (
+            <Fragment key={index}>
+              {index === 0 ? undefined : ", "}
+              {call.tool_error === true ? (
+                <StatusMark
+                  mark="failed"
+                  label={
+                    <>
+                      {call.skill}
+                      <span className="sr-only"> (failed)</span>
+                    </>
+                  }
+                />
+              ) : (
+                call.skill
+              )}
+            </Fragment>
+          ))}
+        </span>
+      )}
+    </TableCell>
+  );
 }
 
 interface RunRowProps {
@@ -153,6 +198,7 @@ function RunRow({ run, columns }: RunRowProps) {
       >
         {agent[0] === undefined ? undefined : <ServedText text={agent[0]} />}
       </TableCell>
+      <SkillsCell skills={run.skills} />
       <TableCell>{fmtDuration(runSeconds(run))}</TableCell>
       <TableCell>{fmtCount(run.turns_completed)}</TableCell>
       <TableCell title={cacheReadsTitle(runCacheReadsText(run))}>{runTokensText(run)}</TableCell>

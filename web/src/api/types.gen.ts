@@ -517,6 +517,7 @@ export interface Report {
   chain_funnels: Funnel[] | null;
   by_trigger: Group[] | null;
   by_origin: Group[] | null;
+  skill_calls: SkillCallReport | null;
   self_review: SelfReview | null;
 }
 
@@ -873,6 +874,18 @@ export interface ShapeWorker {
 export interface SkillCall {
   skill: string;
   tool_error?: boolean;
+}
+
+export interface SkillCallReport {
+  unrecorded_runs: number;
+  by_skill: SkillCount[] | null;
+}
+
+export interface SkillCount {
+  skill: string;
+  runs: number;
+  calls: number;
+  failed_calls: number;
 }
 
 export interface SnapshotAgentTotals {
