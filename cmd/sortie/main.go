@@ -2,7 +2,8 @@
 // The binary accepts an optional positional workflow file path (default
 // ./WORKFLOW.md), a --log-level flag to control log verbosity,
 // a --log-format flag to select text or JSON output encoding, --port
-// and --host flags for the HTTP observability server, and a "validate"
+// and --host flags for the HTTP observability server, a --once flag that
+// finishes the work one poll finds and then exits, and a "validate"
 // subcommand for offline workflow file validation. Short aliases -h
 // (help) and -V (version) are supported alongside their long forms.
 // The HTTP server starts by default on port 7678; --port 0 disables it.
@@ -56,6 +57,25 @@ import (
 	_ "github.com/sortie-ai/sortie/internal/tracker/jira"
 	_ "github.com/sortie-ai/sortie/internal/tracker/linear"
 )
+
+// exitCodeWorkFailed is the exit status of a --once run whose work did not
+// succeed. It differs from the 1 that startup failures return, so a CI job
+// can tell the two apart.
+const exitCodeWorkFailed = 2
+
+// onceExitCode maps the result of a --once run to the process exit status.
+// An interruption outranks a failed poll, which outranks failed work.
+func onceExitCode(res orchestrator.OnceResult) int {
+	switch {
+	case res.Interrupted:
+		return exitCodeWorkFailed
+	case res.PollFailed:
+		return 1
+	case len(res.NotSucceeded) > 0:
+		return exitCodeWorkFailed
+	}
+	return 0
+}
 
 // serverShutdownTimeout controls how long [run] waits for the HTTP server
 // to drain active connections on graceful shutdown. Overridden in tests to
@@ -926,6 +946,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		BlockerResolver:                   br.blockerResolver,
 		AbandonCh:                         abandonCh,
 		Rates:                             startupRates,
+		Once:                              br.once,
 	})
 
 	var srv *server.Server
@@ -992,6 +1013,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		startupDone()
 	}
 	go downloader.Run(ctx, br.mgr.RefreshRates)
+	if br.once && br.cfg.Agent.MaxSessions == 0 && br.cfg.Agent.MaxTokens == 0 && br.cfg.Agent.MaxCostUSD == 0 {
+		br.logger.Warn("--once keeps starting sessions for an issue until it leaves the active states because agent.max_sessions, agent.max_tokens, and agent.max_cost_usd are all 0; set one of them to cap the run")
+	}
 	o.Run(ctx)
 
 	if srv != nil {
@@ -1003,5 +1027,19 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	br.logger.Info("shutting down")
-	return 0
+	if !br.once {
+		return 0
+	}
+
+	res := o.OnceResult()
+	exitCode := onceExitCode(res)
+	br.logger.Info("once run finished",
+		slog.Int("issues", res.Issues),
+		slog.Int("not_succeeded", len(res.NotSucceeded)),
+		slog.Int("not_run", res.NotRun),
+		slog.Bool("interrupted", res.Interrupted),
+		slog.Bool("poll_failed", res.PollFailed),
+		slog.Int("exit_code", exitCode),
+	)
+	return exitCode
 }

@@ -219,6 +219,10 @@ type ReconcileParams struct {
 	// reads this field and never CIFeedback.Triage, which the poll
 	// tick refreshes from the reloaded configuration.
 	CITriage config.ReactionTriageConfig
+
+	// SkipReactions stops reconciliation after the stall, overdue-retry,
+	// and tracker-state passes, so no reaction or label-command pass runs.
+	SkipReactions bool
 }
 
 // ReconcileRunningIssues detects stalled workers and refreshes tracker
@@ -265,6 +269,10 @@ func ReconcileRunningIssues(state *State, params ReconcileParams) {
 	// Refresh issue states from the tracker and stop workers for
 	// terminal or non-active issues.
 	reconcileTrackerState(state, params, log, ctx, now, metrics)
+
+	if params.SkipReactions {
+		return
+	}
 
 	// Poll CI status for issues with pending CI checks.
 	reconcileCIStatus(state, params, log, ctx, metrics)

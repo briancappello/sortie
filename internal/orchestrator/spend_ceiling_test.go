@@ -226,3 +226,44 @@ func TestHandleTick_SpendCeilingHoldsOnlyWhatIsOtherwiseStartable(t *testing.T) 
 		t.Errorf("sessions started after the ceiling was raised = %v, want the unblocked candidate dispatched", started)
 	}
 }
+
+func TestHandleRetryTimer_ReleaseSpendHeld(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		release      bool
+		wantReleased bool
+		wantKept     bool
+	}{
+		{"flag off re-arms the retry", false, false, true},
+		{"flag on releases the claim", true, true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			const id = "ISS-SPEND"
+			state := frozenRetryState(id, RetryEntry{Attempt: 3, Error: "agent exited"})
+			store := &mockRetryStore{windowUsage: persistence.IssueTokenUsage{RecordedCostUSD: 5, PricedSessions: 1, Sessions: 1}}
+			params := defaultRetryParams(t, store, &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")})
+			params.MaxDailyCostUSD = 5
+			params.PollIntervalMS = 60_000
+			params.ReleaseSpendHeld = tt.release
+			t.Cleanup(func() { stopRetryTimer(state, id) })
+
+			got := HandleRetryTimer(state, id, params)
+
+			_, claimed := state.Claimed[id]
+			_, queued := state.RetryAttempts[id]
+			if got != tt.wantReleased || claimed != tt.wantKept || queued != tt.wantKept {
+				t.Errorf("HandleRetryTimer(ReleaseSpendHeld=%v) = %v with claim, queued retry = %v, %v, want %v with %v, %v",
+					tt.release, got, claimed, queued, tt.wantReleased, tt.wantKept, tt.wantKept)
+			}
+			if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 {
+				t.Errorf("persisted retry rows saved, deleted = %d, %v, want none touched", len(store.savedEntries), store.deletedIssueID)
+			}
+		})
+	}
+}

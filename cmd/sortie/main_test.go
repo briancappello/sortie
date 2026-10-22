@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sortie-ai/sortie/internal/orchestrator"
 )
 
 // runTestTimeout bounds a run() startup that never finishes. It is a
@@ -1984,5 +1986,77 @@ func TestHandleSignals(t *testing.T) {
 
 	if got := strings.Count(sink.String(), "abandoning in-flight shutdown work"); got != 1 {
 		t.Errorf("handleSignals() logged the abandon warning %d times, want 1", got)
+	}
+}
+
+func TestOnceExitCode(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		res  orchestrator.OnceResult
+		want int
+	}{
+		"settled":                          {orchestrator.OnceResult{Issues: 1}, 0},
+		"interrupted":                      {orchestrator.OnceResult{Interrupted: true}, 2},
+		"poll failed":                      {orchestrator.OnceResult{PollFailed: true}, 1},
+		"interrupted outranks poll failed": {orchestrator.OnceResult{Interrupted: true, PollFailed: true}, 2},
+		"work did not succeed":             {orchestrator.OnceResult{Issues: 1, NotSucceeded: []string{"PROJ-1"}}, 2},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := onceExitCode(tt.res); got != tt.want {
+				t.Errorf("onceExitCode(%+v) = %d, want %d", tt.res, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunOnce(t *testing.T) {
+	tests := []struct {
+		name        string
+		agent       string
+		wantCode    int
+		wantOutcome string
+	}{
+		{name: "succeeding session", agent: "agent:\n  kind: mock", wantCode: 0, wantOutcome: "succeeded"},
+		{name: "failing session", agent: "agent:\n  kind: mock\n  max_sessions: 1\n  max_retry_backoff_ms: 50\nmock:\n  turn_outcomes: [failed]", wantCode: 2, wantOutcome: "failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeIssuesFixture(t, dir)
+			workflow := fmt.Sprintf(`---
+tracker:
+  kind: file
+  active_states: [To Do]
+  handoff_state: In Review
+file:
+  path: %[1]s/issues.json
+%[2]s
+workspace:
+  root: %[1]s/workspaces
+hooks:
+  after_run: 'echo "$SORTIE_RUN_OUTCOME" >> %[1]s/outcomes.txt'
+price_table:
+  fetch: false
+---
+Do {{ .issue.title }}.
+`, dir, tt.agent)
+			wfPath := writeCustomWorkflowFile(t, dir, []byte(workflow))
+			ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
+			defer cancel()
+			var stderr lockedBuf
+
+			code := run(ctx, []string{"--once", "--port", "0", wfPath}, io.Discard, &stderr)
+
+			recorded, _ := os.ReadFile(filepath.Join(dir, "outcomes.txt"))
+			if got := strings.TrimSpace(string(recorded)); code != tt.wantCode || got != tt.wantOutcome {
+				t.Errorf("run(--once) = %d with after_run outcome %q, want %d and %q; stderr:\n%s", code, got, tt.wantCode, tt.wantOutcome, stderr.String())
+			}
+		})
 	}
 }
