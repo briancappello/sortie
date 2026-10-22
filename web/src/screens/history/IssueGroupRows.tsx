@@ -30,6 +30,7 @@ import {
 import { fmtCount, fmtDuration, fmtStamp, parseInstant, plural } from "@/lib/format";
 import { issueLinkOf } from "@/lib/issue-link";
 import { ruleLabel } from "@/lib/labels";
+import { issueAwaitsApproval } from "@/lib/active-rows";
 import { issueStanding } from "@/lib/lane";
 import { agentStatement, runOutcome } from "@/lib/run-status";
 
@@ -193,6 +194,7 @@ export function IssueGroupRows({ group, filter, state }: IssueGroupRowsProps) {
     group.status,
     group.issue_outcome,
     state?.attention ?? [],
+    issueAwaitsApproval(state, group.issue_id),
   );
   const ending = group.status === "history" ? group.issue_outcome : null;
   const cacheReads = totalsCacheReadsText(group.totals);

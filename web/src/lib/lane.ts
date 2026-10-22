@@ -1,4 +1,11 @@
-import { isRowKind, routeText, rowMark, timeBaseOf, timeText } from "@/lib/active-rows";
+import {
+  awaitsApproval,
+  isRowKind,
+  routeText,
+  rowMark,
+  timeBaseOf,
+  timeText,
+} from "@/lib/active-rows";
 import { fmtStamp, parseInstant, upperFirst } from "@/lib/format";
 import { reactionLabel, reactionShortLabel } from "@/lib/labels";
 import { endingWord, hasSeveralTerminalStates } from "@/lib/ended";
@@ -224,7 +231,7 @@ export function standingOf(input: StandingInput, stations: readonly Station[]): 
   if (deciding !== null) {
     return {
       station: decidingStation(deciding, stations),
-      mark: rowMark(deciding.kind, issueId, attention),
+      mark: rowMark(deciding.kind, issueId, attention, awaitsApproval(deciding)),
       time: timeText(deciding.kind, timeBaseOf(deciding), now),
       label: null,
     };
@@ -265,6 +272,7 @@ export function issueStanding(
   status: string,
   outcome: IssueOutcomeResponse | null,
   attention: readonly AttentionItemResponse[],
+  awaitingApproval: boolean,
 ): { marker: LaneMarker | null; word: string } {
   if (status === "history") {
     return {
@@ -275,7 +283,7 @@ export function issueStanding(
   if (!isRowKind(status)) {
     return { marker: null, word: "" };
   }
-  const mark = rowMark(status, issueId, attention);
+  const mark = rowMark(status, issueId, attention, awaitingApproval);
   return { marker: mark, word: stateWord(mark) };
 }
 

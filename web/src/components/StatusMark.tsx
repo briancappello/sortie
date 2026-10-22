@@ -29,6 +29,7 @@ const STATUS: Record<Mark, StatusEntry> = {
   running: { Glyph: LoaderCircleIcon, word: "Running", tone: "neutral" },
   current: { Glyph: CircleDotIcon, word: "Current", tone: "neutral" },
   waiting: { Glyph: ClockIcon, word: "Waiting", tone: "neutral" },
+  approval: { Glyph: ClockIcon, word: "Waiting on approval", tone: "neutral" },
   retry: { Glyph: RotateCwIcon, word: "Retry scheduled", tone: "neutral" },
   held: { Glyph: CirclePauseIcon, word: "Held, acknowledged", tone: "neutral" },
   needs: { Glyph: CircleAlertFilledIcon, word: "Needs attention", tone: "attention" },

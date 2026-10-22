@@ -5,6 +5,7 @@ export type Mark =
   | "running"
   | "current"
   | "waiting"
+  | "approval"
   | "retry"
   | "held"
   | "needs"
@@ -23,6 +24,7 @@ const STATE_WORDS: Record<StateMark, string> = {
   running: "Running",
   current: "Current",
   waiting: "Waiting",
+  approval: "Approval",
   retry: "Retry",
   held: "Held",
   needs: "Attention",
