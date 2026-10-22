@@ -130,7 +130,15 @@ function SkillsCell({ skills }: SkillsCellProps) {
             <Fragment key={index}>
               {index === 0 ? undefined : ", "}
               {call.tool_error === true ? (
-                <StatusMark mark="failed" label={call.skill} />
+                <StatusMark
+                  mark="failed"
+                  label={
+                    <>
+                      {call.skill}
+                      <span className="sr-only"> (failed)</span>
+                    </>
+                  }
+                />
               ) : (
                 call.skill
               )}
