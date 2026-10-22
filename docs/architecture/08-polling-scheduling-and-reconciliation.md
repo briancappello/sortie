@@ -2,7 +2,7 @@
 
 ### 8.1 Poll Loop
 
-At startup, Sortie validates config, performs startup cleanup, schedules an immediate tick, and then repeats every `polling.interval_ms`.
+At startup, Sortie validates config, performs startup cleanup, schedules an immediate tick, and then repeats every `polling.interval_ms` until shutdown, or under `--once` until the work one poll selects settles (Once mode, below).
 
 The effective poll interval should be updated when workflow config changes are re-applied.
 
@@ -33,6 +33,36 @@ Stage hop hold:
 - The poll tick is the only lane that dispatches an issue after a hop, because the hop leaves no retry entry and no pending reaction; the retry lane needs no hold.
 
 Preflight runs first so the reload it forces is visible to reconciliation and to the sweep, not only to dispatch. If validation fails, dispatch is skipped for that tick, but configuration is still applied, reconciliation still runs, the sweep still runs when due, and the instance spend ceiling is still evaluated, so its figures and its hold edges stay current: those steps keep orchestrator state aligned with the tracker using the last known good configuration, which remains valid for that purpose. Dispatch is the only step gated on preflight success.
+
+Once mode (`sortie --once`):
+
+- The first tick is the only poll. It fetches candidates and dispatches them under `agent.max_concurrent_agents` and the per-state limits, as in the sequence above. Every later tick fetches nothing and dispatches only the candidates of that poll that are still waiting, each evaluated in full against fresh tracker data. An issue that a later fetch would return and the first poll did not is never dispatched.
+- A candidate the poll returned but could not start waits for one of two things. It waits for capacity when no global slot, per-state slot, or SSH host is free. It waits for a later tick when its blocker read failed or the per-pass read budget excluded it, or when the stage hop hold keeps it out for the tick. A tick that ends with no running session stops the wait for capacity, because no session can free a slot.
+- A candidate that fails eligibility, has a blocker, or has incomplete blockers is dropped, and no later tick dispatches it. A candidate whose agent kind, prompt template, or attempt settings are refused is dropped with the outcome `failed`.
+- A candidate that an instance spend window holds (Section 8.4) is dropped with the outcome `stopped`, because the wait for the window to reset outlasts the run. The issue keeps its tracker state, so a later run dispatches it.
+- Reconciliation runs as usual except that the pull request reaction steps and the label-command steps run on no path, including a check an operator requests. A pending reaction that a finished run seeds is neither started nor awaited, and a later long-running process recovers it.
+- Retries and continuation sessions that the run's issues earn are honored and awaited, and so are the retries recovered from the persistent database. `agent.max_sessions`, `agent.max_tokens`, and `agent.max_cost_usd` bound them. With all three at `0`, an issue keeps starting sessions until it leaves the active states, and Sortie logs a warning at startup. The exception is a retry that an instance spend window holds (Section 8.4, item 9).
+- A once run moves a chained issue one stage forward. The poll tick is the only lane that dispatches an issue after a hop, so the run does not dispatch the next stage, and its exit status reports the run of the stage it did dispatch.
+- The run settles when the poll has run, no candidate is waiting, and nothing is running, claimed, or waiting for a retry. Pending reactions do not count. Settling takes the same shutdown path as a signal, so tracker comments and notifications of the final runs are delivered before the process exits.
+
+Each finished attempt, each dispatch-time error, and each spend window hold records an outcome for its issue, and the latest outcome of an issue counts. An attempt that recovers on a retry in the same process therefore leaves the issue `succeeded`. The outcome groups the recorded run status as the dashboard does:
+
+| Outcome | Run status |
+| --- | --- |
+| `succeeded` | `succeeded`, including a run the agent ended with `needs-human-review` or `no-change-needed` |
+| `stopped` | `needs_person`, `budget_stopped`, or a `succeeded` run the agent ended with `blocked` |
+| `cancelled` | `cancelled` |
+| `failed` | `failed`, `ci_failed`, and any other status, including a handoff the evidence policy withholds |
+
+The process exit status reports the result:
+
+| Status | Meaning |
+| --- | --- |
+| `0` | The run settled, the poll succeeded, and every issue's latest outcome is `succeeded`. Nothing ready also exits `0`. |
+| `1` | Startup failed, or the single poll failed (dispatch preflight or candidate fetch) without an interruption. |
+| `2` | A signal interrupted the run, or at least one issue's latest outcome is not `succeeded`. |
+
+A signal before the run settles starts the usual drain, a second signal abandons it, and the status is `2`. A signal after the run settled does not change the status. A fetch that fails because a signal cancelled it counts as the interruption, not as a poll failure. Without `--once`, the status stays `0` after a shutdown. `--once` combined with `--dry-run` is rejected at startup with status `1`.
 
 ### 8.2 Candidate Selection Rules
 
@@ -106,7 +136,7 @@ Retry handling behavior:
 6. A reaction retry the issue's own current state does not permit to dispatch is rescheduled with backoff, but only for as long as it has been pausing consecutively for that reason; past 30 minutes of consecutive pausing it is dropped instead, its persisted row deleted and its claim released, with a warning naming the kind and the dwell (Section 7.5).
 7. A retry entry whose timer event was never delivered is re-armed with a zero delay once its due time is more than 60 seconds in the past, so a dropped timer event self-heals within a few ticks instead of holding its slot for the process lifetime (Section 7.5).
 8. An operator request (Section 13.7.2) makes a retry due now by re-arming its entry in place with a zero delay, and changes nothing outside the entry's schedule. When the fire it brings forward cannot start the retry, the put-back keeps the retry's attempt number and its due time from before the request, under the put-back's own reason, in place of the attempt number and backoff delay a timer's fire sets. The re-arm of item 7 keeps that rule.
-9. While an instance spend window holds dispatch, a fire that reaches the held arm re-arms the retry one `polling.interval_ms` ahead and starts nothing (Instance spend ceiling, below).
+9. While an instance spend window holds dispatch, a fire that reaches the held arm re-arms the retry one `polling.interval_ms` ahead and starts nothing (Instance spend ceiling, below). Under `--once`, the fire releases the claim and keeps the persisted retry entry instead, because the run does not wait for the window to reset (Once mode, Section 8.1).
 
 Retry selection:
 
@@ -173,7 +203,7 @@ Instance spend ceiling (daily and monthly):
 - A window holds dispatch while its spend has reached its ceiling, compared in whole micro-dollars. While both windows hold, the reason is the monthly one, because its reset is never earlier than the daily one's. A hold is identified by its window and window start: a new window start ends the old hold and, when the new window has already reached its ceiling, begins a new one. A ceiling edited while the window still holds continues the hold.
 - A running session folds into the window as it folds into a per-issue figure. A session whose usage reports no figure, a run recorded `unmeasured` or `unpriced`, and an unaccounted turn make the spend a lower bound; a `partial` run contributes what was priced; a session that has reported nothing yet adds nothing and keeps the spend complete. A lower bound below the ceiling never holds dispatch. The evaluation logs one warning per window start while the spend is a lower bound and the window does not hold, and an evaluation that finds the spend complete, or the window holding, re-arms that warning.
 - Evaluation logs one warning when a window begins to hold, naming the window, the spend, the ceiling, and the reset time, and one `Info` record when a hold ends. A held candidate logs nothing and is counted under its window's reason in `sortie_candidate_holds_total`; a held retry logs only at `Debug`. A failed read of a window logs one warning and keeps that window's last result for the same window start, and treats a window with no earlier result for its start as not holding.
-- Held retry: a retry timer fire evaluates the windows after the worker-still-running, parked, and handoff-absence gates and before the effort budget gate. While a window holds, the handler re-arms the entry one `polling.interval_ms` ahead and returns. It starts no worker, fetches nothing from the tracker, keeps the claim, writes and deletes no persisted retry entry, and increments no retry counter. The entry keeps its attempt number, error, reaction kind, continuation and its context, rule, and lineage. A due time an operator request brought forward is not carried, because the fire that request caused has run. A pull request reaction continuation takes the same path, because it fires through the retry handler. The first fire after a hold ends comes at most one `polling.interval_ms` after the evaluation that ends it.
+- Held retry: a retry timer fire evaluates the windows after the worker-still-running, parked, and handoff-absence gates and before the effort budget gate. While a window holds, the handler re-arms the entry one `polling.interval_ms` ahead and returns. It starts no worker, fetches nothing from the tracker, keeps the claim, writes and deletes no persisted retry entry, and increments no retry counter. The entry keeps its attempt number, error, reaction kind, continuation and its context, rule, and lineage. A due time an operator request brought forward is not carried, because the fire that request caused has run. A pull request reaction continuation takes the same path, because it fires through the retry handler. The first fire after a hold ends comes at most one `polling.interval_ms` after the evaluation that ends it. Under `--once`, the handler does not re-arm: it deletes the claim, leaves the persisted retry entry as it is, logs at `Warn` that it releases the claim, and starts nothing. The run records the issue as `stopped` unless it already holds an outcome for it, and the next process loads the entry and resumes the retry.
 - A retry that was held and then finds no free agent slot or no SSH host keeps its attempt number as well, and re-arms one `polling.interval_ms` ahead, in place of the attempt increase and backoff that a retry which was never held takes. The retry therefore starts with its attempt number on the first fire that finds both. Any other put-back drops the flag. A restart re-arms a persisted retry as usual, and its first fire evaluates the windows again.
 - The hold stops no running session, no later turn of one, and no continuation inside a run, so a window's final spend can pass its ceiling by what they spend. It stops neither polling, reconciliation, reaction checks, retry scheduling, nor the per-issue ceilings. Reaction triage runs, because it runs the operator's triage script and records no run; a `dispatch-agent` answer schedules a continuation, which the hold keeps.
 - Both settings at `0` (default) disable the ceiling entirely: nothing is read, logged, or served, and dispatch, the state response, the attention list, and Overview are identical to those of a deployment without the settings.
@@ -187,7 +217,7 @@ Note:
 
 ### 8.5 Active Run Reconciliation
 
-Reconciliation runs every tick, in the order below.
+Reconciliation runs every tick, in the order below. Under `--once`, Parts C through J, the pull request reaction and label-command parts, do not run on any path (Section 8.1); Parts A and B run as usual.
 
 An operator request (Section 13.7.2) makes a pending reaction's next check due at once. It moves the entry's `PendingRetryAt` to the time of the request when that time is later, and changes nothing else about the entry, so the next tick checks it under every rule below, as it checks any due entry. When that check keeps the reaction pending and starts before the due time the request replaced, the entry gets back that due time and its backoff count from before the request, in place of the ones the check sets. The count is zero when the check found a new pull request head.
 

@@ -204,8 +204,9 @@ func retainStartupFailure(entry *RunningEntry, result WorkerResult, at time.Time
 
 // HandleWorkerExit processes a worker's terminal outcome: removes the running
 // entry, updates totals, persists to SQLite, and schedules the appropriate
-// retry. Must be called from the single-writer event loop.
-func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWorkerExitParams) {
+// retry. It returns the outcome of the attempt it recorded, or "" for a result
+// with no running entry. Must be called from the single-writer event loop.
+func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWorkerExitParams) RunOutcome {
 	log := params.Logger
 	if log == nil {
 		log = slog.Default()
@@ -225,7 +226,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	entry, exists := state.Running[workerResult.IssueID]
 	if !exists {
 		log.Warn("worker exit for unknown issue")
-		return
+		return ""
 	}
 	delete(state.Running, workerResult.IssueID)
 	if entry.CancelFunc != nil {
@@ -397,27 +398,15 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		}
 	}
 
-	status := mapExitKindToStatus(workerResult.ExitKind)
 	runError := workerResult.Error
 
 	// Distinct from a stall, terminal-state, or shutdown cancel: attribute
 	// the stop to the budget.
 	request := entry.CeilingStopRequest
-	if workerResult.ExitKind == WorkerExitCancelled && workerResult.StoppedByCeiling && request != nil {
-		status = "budget_stopped"
+	status := attemptStatus(workerResult.ExitKind, workerResult.StoppedByCeiling && request != nil, workerResult.Error)
+	if status == "budget_stopped" {
 		runError = ceilingStopError(state, entry, request)
 		reportCeilingStop(log, metrics, request)
-	}
-
-	// A needs-a-person ending gets its own status only when the worker's own
-	// error, not a shutdown racing it, stopped the run. mapExitKindToStatus
-	// already reports a live-context cancel as "cancelled", so this guard
-	// alone keeps a shutdown from being relabelled. The error is always
-	// wrapped, so it MUST be unwrapped rather than asserted.
-	if status == "failed" {
-		if agentErr, ok := errors.AsType[*domain.AgentError](runError); ok && agentErr.Kind == domain.ErrTurnInputRequired {
-			status = "needs_person"
-		}
 	}
 
 	if evidenceWithheld {
@@ -443,6 +432,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	}
 
 	declaredToken, declaredStatement := declaredOutcome(workerResult)
+	outcome := runOutcomeOf(status, declaredToken)
 
 	// RunHistory.Attempt is 1-based for display; normalizeAttempt returns the
 	// 0-based retry counter, so add 1.
@@ -1516,7 +1506,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	var severity, body, agentText, lifecycle string
 	switch {
 	case workerResult.ExitKind == WorkerExitCancelled:
-		return
+		return outcome
 	case workerResult.ExitKind == WorkerExitNormal && !evidenceWithheld:
 		lifecycle = "completion"
 		if workerResult.SoftStop {
@@ -1557,6 +1547,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		)
 		metrics.IncTrackerComments(lifecycle, "success")
 	})
+	return outcome
 }
 
 // computeBackoffDelay returns the exponential backoff delay in ms for the
@@ -1795,10 +1786,20 @@ func buildSoftStopComment(elapsed time.Duration, turnsCompleted int, reason stri
 // declaredOutcome returns the recognized status token that ended the run and
 // its public statement, or two empty strings when the run ended on none.
 func declaredOutcome(result WorkerResult) (token, statement string) {
-	if !result.SoftStop || !workspace.StatusSignal(result.SoftStopReason).IsRecognized() {
+	token = declaredToken(result.SoftStop, result.SoftStopReason)
+	if token == "" {
 		return "", ""
 	}
-	return result.SoftStopReason, publicStatement(result.SoftStopStatement)
+	return token, publicStatement(result.SoftStopStatement)
+}
+
+// declaredToken returns the soft-stop reason when the agent ended the run with
+// a recognized status signal, and "" otherwise.
+func declaredToken(softStop bool, reason string) string {
+	if !softStop || !workspace.StatusSignal(reason).IsRecognized() {
+		return ""
+	}
+	return reason
 }
 
 // maxPublicStatementRunes bounds the agent text a destination receives.

@@ -291,6 +291,10 @@ type OrchestratorParams struct {
 	// nil channel means no abort is wired; a receive on nil blocks forever,
 	// which is what an unwired abort needs. Read only during shutdown.
 	AbandonCh <-chan struct{}
+
+	// Once makes Run dispatch from one candidate poll and return when that
+	// work settles. See [Orchestrator.OnceResult].
+	Once bool
 }
 
 // Orchestrator owns the poll-and-dispatch event loop and all runtime state.
@@ -313,6 +317,10 @@ type Orchestrator struct {
 	metrics            domain.Metrics
 	blockerResolver    BlockerResolver
 	abandonCh          <-chan struct{}
+
+	// once is non-nil only for an orchestrator built with Once. The event
+	// loop goroutine owns it.
+	once *onceState
 
 	workerExitCh       chan WorkerResult
 	retryTimerCh       chan string
@@ -533,6 +541,9 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		blockerResolver:                   params.BlockerResolver,
 		abandonCh:                         params.AbandonCh,
 	}
+	if params.Once {
+		o.once = newOnceState()
+	}
 	if params.SCMAdapter != nil || params.CIProvider != nil {
 		o.scmHealth = &healthRecord{}
 		o.scmProvider = params.SCMProvider
@@ -687,7 +698,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 	rates := o.workflowManager.Rates()
 	o.updateRouter(cfg)
 	for _, result := range exits {
-		HandleWorkerExit(o.state, result, HandleWorkerExitParams{
+		outcome := HandleWorkerExit(o.state, result, HandleWorkerExitParams{
 			Rates:                             rates,
 			Store:                             o.store,
 			RunEventRetry:                     o.runEventRetry,
@@ -718,16 +729,29 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			LabelFixReactionConfigured:        o.labelFixReactionConfigured,
 			MergeCompletionReactionConfigured: o.mergeCompletionReactionConfigured,
 		})
+		o.recordOutcome(result, outcome)
 	}
 	o.updateGauges(time.Now())
 	o.notifyObservers()
 }
 
-// Run enters the event loop, blocks until ctx is cancelled, and returns.
-// Must be called from a single goroutine. On cancellation it cancels all
-// running worker contexts, drains workers (up to the drain timeout, 30s by
-// default) processing their results and agent events, stops pending retry
-// timers, and returns.
+// recordOutcome keeps the outcome of an attempt for the once-mode result. It
+// records nothing outside once mode or for an exit without a running entry.
+func (o *Orchestrator) recordOutcome(result WorkerResult, outcome RunOutcome) {
+	if o.once == nil || outcome == "" {
+		return
+	}
+	o.once.record(result.IssueID, result.Identifier, outcome)
+}
+
+// Run enters the event loop and blocks until ctx is cancelled or, for an
+// orchestrator built with [OrchestratorParams.Once], until the work of the
+// single poll settles. Must be called from a single goroutine.
+//
+// Either way Run then cancels all running worker contexts, drains workers
+// (up to the stop deadline plus a teardown margin) processing their results
+// and agent events, waits for in-flight tracker operations, stops pending
+// retry timers, and returns.
 func (o *Orchestrator) Run(ctx context.Context) {
 	// A past-due recovered retry can dispatch on the first pass, ahead of
 	// the first tick, so the worker settings it launches under must be in
@@ -751,16 +775,10 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			o.draining.Store(true)
-			close(o.stopping)
-			tickTimer.Stop()
-			o.pollHealth.schedule(time.Time{})
-			o.notifyObservers()
-			o.drainRunningWorkers()
-			o.runEventRetry.Stop()
-			o.drainTriageRuns()
-			o.drainTrackerOps()
-			o.cancelRetryTimers()
+			if o.once != nil {
+				o.once.interrupted = true
+			}
+			o.shutdown(tickTimer)
 			return
 
 		case <-tickTimer.C:
@@ -785,7 +803,11 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			resolveAttemptSettings := func(selection DispatchResolution, sshHost string) AttemptSettings {
 				return o.resolveAttemptSettings(cfg, selection, sshHost)
 			}
-			HandleRetryTimer(o.state, issueID, HandleRetryTimerParams{
+			var retryIdentifier string
+			if entry, ok := o.state.RetryAttempts[issueID]; ok {
+				retryIdentifier = entry.Identifier
+			}
+			spendReleased := HandleRetryTimer(o.state, issueID, HandleRetryTimerParams{
 				Store:                  o.store,
 				TrackerAdapter:         o.trackerAdapter,
 				Router:                 o.router,
@@ -814,7 +836,11 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				Metrics:                o.metrics,
 				HostPool:               o.hostPool,
 				WorkflowFile:           o.workflowFile(),
+				ReleaseSpendHeld:       o.once != nil,
 			})
+			if spendReleased && !o.once.hasOutcome(issueID) {
+				o.once.record(issueID, retryIdentifier, RunOutcomeStopped)
+			}
 			o.updateGauges(time.Now())
 			o.notifyObservers()
 
@@ -852,7 +878,27 @@ func (o *Orchestrator) Run(ctx context.Context) {
 		case <-o.refreshCh:
 			o.handleTick(ctx)
 		}
+
+		if o.once != nil && ctx.Err() == nil && o.once.settled(o.state) {
+			o.shutdown(tickTimer)
+			return
+		}
 	}
+}
+
+// shutdown stops the event loop's intake and waits, bounded, for running
+// workers, triage runs, and in-flight tracker operations.
+func (o *Orchestrator) shutdown(tickTimer *time.Timer) {
+	o.draining.Store(true)
+	close(o.stopping)
+	tickTimer.Stop()
+	o.pollHealth.schedule(time.Time{})
+	o.notifyObservers()
+	o.drainRunningWorkers()
+	o.runEventRetry.Stop()
+	o.drainTriageRuns()
+	o.drainTrackerOps()
+	o.cancelRetryTimers()
 }
 
 // runOnLoop runs apply on the event loop and waits for it. It reports
@@ -1058,6 +1104,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		MergeCompletionReactionConfigured: o.mergeCompletionReactionConfigured,
 		WorkspaceRoot:                     cfg.Workspace.Root,
 		CITriage:                          o.ciTriage,
+		SkipReactions:                     o.once != nil,
 	})
 
 	// Sweep workspaces periodically to catch issues that transitioned after
@@ -1096,6 +1143,12 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		o.logger.Error("dispatch preflight failed",
 			slog.Any("error", validation),
 		)
+		o.once.endPoll(true)
+		o.notifyObservers()
+		return
+	}
+
+	if !o.once.pollNeeded() {
 		o.notifyObservers()
 		return
 	}
@@ -1105,6 +1158,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		pollResult = outcomeError
 		if !canceled(ctx, err) {
 			o.pollHealth.record(time.Now(), pollOutcomeTrackerFailed, err)
+			o.once.endPoll(true)
 		}
 		o.logger.Error("failed to fetch candidate issues",
 			slog.Any("error", err),
@@ -1116,6 +1170,8 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.pollHealth.record(time.Now(), pollOutcomeSucceeded, nil)
 
 	sorted := SortForDispatch(issues)
+	o.once.setCandidates(sorted)
+	input := o.once.dispatchInput(sorted)
 
 	o.rebuildBudgetExhausted(ctx, cfg, sorted)
 	o.fillRetryIdentity(sorted)
@@ -1132,14 +1188,17 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	var dispatched, dispatchedByRule, dispatchedByDefault, dispatchedByFallback int
 	var heldByBlockers, blockersUnresolvedHeld, blockersNotReadHeld, blockersIncompleteHeld int
 	var readFailures int
-	for _, issue := range sorted {
+	for i, issue := range input {
 		if GlobalAvailableSlots(o.state.MaxConcurrentAgents, len(o.state.Running)) == 0 {
+			o.once.deferAll(input[i:], deferSlot)
 			break
 		}
 		if o.hostPool.IsSSHEnabled() && !o.hostPool.HasCapacity() {
+			o.once.deferAll(input[i:], deferSlot)
 			break
 		}
 		if !HasAvailableSlots(o.state, issue.State) {
+			o.once.deferFor(issue.ID, deferSlot)
 			continue
 		}
 
@@ -1162,10 +1221,12 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			case SkipBlockersIncomplete:
 				blockersIncompleteHeld++
 			}
+			o.once.declined(issue, decision.Reason)
 			continue
 		}
 		issue, dispatchable := o.holdForStageHop(ctx, decision.Issue, activeSet, terminalSet)
 		if !dispatchable {
+			o.once.deferFor(issue.ID, deferTick)
 			continue
 		}
 
@@ -1180,6 +1241,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			)
 			o.metrics.IncDispatches(outcomeError)
 			o.metrics.IncDispatchRuleMatch(resolution.MatchedAt.String(), normalizeDispatchRuleName(resolution.RuleName))
+			o.once.dispatchFailed(issue)
 			continue
 		}
 		tmpl := o.workflowManager.PromptTemplateByID(resolution.TemplateID)
@@ -1190,11 +1252,13 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			)
 			o.metrics.IncDispatches(outcomeError)
 			o.metrics.IncDispatchRuleMatch(resolution.MatchedAt.String(), normalizeDispatchRuleName(resolution.RuleName))
+			o.once.dispatchFailed(issue)
 			continue
 		}
 
 		host, ok := o.hostPool.AcquireHost(issue.ID, "")
 		if !ok {
+			o.once.deferAll(input[i:], deferSlot)
 			break
 		}
 		attemptSettings := o.resolveAttemptSettings(cfg, resolution, host)
@@ -1209,6 +1273,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			)
 			o.metrics.IncDispatches(outcomeError)
 			o.metrics.IncDispatchRuleMatch(resolution.MatchedAt.String(), normalizeDispatchRuleName(resolution.RuleName))
+			o.once.dispatchFailed(issue)
 			continue
 		}
 		dispatchCtx := ctx
@@ -1235,6 +1300,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		// recognized here, before the claim makes the issue Sortie's own.
 		endOutsideHandoff(ctx, o.state, o.store, o.trackerAdapter, issue.ID, issue.State, cfg.Tracker.HandoffState, cfg.Tracker.TerminalStates, o.logger)
 		DispatchIssue(dispatchCtx, o.state, issue, nil, host, o.makeWorkerFn("", host, resolution.AgentKind, resolution.TemplateID, "", adapter, attemptSettings))
+		o.once.drop(issue.ID)
 		if entry := o.state.Running[issue.ID]; entry != nil {
 			entry.ContinuationContext = seed
 			entry.WorkflowFile = o.workflowFile()
@@ -1274,6 +1340,11 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		}
 		dispatched++
 	}
+
+	if len(o.state.Running) == 0 {
+		o.once.dropSlotWaiters()
+	}
+	o.once.endPoll(false)
 
 	o.state.BlockerReadOffset = nextBlockerReadOffset(pass)
 
@@ -2358,7 +2429,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 			cfg := o.workflowManager.Config()
 			rates := o.workflowManager.Rates()
 			o.updateRouter(cfg)
-			HandleWorkerExit(o.state, workerExit, HandleWorkerExitParams{
+			outcome := HandleWorkerExit(o.state, workerExit, HandleWorkerExitParams{
 				Rates:                             rates,
 				Store:                             o.store,
 				MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
@@ -2387,6 +2458,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				LabelFixReactionConfigured:        o.labelFixReactionConfigured,
 				MergeCompletionReactionConfigured: o.mergeCompletionReactionConfigured,
 			})
+			o.recordOutcome(workerExit, outcome)
 			o.updateGauges(time.Now())
 			o.notifyObservers()
 

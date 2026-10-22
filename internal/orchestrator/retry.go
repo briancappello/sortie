@@ -71,6 +71,11 @@ type HandleRetryTimerParams struct {
 
 	MaxRetryBackoffMS int
 
+	// ReleaseSpendHeld releases a retry the instance spend ceiling holds
+	// instead of re-arming it, keeping its persisted entry for a later
+	// process.
+	ReleaseSpendHeld bool
+
 	// MakeWorkerFn constructs a [WorkerFunc]. The retry handler resolves
 	// the adapter and the attempt's settings before invoking it; the
 	// reaction kind selects the read-only worker posture for label-review
@@ -177,8 +182,9 @@ func retryClock(params HandleRetryTimerParams) time.Time {
 // HandleRetryTimer processes a retry timer event for the given issue: it
 // removes the retry entry, re-fetches and validates the issue, checks slot
 // availability, and either dispatches, reschedules, or releases the claim.
+// It reports whether params.ReleaseSpendHeld released a held retry.
 // Must be called from the single-writer event loop.
-func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParams) {
+func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParams) (spendReleased bool) {
 	log := params.Logger
 	if log == nil {
 		log = slog.Default()
@@ -399,6 +405,14 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		Now:        retryClock(params),
 		Logger:     params.Logger,
 	}); hold != SkipNone {
+		if params.ReleaseSpendHeld {
+			delete(state.Claimed, issueID)
+			log.Warn("retry held by spend ceiling, releasing claim",
+				slog.String("reason", string(hold)),
+				slog.Int("attempt", popped.Attempt),
+			)
+			return true
+		}
 		rearmHeld()
 		if entry, ok := state.RetryAttempts[issueID]; ok {
 			entry.noStateObserved = popped.noStateObserved
@@ -920,6 +934,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			slog.Any("error", err),
 		)
 	}
+	return false
 }
 
 // isStaleRetryTimer reports whether the entry belongs to a newer
