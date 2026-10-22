@@ -4623,7 +4623,7 @@ file:
   path: /path/to/issues.json
 ```
 
-The `file:` block is forwarded to the file tracker adapter. The `path` field is required and specifies the filesystem path to a JSON file containing issue records. This adapter is intended for local testing and CI workflows where a live tracker is not available. It is also how a CI job hands Sortie one work item: write the issue to the file, then run `sortie --once WORKFLOW.md`, which finishes the issues ready when it starts and exits. The exit status is `0` when every issue's last run succeeded or nothing was ready, `1` when startup or the single poll failed, and `2` when an issue's last run did not succeed, a spend ceiling held an issue, or a signal stopped the work.
+The `file:` block is forwarded to the file tracker adapter. The `path` field is required and specifies the filesystem path to a JSON file containing issue records. This adapter is intended for local testing and CI workflows where a live tracker is not available. It is also how a CI job hands Sortie one work item: write the issue to the file, then run `sortie --once WORKFLOW.md`, which finishes the issues ready when it starts and exits. The exit status is `0` when every issue's last run succeeded or nothing was ready, `1` when startup or the single poll failed, and `2` when an issue's last run did not succeed, a spend ceiling held an issue, or a signal stopped the work. Add `--once-result PATH` to also write a JSON file with the latest outcome of each issue (`succeeded`, `stopped`, `failed`, or `cancelled`) for the job to read after the run.
 
 **Claude Code adapter:**
 

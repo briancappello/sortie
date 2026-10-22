@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -1041,5 +1042,36 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		slog.Bool("poll_failed", res.PollFailed),
 		slog.Int("exit_code", exitCode),
 	)
+	if br.onceResultPath != "" {
+		if err := writeOnceResult(br.onceResultPath, res); err != nil {
+			br.logger.Error("failed to write once result file", slog.Any("error", err))
+		}
+	}
 	return exitCode
+}
+
+type onceResultFile struct {
+	Issues []onceResultIssue `json:"issues"`
+}
+
+type onceResultIssue struct {
+	Identifier string `json:"identifier"`
+	Outcome    string `json:"outcome"`
+}
+
+// writeOnceResult replaces the file at path with the latest outcome of every
+// issue in res.
+func writeOnceResult(path string, res orchestrator.OnceResult) error {
+	file := onceResultFile{Issues: make([]onceResultIssue, 0, len(res.Outcomes))}
+	for _, recorded := range res.Outcomes {
+		file.Issues = append(file.Issues, onceResultIssue{
+			Identifier: recorded.Identifier,
+			Outcome:    string(recorded.Outcome),
+		})
+	}
+	data, err := json.Marshal(file)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }

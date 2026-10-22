@@ -510,6 +510,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `--once` polls candidates once, dispatches them under the usual limits, and returns when nothing is running, claimed, waiting for a retry, or waiting for a slot or a later tick
 - `--once` exits `0` when every issue's latest outcome is `succeeded` or no issue was ready, `1` when startup or the single poll fails, and `2` when a signal interrupts the run or an issue's latest outcome is not `succeeded`
 - Under `--once`, an attempt that fails and recovers on a retry in the same process exits `0`, and a candidate or fired retry that an instance spend ceiling holds exits `2` without waiting for the window to reset, leaving the persisted retry entry in place
+- `--once-result <path>` writes the latest outcome of each issue that has one, so an attempt that fails and recovers on a retry in the same process is reported `succeeded`
 - Under `--once`, no pull request reaction step or label-command step runs while a reaction entry is pending, and an issue that a later fetch returns but the single poll did not is never dispatched
 - `--once` combined with `--dry-run` is rejected with exit status `1` before any workflow file is read
 - Without `--once`, the CLI exits `0` after a signal, as before

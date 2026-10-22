@@ -62,7 +62,9 @@ The process exit status reports the result:
 | `1` | Startup failed, or the single poll failed (dispatch preflight or candidate fetch) without an interruption. |
 | `2` | A signal interrupted the run, or at least one issue's latest outcome is not `succeeded`. |
 
-A signal before the run settles starts the usual drain, a second signal abandons it, and the status is `2`. A signal after the run settled does not change the status. A fetch that fails because a signal cancelled it counts as the interruption, not as a poll failure. Without `--once`, the status stays `0` after a shutdown. `--once` combined with `--dry-run` is rejected at startup with status `1`.
+`--once-result <path>` writes a JSON file after the exit status is decided, on every status the run returns (`0`, `1`, and `2`, an interruption included), and replaces an existing file. Nothing is written when startup fails. A failed write, a missing directory included, is logged and leaves the exit status unchanged. The file holds an `issues` array with one element per issue that has a recorded outcome, each carrying its `identifier` and its latest `outcome` (`succeeded`, `stopped`, `failed`, or `cancelled`), ordered by identifier. The array is empty when no issue has a recorded outcome.
+
+A signal before the run settles starts the usual drain, a second signal abandons it, and the status is `2`. A signal after the run settled does not change the status. A fetch that fails because a signal cancelled it counts as the interruption, not as a poll failure. Without `--once`, the status stays `0` after a shutdown. `--once` combined with `--dry-run` is rejected at startup with status `1`, and so is `--once-result` without `--once`.
 
 ### 8.2 Candidate Selection Rules
 
