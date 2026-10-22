@@ -62,6 +62,8 @@ func TestFor(t *testing.T) {
 		return Entry{Finished: &f}
 	}
 
+	awaitingApproval := &orchestrator.ReactionCheck{Comments: &orchestrator.CommentCheck{AwaitingApproval: true}}
+
 	tests := []struct {
 		name  string
 		entry Entry
@@ -153,6 +155,8 @@ func TestFor(t *testing.T) {
 			short: "2 new review comments on #7; next check in 40s",
 		},
 		{"review wait", reaction("review", nil), "Waiting on review of #7", ""},
+		{"review awaiting approval", reaction("review", awaitingApproval), "Waiting on approval of #7", ""},
+		{"escalated review awaiting approval", escalated(reaction("review", awaitingApproval)), "Review comments escalated on #7", ""},
 		{"bot review wait", reaction("bot-review", nil), "Waiting on bot review of #7", ""},
 		{"bot review handled", reaction("bot-review", &orchestrator.ReactionCheck{Comments: &orchestrator.CommentCheck{Handled: true}}), "Bot review of #7 handled", ""},
 		{"auto-merge wait", reaction("merge", nil), "Auto-merge waiting on #7", ""},

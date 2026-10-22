@@ -214,6 +214,10 @@ var table = map[string]parts{
 		short: "Waiting on review of #{{.PR}}",
 		long:  "Waiting on review of PR #{{.PR}}" + commentsOf + "; " + nextCheck + "." + usedCount,
 	},
+	"wait_review_approval": {
+		short: "Waiting on approval of #{{.PR}}",
+		long:  "Waiting on approval of PR #{{.PR}}; " + nextCheck + "." + usedCount,
+	},
 	"wait_bot": {
 		short: "Waiting on bot review of #{{.PR}}",
 		long:  "Waiting on bot review of PR #{{.PR}}{{if .Bots}} by {{.Bots}}{{end}}" + commentsOf + "; " + nextCheck + "." + usedCount,

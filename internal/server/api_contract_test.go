@@ -168,6 +168,7 @@ func reactionCheckMembers() []contractMember {
 		{"actionable_comments", num, true},
 		{"new_comments", num, true},
 		{"handled", primitive("boolean", "boolean"), true},
+		{"awaiting_approval", primitive("boolean", "boolean"), true},
 		{"mergeable", nullable(primitive("boolean", "boolean")), true},
 	}
 }

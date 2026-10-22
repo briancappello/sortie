@@ -757,6 +757,15 @@ type CommentCheck struct {
 	// Handled reports that the newest triage answer recorded for this
 	// comment set is handled, so no run is given it.
 	Handled bool
+	// AwaitingApproval reports that no comment is actionable and the review
+	// decision says an approval rule is unmet. Only the review pass sets it.
+	AwaitingApproval bool
+}
+
+// awaits reports whether check records a pull request waiting on a required
+// approval.
+func awaits(check *ReactionCheck) bool {
+	return check != nil && check.Comments != nil && check.Comments.AwaitingApproval
 }
 
 // MergeabilityCheck reports whether the pull request merges without
@@ -1810,7 +1819,7 @@ type SnapshotPendingReaction struct {
 	EscalationTrigger string `json:"escalation_trigger,omitempty"`
 	// WatchEndsAt is when the reaction stops watching unless its watch
 	// restarts first; nil for a kind without a watch window or a window of 0,
-	// and while an escalation stands.
+	// while an escalation stands, and while the latest check awaits approval.
 	WatchEndsAt *time.Time     `json:"watch_ends_at"`
 	LastCheck   *ReactionCheck `json:"last_check"`
 
@@ -2289,7 +2298,7 @@ func snapshotPendingReactions(state *State) []SnapshotPendingReaction {
 			row.EscalatedAt = &escalatedAt
 			row.EscalationTrigger = string(entry.EscalationTrigger)
 		}
-		if window, ok := state.ReactionWatchWindows[entry.Kind]; ok && entry.EscalatedAt.IsZero() {
+		if window, ok := state.ReactionWatchWindows[entry.Kind]; ok && entry.EscalatedAt.IsZero() && !awaits(entry.LastCheck) {
 			watchEndsAt := watchBasis(entry).Add(window)
 			row.WatchEndsAt = &watchEndsAt
 		}

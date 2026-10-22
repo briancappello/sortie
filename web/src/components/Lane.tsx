@@ -43,6 +43,7 @@ const DOT: Record<StationState, string> = {
   needs: "border-warning-fill bg-warning-fill",
   current: "border-track-done bg-track-done",
   waiting: "border-dashed border-track-done bg-canvas",
+  approval: "border-dashed border-track-done bg-canvas",
   ahead: "border-track-todo bg-canvas",
   idle: "border-track-todo bg-canvas",
 };
@@ -60,6 +61,7 @@ const STATE_WORD: Partial<Record<StationState, string>> = {
   acted: "Sortie acted",
   quiet: "nothing to act on",
   needs: "needs attention",
+  approval: "waiting on approval",
 };
 
 // Sortie keeps working an issue after its handoff, so the track runs on through every

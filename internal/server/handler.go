@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -401,7 +402,8 @@ func (c reactionCheckResponse) MarshalJSON() ([]byte, error) {
 			ActionableComments int  `json:"actionable_comments"`
 			NewComments        int  `json:"new_comments"`
 			Handled            bool `json:"handled,omitempty"`
-		}{header, c.Comments.Actionable, c.Comments.New, c.Comments.Handled})
+			AwaitingApproval   bool `json:"awaiting_approval,omitempty"`
+		}{header, c.Comments.Actionable, c.Comments.New, c.Comments.Handled, c.Comments.AwaitingApproval})
 	case c.Mergeability != nil:
 		return json.Marshal(struct {
 			reactionCheckHeader
@@ -1887,15 +1889,50 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 }
 
 // decidingPendingReaction returns the first escalated row of a non-empty
-// list, else its first row: the row that decides what the issue is waiting
-// on.
+// list; else the review row awaiting approval when no other row reports an
+// outstanding condition; else its first row: the row that decides what the
+// issue is waiting on.
 func decidingPendingReaction(rows []pendingReactionResponse) pendingReactionResponse {
 	for _, row := range rows {
 		if row.EscalatedAt != nil {
 			return row
 		}
 	}
-	return rows[0]
+	awaiting := slices.IndexFunc(rows, awaitsApproval)
+	if awaiting < 0 {
+		return rows[0]
+	}
+	for i, row := range rows {
+		if i != awaiting && !reportsNothingOutstanding(row) {
+			return rows[0]
+		}
+	}
+	return rows[awaiting]
+}
+
+func awaitsApproval(row pendingReactionResponse) bool {
+	return row.Kind == orchestrator.ReactionKindReview && row.LastCheck != nil &&
+		row.LastCheck.Comments != nil && row.LastCheck.Comments.AwaitingApproval
+}
+
+// reportsNothingOutstanding reports whether row waits on no merge condition.
+// The kinds that record no check wait on the merge or a label, so they never
+// hold the approval reading back; a kind this does not know is assumed busy.
+func reportsNothingOutstanding(row pendingReactionResponse) bool {
+	check := row.LastCheck
+	switch row.Kind {
+	case orchestrator.ReactionKindCI:
+		return check != nil && check.CI != nil && check.CI.Status == "passing"
+	case orchestrator.ReactionKindBotReview:
+		return check != nil && check.Comments != nil && (check.Comments.Actionable == 0 || check.Comments.Handled)
+	case orchestrator.ReactionKindMergeConflict:
+		return check != nil && check.Mergeability != nil && check.Mergeability.Mergeable != nil && *check.Mergeability.Mergeable
+	case orchestrator.ReactionKindAutoMerge, orchestrator.ReactionKindMergeCompletion,
+		orchestrator.ReactionKindLabelReview, orchestrator.ReactionKindLabelFix:
+		return true
+	default:
+		return false
+	}
 }
 
 // healthResponse is the JSON wire format for GET /livez.

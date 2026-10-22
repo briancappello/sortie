@@ -122,8 +122,9 @@ type ReconcileParams struct {
 	ReviewConfig ReviewReactionConfig
 
 	// ReviewPendingTTL bounds the age of a review PendingReaction entry,
-	// measured from the entry's creation. Zero or negative disables the
-	// bound. Supplied from reactions.review_comments.watch_window_ms.
+	// measured from the entry's creation, except while its latest check
+	// awaits approval. Zero or negative disables the bound. Supplied from
+	// reactions.review_comments.watch_window_ms.
 	ReviewPendingTTL time.Duration
 
 	// AutoMergeConfig holds auto-merge reaction configuration. Only

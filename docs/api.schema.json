@@ -2265,6 +2265,9 @@
         "actionable_comments": {
           "type": "integer"
         },
+        "awaiting_approval": {
+          "type": "boolean"
+        },
         "failing": {
           "type": "integer"
         },
