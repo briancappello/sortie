@@ -16,11 +16,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `after_run` hooks now receive `SORTIE_RUN_OUTCOME` (`succeeded`, `stopped`, `failed`, `cancelled`), so a hook that commits and pushes can skip an attempt that did not succeed. ([#1470](https://github.com/sortie-ai/sortie/issues/1470))
 
+- Agent events now name the skill an agent ran. When a Claude Code, Copilot CLI, or OpenCode agent calls a skill, the event log, the live event stream, and the session view show which one, and a Skills panel in the session view lists every skill call of the run in order and marks each one that failed, while the run is live and after it ends. The state and run history APIs serve the same list. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.
 
 - Overview's Agents running tile now says how many agents are idle, or that all of them are running, instead of showing the running count against the agent limit.
+
+- Tool lines in the session view now show what each call ran: an icon for its kind, then the command of a shell call, the tool and path of a file call, the tool and skill of a skill call, or the name of any other tool, with MCP tools named as `server.tool`, such as `github.get_issue`. A long line is cut at the pane's width and shows in full on hover, and a folded group of calls reads as counts such as `3 commands, 2 file reads`. The event log and the live event stream carry the same line with secrets masked, and the `tool` label of the tool call metric names MCP tools the same way. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
 
 ### Fixed
 
@@ -43,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - On Gitea, auto-merge now waits for the approvals the target branch requires instead of trying to merge before they arrive. ([#1444](https://github.com/sortie-ai/sortie/issues/1444))
 
 - After an edit of the workflow file changed the tracker kind, Sortie showed the new kind while it kept polling the tracker it started with. It now shows the tracker it polls, and the workflow reference says a change of tracker kind, project, address, API key, query filter, or Jira API version takes effect at the next restart. ([#1442](https://github.com/sortie-ai/sortie/issues/1442))
+
+- A Codex run no longer shows shell commands with secrets unmasked in the event log and debug logs, its tool calls no longer give the tool call metric a new series for every distinct command, and its MCP tool calls show the tool they called. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
 
 ## [1.29.0] - 2026-10-20
 

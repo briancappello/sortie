@@ -10,7 +10,7 @@ This kind names no default runtime. The operator's `agent.command` picks the bin
 
 The generated wire types in `wire_gen.go` come from a pinned release of the protocol's stable schema. The tag and commit live in `schemagen/generate.go` and in `PROVENANCE.txt` beside the schema copy under `testdata/`. Changing them is a pin move, not a routine edit.
 
-The adapter deliberately ignores some members of the pinned schema. It reports the tool kind instead of the optional tool `name` on a tool call. It does not advertise the client capabilities for notice and compaction session updates, and does not read those updates.
+The adapter deliberately ignores some members of the pinned schema. It names a tool call by its tool kind instead of the optional tool `name`, except that the kinds `other` and `switch_mode` name none. It does not advertise the client capabilities for notice and compaction session updates, and does not read those updates.
 
 A scheduled check reports when the publisher's stable schema releases differ from the pin. It never moves the pin, and it closes its own report on the first run that finds no difference.
 

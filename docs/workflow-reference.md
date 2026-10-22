@@ -2059,6 +2059,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       },
       "api_request_count": 3,
       "requests_by_model": {"claude-sonnet-4-20250514": 3},
+      "skills": [{"skill": "ce-plan"}, {"skill": "ce-work", "tool_error": true}],
       "tool_time_percent": 12.3,
       "api_time_percent": 45.6,
       "tokens_measured": true,
@@ -2570,6 +2571,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `configured_effort`       | string or absent  | The `effort` the session's resolved settings block carries. Omitted when no level is configured. |
 | `api_request_count` | integer or `null` | Number of `token_usage` events received during this session, and a count of actual API requests only when `api_requests_measured` is `true`. `null` exactly when that field is `false`. |
 | `requests_by_model` | object or absent  | Map of model name to request count (e.g. `{"claude-sonnet-4-20250514": 3}`). Omitted when `api_requests_measured` is `false`, and when `usage_attribution` does not name a model. Enables tracking model usage when the agent switches models mid-session. |
+| `skills` | array or absent | The run's skill calls so far, in completion order, each an object with `skill` (the skill name) and, for a failed call, `tool_error` set to `true`. Repeated calls are listed each time. Omitted until the run has completed a skill call, and for an agent that reports none. |
 | `tool_time_percent` | number or `null`  | Cumulative tool call execution time as a percentage of session wall-clock time. Computed at response time. `null` when no tool timing data has been received. |
 | `api_time_percent`  | number or `null`  | Cumulative LLM API response wait time as a percentage of session wall-clock time. Computed at response time. `null` when no API timing data has been received. |
 | `tokens_measured`    | boolean           | True once at least one usage measurement has been reported in this session. The members of `tokens` and `uncached_tokens` are `null` when it is `false`. False for a session whose `usage_arrival` is `none`, whatever its runtime reports.   |
@@ -3096,6 +3098,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
     },
     "api_request_count": 3,
     "requests_by_model": {"claude-sonnet-4-20250514": 3},
+    "skills": [{"skill": "ce-plan"}, {"skill": "ce-work", "tool_error": true}],
     "tool_time_percent": 12.3,
     "api_time_percent": 45.6,
     "tokens_measured": true,
@@ -3208,9 +3211,12 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
       "event": "tool_result",
       "message": "",
       "tool_name": "Bash",
+      "tool_kind": "shell",
+      "tool_argument": "go test ./...",
       "duration_ms": 2400,
       "tool_error": false,
-      "text": "Ran Bash in 2.4s."
+      "text": "Ran go test ./... in 2.4s.",
+      "tool_line": "go test ./..."
     },
     {
       "seq": 42,
@@ -3368,6 +3374,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
           "unrated_classes": []
         }
       ],
+      "skills": [{"skill": "ce-plan"}, {"skill": "ce-work", "tool_error": true}],
       "chain_id": "3c8v5n2w7r1t4y6u9i0o8p2asd",
       "stage_previous": "specify",
       "stage_previous_outcome": "succeeded",
@@ -3433,6 +3440,7 @@ The response is ordered by descending `run_id`, the order Sortie recorded the ru
 | `estimated_cost_usd`     | number or `null`   | The estimated USD cost recorded when the run finished, from its tokens per model under the rates in force then, and never re-priced ([Section 4.4](#44-token_rates--cost-estimation)). Unrounded. Non-`null` exactly when `cost_status` is `estimated` or `partial`. |
 | `cost_status`            | string             | The status recorded with the cost: `estimated`, which a zero rate also gives, and which a run that spent nothing with no unaccounted turn gives whether or not a rate prices its model; `partial` when the estimate is a lower bound because the run has unaccounted turns, or because a model or a token class it spent had no rate beside priced spend; `unpriced` when the run spent tokens and no rate priced any of them; `unmeasured` when `tokens_measured` is `false`. |
 | `model_usage`            | array              | The run's spend split by model, one element per model the run spent tokens on, ordered by `model`. Always present, never `null`. `[]` when the run recorded no per-model spend: an unmeasured run, a run that spent nothing, and a run recorded before per-model spend was kept that no start has priced yet. The members of an element are below. |
+| `skills`                 | array or absent    | Every skill call of the run, in completion order, repeats included and with no limit. Each element holds `skill`, the skill name, and `tool_error` as `true` when the call failed; a failed call loaded no skill. Omitted when the run made no skill call, when its agent reports none, and for a run recorded before the list was kept. The list stays complete when the run's oldest events are no longer kept. |
 | `chain_id`               | string or absent   | The stage chain identifier of the run. Omitted when empty. |
 | `stage_previous`, `stage_previous_outcome` | string or absent | The rule whose hop led to the run's dispatch and that hop's outcome, `succeeded` or `no_change`. Omitted when empty. |
 | `stage_target`, `stage_result` | string or absent | The rule the run's exit targeted with a hop decision and its result: `advanced`, `partial`, `failed`, or `ceiling`. Omitted when the run reached no decision. A read taken just after the run completes can precede the decision, and the next read carries it. |
@@ -3601,9 +3609,12 @@ A running run keeps its newest 1,000 retained events, within 256 KiB, in memory,
       "event": "tool_result",
       "message": "",
       "tool_name": "Bash",
+      "tool_kind": "shell",
+      "tool_argument": "go test ./...",
       "duration_ms": 2400,
       "tool_error": false,
-      "text": "Ran Bash in 2.4s."
+      "text": "Ran go test ./... in 2.4s.",
+      "tool_line": "go test ./..."
     },
     {
       "seq": 42,
@@ -3635,7 +3646,10 @@ A running run keeps its newest 1,000 retained events, within 256 KiB, in memory,
 | `message` | every event | The event's message, masked and cut to 999 runes followed by `…` when it exceeds 1,000 runes. `""` when the event carries none. Masked: a value registered as a secret after the event was retained is replaced by `[redacted]`. |
 | `text` | every event | One plain English sentence that words the event. The `text` of a `notification` and an `other_message` is the message itself. A session that fails to start gets a `startup_failed` event whose sentence states the failure. |
 | `session_id` | `session_started` | The session the run started, `""` when the event carries none. |
-| `tool_name` | `tool_result` | The tool. Omitted when the adapter reported none. |
+| `tool_name` | `tool_result` | The name the agent runtime gives the tool, or `{server}.{tool}` for an MCP or dynamic tool, such as `github.get_issue`. Omitted when the runtime names none. It is never a command or a protocol item type. |
+| `tool_kind` | `tool_result` | `shell`, `read`, `edit`, or `skill`. Omitted for any other tool and for an event recorded before this member existed. |
+| `tool_argument` | `tool_result` | The call's one main argument: a shell call's command without its `bash -lc` or `sh -c` wrapper, a read or edit call's path relative to the workspace (several paths joined by `, `), a skill call's skill name. Masked, stripped of control characters, and cut to 999 runes followed by `…`. No other argument of a call is served. Omitted when the call has none and for an event recorded before this member existed. |
+| `tool_line` | `tool_result` | The call as one line of text: a shell call's command; otherwise the tool's name followed by its main argument, such as `Read internal/foo.go` or `skill ce-plan`; otherwise the name alone. The session view draws it. Omitted on no other event. |
 | `duration_ms` | `tool_result` | The tool call's duration in milliseconds. Omitted when the adapter reported none. |
 | `tool_error` | `tool_result` | Whether the tool call returned an error. |
 | `usage` | `turn_completed`, `turn_failed`, `turn_cancelled`, `turn_ended_with_error`, `turn_input_required` | The run's token totals after the event, with the members of a running row's `tokens`. `null` while the run has measured no usage, so an unmeasured figure never reads as zero. |
@@ -4377,7 +4391,7 @@ The endpoint uses a dedicated `prometheus.Registry` (not the Go default global) 
 | `sortie_tracker_requests_total`                 | Counter   | `operation`, `result`       | Tracker adapter API calls by operation and result.             |
 | `sortie_handoff_transitions_total`              | Counter   | `result`                    | Handoff-state transition attempts (`success`, `error`, `skipped`, `withheld`). `skipped` covers three suppression causes: the issue had already reached a terminal state, the issue was not in an active state at worker exit, or a withheld verdict's own verification read reported the issue terminal, suppressing the absence-failure recording. `withheld` covers the remaining case: the run's handoff-evidence verdict did not permit the write and its own verification read did not find the issue terminal, so the run is recorded as failed. Recorded only when `tracker.handoff_state` is set. A made stage hop records no result, because it writes no handoff transition. |
 | `sortie_issue_parks_total`                      | Counter   | `reason`                    | Issue park events (`agent_blocked`, `handoff_absence`).        |
-| `sortie_tool_calls_total`                       | Counter   | `tool`, `result`            | Agent tool call completions by tool name and result.           |
+| `sortie_tool_calls_total`                       | Counter   | `tool`, `result`            | Agent tool call completions by tool and result. `tool` is the name the runtime gives the tool, `{server}.{tool}` for an MCP or dynamic tool, the call's kind when the runtime names none, and `other` when the name holds anything but ASCII letters, digits, `_`, `-`, `.`, and `:`. A command is never a label. |
 | `sortie_poll_duration_seconds`                  | Histogram | —                           | Wall-clock time per poll cycle.                                |
 | `sortie_worker_duration_seconds`                | Histogram | `exit_type`                 | Worker session wall-clock time.                                |
 | `sortie_build_info`                             | Gauge     | `version`, `go_version`     | Always `1`; carries build metadata as labels.                  |
