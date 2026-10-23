@@ -43,6 +43,7 @@ const contractProcutilImportPath = "github.com/sortie-ai/sortie/internal/agent/p
 // because persistent JSON-RPC framing has no alternative.
 var contractBanTable = map[string]string{
 	"classifyTransportError": "httpkit.ClassifyTransport",
+	"transportCategory":      "notifyhttp.NewClient",
 	"withRetry":              "httpkit.RetryWithBackoff",
 	"sleepContext":           "httpkit.RetryWithBackoff",
 	"isRetryable":            "httpkit.RetryWithBackoff",
@@ -110,7 +111,6 @@ var contractTrackerAdapterMethods = map[string]bool{
 	"FetchIssueBlockers":             true,
 	"TransitionIssue":                true,
 	"CommentIssue":                   true,
-	"CommentIssueWithLiteral":        true,
 	"AddLabel":                       true,
 	"RemoveLabel":                    true,
 }
@@ -196,6 +196,8 @@ var contractSharedFamilyPackages = map[string]contractSharedPackage{
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest":  {reason: "shared credential-verification conformance assertion, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel":       {reason: "shared scripted model endpoint and scripted-model conformance driver; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/notify/route":                    {reason: "shared notification routing for orchestrator events; registers no kind and holds no adapter", coreImportable: true},
+	"github.com/sortie-ai/sortie/internal/notify/notifyhttp":               {reason: "shared JSON-over-HTTP transport for the notifier kinds; registers no kind and holds no adapter", coreImportable: false},
+	"github.com/sortie-ai/sortie/internal/notify/render":                   {reason: "shared notification text rendering for every destination; registers no kind and holds no adapter", coreImportable: false},
 }
 
 // contractPackageBannedImports maps one package's import path to the

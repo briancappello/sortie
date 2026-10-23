@@ -379,15 +379,6 @@ func (a *FileAdapter) CommentIssue(_ context.Context, issueID string, text strin
 	})
 }
 
-// CommentIssueWithLiteral records a comment whose body is text followed by
-// literal in a fenced Markdown code block, otherwise as
-// [FileAdapter.CommentIssue] does.
-func (a *FileAdapter) CommentIssueWithLiteral(_ context.Context, issueID, text, literal string) error {
-	return trackermetrics.Track(a.metrics, "comment", func() error {
-		return a.postComment(issueID, issuekit.MarkdownLiteralComment(text, literal))
-	})
-}
-
 func (a *FileAdapter) postComment(issueID, body string) error {
 	raws, err := loadIssues(a.path)
 	if err != nil {

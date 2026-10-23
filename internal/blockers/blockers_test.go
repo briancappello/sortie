@@ -42,10 +42,7 @@ func (fakeTrackerAdapter) FetchIssueComments(context.Context, string) ([]domain.
 }
 func (fakeTrackerAdapter) TransitionIssue(context.Context, string, string) error { return nil }
 func (fakeTrackerAdapter) CommentIssue(context.Context, string, string) error    { return nil }
-func (fakeTrackerAdapter) CommentIssueWithLiteral(context.Context, string, string, string) error {
-	return nil
-}
-func (fakeTrackerAdapter) AddLabel(context.Context, string, string) error { return nil }
+func (fakeTrackerAdapter) AddLabel(context.Context, string, string) error        { return nil }
 
 func (fakeTrackerAdapter) RemoveLabel(_ context.Context, _ string, _ string) error { return nil }
 

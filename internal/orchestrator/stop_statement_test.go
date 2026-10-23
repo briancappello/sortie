@@ -12,6 +12,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/notify/render"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -241,7 +242,7 @@ func (e stopExit) singleNotification(t *testing.T) domain.Notification {
 	return sent[0]
 }
 
-func TestStopStatement_ExitCommentCarriesTheReasonAsLiteral(t *testing.T) {
+func TestStopStatement_ExitCommentCarriesTheReasonAfterTheBody(t *testing.T) {
 	t.Parallel()
 
 	secret := registeredSecret(t)
@@ -302,15 +303,15 @@ func TestStopStatement_ExitCommentCarriesTheReasonAsLiteral(t *testing.T) {
 			}, false)
 
 			comment := exit.singleComment(t)
-			if comment.Text != tt.wantBody || comment.Literal != tt.wantLiteral {
-				t.Errorf("tracker comment = {Text:%q Literal:%q}, want {Text:%q Literal:%q}", comment.Text, comment.Literal, tt.wantBody, tt.wantLiteral)
+			if wantText := tt.wantBody + "\n\n" + tt.wantLiteral; comment.Text != wantText {
+				t.Errorf("tracker comment Text = %q, want %q", comment.Text, wantText)
 			}
 			notification := exit.singleNotification(t)
 			if notification.Message.AgentText != tt.wantLiteral {
 				t.Errorf("slack AgentText = %q, want %q", notification.Message.AgentText, tt.wantLiteral)
 			}
-			if notification.Message.Body != tt.wantBody {
-				t.Errorf("slack Body = %q, want %q (the statement travels apart from the body)", notification.Message.Body, tt.wantBody)
+			if body := render.Notification(notification).Body; body != tt.wantBody {
+				t.Errorf("slack Body = %q, want %q (the statement travels apart from the body)", body, tt.wantBody)
 			}
 			if notification.Envelope.EventType != domain.EventSessionStopped {
 				t.Errorf("slack EventType = %q, want %q", notification.Envelope.EventType, domain.EventSessionStopped)
@@ -379,8 +380,8 @@ func TestStopStatement_FailedSessionCarriesNoReason(t *testing.T) {
 		t.Errorf("session.failed AgentText = %q, want empty", notification.Message.AgentText)
 	}
 	comment := exit.singleComment(t)
-	if comment.Literal != "" || !strings.HasPrefix(comment.Text, "Sortie session failed.") {
-		t.Errorf("tracker comment = %+v, want the failure comment with no literal block", comment)
+	if !strings.HasPrefix(comment.Text, "Sortie session failed.") || strings.Contains(comment.Text, "Check the retry path.") {
+		t.Errorf("tracker comment = %+v, want the failure comment with no statement", comment)
 	}
 	exit.assertRun(t, "needs-human-review", "Check the retry path.")
 }
@@ -397,8 +398,8 @@ func TestStopStatement_ErrorExitCarriesNoReason(t *testing.T) {
 	if got := exit.singleNotification(t).Message.AgentText; got != "" {
 		t.Errorf("session.failed AgentText = %q, want empty", got)
 	}
-	if comment := exit.singleComment(t); comment.Literal != "" {
-		t.Errorf("tracker comment literal = %q, want empty", comment.Literal)
+	if comment := exit.singleComment(t); strings.Contains(comment.Text, "left over") {
+		t.Errorf("tracker comment = %q, want no statement", comment.Text)
 	}
 	exit.assertRun(t, "", "")
 }

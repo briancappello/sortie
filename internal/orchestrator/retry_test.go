@@ -16,6 +16,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/notify/render"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/registry"
@@ -181,7 +182,6 @@ type mockRetryTracker struct {
 type mockRetryCommentCall struct {
 	IssueID string
 	Text    string
-	Literal string
 }
 
 var _ domain.TrackerAdapter = (*mockRetryTracker)(nil)
@@ -226,11 +226,6 @@ func (m *mockRetryTracker) TransitionIssue(context.Context, string, string) erro
 // detached goroutine, never synchronously from HandleRetryTimer.
 func (m *mockRetryTracker) CommentIssue(_ context.Context, issueID, text string) error {
 	m.commentCalls = append(m.commentCalls, mockRetryCommentCall{IssueID: issueID, Text: text})
-	return m.commentIssueErr
-}
-
-func (m *mockRetryTracker) CommentIssueWithLiteral(_ context.Context, issueID, text, literal string) error {
-	m.commentCalls = append(m.commentCalls, mockRetryCommentCall{IssueID: issueID, Text: text, Literal: literal})
 	return m.commentIssueErr
 }
 
@@ -303,7 +298,7 @@ func requireMoneyHold(t *testing.T, id string, state *State, store *mockRetrySto
 	if !held {
 		t.Fatalf("BudgetExhausted[%s] missing, want a hold", id)
 	}
-	if len(tracker.commentCalls) != 1 || tracker.commentCalls[0].Text != buildBudgetHoldComment(entry) {
+	if len(tracker.commentCalls) != 1 || tracker.commentCalls[0].Text != render.Notification(budgetHeldNotification(id, entry)).Public {
 		t.Errorf("hold comment calls = %+v, want exactly one carrying the hold comment", tracker.commentCalls)
 	}
 	return entry
@@ -4197,7 +4192,11 @@ func TestHandleRetryTimer_BudgetHoldNotice(t *testing.T) {
 		if !ok {
 			t.Fatal("BudgetExhausted[ISS-NOTICE] missing, want present after the block")
 		}
-		want := buildBudgetHoldComment(entry)
+		want := "Sortie stopped dispatching this issue.\n" +
+			"Recorded: " + entry.ExhaustedAt.Format(time.RFC3339) + "\n" +
+			"Ceiling: session budget (agent.max_sessions)\n" +
+			"Sessions: 3 of 3\n" +
+			"Raising agent.max_sessions raises this ceiling."
 
 		if len(tracker.commentCalls) != 1 {
 			t.Fatalf("commentCalls = %+v, want exactly one comment", tracker.commentCalls)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +35,7 @@ const (
 	stageResultAdvanced = "advanced"
 	stageResultPartial  = "partial"
 	stageResultFailed   = "failed"
-	stageResultCeiling  = "ceiling"
+	stageResultCeiling  = domain.StageReasonCeiling
 )
 
 const stageChainSeparator = " -> "
@@ -313,7 +312,7 @@ func reportStageHop(ctx context.Context, state *State, params HandleWorkerExitPa
 		eventType = domain.EventStageAdvanced
 		reason = ""
 	}
-	notification := identity.notification(eventType, "", buildStageHopComment(hop))
+	notification := identity.notification(eventType, "", domain.StageFacts{})
 	notification.Envelope.Stage = domain.StageTransition{
 		SourceRule: hop.SourceRule,
 		TargetRule: hop.TargetRule,
@@ -330,26 +329,6 @@ func reportStageHop(ctx context.Context, state *State, params HandleWorkerExitPa
 			)
 		}
 	})
-}
-
-// buildStageHopComment returns the public text of a stage event. It names
-// no error, session, or agent, so a tracker comment may post it.
-func buildStageHopComment(d stageHopDecision) string {
-	headline := "Sortie advanced the issue to the next stage."
-	lines := []string{"From: " + d.SourceRule, "To: " + d.TargetRule}
-	if !d.made() {
-		headline = "Sortie did not advance the issue to the next stage."
-		lines = append(lines, "Reason: "+stageNotAdvancedPhrase(d.Result))
-	}
-	lines = append(lines, "Hop count: "+strconv.Itoa(d.HopCount), "Chain: "+d.ChainID)
-	return strings.Join(append([]string{headline}, lines...), "\n")
-}
-
-func stageNotAdvancedPhrase(result string) string {
-	if result == stageResultCeiling {
-		return "the issue reached its limit of consecutive stage moves (dispatch.max_consecutive_hops)"
-	}
-	return "the next stage's label could not be added to the issue"
 }
 
 // missingStageLabels returns the configured stage labels dispatchLabels

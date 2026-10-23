@@ -8499,11 +8499,7 @@ func (s *sweepThrottleTracker) FetchIssueComments(_ context.Context, _ string) (
 func (s *sweepThrottleTracker) TransitionIssue(_ context.Context, _, _ string) error { return nil }
 
 func (s *sweepThrottleTracker) CommentIssue(_ context.Context, _, _ string) error { return nil }
-func (s *sweepThrottleTracker) CommentIssueWithLiteral(_ context.Context, _, _, _ string) error {
-	return nil
-}
-
-func (s *sweepThrottleTracker) AddLabel(_ context.Context, _, _ string) error { return nil }
+func (s *sweepThrottleTracker) AddLabel(_ context.Context, _, _ string) error     { return nil }
 
 func (s *sweepThrottleTracker) RemoveLabel(_ context.Context, _ string, _ string) error { return nil }
 
@@ -9684,7 +9680,12 @@ func TestHandleTick_BudgetHoldNoticeOnce(t *testing.T) {
 	if !ok {
 		t.Fatal("BudgetExhausted missing after the ticks, want present")
 	}
-	if want := buildBudgetHoldComment(entry); calls[0].Text != want {
+	want := "Sortie stopped dispatching this issue.\n" +
+		"Recorded: " + entry.ExhaustedAt.Format(time.RFC3339) + "\n" +
+		"Ceiling: session budget (agent.max_sessions)\n" +
+		"Sessions: 5 of 3\n" +
+		"Raising agent.max_sessions raises this ceiling."
+	if calls[0].Text != want {
 		t.Errorf("commentCalls[0].Text =\n%q\nwant\n%q", calls[0].Text, want)
 	}
 

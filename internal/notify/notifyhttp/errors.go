@@ -1,4 +1,4 @@
-package webhook
+package notifyhttp
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 )
 
 // sendError is a classified notifier failure. It carries a category
@@ -43,24 +44,20 @@ func classifyHTTPError(resp *http.Response, _, _ string) error {
 	}
 }
 
-// classifyTransport maps a request, network, or body-read failure
-// to a [sendError] with a transport category. The underlying error is
-// wrapped for chain inspection but is never rendered into the category,
-// so the host and URL it embeds stay out of logs and agent-visible
-// results.
+// classifyTransport maps a request, network, or body-read failure to a
+// [sendError] with a transport category. The category never renders the
+// error text. The chain keeps the cause beneath a [*url.Error], because
+// that wrapper holds the full request URL and the URL carries the secret.
 func classifyTransport(err error, _, _ string) error {
-	return &sendError{Category: transportCategory(err), Err: err}
-}
-
-// transportCategory derives a redaction-safe category from a transport
-// error without rendering the error text, which embeds the host or URL.
-func transportCategory(err error) string {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
-	}
+	category := "connection failure"
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout"
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		category = "timeout"
 	}
-	return "connection failure"
+
+	cause := err
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
+		cause = urlErr.Err
+	}
+	return &sendError{Category: category, Err: cause}
 }

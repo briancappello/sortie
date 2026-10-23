@@ -54,9 +54,9 @@ const (
 // Money budget takes precedence over the token budget, which takes
 // precedence over the session budget.
 const (
-	budgetReasonMoney   = "money_budget"
-	budgetReasonToken   = "token_budget"
-	budgetReasonSession = "session_budget"
+	budgetReasonMoney   = domain.BudgetHoldReasonMoney
+	budgetReasonToken   = domain.BudgetHoldReasonToken
+	budgetReasonSession = domain.BudgetHoldReasonSession
 )
 
 // knownBudgetReasons lists every dispatch-gate budget reason in the order

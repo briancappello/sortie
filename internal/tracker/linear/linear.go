@@ -703,14 +703,6 @@ func (a *LinearAdapter) CommentIssue(ctx context.Context, issueID, text string) 
 	})
 }
 
-// CommentIssueWithLiteral posts text followed by literal in a fenced Markdown
-// code block, so the tracker shows literal verbatim.
-func (a *LinearAdapter) CommentIssueWithLiteral(ctx context.Context, issueID, text, literal string) error {
-	return trackermetrics.Track(a.metrics, "comment", func() error {
-		return a.postComment(ctx, issueID, issuekit.MarkdownLiteralComment(text, literal))
-	})
-}
-
 func (a *LinearAdapter) postComment(ctx context.Context, issueID, body string) error {
 	return runMutation(ctx, a.client, a.log, queryCommentCreate, map[string]any{
 		"issueId": issueID,

@@ -475,11 +475,15 @@ func applyReviewEscalation(
 		)
 	}
 
-	commentText := buildReviewEscalationComment(reviewData, turnCount)
-	if trigger == EscalationTriggerTriage {
-		commentText = buildTriageEscalationComment("review", fmt.Sprintf("PR #%d", reviewData.PRNumber))
+	var facts domain.MessageFacts = domain.ReviewEscalationFacts{
+		PRNumber: reviewData.PRNumber,
+		Branch:   reviewData.Branch,
+		Turns:    turnCount,
 	}
-	delivery := params.Router.Route(reactionNotification(domain.EventEscalationReviewComments, pending, commentText))
+	if trigger == EscalationTriggerTriage {
+		facts = domain.TriageEscalationFacts{PRNumber: reviewData.PRNumber}
+	}
+	delivery := params.Router.Route(reactionNotification(domain.EventEscalationReviewComments, pending, facts))
 
 	if params.ReviewConfig.Escalation == "label" {
 		label := params.ReviewConfig.EscalationLabel
@@ -520,15 +524,6 @@ func applyReviewEscalation(
 	publishEscalation(ctx, &state.TrackerOpsWg, delivery, log, record, func(err error) {
 		log.Warn("review escalation comment failed", slog.Any("error", err))
 	})
-}
-
-// buildReviewEscalationComment builds a plain-text escalation comment
-// for review fixes that exceeded the turn budget.
-func buildReviewEscalationComment(reviewData *ReviewReactionData, turnCount int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Review fix continuation turns exhausted for PR #%d on branch %s.\n", reviewData.PRNumber, reviewData.Branch)
-	fmt.Fprintf(&b, "%d continuation turns attempted. Remaining review comments require human attention.", turnCount)
-	return b.String()
 }
 
 // buildReviewFingerprint constructs a deterministic fingerprint from the

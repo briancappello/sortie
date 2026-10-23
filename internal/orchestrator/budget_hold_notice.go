@@ -2,16 +2,12 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
-	"github.com/sortie-ai/sortie/internal/pricing"
 )
 
 // budgetHoldNoticeStore is the persistence contract [postBudgetHoldNotice]
@@ -39,15 +35,6 @@ type budgetHoldNoticeParams struct {
 	Metrics  domain.Metrics
 	Logger   *slog.Logger
 	Ctx      context.Context
-}
-
-// budgetHoldCeilingWords names each budget-hold reason in the words the
-// notice uses. A reason absent from this map renders no Ceiling: line at
-// all, rather than a machine value or an invented phrase.
-var budgetHoldCeilingWords = map[string]string{
-	budgetReasonSession: "session budget",
-	budgetReasonToken:   "token budget",
-	budgetReasonMoney:   "money budget",
 }
 
 // Pacing constants for the budget hold notice. At most
@@ -118,39 +105,6 @@ func postBudgetHoldNotice(state *State, params budgetHoldNoticeParams) {
 	})
 }
 
-// budgetHoldTokenSpend words the entry's token sum for the notice: unknown
-// spend is never printed as zero, and a sum that leaves spend out is marked
-// as a lower bound. The entry's UsedTokens must be non-nil.
-func budgetHoldTokenSpend(entry *BudgetExhaustedEntry) string {
-	used := *entry.UsedTokens
-	var unmeasured int
-	if entry.UnmeasuredSessions != nil {
-		unmeasured = *entry.UnmeasuredSessions
-	}
-	switch {
-	case !SpendIncomplete(unmeasured, entry.UnaccountedTurns):
-		return strconv.FormatInt(used, 10)
-	case used == 0:
-		return "not measured"
-	default:
-		return fmt.Sprintf("at least %d", used)
-	}
-}
-
-// budgetHoldMoneySpend renders the entry's estimated cost: exact when the
-// figure is complete, else a lower bound, or unknown when nothing priced.
-func budgetHoldMoneySpend(entry *BudgetExhaustedEntry) string {
-	used := *entry.UsedUSD
-	switch {
-	case entry.UsedUSDComplete != nil && *entry.UsedUSDComplete:
-		return pricing.FormatUSD(used)
-	case used == 0:
-		return "unknown"
-	default:
-		return "at least " + pricing.FormatUSD(used)
-	}
-}
-
 // releaseBudgetHoldNotice deletes the durable row and the memory entry for
 // one issue. It returns without a store call when the memory holds no
 // reason for the issue. The memory entry is dropped only once the durable
@@ -181,47 +135,6 @@ func releaseAllBudgetHoldNotices(ctx context.Context, state *State, store budget
 		return
 	}
 	state.BudgetHoldNoticed = make(map[string]string)
-}
-
-// buildBudgetHoldComment renders the plain-text notice body from the
-// entry alone. Pure: no clock, no config lookup, no tracker call. The
-// body is a past-tense event record and MUST NOT assert a present state,
-// use imperative or sufficiency-claiming phrasing, or interpolate the
-// issue's identifier, which the comment is already attached to.
-func buildBudgetHoldComment(entry *BudgetExhaustedEntry) string {
-	lines := []string{
-		"Sortie stopped dispatching this issue.",
-		fmt.Sprintf("Recorded: %s", entry.ExhaustedAt.Format(time.RFC3339)),
-	}
-
-	word, hasWord := budgetHoldCeilingWords[entry.Reason]
-	setting, hasSetting := ceilingSettingByBudgetReason[entry.Reason]
-	if hasWord && hasSetting {
-		lines = append(lines, fmt.Sprintf("Ceiling: %s (%s)", word, setting))
-	}
-
-	if entry.BudgetUSD > 0 && entry.UsedUSD != nil {
-		lines = append(lines, fmt.Sprintf("Estimated cost: %s of %s", budgetHoldMoneySpend(entry), pricing.FormatUSD(entry.BudgetUSD)))
-	}
-	if entry.BudgetTokens > 0 && entry.UsedTokens != nil {
-		lines = append(lines, fmt.Sprintf("Tokens: %s of %d", budgetHoldTokenSpend(entry), entry.BudgetTokens))
-	}
-	if entry.BudgetSessions > 0 {
-		lines = append(lines, fmt.Sprintf("Sessions: %d of %d", entry.UsedSessions, entry.BudgetSessions))
-	}
-	if entry.StoppedInFlight != nil && *entry.StoppedInFlight > 0 {
-		word := "session"
-		if *entry.StoppedInFlight != 1 {
-			word = "sessions"
-		}
-		lines = append(lines, fmt.Sprintf("Stopped in flight: %d %s", *entry.StoppedInFlight, word))
-	}
-
-	if hasSetting {
-		lines = append(lines, fmt.Sprintf("Raising %s raises this ceiling.", setting))
-	}
-
-	return strings.Join(lines, "\n")
 }
 
 // PopulateBudgetHoldNotices loads persisted budget hold notice records

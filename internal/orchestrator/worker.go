@@ -1913,9 +1913,3 @@ func buildToolAdvertisement(reg *domain.ToolRegistry, project string) string {
 
 	return sb.String()
 }
-
-// dispatchComment is the tracker comment text posted on every session
-// dispatch, for every agent kind and every tracker kind alike: a
-// business reader of the issue needs only that a session started, not
-// an internal integration name or a dispatch counter.
-const dispatchComment = "Sortie session started."

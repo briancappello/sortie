@@ -1202,40 +1202,6 @@ func TestBuildAutoMergeFingerprint(t *testing.T) {
 	}
 }
 
-func TestBuildAutoMergeComment(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		sha  string
-		want string
-	}{
-		{
-			name: "merge commit line follows the strategy",
-			sha:  "abc123def",
-			want: "Sortie auto-merged PR #99 (myorg/myrepo).\nStrategy: squash.\nMerge commit: abc123def.",
-		},
-		{
-			name: "empty merge commit omits the line",
-			want: "Sortie auto-merged PR #99 (myorg/myrepo).\nStrategy: squash.",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			data := &AutoMergeReactionData{PRNumber: 99, Owner: "myorg", Repo: "myrepo"}
-
-			got := buildAutoMergeComment(data, domain.MergeResult{SHA: tt.sha}, domain.StrategySquash)
-
-			if got != tt.want {
-				t.Errorf("buildAutoMergeComment(sha %q) = %q, want %q", tt.sha, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestComputeAutoMergePendingDelay verifies the exponential-backoff formula.
 func TestComputeAutoMergePendingDelay(t *testing.T) {
 	t.Parallel()

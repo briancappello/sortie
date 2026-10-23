@@ -928,14 +928,6 @@ func (a *GiteaAdapter) CommentIssue(ctx context.Context, issueID, text string) e
 	})
 }
 
-// CommentIssueWithLiteral posts text followed by literal in a fenced Markdown
-// code block, so the tracker shows literal verbatim.
-func (a *GiteaAdapter) CommentIssueWithLiteral(ctx context.Context, issueID, text, literal string) error {
-	return trackermetrics.Track(a.metrics, "comment", func() error {
-		return a.postComment(ctx, issueID, issuekit.MarkdownLiteralComment(text, literal))
-	})
-}
-
 func (a *GiteaAdapter) postComment(ctx context.Context, issueID, body string) error {
 	path := "/repos/" + a.owner + "/" + a.repo + "/issues/" + url.PathEscape(issueID) + "/comments"
 
