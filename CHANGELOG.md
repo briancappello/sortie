@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `agent.max_weekly_cost_usd` (or `SORTIE_AGENT_MAX_WEEKLY_COST_USD`) caps what the whole instance spends in estimated cost in a UTC week, from Monday 00:00 UTC to the next Monday, the way the daily and monthly limits cap a day and a month: once the week's spend reaches it, Sortie starts no new agent session until the week resets or you raise the limit, and sessions already running finish. You can set it alone or with the other limits; while more than one is reached, Sortie starts nothing until every one of them clears. Overview shows the week's spend against the limit and when it resets. ([#1453](https://github.com/sortie-ai/sortie/issues/1453))
 
+- Sortie can now post its notifications to a Telegram chat or channel: add a `telegram` entry to `notifications` with the bot's token in `bot_token` (for example `$SORTIE_TELEGRAM_BOT_TOKEN`) and the chat in `chat_id`, either its numeric id or a public channel's `@username`. Each message carries the same text as a Slack message, and a message longer than Telegram's 4096-character limit is cut to fit. ([#1454](https://github.com/sortie-ai/sortie/issues/1454))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.
@@ -31,6 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Tool lines in the session view now show what each call ran: an icon for its kind, then the command of a shell call, the tool and path of a file call, the tool and skill of a skill call, or the name of any other tool, with MCP tools named as `server.tool`, such as `github.get_issue`. A long line is cut at the pane's width and shows in full on hover, and a folded group of calls reads as counts such as `3 commands, 2 file reads`. The event log and the live event stream carry the same line with secrets masked, and the `tool` label of the tool call metric names MCP tools the same way. ([#1438](https://github.com/sortie-ai/sortie/issues/1438))
 
 - An OpenCode CLI turn whose output Sortie cannot read now fails with error kind `port_exit` instead of `response_error`, and one whose runtime exits with status 127 after writing output fails with `agent_not_found`, which is not retried, instead of `port_exit`.
+
+- The reason an agent gives when it stops on `blocked`, `needs-human-review`, or `no-change-needed` now appears as plain text after the rest of the message: Sortie's issue comment no longer puts it in a code block, and Slack no longer escapes `&`, `<`, and `>` in it. Secrets Sortie knows are still masked. ([#1454](https://github.com/sortie-ai/sortie/issues/1454))
 
 ### Fixed
 

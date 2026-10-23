@@ -161,10 +161,7 @@ func (s *stubTrackerAdapter) FetchIssueComments(_ context.Context, _ string) ([]
 }
 func (s *stubTrackerAdapter) TransitionIssue(_ context.Context, _ string, _ string) error { return nil }
 func (s *stubTrackerAdapter) CommentIssue(_ context.Context, _ string, _ string) error    { return nil }
-func (s *stubTrackerAdapter) CommentIssueWithLiteral(_ context.Context, _, _, _ string) error {
-	return nil
-}
-func (s *stubTrackerAdapter) AddLabel(_ context.Context, _ string, _ string) error { return nil }
+func (s *stubTrackerAdapter) AddLabel(_ context.Context, _ string, _ string) error        { return nil }
 
 func (s *stubTrackerAdapter) RemoveLabel(_ context.Context, _ string, _ string) error { return nil }
 

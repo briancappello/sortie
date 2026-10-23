@@ -587,18 +587,6 @@ func (a *JiraAdapter) CommentIssue(ctx context.Context, issueID string, text str
 	})
 }
 
-// CommentIssueWithLiteral posts text followed by literal as a literal
-// block. On version "3" the block is an ADF codeBlock node holding one
-// text node. On version "2" it is a {noformat} block whose content has
-// a zero-width space inserted after every brace that starts a
-// case-insensitive "noformat", so the content cannot close the block,
-// and after every bracket that opens a [~user] mention.
-func (a *JiraAdapter) CommentIssueWithLiteral(ctx context.Context, issueID, text, literal string) error {
-	return trackermetrics.Track(a.metrics, "comment", func() error {
-		return a.postComment(ctx, issueID, literalCommentPayload(a.apiVersion, text, literal))
-	})
-}
-
 func (a *JiraAdapter) postComment(ctx context.Context, issueID string, body any) error {
 	path := a.basePath + "/issue/" + url.PathEscape(issueID) + "/comment"
 
@@ -624,35 +612,6 @@ func commentPayload(apiVersion, text string) any {
 		return map[string]any{"body": text}
 	}
 	return buildADFComment(text)
-}
-
-// literalCommentPayload is [commentPayload] for a comment that ends in a
-// literal block.
-func literalCommentPayload(apiVersion, text, literal string) any {
-	if apiVersion == "2" {
-		return map[string]any{"body": text + "\n\n{noformat}\n" + inertNoformatContent(literal) + "\n{noformat}"}
-	}
-	return buildADFLiteralComment(text, literal)
-}
-
-// inertNoformatContent inserts a zero-width space after every brace that
-// starts the word noformat, in any letter case, so wiki markup inside the
-// block cannot terminate it. It also inserts one after every bracket that
-// opens a [~user] mention, because Jira Server parses mentions inside a
-// {noformat} block and would notify that user.
-func inertNoformatContent(literal string) string {
-	const word = "noformat"
-	var out strings.Builder
-	for i := 0; i < len(literal); i++ {
-		out.WriteByte(literal[i])
-		rest := literal[i+1:]
-		switch {
-		case literal[i] == '{' && len(rest) >= len(word) && strings.EqualFold(rest[:len(word)], word),
-			literal[i] == '[' && strings.HasPrefix(rest, "~"):
-			out.WriteString("\u200b")
-		}
-	}
-	return out.String()
 }
 
 // SetMetrics configures the metrics recorder for tracker API call

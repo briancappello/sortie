@@ -318,22 +318,11 @@ func (m *mockTrackerAdapter) TransitionIssue(ctx context.Context, issueID string
 type commentIssueCall struct {
 	IssueID string
 	Text    string
-	Literal string
 }
 
 func (m *mockTrackerAdapter) CommentIssue(ctx context.Context, issueID string, text string) error {
 	m.commentMu.Lock()
 	m.commentCalls = append(m.commentCalls, commentIssueCall{IssueID: issueID, Text: text})
-	m.commentMu.Unlock()
-	if m.commentIssueFn != nil {
-		return m.commentIssueFn(ctx, issueID, text)
-	}
-	return nil
-}
-
-func (m *mockTrackerAdapter) CommentIssueWithLiteral(ctx context.Context, issueID, text, literal string) error {
-	m.commentMu.Lock()
-	m.commentCalls = append(m.commentCalls, commentIssueCall{IssueID: issueID, Text: text, Literal: literal})
 	m.commentMu.Unlock()
 	if m.commentIssueFn != nil {
 		return m.commentIssueFn(ctx, issueID, text)
@@ -5248,19 +5237,7 @@ func TestRunWorkerAttempt_UsageArrivalNoneDiscardsFigures(t *testing.T) {
 	})
 }
 
-func TestDispatchComment_IsTheFixedHeadline(t *testing.T) {
-	t.Parallel()
-
-	const want = "Sortie session started."
-	if dispatchComment != want {
-		t.Errorf("dispatchComment = %q, want %q", dispatchComment, want)
-	}
-	for _, forbidden := range []string{"Session:", "Workspace:", "Attempt:", "Agent:"} {
-		if strings.Contains(dispatchComment, forbidden) {
-			t.Errorf("dispatchComment = %q, must not contain %q", dispatchComment, forbidden)
-		}
-	}
-}
+const sessionStartedText = "Sortie session started."
 
 func workerDotEnvSecret(t *testing.T) string {
 	t.Helper()
@@ -5479,8 +5456,8 @@ func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 		if got := tracker.commentCalls[0].IssueID; got != issue.ID {
 			t.Errorf("CommentIssue IssueID = %q, want %q", got, issue.ID)
 		}
-		if tracker.commentCalls[0].Text != dispatchComment {
-			t.Errorf("CommentIssue Text = %q, want %q", tracker.commentCalls[0].Text, dispatchComment)
+		if tracker.commentCalls[0].Text != sessionStartedText {
+			t.Errorf("CommentIssue Text = %q, want %q", tracker.commentCalls[0].Text, sessionStartedText)
 		}
 
 		spy.mu.Lock()
@@ -5535,8 +5512,8 @@ func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 				if len(tracker.commentCalls) != 1 {
 					t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
 				}
-				if got := tracker.commentCalls[0].Text; got != dispatchComment {
-					t.Errorf("agent kind %q: CommentIssue Text = %q, want %q (unchanged across agent kind)", kind, got, dispatchComment)
+				if got := tracker.commentCalls[0].Text; got != sessionStartedText {
+					t.Errorf("agent kind %q: CommentIssue Text = %q, want %q (unchanged across agent kind)", kind, got, sessionStartedText)
 				}
 			})
 		}
@@ -5666,8 +5643,8 @@ func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 		if len(tracker.commentCalls) != 1 {
 			t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
 		}
-		if got := tracker.commentCalls[0].Text; got != dispatchComment {
-			t.Errorf("CommentIssue Text = %q, want %q (unchanged on a retry dispatch)", got, dispatchComment)
+		if got := tracker.commentCalls[0].Text; got != sessionStartedText {
+			t.Errorf("CommentIssue Text = %q, want %q (unchanged on a retry dispatch)", got, sessionStartedText)
 		}
 	})
 
@@ -5699,8 +5676,8 @@ func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 		if tracker.commentIssueCalls != 1 {
 			t.Fatalf("CommentIssue call count = %d, want 1", tracker.commentIssueCalls)
 		}
-		if tracker.lastComment != dispatchComment {
-			t.Errorf("CommentIssue text = %q, want %q (unchanged across tracker adapter implementation)", tracker.lastComment, dispatchComment)
+		if tracker.lastComment != sessionStartedText {
+			t.Errorf("CommentIssue text = %q, want %q (unchanged across tracker adapter implementation)", tracker.lastComment, sessionStartedText)
 		}
 	})
 
@@ -5733,8 +5710,8 @@ func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 		if len(tracker.commentCalls) != 1 {
 			t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
 		}
-		if got := tracker.commentCalls[0].Text; got != dispatchComment {
-			t.Errorf("CommentIssue Text = %q, want %q (unchanged on a continuation dispatch)", got, dispatchComment)
+		if got := tracker.commentCalls[0].Text; got != sessionStartedText {
+			t.Errorf("CommentIssue Text = %q, want %q (unchanged on a continuation dispatch)", got, sessionStartedText)
 		}
 	})
 
@@ -5771,8 +5748,8 @@ func TestRunWorkerAttempt_DispatchComment(t *testing.T) {
 				if len(tracker.commentCalls) != 1 {
 					t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
 				}
-				if got := tracker.commentCalls[0].Text; got != dispatchComment {
-					t.Errorf("reaction kind %q: CommentIssue Text = %q, want %q", reactionKind, got, dispatchComment)
+				if got := tracker.commentCalls[0].Text; got != sessionStartedText {
+					t.Errorf("reaction kind %q: CommentIssue Text = %q, want %q", reactionKind, got, sessionStartedText)
 				}
 			})
 		}

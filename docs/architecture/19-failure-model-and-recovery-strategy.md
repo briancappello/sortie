@@ -33,11 +33,11 @@
    - Snapshot timeout
    - Dashboard request errors
    - Log sink configuration failure
-   - Delivery of an orchestrator event to a Slack or webhook destination
+   - Delivery of an orchestrator event to a backend destination
 
 6. `CI Feedback Failures`
    - CI status fetch errors (transport, auth, API, not-found, payload)
-   - Escalation failures (label write or `tracker_comment` delivery to the tracker, and delivery of the escalation event to a Slack or webhook destination)
+   - Escalation failures (label write or `tracker_comment` delivery to the tracker, and delivery of the escalation event to a backend destination)
    - Missing or malformed `.sortie/scm.json`
 
 7. `Handoff Evidence Failures`
@@ -65,7 +65,7 @@
   - A retry or reaction continuation that comes due is re-armed one `polling.interval_ms` ahead with its attempt count, claim, and persisted entry unchanged, so the hold costs the work no retry budget and no backoff.
   - Lift the hold with no operator action when the window resets or a reload raises or removes the ceiling.
 
-- Failed delivery of an orchestrator event to a Slack or webhook destination:
+- Failed delivery of an orchestrator event to a backend destination:
   - Log a warning naming the event type, the destination, and the notifier kind.
   - Never retry, and never let it block another destination or the action a producer uses to confirm its own delivery.
 
@@ -114,7 +114,7 @@
 
 Not every orchestrator-driven tracker write in this section gets a later re-attempt. A stalled dispatch is retried and a CI check re-enqueues, but a dispatch-time in-progress transition failure is only logged and never retried, and a handoff transition failure on a soft-stop worker exit releases the claim without scheduling a continuation; both fail quietly with no re-attempt to follow. An escalation failure changes nothing about the pending entry, which stays pending under the escalation and makes no further transition call (§11G.6). What distinguishes merge-completion is not the absence of any fallback, but where that fallback lives. A failed transition escalation deliberately leaves the normal merge fingerprint undispatched (§11G.4), so the one transition call a restart resumes reconciles the same merge commit and retries the transition the escalated attempt could not complete.
 
-Missing-identifier escalation follows the same cross-run posture without changing that normal fingerprint: its separate observation is marked dispatched only after the action that confirms delivery succeeds: the label under `escalation: label`, and the `tracker_comment` write under `comment` or `none` when that destination receives the event (§11G.6). A Slack or webhook outcome never confirms delivery and never blocks it. A failed write leaves the expired observation undispatched and the current pending entry in place under its `missing_merge_commit` escalation. The first pass after a restart, or a fresh entry that a later worker exit or startup recovery seeds, retries only that undelivered operator signal once; it does not restart the thirty-minute grace period. This is why every disposition above ends in a bounded retry followed by escalation, an immediate escalation, or an explicit logged stop, and never a silent drop: the durable undispatched state gives the failed action another chance across a restart or a fresh entry.
+Missing-identifier escalation follows the same cross-run posture without changing that normal fingerprint: its separate observation is marked dispatched only after the action that confirms delivery succeeds: the label under `escalation: label`, and the `tracker_comment` write under `comment` or `none` when that destination receives the event (§11G.6). The outcome of a backend destination never confirms delivery and never blocks it. A failed write leaves the expired observation undispatched and the current pending entry in place under its `missing_merge_commit` escalation. The first pass after a restart, or a fresh entry that a later worker exit or startup recovery seeds, retries only that undelivered operator signal once; it does not restart the thirty-minute grace period. This is why every disposition above ends in a bounded retry followed by escalation, an immediate escalation, or an explicit logged stop, and never a silent drop: the durable undispatched state gives the failed action another chance across a restart or a fresh entry.
 
 ### 14.3 Partial State Recovery (Restart)
 

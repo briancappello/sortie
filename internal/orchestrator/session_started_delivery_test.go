@@ -13,6 +13,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/notify/render"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/prompt"
 )
@@ -155,7 +156,7 @@ func TestSessionStartedDelivery_DetachedSendDoesNotBlockTheWorker(t *testing.T) 
 	}
 
 	sent := run.slack.notifications()
-	if len(sent) != 1 || sent[0].Envelope.EventType != domain.EventTypeSessionStarted || sent[0].Message.Body != dispatchComment {
+	if len(sent) != 1 || sent[0].Envelope.EventType != domain.EventTypeSessionStarted || render.Notification(sent[0]).Body != sessionStartedText {
 		t.Fatalf("subscriber notifications = %+v, want one session.started carrying the dispatch comment", sent)
 	}
 	if sent[0].Envelope.IssueID != workerTestIssue().ID || sent[0].Envelope.Identifier != workerTestIssue().Identifier {
@@ -173,7 +174,7 @@ func TestSessionStartedDelivery_TrackerCommentLoggedAndCountedBeforeWorkspacePre
 	run.tracker.commentMu.Lock()
 	comments := slices.Clone(run.tracker.commentCalls)
 	run.tracker.commentMu.Unlock()
-	if len(comments) != 1 || comments[0].Text != dispatchComment {
+	if len(comments) != 1 || comments[0].Text != sessionStartedText {
 		t.Fatalf("tracker comments = %+v, want exactly one dispatch comment", comments)
 	}
 	if got := run.metrics.existedAtCount(); !slices.Equal(got, []bool{false}) {

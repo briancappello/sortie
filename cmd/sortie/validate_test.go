@@ -4818,3 +4818,55 @@ Do {{ .issue.title }}.
 		t.Errorf("validateOutput.Errors = %v, want a diagnostic with check %q", out.Errors, "config.notifications[0]")
 	}
 }
+
+func TestValidateTelegramDestination(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		chatID   string
+		wantCode int
+		wantDiag bool
+	}{
+		{name: "token and chat id construct", chatID: "    chat_id: -1001234567890\n", wantCode: 0},
+		{name: "missing chat id is rejected", wantCode: 1, wantDiag: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wfPath := writeCustomWorkflowFile(t, t.TempDir(), []byte(`---
+tracker:
+  kind: file
+  active_states:
+    - To Do
+  terminal_states:
+    - Done
+agent:
+  kind: mock
+notifications:
+  - kind: telegram
+    bot_token: "123456:test-token"
+`+tt.chatID+`    events: [budget.held]
+---
+Do {{ .issue.title }}.
+`))
+
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), []string{"validate", "--format", "json", wfPath}, &stdout, &stderr)
+
+			if code != tt.wantCode {
+				t.Fatalf("run(validate) = %d, want %d; stdout: %s stderr: %s", code, tt.wantCode, stdout.String(), stderr.String())
+			}
+			var out validateOutput
+			if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+				t.Fatalf("json.Unmarshal(%q) error: %v", stdout.String(), err)
+			}
+			hasDiag := slices.ContainsFunc(out.Errors, func(d validateDiag) bool { return d.Check == "config.notifications[0]" })
+			if hasDiag != tt.wantDiag || out.Valid == tt.wantDiag {
+				t.Errorf("validateOutput (Valid, config.notifications[0] diagnostic) = (%v, %v), want (%v, %v)", out.Valid, hasDiag, !tt.wantDiag, tt.wantDiag)
+			}
+		})
+	}
+}

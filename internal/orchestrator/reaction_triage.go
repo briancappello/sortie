@@ -781,17 +781,3 @@ const (
 	// merge commit of a merged pull request has run out.
 	EscalationTriggerMissingMergeCommit ReactionEscalationTrigger = "missing_merge_commit"
 )
-
-// buildTriageEscalationComment returns the operator-facing comment for
-// an escalation a triage command requested. One builder serves all four
-// kinds. subject is the short phrase naming what was triaged: "ref <head
-// sha>" for CI, and "PR #<number>" for the three pull-request kinds, the
-// same subjects the budget escalations name.
-func buildTriageEscalationComment(kind string, subject string) string {
-	return fmt.Sprintf(
-		"The %s triage command requested human attention for %s.\n\n"+
-			"Sortie ran the configured triage command before dispatching a continuation "+
-			"and the command answered \"escalate\", so no continuation was dispatched and "+
-			"no retry or continuation budget was spent. Manual intervention required.",
-		kind, subject)
-}

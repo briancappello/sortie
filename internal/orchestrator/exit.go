@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -1511,10 +1510,11 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	// comments report re-queuing for either outcome.
 	retryPending := retryScheduled || retryDeferred
 
-	// The body is built synchronously to capture exit-time data; the
-	// delivery is detached so the event loop never blocks.
+	// The facts are captured synchronously at exit time; the delivery is
+	// detached so the event loop never blocks.
 	var eventType domain.EventType
-	var severity, body, agentText, lifecycle string
+	var facts domain.MessageFacts
+	var severity, agentText, lifecycle string
 	switch {
 	case workerResult.ExitKind == WorkerExitCancelled:
 		return outcome
@@ -1522,24 +1522,36 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		lifecycle = "completion"
 		if workerResult.SoftStop {
 			eventType = domain.EventSessionStopped
-			body = buildSoftStopComment(runDuration, workerResult.TurnsCompleted, workerResult.SoftStopReason)
+			facts = domain.SessionStoppedFacts{
+				Elapsed: runDuration,
+				Turns:   workerResult.TurnsCompleted,
+				Reason:  workerResult.SoftStopReason,
+			}
 			agentText = publicStatement(workerResult.SoftStopStatement)
 			if workerResult.SoftStopReason == string(workspace.StatusNoChangeNeeded) {
 				severity = "info"
 			}
 		} else {
 			eventType = domain.EventSessionCompleted
-			body = buildCompletionComment(runDuration, workerResult.TurnsCompleted, retryPending)
+			facts = domain.SessionCompletedFacts{
+				Elapsed:        runDuration,
+				Turns:          workerResult.TurnsCompleted,
+				RetryScheduled: retryPending,
+			}
 		}
 	default:
 		lifecycle = "failure"
 		eventType = domain.EventSessionFailed
-		body = buildFailureComment(runDuration, retryPending, nextAttempt)
+		facts = domain.SessionFailedFacts{
+			Elapsed:        runDuration,
+			RetryScheduled: retryPending,
+			NextAttempt:    nextAttempt,
+		}
 	}
 
 	exitEvent := identity
 	exitEvent.AgentText = agentText
-	delivery := params.Router.Route(exitEvent.notification(eventType, severity, body))
+	delivery := params.Router.Route(exitEvent.notification(eventType, severity, facts))
 
 	deliverDetached(ctx, &state.TrackerOpsWg, delivery, log, func(received bool, err error) {
 		if !received {
@@ -1759,39 +1771,6 @@ func stringPtr(s string) *string {
 		return nil
 	}
 	return &s
-}
-
-// buildCompletionComment returns the tracker comment for a normal exit.
-// retryScheduled distinguishes "completed (re-queuing)" from "completed".
-// The comment carries no session identifier: a reader of the issue
-// cannot act on it, and a public issue would publish it.
-func buildCompletionComment(elapsed time.Duration, turnsCompleted int, retryScheduled bool) string {
-	headline := "Sortie session completed."
-	if retryScheduled {
-		headline = "Sortie session completed (re-queuing)."
-	}
-	return fmt.Sprintf("%s\nDuration: %s\nTurns: %d",
-		headline, elapsed.Truncate(time.Second).String(), turnsCompleted)
-}
-
-// buildFailureComment returns the tracker comment for an error exit. It
-// carries neither the error text nor the session identifier: the issue
-// may be public, and the cause stays in the log, the run history, and
-// the dashboard.
-func buildFailureComment(elapsed time.Duration, retryScheduled bool, nextAttempt int) string {
-	retryLine := "Retry: no (not retryable)"
-	if retryScheduled {
-		retryLine = fmt.Sprintf("Retry: yes (attempt %d)", nextAttempt)
-	}
-	return fmt.Sprintf("Sortie session failed.\nDuration: %s\n%s",
-		elapsed.Truncate(time.Second).String(), retryLine)
-}
-
-// buildSoftStopComment returns the tracker comment for an exit triggered by
-// a recognized A2O status signal.
-func buildSoftStopComment(elapsed time.Duration, turnsCompleted int, reason string) string {
-	return fmt.Sprintf("Sortie session completed (agent signaled: %s).\nDuration: %s\nTurns: %d",
-		reason, elapsed.Truncate(time.Second).String(), turnsCompleted)
 }
 
 // declaredOutcome returns the recognized status token that ended the run and

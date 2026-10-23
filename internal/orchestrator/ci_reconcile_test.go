@@ -213,7 +213,6 @@ type ciTrackerStub struct {
 	addLabelErr       error
 	commentIssueErr   error
 	lastComment       string
-	lastLiteral       string
 }
 
 var _ domain.TrackerAdapter = (*ciTrackerStub)(nil)
@@ -246,12 +245,6 @@ func (s *ciTrackerStub) TransitionIssue(_ context.Context, _ string, _ string) e
 func (s *ciTrackerStub) CommentIssue(_ context.Context, _ string, text string) error {
 	s.commentIssueCalls++
 	s.lastComment = text
-	return s.commentIssueErr
-}
-func (s *ciTrackerStub) CommentIssueWithLiteral(_ context.Context, _, text, literal string) error {
-	s.commentIssueCalls++
-	s.lastComment = text
-	s.lastLiteral = literal
 	return s.commentIssueErr
 }
 func (s *ciTrackerStub) AddLabel(_ context.Context, _ string, _ string) error {
@@ -1215,111 +1208,6 @@ func TestReconcileCIStatus_CommentEscalation_RecursOncePerHead_ThenAgainAfterNot
 	}
 }
 
-// TestBuildCIEscalationComment: the escalation comment
-// names exactly the checks the verdict counted as failing.
-func TestBuildCIEscalationComment(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		result         domain.CIResult
-		ref            string
-		attempts       int
-		wantContains   []string
-		wantNotContain []string
-	}{
-		{
-			name: "basic format with failing count and details URL",
-			result: domain.CIResult{
-				FailingCount: 2,
-				CheckRuns: []domain.CheckRun{
-					{
-						Name:       "test",
-						Status:     domain.CheckRunStatusCompleted,
-						Conclusion: domain.CheckConclusionFailure,
-						DetailsURL: "https://ci.example.com/runs/42",
-					},
-				},
-			},
-			ref:      "abc1234",
-			attempts: 3,
-			wantContains: []string{
-				"CI fix retries exhausted",
-				"abc1234",
-				"3 CI-fix continuation(s)",
-				"Failing checks:",
-				"2",
-				"test",
-				"https://ci.example.com/runs/42",
-				"Manual intervention required",
-			},
-		},
-		{
-			name: "zero failing count omits count line",
-			result: domain.CIResult{
-				FailingCount: 0,
-				CheckRuns:    []domain.CheckRun{},
-			},
-			ref:      "main",
-			attempts: 1,
-			wantContains: []string{
-				"CI fix retries exhausted",
-				"main",
-				"1 CI-fix continuation(s)",
-				"Manual intervention required",
-			},
-		},
-		{
-			name: "only failure check runs included",
-			result: domain.CIResult{
-				FailingCount: 2,
-				CheckRuns: []domain.CheckRun{
-					{Name: "lint", Status: domain.CheckRunStatusCompleted, Conclusion: domain.CheckConclusionSuccess},
-					{Name: "test", Status: domain.CheckRunStatusCompleted, Conclusion: domain.CheckConclusionFailure},
-					{Name: "deploy", Status: domain.CheckRunStatusCompleted, Conclusion: domain.CheckConclusionTimedOut},
-					{Name: "e2e", Status: domain.CheckRunStatusCompleted, Conclusion: domain.CheckConclusionCancelled},
-				},
-			},
-			ref:            "feature/x",
-			attempts:       2,
-			wantContains:   []string{"test", "deploy"},
-			wantNotContain: []string{"lint", "e2e"},
-		},
-		{
-			name: "check run without details URL omits link",
-			result: domain.CIResult{
-				FailingCount: 1,
-				CheckRuns: []domain.CheckRun{
-					{Name: "build", Status: domain.CheckRunStatusCompleted, Conclusion: domain.CheckConclusionFailure, DetailsURL: ""},
-				},
-			},
-			ref:            "sha9999",
-			attempts:       1,
-			wantContains:   []string{"build"},
-			wantNotContain: []string{"details"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := buildCIEscalationComment(tt.result, tt.ref, tt.attempts)
-
-			for _, want := range tt.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("buildCIEscalationComment() output missing %q\ngot: %s", want, got)
-				}
-			}
-			for _, notWant := range tt.wantNotContain {
-				if strings.Contains(got, notWant) {
-					t.Errorf("buildCIEscalationComment() output unexpectedly contains %q\ngot: %s", notWant, got)
-				}
-			}
-		})
-	}
-}
-
 // TestReconcileCIStatus_NoPersonAttributingLanguage verifies that no log
 // line, comment, or label emitted on a head-change path contains a
 // person-attributing phrase. The assertion enumerates the emitted
@@ -1428,9 +1316,6 @@ func (b *blockingCITracker) CommentIssue(ctx context.Context, _ string, _ string
 		}
 	}
 	return nil
-}
-func (b *blockingCITracker) CommentIssueWithLiteral(ctx context.Context, issueID, text, _ string) error {
-	return b.CommentIssue(ctx, issueID, text)
 }
 
 // TestEscalateCIFailure_LabelTracksTrackerOps verifies that the AddLabel
