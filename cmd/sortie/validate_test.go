@@ -4780,56 +4780,43 @@ func TestValidateDeprecatedNotificationSettingsAreWarnings(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsUnconstructibleDestination(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	wfPath := writeCustomWorkflowFile(t, dir, []byte(`---
-tracker:
-  kind: file
-  active_states:
-    - To Do
-  terminal_states:
-    - Done
-agent:
-  kind: mock
-notifications:
-  - kind: webhook
-    url: ""
-    events: [budget.held]
----
-Do {{ .issue.title }}.
-`))
-
-	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"validate", "--format", "json", wfPath}, &stdout, &stderr)
-
-	if code != 1 {
-		t.Fatalf("run(validate) = %d, want 1; stderr: %s", code, stderr.String())
-	}
-	var out validateOutput
-	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		t.Fatalf("json.Unmarshal(%q) error: %v", stdout.String(), err)
-	}
-	if out.Valid {
-		t.Error("validateOutput.Valid = true, want false for a destination that cannot be constructed")
-	}
-	if !slices.ContainsFunc(out.Errors, func(d validateDiag) bool { return d.Check == "config.notifications[0]" }) {
-		t.Errorf("validateOutput.Errors = %v, want a diagnostic with check %q", out.Errors, "config.notifications[0]")
-	}
-}
-
-func TestValidateTelegramDestination(t *testing.T) {
+func TestValidateChecksDestinationConstruction(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		chatID   string
+		entry    string
 		wantCode int
 		wantDiag bool
 	}{
-		{name: "token and chat id construct", chatID: "    chat_id: -1001234567890\n", wantCode: 0},
-		{name: "missing chat id is rejected", wantCode: 1, wantDiag: true},
+		{
+			name:     "webhook with an empty url is rejected",
+			entry:    "  - kind: webhook\n    url: \"\"\n",
+			wantCode: 1,
+			wantDiag: true,
+		},
+		{
+			name:     "telegram token and chat id construct",
+			entry:    "  - kind: telegram\n    bot_token: \"123456:test-token\"\n    chat_id: -1001234567890\n",
+			wantCode: 0,
+		},
+		{
+			name:     "telegram without chat id is rejected",
+			entry:    "  - kind: telegram\n    bot_token: \"123456:test-token\"\n",
+			wantCode: 1,
+			wantDiag: true,
+		},
+		{
+			name:     "discord webhook url constructs",
+			entry:    "  - kind: discord\n    webhook_url: \"https://discord.com/api/webhooks/1/test-token\"\n",
+			wantCode: 0,
+		},
+		{
+			name:     "discord without webhook url is rejected",
+			entry:    "  - kind: discord\n",
+			wantCode: 1,
+			wantDiag: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -4846,9 +4833,7 @@ tracker:
 agent:
   kind: mock
 notifications:
-  - kind: telegram
-    bot_token: "123456:test-token"
-`+tt.chatID+`    events: [budget.held]
+`+tt.entry+`    events: [budget.held]
 ---
 Do {{ .issue.title }}.
 `))
