@@ -622,7 +622,7 @@ dispatch:
 
 #### 5.3.10 `notifications` (list, optional)
 
-The `notifications` list configures every outbound message Sortie sends to a destination other than the issue's own tracker fields: Slack, Telegram, and webhook backends, and the built-in `tracker_comment` destination that posts comments on the tracker issue. Each entry names the event types it receives. Two producers feed the list: the agent, through the `notify_operator` tool (Section 10.4.5), which produces `agent.message`, and the orchestrator, which produces every other event in the catalog below (Section 10.4.7). The tool is registered only when at least one entry receives `agent.message`, so the agent is never offered a tool it cannot use.
+The `notifications` list configures every outbound message Sortie sends to a destination other than the issue's own tracker fields: Slack, Telegram, Discord, and webhook backends, and the built-in `tracker_comment` destination that posts comments on the tracker issue. Each entry names the event types it receives. Two producers feed the list: the agent, through the `notify_operator` tool (Section 10.4.5), which produces `agent.message`, and the orchestrator, which produces every other event in the catalog below (Section 10.4.7). The tool is registered only when at least one entry receives `agent.message`, so the agent is never offered a tool it cannot use.
 
 The value is a sequence, not a single object. Each entry is a map carrying a required `kind` discriminator, an `events` list, and that backend's own fields. A second channel is a second list entry.
 
@@ -638,6 +638,9 @@ notifications:
     bot_token: $SORTIE_TELEGRAM_BOT_TOKEN
     chat_id: -1001234567890
     events: [agent.message, session.failed]
+  - kind: discord
+    webhook_url: $SORTIE_DISCORD_WEBHOOK_URL
+    events: [agent.message, session.failed]
   - kind: webhook
     url: $SORTIE_OPS_WEBHOOK_URL
     events: [session.started, session.completed, session.stopped, session.failed]
@@ -646,7 +649,7 @@ notifications:
 Per-entry fields:
 
 - `kind` (string)
-  - Required. The registry discriminator, resolved against the notifier registry (Section 10.4.7). v1 backends are `webhook`, `slack`, and `telegram`. The reserved value `tracker_comment` selects the built-in destination and is not a registry entry.
+  - Required. The registry discriminator, resolved against the notifier registry (Section 10.4.7). v1 backends are `webhook`, `slack`, `telegram`, and `discord`. The reserved value `tracker_comment` selects the built-in destination and is not a registry entry.
 - `events` (list of strings)
   - The event types the entry receives, listed explicitly. There is no wildcard and no filter beyond the event type.
   - Optional on a registered kind: an entry that omits it receives `agent.message` only, as every entry did before the key existed, and draws a deprecation advisory that suggests `events: [agent.message]`.
@@ -655,7 +658,7 @@ Per-entry fields:
 - `max_per_session` (integer, optional)
   - The `notify_operator` call cap for the whole agent run, shared by every tool server process of the dispatch (Section 10.4.5). It is not a per-entry default: an omitted, `null`, or `0` value contributes nothing to cap selection, which then falls back to the default of `20` only when every entry that receives `agent.message` is `0` or unset. `0` never means unlimited. A negative value is rejected at config parse time. The value has no effect on an entry that does not receive `agent.message`, and an orchestrator event never counts against it.
 - backend-specific fields
-  - Passed through to the backend constructor untyped, with `$VAR` references resolved. The `webhook` backend requires `url`; the `slack` backend requires `webhook_url`; the `telegram` backend requires `bot_token` and `chat_id`, which is an integer or a string. A `tracker_comment` entry carries no key other than `kind` and `events`.
+  - Passed through to the backend constructor untyped, with `$VAR` references resolved. The `webhook` backend requires `url`; the `slack` backend requires `webhook_url`; the `telegram` backend requires `bot_token` and `chat_id`, which is an integer or a string; the `discord` backend requires `webhook_url`. A `tracker_comment` entry carries no key other than `kind` and `events`.
 
 **Event catalog.** The catalog is closed and lives in the domain model. Validation accepts exactly these names.
 

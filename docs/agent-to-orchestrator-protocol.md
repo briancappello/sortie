@@ -246,7 +246,7 @@ An absent statement is the same as a status file that holds only the token. A on
 The orchestrator publishes the statement with the `session.stopped` event, which a soft stop on any of the three recognized values produces unless the orchestrator withholds a `needs-human-review` handoff, and stores the same text with the run, where the run row of the HTTP API serves it, a withheld `needs-human-review` run included, and the dashboard shows the statement beside the run on the issue page, the session view, and History. Notifications carry it as follows:
 
 - **Tracker comment.** When a `notifications` entry of kind `tracker_comment` lists `session.stopped`, or the deprecated `tracker.comments.on_completion` setting is on, the stop comment carries the statement after Sortie's own text and a blank line: the comment that accompanies the park for `blocked`, and the completion comment for `no-change-needed` and `needs-human-review`. Sortie's own text never changes.
-- **Slack, Telegram, and webhook.** Every Slack, Telegram, or webhook entry that lists `session.stopped` receives the statement. Slack and Telegram append it after the body as written; the webhook carries it in the `agent_text` key.
+- **Slack, Telegram, Discord, and webhook.** Every Slack, Telegram, Discord, or webhook entry that lists `session.stopped` receives the statement. Slack, Telegram, and Discord append it after the body as written; the webhook carries it in the `agent_text` key.
 
 A `session.failed` event never carries a statement, including a `needs-human-review` run whose handoff evidence withheld the transition. Neither does an `agent.message` notification.
 
