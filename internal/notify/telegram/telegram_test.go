@@ -103,7 +103,7 @@ func TestNotifier_Send(t *testing.T) {
 			t.Parallel()
 
 			srv, requests := serve(t, cmp.Or(tt.status, http.StatusOK))
-			n, err := newNotifierAt(map[string]any{"bot_token": testToken, "chat_id": cmp.Or[any](tt.chatID, channel)}, srv.URL)
+			n, err := newNotifierAt(map[string]any{"bot_token": testToken, "chat_id": cmp.Or(tt.chatID, channel)}, srv.URL)
 			if err != nil {
 				t.Fatalf("newNotifierAt: %v", err)
 			}
