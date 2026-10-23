@@ -3117,6 +3117,12 @@
         "input_cost_per_token": 2e-7,
         "output_cost_per_token": 7.8e-7
     },
+    "azure_ai/MAI-Code-1.1-Flash": {
+        "litellm_provider": "azure_ai",
+        "input_cost_per_token": 2e-7,
+        "output_cost_per_token": 0.0000012,
+        "cache_read_input_token_cost": 2e-8
+    },
     "azure_ai/MAI-Cyber-1-Flash": {
         "litellm_provider": "azure_ai",
         "input_cost_per_token": 6e-7,
@@ -3854,9 +3860,9 @@
     },
     "baseten/reflection/Beam-1.0": {
         "litellm_provider": "baseten",
-        "input_cost_per_token": 0.0000013,
-        "output_cost_per_token": 0.0000043,
-        "cache_read_input_token_cost": 1.3e-7
+        "input_cost_per_token": 4e-7,
+        "output_cost_per_token": 0.0000012,
+        "cache_read_input_token_cost": 4e-8
     },
     "baseten/thinkingmachines/inkling": {
         "litellm_provider": "baseten",
@@ -5448,6 +5454,11 @@
         "input_cost_per_token": 3.51e-7,
         "output_cost_per_token": 5.55e-7
     },
+    "cloudflare/@cf/cloudflare/clairic": {
+        "litellm_provider": "cloudflare",
+        "input_cost_per_token": 1e-7,
+        "output_cost_per_token": 0
+    },
     "cloudflare/@cf/cloudflare/clef": {
         "litellm_provider": "cloudflare",
         "input_cost_per_token": 2.4e-7,
@@ -5616,6 +5627,11 @@
         "litellm_provider": "cloudflare",
         "input_cost_per_token": 0.000001923,
         "output_cost_per_token": 0.000001923
+    },
+    "cloudflare/clairic": {
+        "litellm_provider": "cloudflare",
+        "input_cost_per_token": 1e-7,
+        "output_cost_per_token": 0
     },
     "cloudflare/clef": {
         "litellm_provider": "cloudflare",
@@ -8792,6 +8808,12 @@
         "input_cost_per_token": 3e-7,
         "output_cost_per_token": 0.0000012,
         "cache_read_input_token_cost": 6e-9
+    },
+    "fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash-1017-us": {
+        "litellm_provider": "fireworks_ai",
+        "input_cost_per_token": 4.5e-7,
+        "output_cost_per_token": 0.0000018,
+        "cache_read_input_token_cost": 9e-9
     },
     "fireworks_ai/accounts/fireworks/models/devstral-small-2505": {
         "litellm_provider": "fireworks_ai",
@@ -20921,11 +20943,23 @@
         "input_cost_per_token": 3e-8,
         "output_cost_per_token": 1.3e-7
     },
+    "wandb/reflection/Beam-1.0-501B-A23B": {
+        "litellm_provider": "wandb",
+        "input_cost_per_token": 0.000001,
+        "output_cost_per_token": 0.000003,
+        "cache_read_input_token_cost": 1e-7
+    },
     "wandb/zai-org/GLM-5.2": {
         "litellm_provider": "wandb",
         "input_cost_per_token": 7.6e-7,
         "output_cost_per_token": 0.00000242,
         "cache_read_input_token_cost": 1.4e-7
+    },
+    "wandb/zai-org/GLM-5.3": {
+        "litellm_provider": "wandb",
+        "input_cost_per_token": 0.0000012,
+        "output_cost_per_token": 0.000004,
+        "cache_read_input_token_cost": 1.9e-7
     },
     "wandb/zai-org/GLM-5.3-Flash": {
         "litellm_provider": "wandb",
