@@ -1011,7 +1011,7 @@ Fields:
 
 **Target-state rule and irreversibility:** the target is never inferred from the terminal list; the operator names it explicitly, and it is applied verbatim once the merge is observed. The transition is not reversible by the orchestrator: naming an abandonment state where a completion state was meant closes finished work under the wrong label, and no validator can detect that mistake, because it is a judgement about the issue rather than a configuration shape.
 
-**Idempotency key:** the fingerprint is the merge commit identifier reported by the provider, not the pull request number, persisted in the `reaction_fingerprints` SQLite table under a kind distinct from every other reaction. A row is created on the first observed merge, retained (never deleted) once the transition succeeds, and re-armed only when a later merge reports a different commit identifier. A pull request may remain unmerged for any length of time without starting a failure clock. When the provider first reports `Merged: true` with no commit identifier, Sortie records that PR identity separately and waits thirty minutes, retrying with exponential pending backoff floored at `poll_interval_ms`. If the identifier is still absent on the first poll at or after the deadline, Sortie escalates without transitioning the issue: it emits `escalation.merge_completion` under the configured `escalation` and keeps watching the pull request, and the escalation ends when the forge reports the merge commit. Delivery is recorded only after the action that confirms it succeeds: the label under `escalation: label`, and the comment on the issue under `escalation: comment` or `none` when a `tracker_comment` subscription receives the event. A Slack or webhook send never confirms delivery and never blocks it, so it never suppresses the retry of a failed tracker write. Under `none` with no subscriber the event has no destination and delivery is recorded at once. A failure does not restart the grace period; the first poll after a restart, or a later fresh pending entry, can retry the undelivered notification once. If the tracker write succeeds but the follow-up marker write itself fails, the notification has already reached the operator even though the observation stays recorded as undelivered; the retry then delivers it a second time. `escalation: label` repeats harmlessly, because re-applying a present label is a no-op; a comment on the issue is posted a second time. If such a later entry instead observes a real identifier, it follows the normal merge-commit fingerprint path and clears the temporary observation after that latch completes. `max_retries` applies only to failed tracker transitions, not to this grace period.
+**Idempotency key:** the fingerprint is the merge commit identifier reported by the provider, not the pull request number, persisted in the `reaction_fingerprints` SQLite table under a kind distinct from every other reaction. A row is created on the first observed merge, retained (never deleted) once the transition succeeds, and re-armed only when a later merge reports a different commit identifier. A pull request may remain unmerged for any length of time without starting a failure clock. When the provider first reports `Merged: true` with no commit identifier, Sortie records that PR identity separately and waits thirty minutes, retrying with exponential pending backoff floored at `poll_interval_ms`. If the identifier is still absent on the first poll at or after the deadline, Sortie escalates without transitioning the issue: it emits `escalation.merge_completion` under the configured `escalation` and keeps watching the pull request, and the escalation ends when the forge reports the merge commit. Delivery is recorded only after the action that confirms it succeeds: the label under `escalation: label`, and the comment on the issue under `escalation: comment` or `none` when a `tracker_comment` subscription receives the event. A send to a backend destination never confirms delivery and never blocks it, so it never suppresses the retry of a failed tracker write. Under `none` with no subscriber the event has no destination and delivery is recorded at once. A failure does not restart the grace period; the first poll after a restart, or a later fresh pending entry, can retry the undelivered notification once. If the tracker write succeeds but the follow-up marker write itself fails, the notification has already reached the operator even though the observation stays recorded as undelivered; the retry then delivers it a second time. `escalation: label` repeats harmlessly, because re-applying a present label is a no-op; a comment on the issue is posted a second time. If such a later entry instead observes a real identifier, it follows the normal merge-commit fingerprint path and clears the temporary observation after that latch completes. `max_retries` applies only to failed tracker transitions, not to this grace period.
 
 **Failure matrix:**
 
@@ -1540,6 +1540,10 @@ notifications: # ordered list of destinations; optional
     webhook_url: $SORTIE_SLACK_WEBHOOK_URL # SORTIE_-prefixed reference (mandatory)
     events: [agent.message, session.failed]
     max_per_session: 20                     # optional; 0 selects the default (also 20)
+  - kind: telegram
+    bot_token: $SORTIE_TELEGRAM_BOT_TOKEN  # SORTIE_-prefixed reference (mandatory)
+    chat_id: -1001234567890                 # required; or "@channelusername", or a $VAR reference
+    events: [agent.message, session.failed]
   - kind: webhook
     url: $SORTIE_OPS_WEBHOOK_URL            # SORTIE_-prefixed reference (mandatory)
     events: [session.started, session.completed, session.stopped, session.failed]
@@ -1553,8 +1557,8 @@ The value is a sequence, not a single object. A second channel is a second list 
 
 | Field | Type | Required | Default | Description |
 | ----- | ---- | -------- | ------- | ----------- |
-| `kind` | string | Yes | _(none)_ | Destination discriminator. v1 backends are `webhook` and `slack`. The reserved value `tracker_comment` selects the built-in destination that comments on the issue. |
-| `events` | list of strings | On `tracker_comment`; otherwise optional | `[agent.message]` for `webhook` and `slack` | The event types the entry receives, written explicitly. Each name must come from the catalog below, none may repeat, and there is no wildcard. An entry of a `webhook` or `slack` kind that omits the key receives `agent.message` only, as before the key existed, and draws a deprecation warning that suggests `events: [agent.message]`. A `tracker_comment` entry must write the key; `[]` means only the comments that deprecated settings enable. |
+| `kind` | string | Yes | _(none)_ | Destination discriminator. v1 backends are `webhook`, `slack`, and `telegram`. The reserved value `tracker_comment` selects the built-in destination that comments on the issue. |
+| `events` | list of strings | On `tracker_comment`; otherwise optional | `[agent.message]` for every backend kind | The event types the entry receives, written explicitly. Each name must come from the catalog below, none may repeat, and there is no wildcard. An entry of a backend kind that omits the key receives `agent.message` only, as before the key existed, and draws a deprecation warning that suggests `events: [agent.message]`. A `tracker_comment` entry must write the key; `[]` means only the comments that deprecated settings enable. |
 | `max_per_session` | int | No | `20` | Notification cap for the whole agent run. `0` selects the default (`20`); it never means unlimited. A negative value is rejected. It counts only `agent.message` calls and has no effect on an entry that does not receive that event. |
 
 Per-backend fields depend on `kind` and are passed through to the backend untyped:
@@ -1563,7 +1567,11 @@ Per-backend fields depend on `kind` and are passed through to the backend untype
 | ------ | ----- | ----------- |
 | `webhook` | `url` | Endpoint that receives an HTTP POST of the notification as a JSON object using generic field names. |
 | `slack` | `webhook_url` | Slack incoming webhook URL that receives a Slack-shaped JSON body with a `text` field. |
+| `telegram` | `bot_token` | The bot's token, given as a `SORTIE_`-prefixed reference. Required. Sortie never logs it. |
+| `telegram` | `chat_id` | The target chat. A numeric id written as a number or as a string, or a public channel's or supergroup's `@username`. Required. |
 | `tracker_comment` | _(none)_ | Takes only `kind` and `events`. Any other key is rejected. |
+
+A `telegram` entry sends each message as plain text through the Bot API `sendMessage` method. The text has the same content as a Slack message and is cut to Telegram's 4096-character limit, never rejected. A failed send is logged with a category, and nothing is retried. For this kind, `unauthorized (HTTP 403)` means the bot is not a member or an admin of the chat, not that the token is bad; a bad token is `unauthorized (HTTP 401)`. `unexpected response (HTTP 400)` is usually a wrong `chat_id` or a group that was upgraded to a supergroup, which changes its id. `rate limited (HTTP 429)` is a burst past about 20 messages per minute to one group.
 
 #### Event catalog
 
@@ -1586,7 +1594,7 @@ A run cancelled by Sortie produces no session event. Sortie never counts its own
 
 #### The `tracker_comment` destination
 
-A `tracker_comment` entry posts each event it receives as a comment on the event's issue, using the same text Sortie has always posted for that moment. Sortie's own text never carries error text, the agent's session identifier, or the agent kind, because a tracker issue can be read by people outside your deployment. Slack and webhook destinations receive the full notification. The one addition is the agent's reason on a stop, which follows Sortie's text in the same comment ([The agent's reason on a stop](#the-agents-reason-on-a-stop)).
+A `tracker_comment` entry posts each event it receives as a comment on the event's issue, using the same text Sortie has always posted for that moment. Sortie's own text never carries error text, the agent's session identifier, or the agent kind, because a tracker issue can be read by people outside your deployment. The `webhook` destination receives the full notification. The one addition is the agent's reason on a stop, which follows Sortie's text in the same comment ([The agent's reason on a stop](#the-agents-reason-on-a-stop)).
 
 - At most one entry has this kind, and it requires a configured `tracker.kind`.
 - It requires `events`, and `agent.message` is rejected there: messages from the agent never reach the issue.
@@ -1604,8 +1612,9 @@ Before a reason leaves Sortie, Sortie removes control characters, replaces bytes
 
 | Destination | What it receives |
 | ----------- | ---------------- |
-| `tracker_comment` | Sortie's usual comment, then the reason in one literal block, shown by the tracker as plain text. A mention, link, markup, or slash command inside it takes no effect. |
-| `slack` | Sortie's usual text, a blank line, and the reason, with `&`, `<`, and `>` written as `&amp;`, `&lt;`, and `&gt;` so it never becomes a mention or a labeled link. Slack still makes a bare web address in it clickable and applies its own text formatting. |
+| `tracker_comment` | Sortie's usual comment, a blank line, and the reason. |
+| `slack` | Sortie's usual text, a blank line, and the reason. |
+| `telegram` | The same text as Slack, cut to Telegram's 4096-character limit. |
 | `webhook` | The reason in the `agent_text` key, apart from `body`. |
 
 A status with no reason, or a reason that is empty after this cleanup, changes nothing: the comment and the notifications are exactly what Sortie sent before the reason existed.
@@ -1664,11 +1673,11 @@ The old form keeps working. Each deprecated form the configuration relies on dra
 | `reactions.<kind>.escalation: comment` on an active reaction | Set `escalation: none` and list `escalation.<kind>` in a `tracker_comment` entry. |
 | The auto-merge success comment, with the auto-merge reaction active, a tracker configured, and no `tracker_comment` entry | Add an entry that lists `auto_merge.merged`. |
 | The budget-hold comment, with `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd` above `0`, a tracker configured, and no `tracker_comment` entry | Add an entry that lists `budget.held`. |
-| A `webhook` or `slack` entry without `events` | Add `events: [agent.message]`. |
+| An entry of a backend kind without `events` | Add `events: [agent.message]`. |
 
 #### Delivery
 
-Sortie sends an orchestrator event to every destination that lists it, all at once. A failure to deliver to one destination is logged and never stops the others, and nothing is retried. A slow Slack or webhook endpoint never delays an agent's start and never delays the comment on the issue. A reload whose destinations for orchestrator events cannot be built, such as an unknown `kind` or a required secret that resolved to an empty string, is rejected, and the previous configuration stays in force ([Section 7.2](#72-per-field-reload-behavior)).
+Sortie sends an orchestrator event to every destination that lists it, all at once. A failure to deliver to one destination is logged and never stops the others, and nothing is retried. A slow notification endpoint never delays an agent's start and never delays the comment on the issue. A reload whose destinations for orchestrator events cannot be built, such as an unknown `kind` or a required secret that resolved to an empty string, is rejected, and the previous configuration stays in force ([Section 7.2](#72-per-field-reload-behavior)).
 
 The `notifications` `webhook` backend is an outbound POST to an operator-supplied endpoint. It is unrelated to inbound tracker webhooks ([architecture §20](architecture/25-webhook-support.md)), which trigger reconciliation. The two share a name but not a direction.
 
@@ -5766,7 +5775,7 @@ These errors are raised during typed config construction from the parsed front m
 | `config: notifications[N].kind: only one notifications entry may have kind tracker_comment` | A second `tracker_comment` entry. | Merge the two entries into one. |
 | `config: notifications[N].kind: kind tracker_comment requires a configured tracker` | A `tracker_comment` entry while `tracker.kind` is empty. | Set `tracker.kind`, or remove the entry. |
 | `config: notifications[N].<key>: kind tracker_comment takes only kind and events` | A `tracker_comment` entry carries a key other than `kind` and `events`. | Remove the key. |
-| `config: notifications[N].kind: <reason>` | The entry receives an event Sortie produces and its `kind` is not a registered backend. | Use `webhook`, `slack`, or `tracker_comment`. |
+| `config: notifications[N].kind: <reason>` | The entry receives an event Sortie produces and its `kind` is not a registered backend. | Use `webhook`, `slack`, `telegram`, or `tracker_comment`. |
 | `config: notifications[N]: <reason>` | The entry receives an event Sortie produces and its backend cannot be built, such as a required secret that resolved to an empty string. | Fix the field the reason names. |
 | `config: reactions.<kind>.escalation: must be "label", "comment", or "none", got "<v>"` | `escalation` of a reaction is any other value. | Use `label`, `none`, or the deprecated `comment`. |
 
@@ -5896,8 +5905,8 @@ A flat reference of every configuration field, for quick lookup. The "Env Overri
 | `self_review.reviewer`                  | string           | `"same"`                     | —                                        | Only `"same"` in v1                                                                    |
 | `dispatch.partials`                     | `[string]`       | `[]` (empty)                 | —                                        | Paths or glob patterns relative to the `WORKFLOW.md` directory; files whose define blocks every prompt template can call; read again on every load |
 | `notifications`                         | `[map]`          | _(absent)_                   | —                                        | Destination list; `notify_operator` is registered only when an entry receives `agent.message` |
-| `notifications[].kind`                  | string           | _(required)_                 | —                                        | Destination discriminator; v1: `webhook`, `slack`, and the built-in `tracker_comment`  |
-| `notifications[].events`                | `[string]`       | `[agent.message]` for `webhook` and `slack`; _(required)_ for `tracker_comment` | — | Event types the entry receives; names from the closed catalog, none repeated; omitting it on `webhook` or `slack` is deprecated; `agent.message` is rejected on `tracker_comment` |
+| `notifications[].kind`                  | string           | _(required)_                 | —                                        | Destination discriminator; v1: `webhook`, `slack`, `telegram`, and the built-in `tracker_comment`  |
+| `notifications[].events`                | `[string]`       | `[agent.message]` for every backend kind; _(required)_ for `tracker_comment` | — | Event types the entry receives; names from the closed catalog, none repeated; omitting it on a backend kind is deprecated; `agent.message` is rejected on `tracker_comment` |
 | `notifications[].max_per_session`       | integer          | `20`                         | —                                        | `notify_operator` cap for the whole agent run, drawn from entries that receive `agent.message`; `0` selects the default; never unlimited; non-negative |
 | **Extensions**                          |                  |                              |                                          |                                                                                        |
 | `server.port`                           | integer          | `7678`                       | —                                        | CLI `--port` overrides; `0` disables server                                    |

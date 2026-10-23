@@ -622,7 +622,7 @@ dispatch:
 
 #### 5.3.10 `notifications` (list, optional)
 
-The `notifications` list configures every outbound message Sortie sends to a destination other than the issue's own tracker fields: Slack and webhook backends, and the built-in `tracker_comment` destination that posts comments on the tracker issue. Each entry names the event types it receives. Two producers feed the list: the agent, through the `notify_operator` tool (Section 10.4.5), which produces `agent.message`, and the orchestrator, which produces every other event in the catalog below (Section 10.4.7). The tool is registered only when at least one entry receives `agent.message`, so the agent is never offered a tool it cannot use.
+The `notifications` list configures every outbound message Sortie sends to a destination other than the issue's own tracker fields: Slack, Telegram, and webhook backends, and the built-in `tracker_comment` destination that posts comments on the tracker issue. Each entry names the event types it receives. Two producers feed the list: the agent, through the `notify_operator` tool (Section 10.4.5), which produces `agent.message`, and the orchestrator, which produces every other event in the catalog below (Section 10.4.7). The tool is registered only when at least one entry receives `agent.message`, so the agent is never offered a tool it cannot use.
 
 The value is a sequence, not a single object. Each entry is a map carrying a required `kind` discriminator, an `events` list, and that backend's own fields. A second channel is a second list entry.
 
@@ -634,6 +634,10 @@ notifications:
     webhook_url: $SORTIE_SLACK_WEBHOOK_URL
     events: [agent.message, session.stopped, session.failed]
     max_per_session: 20
+  - kind: telegram
+    bot_token: $SORTIE_TELEGRAM_BOT_TOKEN
+    chat_id: -1001234567890
+    events: [agent.message, session.failed]
   - kind: webhook
     url: $SORTIE_OPS_WEBHOOK_URL
     events: [session.started, session.completed, session.stopped, session.failed]
@@ -642,7 +646,7 @@ notifications:
 Per-entry fields:
 
 - `kind` (string)
-  - Required. The registry discriminator, resolved against the notifier registry (Section 10.4.7). v1 backends are `webhook` and `slack`. The reserved value `tracker_comment` selects the built-in destination and is not a registry entry.
+  - Required. The registry discriminator, resolved against the notifier registry (Section 10.4.7). v1 backends are `webhook`, `slack`, and `telegram`. The reserved value `tracker_comment` selects the built-in destination and is not a registry entry.
 - `events` (list of strings)
   - The event types the entry receives, listed explicitly. There is no wildcard and no filter beyond the event type.
   - Optional on a registered kind: an entry that omits it receives `agent.message` only, as every entry did before the key existed, and draws a deprecation advisory that suggests `events: [agent.message]`.
@@ -651,7 +655,7 @@ Per-entry fields:
 - `max_per_session` (integer, optional)
   - The `notify_operator` call cap for the whole agent run, shared by every tool server process of the dispatch (Section 10.4.5). It is not a per-entry default: an omitted, `null`, or `0` value contributes nothing to cap selection, which then falls back to the default of `20` only when every entry that receives `agent.message` is `0` or unset. `0` never means unlimited. A negative value is rejected at config parse time. The value has no effect on an entry that does not receive `agent.message`, and an orchestrator event never counts against it.
 - backend-specific fields
-  - Passed through to the backend constructor untyped, with `$VAR` references resolved. The `webhook` backend requires `url`; the `slack` backend requires `webhook_url`. A `tracker_comment` entry carries no key other than `kind` and `events`.
+  - Passed through to the backend constructor untyped, with `$VAR` references resolved. The `webhook` backend requires `url`; the `slack` backend requires `webhook_url`; the `telegram` backend requires `bot_token` and `chat_id`, which is an integer or a string. A `tracker_comment` entry carries no key other than `kind` and `events`.
 
 **Event catalog.** The catalog is closed and lives in the domain model. Validation accepts exactly these names.
 
@@ -668,7 +672,7 @@ Per-entry fields:
 | `stage.not_advanced` | A stage hop was due and not made, because the next stage's label could not be added or the hop ceiling was reached; the event carries the reason |
 | `agent.message` | The agent called `notify_operator` |
 
-**The `tracker_comment` destination.** The destination posts an event's body as a comment on the event's issue through the tracker adapter, and renders nothing else of the event except the agent's reason on a `session.stopped` event, which it posts after the body as one literal block (Section 10.4.7, Section 21.1). It is available only when `tracker.kind` is configured. At most one entry has this kind. The destination receives the union of three sets: the `events` of its explicit entry, the subscriptions synthesized from `tracker.comments` and from `escalation: comment` (Section 5.3.1, Section 5.3.8), and, while no explicit entry exists, implicit subscriptions to `auto_merge.merged` and `budget.held`. The union is monotone: writing the new form never withdraws a comment an old key enabled, and one event is delivered at most once to a destination however many subscriptions select it. An operator who keeps `tracker.comments.on_completion: true` and also lists `session.completed` on a `tracker_comment` entry gets one comment per completion.
+**The `tracker_comment` destination.** The destination posts an event's body as a comment on the event's issue through the tracker adapter, and renders nothing else of the event except the agent's reason on a `session.stopped` event, which it posts after the body, separated by a blank line (Section 10.4.7, Section 21.1). It is available only when `tracker.kind` is configured. At most one entry has this kind. The destination receives the union of three sets: the `events` of its explicit entry, the subscriptions synthesized from `tracker.comments` and from `escalation: comment` (Section 5.3.1, Section 5.3.8), and, while no explicit entry exists, implicit subscriptions to `auto_merge.merged` and `budget.held`. The union is monotone: writing the new form never withdraws a comment an old key enabled, and one event is delivered at most once to a destination however many subscriptions select it. An operator who keeps `tracker.comments.on_completion: true` and also lists `session.completed` on a `tracker_comment` entry gets one comment per completion.
 
 **An explicit entry is authoritative for the two formerly ungated comments.** The auto-merge success comment and the budget-hold comment were posted without any configuration gate. They keep posting through implicit subscriptions only while no `tracker_comment` entry exists. An entry is the operator's own statement of what the issue receives, so it receives `auto_merge.merged` and `budget.held` only when it lists them. With no tracker configured no implicit destination exists.
 
@@ -714,7 +718,7 @@ notifications:
     events: [agent.message]
 ```
 
-**Delivery.** The orchestrator delivers its events to Slack and webhook destinations from the main process. A destination for orchestrator events is an entry of a registered kind whose `events` hold at least one orchestrator event; the main process builds it with the backend constructor the sidecar uses. A failed delivery to one destination is logged and does not prevent delivery to the others, and nothing is retried (Section 10.4.7). The orchestrator never claims a notification slot, so its events cannot interact with the `notify_operator` cap.
+**Delivery.** The orchestrator delivers its events to backend destinations from the main process. A destination for orchestrator events is an entry of a registered kind whose `events` hold at least one orchestrator event; the main process builds it with the backend constructor the sidecar uses. A failed delivery to one destination is logged and does not prevent delivery to the others, and nothing is retried (Section 10.4.7). The orchestrator never claims a notification slot, so its events cannot interact with the `notify_operator` cap.
 
 Validation and resolution:
 
