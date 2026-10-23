@@ -1,6 +1,8 @@
 // Package render turns a [domain.Notification] into the text every
-// destination sends. [Notification] is the one entry point: no destination
-// builds a title, a body, or its own rendering of the agent's statement.
+// destination sends. [Notification] is the one place text is built: no
+// destination builds a title, a body, or its own rendering of the agent's
+// statement. A kind with a message limit applies [TruncateUTF16] to the
+// rendered text.
 //
 // The package registers no notifier kind and imports no notifier package.
 package render

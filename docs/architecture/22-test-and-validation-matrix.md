@@ -393,7 +393,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - A 1024-byte cut inside a registered value or a multi-byte character leaves agent text that holds no prefix of the value, is valid UTF-8, and ends in an ellipsis
 - Only `session.stopped` carries agent text: `session.failed`, including a `needs-human-review` run whose handoff the evidence verdict withheld, and `agent.message` carry none
 - A tracker comment with agent text is the body, a blank line, and the masked statement, as written; a comment without agent text is unchanged
-- Slack and Telegram receive the agent text after the usual text as written, and the webhook payload carries it under `agent_text` and nowhere else; an `agent.message` payload and an `agent.message` body are byte-identical to those without the field
+- Slack, Telegram, and Discord receive the agent text after the usual text as written, and the webhook payload carries it under `agent_text` and nowhere else; an `agent.message` payload and an `agent.message` body are byte-identical to those without the field
 - The injected status instructions ask for a reason on the lines after the status and for a whole file under 1024 bytes
 - `tracker.no_change_state` set with `tracker.handoff_state` unset is rejected offline, and a value that is neither `handoff_state` nor a member of the `terminal_states` written in front matter is rejected offline, both with no tracker call
 - On an SCM platform that exposes no bot-account marker, a `CHANGES_REQUESTED` review whose author matches the operator-configured `bot_usernames` allowlist does not trigger the human `review_comments` reaction

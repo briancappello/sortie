@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Sortie can now post its notifications to a Telegram chat or channel: add a `telegram` entry to `notifications` with the bot's token in `bot_token` (for example `$SORTIE_TELEGRAM_BOT_TOKEN`) and the chat in `chat_id`, either its numeric id or a public channel's `@username`. Each message carries the same text as a Slack message, and a message longer than Telegram's 4096-character limit is cut to fit. ([#1454](https://github.com/sortie-ai/sortie/issues/1454))
 
+- Sortie can now post its notifications to a Discord channel: add a `discord` entry to `notifications` with the channel's webhook URL in `webhook_url` (for example `$SORTIE_DISCORD_WEBHOOK_URL`). Each message carries the same text as a Slack message, a message longer than Discord's 2000-character limit is cut to fit, and no message pings a user, a role, or `@everyone`. ([#1455](https://github.com/sortie-ai/sortie/issues/1455))
+
 ### Changed
 
 - The dashboard shows an issue's status as one word with the same mark on every screen.
