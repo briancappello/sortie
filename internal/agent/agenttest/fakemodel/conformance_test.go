@@ -731,11 +731,6 @@ func TestConformancePropertyToolPath(t *testing.T) {
 			want:   []string{"reports a tool error"},
 		},
 		{
-			name:   "tool event has no tool name",
-			mutate: func(run *Run) { run.Events[conformanceEventToolAt].ToolName = "" },
-			want:   []string{"tool name"},
-		},
-		{
 			name:   "tool event has the unknown tool name",
 			mutate: func(run *Run) { run.Events[conformanceEventToolAt].ToolName = "unknown" },
 			want:   []string{"tool name"},

@@ -1122,8 +1122,8 @@ func toolPathViolations(run Run, wantOutput string) []string {
 		if event.ToolError {
 			v.add("event %d reports a tool error for %q", i, event.ToolName)
 		}
-		if event.ToolName == "" || event.ToolName == "unknown" {
-			v.add("event %d has tool name %q, want the tool's own name", i, event.ToolName)
+		if event.ToolName == "unknown" {
+			v.add("event %d has tool name %q, want the runtime's name for the tool or none", i, event.ToolName)
 		}
 		if event.ToolDurationMS < 0 {
 			v.add("event %d has tool duration %d ms, want at least 0", i, event.ToolDurationMS)
@@ -1173,8 +1173,8 @@ func toolServerViolations(run Run, wantOutput string) []string {
 		if event.ToolError {
 			v.add("event %d reports a tool error for %q", i, event.ToolName)
 		}
-		if event.ToolName == "" || event.ToolName == "unknown" {
-			v.add("event %d has tool name %q, want the tool's own name", i, event.ToolName)
+		if event.ToolName == "unknown" {
+			v.add("event %d has tool name %q, want the runtime's name for the tool or none", i, event.ToolName)
 		}
 	}
 	return v.items

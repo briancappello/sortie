@@ -3,9 +3,12 @@ package gitlab
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +23,37 @@ func skipUnlessIntegration(t *testing.T) {
 	if os.Getenv("SORTIE_GITLAB_TEST") != "1" {
 		t.Skip("skipping GitLab integration test: set SORTIE_GITLAB_TEST=1 to enable")
 	}
+}
+
+// gitlabComRequestInterval keeps a run against GitLab.com under the
+// Free-plan per-user burst limit of 100 requests a minute, which the
+// sequential suite otherwise exceeds and then fails on HTTP 429.
+const gitlabComRequestInterval = 700 * time.Millisecond
+
+func TestMain(m *testing.M) {
+	endpoint, err := url.Parse(os.Getenv("SORTIE_GITLAB_ENDPOINT"))
+	if os.Getenv("SORTIE_GITLAB_TEST") == "1" && err == nil && endpoint.Hostname() == "gitlab.com" {
+		// The limit counts every request of the user, so the merge
+		// fixture's raw client must share the adapter's pace.
+		http.DefaultTransport = &pacedTransport{base: http.DefaultTransport, interval: gitlabComRequestInterval}
+	}
+	os.Exit(m.Run())
+}
+
+type pacedTransport struct {
+	base     http.RoundTripper
+	interval time.Duration
+
+	mu   sync.Mutex
+	last time.Time
+}
+
+func (p *pacedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	p.mu.Lock()
+	time.Sleep(time.Until(p.last.Add(p.interval)))
+	p.last = time.Now()
+	p.mu.Unlock()
+	return p.base.RoundTrip(req)
 }
 
 // requireEnv reads an environment variable and fails the test when empty.
