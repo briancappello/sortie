@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-10-23
+
 ### Added
 
 - When a pull request has passed its checks and waits only for the approval your branch rules require, the dashboard now says it is waiting on approval, and the issue stays on the Pipeline until someone approves, merges, or closes it. The state API marks it with `awaiting_approval`. ([#1444](https://github.com/sortie-ai/sortie/issues/1444))
@@ -1425,7 +1427,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CI pipeline with `golangci-lint`, `gofmt` enforcement, and test execution via GitHub Actions.
 - Architecture Decision Records (ADR-0001 through ADR-0005).
 
-[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.29.0...HEAD
+[Unreleased]: https://github.com/sortie-ai/sortie/compare/v1.30.0...HEAD
+[1.30.0]: https://github.com/sortie-ai/sortie/compare/v1.29.0...v1.30.0
 [1.29.0]: https://github.com/sortie-ai/sortie/compare/v1.28.1...v1.29.0
 [1.28.1]: https://github.com/sortie-ai/sortie/compare/v1.28.0...v1.28.1
 [1.28.0]: https://github.com/sortie-ai/sortie/compare/v1.27.0...v1.28.0
