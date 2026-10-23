@@ -370,7 +370,7 @@ The family has the following parts:
 
 The backend packages obey the adapter-family boundary rules: no cross-adapter imports, no importing the orchestrator, normalization to the domain type at the boundary, and generic `notifier_*` vocabulary in the core, never `slack_*`.
 
-**Event catalog.** The orchestrator produces each event at the point where it formerly wrote the matching tracker comment, and the event body, as the renderer builds it from the event's facts, is exactly the text that comment carried. The stage events had no comment: the orchestrator produces them at the hop decision, with a body of their own that carries no error text, session identifier, or agent kind, so a `tracker_comment` entry may post it.
+**Event catalog.** The orchestrator produces each event at the point where it formerly wrote the matching tracker comment, and the event body, as the renderer builds it from the event's facts, is exactly the text that comment carried; a `session.stopped` event that carries the agent's statement is posted as that body followed by the statement. The stage events had no comment: the orchestrator produces them at the hop decision, with a body of their own that carries no error text, session identifier, or agent kind, so a `tracker_comment` entry may post it.
 
 | Event type | Produced when | Severity |
 |---|---|---|
