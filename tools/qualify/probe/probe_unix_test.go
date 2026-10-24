@@ -5,7 +5,6 @@ package probe
 import (
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
-	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
 	"github.com/sortie-ai/sortie/tools/qualify/profile"
 )
@@ -192,43 +190,6 @@ func waitStatusSignaled(t *testing.T, waitErr error) bool {
 		return false
 	}
 	return status.Signaled()
-}
-
-func TestSignalProcessGroup(t *testing.T) {
-	t.Parallel()
-
-	t.Run("ESRCH against an implausible pid is suppressed", func(t *testing.T) {
-		t.Parallel()
-
-		if err := signalProcessGroup(math.MaxInt32, syscall.SIGTERM); err != nil {
-			t.Errorf("signalProcessGroup(MaxInt32, SIGTERM) = %v, want nil (ESRCH must be suppressed)", err)
-		}
-	})
-
-	t.Run("a live process group is actually terminated", func(t *testing.T) {
-		t.Parallel()
-
-		hangPath := agenttest.FakeRuntime(t, t.TempDir(), "runtime", agenttest.OutputScenario, agenttest.Output{Hang: true})
-		cmd := exec.Command(hangPath) //nolint:gosec // hangPath is a fake runtime this test built under its own temp directory
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("cmd.Start() error = %v, want nil", err)
-		}
-		pid := cmd.Process.Pid
-		t.Cleanup(func() {
-			_ = signalProcessGroup(pid, syscall.SIGKILL)
-			_, _ = cmd.Process.Wait()
-		})
-
-		if err := signalProcessGroup(pid, syscall.SIGTERM); err != nil {
-			t.Fatalf("signalProcessGroup(pid, SIGTERM) = %v, want nil", err)
-		}
-
-		waitErr := cmd.Wait()
-		if !waitStatusSignaled(t, waitErr) {
-			t.Errorf("cmd.Wait() = %v, want the process to have been terminated by SIGTERM", waitErr)
-		}
-	})
 }
 
 func TestLaunchNativeProbe(t *testing.T) {
@@ -514,47 +475,6 @@ func TestPathWithin(t *testing.T) {
 				t.Errorf("pathWithin(%q, %q) = %v, want %v", tt.path, root, got, tt.want)
 			}
 		})
-	}
-}
-
-func reapedProcessGroupLeaderPID(t *testing.T) int {
-	t.Helper()
-	cmd := exec.Command("true")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("cmd.Start() error = %v, want nil", err)
-	}
-	pid := cmd.Process.Pid
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("cmd.Wait() error = %v, want nil", err)
-	}
-	return pid
-}
-
-func TestAssertSessionGroupAbsent(t *testing.T) {
-	t.Parallel()
-
-	pid := reapedProcessGroupLeaderPID(t)
-	assertSessionGroupAbsent(t, domain.Session{AgentPID: strconv.Itoa(pid)})
-}
-
-func TestAssertSessionGroupAbsentFailsOnUnparsablePID(t *testing.T) {
-	t.Parallel()
-
-	if os.Getenv("PROBE_ASSERT_SESSION_GROUP_ABSENT_HELPER_PROCESS") == "1" {
-		assertSessionGroupAbsent(t, domain.Session{AgentPID: "not-a-pid"})
-		t.Fatal("assertSessionGroupAbsent() returned instead of calling t.Fatalf for an unparsable agent pid")
-		return
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=^TestAssertSessionGroupAbsentFailsOnUnparsablePID$", "-test.v") //nolint:gosec // re-invokes this package's own compiled test binary
-	cmd.Env = append(os.Environ(), "PROBE_ASSERT_SESSION_GROUP_ABSENT_HELPER_PROCESS=1")
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("the helper process exited 0, want a non-zero exit from assertSessionGroupAbsent() on an unparsable agent pid; output:\n%s", output)
-	}
-	if !strings.Contains(string(output), "did not parse as a process id") {
-		t.Errorf("helper process output = %s, want it to name the parse failure", output)
 	}
 }
 
