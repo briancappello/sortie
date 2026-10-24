@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -269,8 +270,12 @@ func TestLaunchNativeProbe(t *testing.T) {
 			t.Fatalf("parse descendant pid %q: %v", raw, err)
 		}
 
-		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-			t.Errorf("syscall.Kill(%d, 0) = %v, want ESRCH: launchNativeProbe must have killed the whole process group its leader forked into, not just the leader itself", pid, err)
+		snapshot, err := psSnapshot()
+		if err != nil {
+			t.Fatalf("psSnapshot() = %v, want nil", err)
+		}
+		if slices.ContainsFunc(snapshot, func(m processMember) bool { return m.pid == pid }) {
+			t.Errorf("descendant %d is still running: launchNativeProbe must have killed the whole process group its leader forked into, not just the leader itself", pid)
 		}
 	})
 }
