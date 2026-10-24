@@ -332,6 +332,9 @@ func observeProcessCleanup(fixture *sharedFixture, owned *ownedDescendants) evid
 		}
 		survivors := owned.observe(snapshot, held)
 		if len(survivors) == 0 {
+			if failed := releasedWithCleanupError(fixture.tracker.all()); failed > 0 {
+				return evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: fmt.Sprintf("%d launch(es) were released with a cleanup error", failed)}
+			}
 			return evidence.Observation{Grade: evidence.GradeUsable, Outcome: evidence.OutcomePass, Detail: fmt.Sprintf("checked_groups=%d stopped_sessions=%d", checked, stopped)}
 		}
 		if time.Now().After(deadline) {
@@ -366,4 +369,17 @@ func drainOwnedProcesses(owned *ownedDescendants) {
 		}
 		time.Sleep(cleanupPollInterval)
 	}
+}
+
+// releasedWithCleanupError counts the records whose reap reported a
+// cleanup error. A released record is out of every process-table read,
+// so a member that outlived its reap shows up only here.
+func releasedWithCleanupError(groups []*procutil.Group) int {
+	failed := 0
+	for _, g := range groups {
+		if released, cleanupErr := g.Released(); released && cleanupErr != nil {
+			failed++
+		}
+	}
+	return failed
 }
