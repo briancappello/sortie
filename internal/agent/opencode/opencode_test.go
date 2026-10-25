@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
@@ -23,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
@@ -571,8 +571,7 @@ fi
 touch '`+counterPath+`'
 cat '`+runPath+`'`)
 
-	outerCtx, outerCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer outerCancel()
+	outerCtx := waittest.Context(t)
 
 	a, _ := NewOpenCodeAdapter()
 	session, err := a.StartSession(outerCtx, domain.StartSessionParams{
@@ -1368,8 +1367,7 @@ cat '`+stdoutPath+`'`)
 func TestRunTurn_TurnCancelledOnContextCancel(t *testing.T) {
 	t.Parallel()
 
-	outerCtx, outerCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer outerCancel()
+	outerCtx := waittest.Context(t)
 
 	tmpDir := t.TempDir()
 	script := writeOpenCodeScript(t, tmpDir, `case "$1 $2" in
@@ -1746,8 +1744,7 @@ esac
 printf '{"type":"step_start","timestamp":1000,"sessionID":"ses_abc123","part":{"id":"p1","messageID":"m1","sessionID":"ses_abc123","snapshot":"","type":"step-start"}}\n'
 sleep 1000`)
 
-	outerCtx, outerCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer outerCancel()
+	outerCtx := waittest.Context(t)
 
 	a, _ := NewOpenCodeAdapter()
 	session, err := a.StartSession(outerCtx, domain.StartSessionParams{

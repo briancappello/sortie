@@ -3,14 +3,15 @@
 package probe
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/tools/qualify/profile"
 )
 
@@ -57,16 +58,15 @@ func TestProbeScriptsCarryNoNetworkCommand(t *testing.T) {
 
 // awaitProbeStarted attests only to a file the measured runtime can write
 // itself; no induction binds a signal to it.
-func awaitProbeStarted(workspace string, deadline time.Time) bool {
-	for {
-		if probeStarted(workspace) {
-			return true
+func awaitProbeStarted(t *testing.T, workspace string) {
+	t.Helper()
+
+	waittest.Until(t, func() error {
+		if !probeStarted(workspace) {
+			return fmt.Errorf("the probe in %s never created its started marker", workspace)
 		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return nil
+	})
 }
 
 func TestFailingProbeScriptTouchesMarkerAndExitsNonZero(t *testing.T) {
@@ -110,10 +110,7 @@ func TestCancellationProbeScriptExitsGracefullyOnSIGINT(t *testing.T) {
 	cmd.Dir = dir
 	capture := startHeldLaunch(t, cmd)
 
-	deadline := time.Now().Add(30 * time.Second)
-	if !awaitProbeStarted(dir, deadline) {
-		t.Fatal("cancellation-probe script never created its own started marker")
-	}
+	awaitProbeStarted(t, dir)
 
 	if err := capture.Group().Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("Signal(SIGINT) error = %v, want nil", err)
@@ -133,10 +130,7 @@ func TestTransportProbeScriptRequiresForcefulTermination(t *testing.T) {
 	cmd.Dir = dir
 	capture := startHeldLaunch(t, cmd)
 
-	deadline := time.Now().Add(30 * time.Second)
-	if !awaitProbeStarted(dir, deadline) {
-		t.Fatal("transport-probe script never created its own started marker")
-	}
+	awaitProbeStarted(t, dir)
 
 	if err := capture.Group().Signal(syscall.SIGKILL); err != nil {
 		t.Fatalf("Signal(SIGKILL) error = %v, want nil", err)

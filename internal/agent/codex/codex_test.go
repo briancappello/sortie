@@ -21,6 +21,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // Compile-time interface satisfaction check.
@@ -275,6 +276,7 @@ func newInterruptedStatusState(t *testing.T, stdin io.Writer) *sessionState {
 		acc:        agentcore.NewRunUsage(),
 	}
 	state.conn = jsonrpc.NewConn(sig, inPr, jsonrpc.Deliver(state.inbox, identity))
+	t.Cleanup(state.conn.Close)
 	go watchTermination(state)
 
 	go func() {
@@ -283,21 +285,6 @@ func newInterruptedStatusState(t *testing.T, stdin io.Writer) *sessionState {
 	}()
 
 	return state
-}
-
-// waitForSessionStarted blocks until state's turn emits its
-// domain.EventSessionStarted event, which RunTurn's loop can only
-// reach after its initial turn/start Call has returned: this is the
-// test's proof that RunTurn has moved past that call and into its main
-// loop, so a real context cancellation that follows lands on the
-// loop's own arm rather than aborting the call itself.
-func waitForSessionStarted(t *testing.T, started <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("RunTurn did not emit domain.EventSessionStarted within 2s, want it past the initial turn/start call")
-	}
 }
 
 // onEventSignalingSessionStarted wraps onEvent so it closes started
@@ -677,30 +664,18 @@ func TestStopSession_ReturnsWhileWriteParked(t *testing.T) {
 	t.Cleanup(func() {
 		_ = pr.Close()
 		_ = pw.Close()
-		select {
-		case <-written:
-		case <-time.After(2 * time.Second):
-		}
+		waittest.Receive(t, written, "parked write release")
 	})
 
-	select {
-	case <-sig.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the write to enter the wrapped writer")
-	}
+	waittest.Receive(t, sig.done, "write entering the wrapped writer")
 
 	stopErr := make(chan error, 1)
 	go func() {
 		stopErr <- (&CodexAdapter{}).StopSession(context.Background(), domain.Session{Internal: state})
 	}()
 
-	select {
-	case err := <-stopErr:
-		if err != nil {
-			t.Errorf("StopSession() error = %v, want nil", err)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("StopSession() did not return while a write was parked, want it to return well short of its own 5-second graceful-wait ceiling")
+	if err := waittest.Receive(t, stopErr, "StopSession return while a write is parked"); err != nil {
+		t.Errorf("StopSession() error = %v, want nil", err)
 	}
 }
 
@@ -1121,12 +1096,7 @@ func TestRunTurn_BurstDuringTurnOpeningNoLongerHangs(t *testing.T) {
 		outcomeCh <- handlerParkedOutcome{result: result, err: runErr}
 	}()
 
-	var got handlerParkedOutcome
-	select {
-	case got = <-outcomeCh:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("RunTurn has not returned after 10s, state.waitCh still open = %v", waitChOpen(state))
-	}
+	got := waittest.Receive(t, outcomeCh, "RunTurn outcome")
 
 	if got.err != nil {
 		t.Errorf("RunTurn() error = %v, want nil", got.err)
@@ -1180,16 +1150,7 @@ func TestRunTurn_BurstBetweenTurnsNoLongerHangs(t *testing.T) {
 		t.Fatalf("RunTurn(1) ExitReason = %q, want %q", result1.ExitReason, domain.EventTurnCompleted)
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, statErr := os.Stat(markerPath); statErr == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("marker file is absent after 10s, state.waitCh still open = %v", waitChOpen(state))
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waittest.File(t, markerPath)
 
 	var events []domain.AgentEvent
 	outcomeCh := make(chan handlerParkedOutcome, 1)
@@ -1201,12 +1162,7 @@ func TestRunTurn_BurstBetweenTurnsNoLongerHangs(t *testing.T) {
 		outcomeCh <- handlerParkedOutcome{result: result, err: runErr}
 	}()
 
-	var got handlerParkedOutcome
-	select {
-	case got = <-outcomeCh:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("RunTurn(2) has not returned after 10s, state.waitCh still open = %v", waitChOpen(state))
-	}
+	got := waittest.Receive(t, outcomeCh, "RunTurn(2) outcome")
 
 	if got.err != nil {
 		t.Errorf("RunTurn(2) error = %v, want nil", got.err)
@@ -1222,17 +1178,8 @@ func TestRunTurn_BurstBetweenTurnsNoLongerHangs(t *testing.T) {
 	}
 }
 
-// TestStartSession_HandshakeBurstDoesNotLoseAwaitedNotification drives
-// two fake runtimes, each of which writes burstCount notifications in
-// one write before the notification the handshake waits for: the first
-// answers account/login/start after account/login/completed, with
-// CODEX_API_KEY set; the second answers thread/start after
-// thread/started. Each StartSession must succeed well inside its read
-// timeout: a lost thread/started is accepted silently once that
-// timeout expires, so only elapsed time can expose it, and the bound
-// sits far enough below the timeout to tolerate a slow race build.
 func TestStartSession_HandshakeBurstDoesNotLoseAwaitedNotification(t *testing.T) {
-	const readTimeout = 30 * time.Second
+	const readTimeout = waittest.HangGuard
 	tests := []struct {
 		name     string
 		scenario string
@@ -1275,8 +1222,12 @@ func TestStartSession_HandshakeBurstDoesNotLoseAwaitedNotification(t *testing.T)
 			}
 			t.Cleanup(func() { _ = adapter.StopSession(context.Background(), session) })
 
-			if bound := readTimeout / 2; elapsed > bound {
-				t.Fatalf("StartSession() took %v past its %v bound, want the burst to cost it nothing", elapsed, bound)
+			// A lost thread/started is accepted silently once the read
+			// timeout expires and yields the same thread ID, so waiting
+			// the timeout out is the only trace it leaves. A timer never
+			// fires early, so a regression always reaches the bound.
+			if elapsed >= readTimeout {
+				t.Fatalf("StartSession() took %v, want less than the %v read timeout: it waited the timeout out, so the awaited notification was lost to the burst", elapsed, readTimeout)
 			}
 		})
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // scenarioCodexSSHStandIn names the Go fake runtime registered below
@@ -301,69 +302,6 @@ func writeFakeAppServerScript(t *testing.T, dir, descendantScript string) string
 	return agenttest.WriteScript(t, dir, "fake-codex-app-server", content)
 }
 
-// pollPIDFile polls pidFile until it contains a valid positive integer
-// PID, or fails the test after timeout.
-func pollPIDFile(t *testing.T, pidFile string, timeout time.Duration) int {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(pidFile)
-		if err == nil {
-			pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
-			if convErr == nil && pid > 0 {
-				return pid
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("pollPIDFile(%q) = no valid PID after %v, want a PID", pidFile, timeout)
-	return 0
-}
-
-// isZombie reports whether pid is a zombie by reading /proc/<pid>/stat.
-// Returns false if the file cannot be read.
-func isZombie(pid int) bool {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
-	}
-	if i := strings.LastIndex(string(data), ")"); i >= 0 && i+2 < len(data) {
-		return data[i+2] == 'Z'
-	}
-	return false
-}
-
-// assertProcessDead polls until pid is gone (or a zombie) or the timeout
-// expires.
-func assertProcessDead(t *testing.T, label string, pid int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
-			return // any error means the process is gone or unreachable
-		}
-		if isZombie(pid) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Errorf("assertProcessDead(%s, %d) = alive after %v, want gone", label, pid, timeout)
-}
-
-// awaitFile polls until path exists or the timeout expires, reporting
-// whether it appeared.
-func awaitFile(t *testing.T, path string, timeout time.Duration) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return false
-}
-
 // killGroupOnCleanup registers a best-effort force kill of the process
 // group led by pid, so a failing assertion cannot strand the subprocess
 // or its descendants for the rest of the run.
@@ -443,15 +381,13 @@ func TestStartSession_CancelSignalsProcessGroup(t *testing.T) {
 	}
 	killGroupOnCleanup(t, directPID)
 
-	descendantPID := pollPIDFile(t, pidFile, 5*time.Second)
+	descendantPID := waittest.PIDFile(t, pidFile)
 
 	cancel()
 
-	if !awaitFile(t, markerFile, 5*time.Second) {
-		t.Errorf("cancelling the launch context left %q absent after %v, want the descendant to have caught a graceful signal", markerFile, 5*time.Second)
-	}
-	assertProcessDead(t, "app-server", directPID, 3*time.Second)
-	assertProcessDead(t, "descendant", descendantPID, 3*time.Second)
+	waittest.File(t, markerFile)
+	waittest.ProcessGone(t, directPID)
+	waittest.ProcessGone(t, descendantPID)
 }
 
 // writeFakeAppServerScriptEscapedTurn creates a script that fakes the
@@ -517,8 +453,8 @@ func TestStartSession_ReleaseEndsTurnWhenEscapedDescendantHoldsOutput(t *testing
 	})
 	elapsed := time.Since(start)
 
-	if elapsed > 2*time.Second {
-		t.Errorf("RunTurn() took %v, want well under 2s (bounded by CodexAdapter.drainGrace)", elapsed)
+	if elapsed > procutil.DefaultDrainGrace {
+		t.Errorf("RunTurn() took %v, want under the default drain grace %v (bounded by CodexAdapter.drainGrace)", elapsed, procutil.DefaultDrainGrace)
 	}
 
 	var agentErr *domain.AgentError

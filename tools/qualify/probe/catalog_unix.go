@@ -22,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	"github.com/sortie-ai/sortie/tools/qualify/e2e"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
@@ -594,18 +595,17 @@ const probeExecutionPollInterval = 100 * time.Millisecond
 // through, since a released record's number may name another process.
 func awaitProbeExecution(owned *ownedDescendants, probePath string, pgid int, deadline time.Time) bool {
 	basename := filepath.Base(probePath)
-	for {
-		if snapshot, held, err := owned.readHeld(); err == nil {
-			owned.observe(snapshot, held)
-			if slices.Contains(held, pgid) && launchRunsProgram(snapshot, pgid, basename) {
-				return true
-			}
+	return waittest.UntilWithin(time.Until(deadline), probeExecutionPollInterval, func() error {
+		snapshot, held, err := owned.readHeld()
+		if err != nil {
+			return err
 		}
-		if time.Now().After(deadline) {
-			return false
+		owned.observe(snapshot, held)
+		if !slices.Contains(held, pgid) || !launchRunsProgram(snapshot, pgid, basename) {
+			return fmt.Errorf("%s is not running under group %d", basename, pgid)
 		}
-		time.Sleep(probeExecutionPollInterval)
-	}
+		return nil
+	}) == nil
 }
 
 func launchRunsProgram(members []processMember, pgid int, basename string) bool {

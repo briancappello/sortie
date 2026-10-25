@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
@@ -541,9 +542,11 @@ func TestRepositoryPathFailsOnPathEscapingRoot(t *testing.T) {
 func TestAwaitMinuteBoundaryReturnsImmediatelyOutsideTheCurrentMinute(t *testing.T) {
 	t.Parallel()
 
-	start := time.Now()
-	awaitMinuteBoundary(time.Now().Add(-time.Hour))
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("awaitMinuteBoundary(createdAt outside the current minute) took %v, want an immediate return", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		awaitMinuteBoundary(time.Now().Add(-time.Hour))
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("awaitMinuteBoundary(createdAt outside the current minute) took %v, want an immediate return", elapsed)
+		}
+	})
 }

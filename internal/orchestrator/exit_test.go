@@ -25,6 +25,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -3167,7 +3168,7 @@ func TestHandleWorkerExit_WithheldReadFailOpen(t *testing.T) {
 			AgentAdapter:            "mock",
 		}, params)
 		t.Cleanup(func() { CancelRetry(state, issueID) })
-		spy.waitComment(t)
+		waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 		if len(store.runHistories) != 1 || store.runHistories[0].Status != "failed" {
 			t.Fatalf("run histories = %+v, want one failed row", store.runHistories)
@@ -3356,7 +3357,7 @@ func TestHandleWorkerExit_RetryPromiseInvariantAcrossWithheldFamily(t *testing.T
 			HandoffEvidenceBaseline: baseline,
 			AgentAdapter:            "mock",
 		}, params)
-		spy.waitComment(t)
+		waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 		if len(tracker.commentCalls) != 1 {
 			t.Fatalf("CommentIssue called %d times, want 1", len(tracker.commentCalls))
@@ -3396,7 +3397,7 @@ func TestHandleWorkerExit_RetryPromiseInvariantAcrossWithheldFamily(t *testing.T
 			HandoffEvidenceBaseline: baseline,
 			AgentAdapter:            "mock",
 		}, params)
-		spy.waitComment(t)
+		waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 		if _, ok := state.RetryAttempts[issueID]; ok {
 			t.Error("RetryAttempts entry present after parking, want none")
@@ -3439,7 +3440,7 @@ func TestHandleWorkerExit_RetryPromiseInvariantAcrossWithheldFamily(t *testing.T
 			AgentAdapter:            "mock",
 		}, params)
 		t.Cleanup(func() { CancelRetry(state, issueID) })
-		spy.waitComment(t)
+		waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 		retry, ok := state.RetryAttempts[issueID]
 		if !ok {
@@ -3489,7 +3490,7 @@ func TestHandleWorkerExit_RetryPromiseInvariantAcrossWithheldFamily(t *testing.T
 			AgentAdapter:            "mock",
 		}, params)
 		t.Cleanup(func() { CancelRetry(state, issueID) })
-		spy.waitComment(t)
+		waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 		incumbent, ok := state.RetryAttempts[issueID]
 		if !ok || incumbent.Attempt != 5 {
@@ -3560,7 +3561,7 @@ func TestHandleWorkerExit_SuppressedExitPostsCompletionCommentNotFailure(t *test
 				SoftStop:                tt.softStop,
 				SoftStopReason:          tt.softStopReason,
 			}, params)
-			spy.waitComment(t)
+			waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 			if len(tracker.commentCalls) != 1 {
 				t.Fatalf("CommentIssue called %d times, want 1", len(tracker.commentCalls))
@@ -3884,6 +3885,8 @@ func TestHandleWorkerExit_HandoffEvidenceOnlyAppliesToEligibleHandoff(t *testing
 	})
 }
 
+const stalledGitSleep = 20 * time.Second
+
 // stallingGitDir returns a directory holding a git shim that never produces
 // output, prepended to PATH so the evidence inspection stalls. The shim forks
 // its sleep and then exits, so the child outlives a kill of the shim itself
@@ -3892,7 +3895,7 @@ func TestHandleWorkerExit_HandoffEvidenceOnlyAppliesToEligibleHandoff(t *testing
 func stallingGitDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\nsleep 20\nexit 0\n"
+	script := fmt.Sprintf("#!/bin/sh\nsleep %d\nexit 0\n", int(stalledGitSleep.Seconds()))
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // test shim must be executable
 		t.Fatalf("writing stalling git shim: %v", err)
 	}
@@ -3933,7 +3936,7 @@ func TestHandleWorkerExit_HandoffEvidenceInspectionBounded(t *testing.T) {
 	}, params)
 	elapsed := time.Since(start)
 
-	if elapsed > 15*time.Second {
+	if elapsed >= stalledGitSleep {
 		t.Errorf("HandleWorkerExit took %s, want the evidence inspection bounded well below the stalled command", elapsed)
 	}
 	if len(tracker.transitionCalls) != 1 {
@@ -5166,15 +5169,6 @@ func (m *commentAwareMetrics) IncTrackerComments(lifecycle, result string) {
 	m.done <- struct{}{}
 }
 
-func (m *commentAwareMetrics) waitComment(t *testing.T) {
-	t.Helper()
-	select {
-	case <-m.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for tracker comment goroutine to call IncTrackerComments")
-	}
-}
-
 func routerWithComments(tracker domain.TrackerAdapter, comments config.TrackerCommentsConfig) *route.Router {
 	router := route.NewRouter(tracker, nil)
 	if err := router.Update(route.Inputs{Comments: comments}); err != nil {
@@ -5212,7 +5206,7 @@ func TestHandleWorkerExit_CommentOnNormalExit(t *testing.T) {
 		AgentAdapter:   "mock",
 	}, params)
 
-	spy.waitComment(t)
+	waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 	if len(tracker.commentCalls) != 1 {
 		t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
@@ -5285,7 +5279,7 @@ func TestHandleWorkerExit_CommentOnErrorExit(t *testing.T) {
 		AgentAdapter: "mock",
 	}, params)
 
-	spy.waitComment(t)
+	waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 	if len(tracker.commentCalls) != 1 {
 		t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
@@ -5384,7 +5378,7 @@ func TestHandleWorkerExit_CommentErrorIsNonFatal(t *testing.T) {
 		AgentAdapter: "mock",
 	}, params)
 
-	spy.waitComment(t)
+	waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 	spy.mu.Lock()
 	comments := append([]trackerCommentCall(nil), spy.trackerComments...)
@@ -5450,7 +5444,7 @@ func TestHandleWorkerExit_CommentNeverCarriesEitherSessionID(t *testing.T) {
 		AgentAdapter: "mock",
 	}, params)
 
-	spy.waitComment(t)
+	waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 	if len(tracker.commentCalls) != 1 {
 		t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
@@ -5677,7 +5671,7 @@ func TestHandleWorkerExit_SoftStop(t *testing.T) {
 			SoftStopReason: "blocked",
 		}, params)
 
-		spy.waitComment(t)
+		waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 		if len(tracker.commentCalls) != 1 {
 			t.Fatalf("CommentIssue call count = %d, want 1", len(tracker.commentCalls))
@@ -6567,19 +6561,11 @@ func TestHandleWorkerExit_TrackerOpsWgDrains(t *testing.T) {
 		close(waitDone)
 	}()
 
-	select {
-	case <-waitDone:
-		t.Fatal("TrackerOpsWg.Wait() returned before CommentIssue goroutine completed")
-	case <-time.After(20 * time.Millisecond):
-	}
+	waittest.Never(t, waitDone, 20*time.Millisecond, "TrackerOpsWg.Wait() return before the CommentIssue goroutine completed")
 
 	close(gate)
 
-	select {
-	case <-waitDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("TrackerOpsWg.Wait() did not return after CommentIssue goroutine completed")
-	}
+	waittest.Receive(t, waitDone, "TrackerOpsWg.Wait() return after the CommentIssue goroutine completed")
 }
 
 func TestHandleWorkerExit_ReviewMetadata_Persisted(t *testing.T) {
@@ -8506,7 +8492,7 @@ func TestHandleWorkerExit_ActiveIssueContinuationDeferral(t *testing.T) {
 		AgentAdapter: "mock",
 	}, params)
 
-	spy.waitComment(t)
+	waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 	incumbent, ok := state.RetryAttempts[issueID]
 	if !ok {
@@ -8590,7 +8576,7 @@ func TestHandleWorkerExit_RetryableErrorDeferral(t *testing.T) {
 		AgentAdapter: "mock",
 	}, params)
 
-	spy.waitComment(t)
+	waittest.Receive(t, spy.done, "IncTrackerComments call")
 
 	incumbent, ok := state.RetryAttempts[issueID]
 	if !ok {
@@ -9547,11 +9533,7 @@ func TestDrainRunningWorkers_NoChangeState(t *testing.T) {
 		SoftStopReason: "no-change-needed",
 	}
 
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("drainRunningWorkers did not return within 10 seconds")
-	}
+	waittest.Receive(t, done, "drainRunningWorkers return")
 	state.TrackerOpsWg.Wait()
 
 	if len(tracker.transitionCalls) != 1 || tracker.transitionCalls[0].TargetState != "Done" {

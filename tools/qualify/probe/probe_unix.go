@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	"github.com/sortie-ai/sortie/tools/qualify/e2e"
 	"github.com/sortie-ai/sortie/tools/qualify/eval"
@@ -36,19 +38,18 @@ import (
 func requireTornDown(t *testing.T, g *procutil.Group) {
 	t.Helper()
 
-	deadline := time.Now().Add(e2e.ShutdownDeadline)
-	for {
+	err := waittest.UntilWithin(e2e.ShutdownDeadline, 10*time.Millisecond, func() error {
 		released, cleanupErr := g.Released()
-		if released {
-			if cleanupErr != nil {
-				t.Fatalf("the launch's process group was released with a cleanup error: %v", cleanupErr)
-			}
-			return
+		if !released {
+			return errors.New("the launch's process group is not released")
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the launch's process group was not released within %s", e2e.ShutdownDeadline)
+		if cleanupErr != nil {
+			t.Fatalf("the launch's process group was released with a cleanup error: %v", cleanupErr)
 		}
-		time.Sleep(10 * time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("the launch did not release its process group: %v", err)
 	}
 }
 
@@ -166,16 +167,13 @@ func (l *boundedLaunch) observeOwnership(owned *ownedDescendants) {
 // passes. Output is readable only when ended is true: until the
 // capture's wait returns, the reader goroutine still owns the writers.
 func (l *boundedLaunch) await(bound time.Duration) (result procutil.CaptureResult, output string, ended bool) {
-	timer := time.NewTimer(bound)
-	defer timer.Stop()
-	select {
-	case result = <-l.done:
-		l.stdout.Flush()
-		l.stderr.Flush()
-		return result, l.stdout.String() + l.stderr.String(), true
-	case <-timer.C:
+	result, ended = waittest.ReceiveWithin(l.done, bound)
+	if !ended {
 		return procutil.CaptureResult{}, "", false
 	}
+	l.stdout.Flush()
+	l.stderr.Flush()
+	return result, l.stdout.String() + l.stderr.String(), true
 }
 
 // terminate takes the launch's process group down and awaits its end
@@ -332,13 +330,12 @@ const continuationInductionTurnBound = 3 * time.Minute
 // UTC minute, or a bounded deadline passes: this runtime family
 // protects a session/load issued within its own creation minute.
 func awaitMinuteBoundary(createdAt time.Time) {
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().UTC().Truncate(time.Minute).Equal(createdAt.Truncate(time.Minute)) {
-		if time.Now().After(deadline) {
-			return
+	_ = waittest.UntilWithin(90*time.Second, time.Second, func() error {
+		if time.Now().UTC().Truncate(time.Minute).Equal(createdAt.Truncate(time.Minute)) {
+			return errors.New("the wall clock is still in the creation minute")
 		}
-		time.Sleep(time.Second)
-	}
+		return nil
+	})
 }
 
 // defaultOutputDir returns a fresh run-scoped directory under the OS
@@ -586,7 +583,7 @@ func Run(t *testing.T, coords Coordinates) Result {
 		t.Fatalf("compose the collected evidence: %v", err)
 	}
 	if err := checkNoBarePair(records); err != nil {
-		t.Fatalf("%v", err)
+		t.Fatalf("the launch did not release its process group: %v", err)
 	}
 
 	// A paid collection that fails a later check still leaves the rows it

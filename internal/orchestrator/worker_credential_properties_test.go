@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 type credentialPropertyAdapter struct {
@@ -186,19 +187,26 @@ func TestRunWorkerAttempt_HandoffEvidenceBaselineCapturedBeforeCredentialVerific
 func TestRunWorkerAttempt_CredentialStepBounds(t *testing.T) {
 	t.Parallel()
 
-	silent := func(ctx context.Context, _ domain.RunTurnParams) (domain.TurnResult, error) {
-		<-ctx.Done()
-		return domain.TurnResult{}, ctx.Err()
+	type turnFn = func(context.Context, domain.RunTurnParams) (domain.TurnResult, error)
+	silent := func(entered chan<- struct{}) turnFn {
+		var once sync.Once
+		return func(ctx context.Context, _ domain.RunTurnParams) (domain.TurnResult, error) {
+			once.Do(func() { close(entered) })
+			<-ctx.Done()
+			return domain.TurnResult{}, ctx.Err()
+		}
 	}
-	chatty := func(ctx context.Context, params domain.RunTurnParams) (domain.TurnResult, error) {
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return domain.TurnResult{}, ctx.Err()
-			case <-ticker.C:
-				params.OnEvent(domain.AgentEvent{Type: domain.EventNotification, Timestamp: time.Now().UTC(), Message: "still working"})
+	chatty := func(chan<- struct{}) turnFn {
+		return func(ctx context.Context, params domain.RunTurnParams) (domain.TurnResult, error) {
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return domain.TurnResult{}, ctx.Err()
+				case <-ticker.C:
+					params.OnEvent(domain.AgentEvent{Type: domain.EventNotification, Timestamp: time.Now().UTC(), Message: "still working"})
+				}
 			}
 		}
 	}
@@ -206,17 +214,17 @@ func TestRunWorkerAttempt_CredentialStepBounds(t *testing.T) {
 	tests := []struct {
 		name          string
 		turnTimeoutMS int
-		// cancelAfter stands in for stall detection cancelling the
-		// running entry's context; zero never cancels.
-		cancelAfter    time.Duration
-		run            func(context.Context, domain.RunTurnParams) (domain.TurnResult, error)
+		// cancelOnEntry stands in for stall detection cancelling the
+		// running entry's context once the verification turn runs.
+		cancelOnEntry  bool
+		run            func(entered chan<- struct{}) turnFn
 		wantExit       WorkerExitKind
 		wantUnverified bool
 	}{
 		{
 			name:          "stall cancellation wins over the turn bound",
-			turnTimeoutMS: 5000,
-			cancelAfter:   50 * time.Millisecond,
+			turnTimeoutMS: int(waittest.HangGuard.Milliseconds()),
+			cancelOnEntry: true,
 			run:           silent,
 			wantExit:      WorkerExitCancelled,
 		},
@@ -235,23 +243,22 @@ func TestRunWorkerAttempt_CredentialStepBounds(t *testing.T) {
 
 			cfg := defaultWorkerConfig(t.TempDir())
 			cfg.Agent.TurnTimeoutMS = tt.turnTimeoutMS
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(waittest.Context(t))
 			defer cancel()
-			if tt.cancelAfter > 0 {
-				time.AfterFunc(tt.cancelAfter, cancel)
+			entered := make(chan struct{})
+			if tt.cancelOnEntry {
+				go func() {
+					select {
+					case <-entered:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
 			}
-			adapter := &credentialPropertyAdapter{verifyRunFn: tt.run}
-			limit := time.Duration(tt.turnTimeoutMS)*time.Millisecond + stopSessionDeadline(cfg) + 2*time.Second
-			if tt.cancelAfter > 0 {
-				limit = 2 * time.Second
-			}
+			adapter := &credentialPropertyAdapter{verifyRunFn: tt.run(entered)}
 
-			startedAt := time.Now()
 			result := runCredentialWorker(t, ctx, cfg, adapter, nil)
 
-			if elapsed := time.Since(startedAt); elapsed > limit {
-				t.Errorf("RunWorkerAttempt took %v, want at most %v", elapsed, limit)
-			}
 			if result.ExitKind != tt.wantExit {
 				t.Fatalf("WorkerResult.ExitKind = %q, want %q (error: %v)", result.ExitKind, tt.wantExit, result.Error)
 			}

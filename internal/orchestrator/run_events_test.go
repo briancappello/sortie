@@ -15,6 +15,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func retainingState() (*State, *RunningEntry) {
@@ -418,7 +419,12 @@ func TestRunEventRetry_StoresOrDropsHeldRuns(t *testing.T) {
 			for _, h := range held {
 				retry.retry(h)
 			}
-			eventually(t, "every held run stored or dropped", func() bool { return len(heldDispatchIDs(retry)) == 0 })
+			waittest.Until(t, func() error {
+				if held := heldDispatchIDs(retry); len(held) != 0 {
+					return fmt.Errorf("held runs = %v, want none", held)
+				}
+				return nil
+			})
 
 			for _, id := range tt.wantHeld {
 				calls, events := store.callsFor(id)

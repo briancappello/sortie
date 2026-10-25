@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
 	"github.com/sortie-ai/sortie/tools/qualify/evidencetest"
 )
@@ -114,53 +117,31 @@ func TestHarnessContract(t *testing.T) {
 func requireReleased(t *testing.T, g *procutil.Group) {
 	t.Helper()
 
-	deadline := time.Now().Add(ShutdownDeadline)
-	for {
+	waittest.Until(t, func() error {
 		released, cleanupErr := g.Released()
-		if released {
-			if cleanupErr != nil {
-				t.Fatalf("Released() cleanup error = %v, want nil", cleanupErr)
-			}
-			return
+		if !released {
+			return errors.New("Released() = false, want the launch's group released")
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Released() = false after %s, want the launch's group released", ShutdownDeadline)
+		if cleanupErr != nil {
+			t.Fatalf("Released() cleanup error = %v, want nil", cleanupErr)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return nil
+	})
 }
 
 func TestTerminalOracle(t *testing.T) {
 	harness := NewHarness(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan struct{})
-	go func() {
-		harness.orchestrator.Run(ctx)
-		close(runDone)
-	}()
-
-	deadline := time.Now().Add(ShutdownDeadline)
+	cancel, runDone := StartWorkflow(t, harness)
 	var condition TerminalCondition
-	for {
-		condition = ObserveTerminalCondition(t, harness)
-		if condition.Reached() {
-			break
+	waittest.Until(t, func() error {
+		if condition = ObserveTerminalCondition(t, harness); !condition.Reached() {
+			return fmt.Errorf("terminal condition not reached; last observation = %+v", condition)
 		}
-		if time.Now().After(deadline) {
-			cancel()
-			<-runDone
-			t.Fatalf("the isolated end-to-end harness never reached its terminal condition; last observation = %+v", condition)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
+		return nil
+	})
 	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(ShutdownDeadline):
-		t.Fatal("the orchestrator did not drain within the shared shutdown bound")
-	}
+	waittest.Receive(t, runDone, "the orchestrator to drain after cancellation")
 
 	groups := harness.Agent().Groups()
 	if len(groups) != 2 {
@@ -317,28 +298,14 @@ func TestStartWorkflowDrivesTheRunToItsTerminalCondition(t *testing.T) {
 	harness := NewHarness(t)
 
 	cancel, runDone := StartWorkflow(t, harness)
-
-	deadline := time.Now().Add(ShutdownDeadline)
-	var condition TerminalCondition
-	for {
-		condition = ObserveTerminalCondition(t, harness)
-		if condition.Reached() {
-			break
+	waittest.Until(t, func() error {
+		if condition := ObserveTerminalCondition(t, harness); !condition.Reached() {
+			return fmt.Errorf("terminal condition not reached; last observation = %+v", condition)
 		}
-		if time.Now().After(deadline) {
-			cancel()
-			<-runDone
-			t.Fatalf("StartWorkflow never reached the terminal condition; last observation = %+v", condition)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
+		return nil
+	})
 	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(ShutdownDeadline):
-		t.Fatal("the run goroutine did not return after cancellation")
-	}
+	waittest.Receive(t, runDone, "the run goroutine to return after cancellation")
 
 	sessions := harness.Agent().SessionIDs()
 	if len(sessions) == 0 {

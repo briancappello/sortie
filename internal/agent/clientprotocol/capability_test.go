@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func newPumpForCapabilityTests(t *testing.T) (*sessionState, *pumpState) {
@@ -111,7 +112,7 @@ func TestHandshakeLoweringPersistsAcrossTurns(t *testing.T) {
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&firstTurnEvents)})
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("first RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -125,7 +126,7 @@ func TestHandshakeLoweringPersistsAcrossTurns(t *testing.T) {
 	outcomeCh2 := runTurnAsync(state, domain.RunTurnParams{Prompt: "go again", OnEvent: collectEvents(&secondTurnEvents)})
 	promptID2 := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID2, promptResponse{StopReason: stopReasonEndTurn})
-	outcome2 := awaitOutcome(t, outcomeCh2)
+	outcome2 := waittest.Receive(t, outcomeCh2, "turn outcome")
 	if outcome2.err != nil {
 		t.Fatalf("second RunTurn() error = %v, want nil", outcome2.err)
 	}
@@ -556,7 +557,7 @@ func TestCapabilityGapNoticeOncePerSession(t *testing.T) {
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&firstTurnEvents)})
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("first RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -590,7 +591,7 @@ func TestCapabilityGapNoticeOncePerSession(t *testing.T) {
 	outcomeCh2 := runTurnAsync(state, domain.RunTurnParams{Prompt: "go again", OnEvent: collectEvents(&secondTurnEvents)})
 	promptID2 := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID2, promptResponse{StopReason: stopReasonEndTurn})
-	outcome2 := awaitOutcome(t, outcomeCh2)
+	outcome2 := waittest.Receive(t, outcomeCh2, "turn outcome")
 	if outcome2.err != nil {
 		t.Fatalf("second RunTurn() error = %v, want nil", outcome2.err)
 	}
@@ -614,7 +615,7 @@ func runOneTurnAndCaptureNotice(t *testing.T, sessionID string, facts *handshake
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&events)})
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}

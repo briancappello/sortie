@@ -22,6 +22,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // Usage is the token accounting one answer reports.
@@ -216,11 +218,10 @@ type Server struct {
 	releaseOnce sync.Once
 	released    chan struct{}
 
-	mu         sync.Mutex
-	served     []bool        // guarded by mu
-	log        []Exchange    // guarded by mu
-	open       map[int]bool  // guarded by mu; Seq of every held request still open
-	holdsMoved chan struct{} // guarded by mu; closed and replaced whenever open changes
+	mu     sync.Mutex
+	served []bool       // guarded by mu
+	log    []Exchange   // guarded by mu
+	open   map[int]bool // guarded by mu; Seq of every held request still open
 }
 
 // Start serves script on 127.0.0.1 with an OS-assigned port and closes the
@@ -250,10 +251,9 @@ func Start(t testing.TB, script []Response) *Server {
 		script: slices.Clone(script),
 		served: make([]bool, len(script)),
 
-		holdingCh:  make(chan struct{}),
-		released:   make(chan struct{}),
-		open:       make(map[int]bool),
-		holdsMoved: make(chan struct{}),
+		holdingCh: make(chan struct{}),
+		released:  make(chan struct{}),
+		open:      make(map[int]bool),
 	}
 	s.http = &httptest.Server{
 		Listener: listener,
@@ -324,22 +324,18 @@ func (s *Server) release() {
 // awaitHolds returns the held requests still open once all have ended or
 // bound has elapsed.
 func (s *Server) awaitHolds(bound time.Duration) []Exchange {
-	timer := time.NewTimer(bound)
-	defer timer.Stop()
-	for {
+	err := waittest.UntilWithin(bound, livenessPoll, func() error {
 		s.mu.Lock()
-		moved := s.holdsMoved
-		pending := len(s.open)
-		s.mu.Unlock()
-		if pending == 0 {
-			return nil
+		defer s.mu.Unlock()
+		if len(s.open) > 0 {
+			return fmt.Errorf("%d held request(s) still open", len(s.open))
 		}
-		select {
-		case <-moved:
-		case <-timer.C:
-			return s.openHolds()
-		}
+		return nil
+	})
+	if err != nil {
+		return s.openHolds()
 	}
+	return nil
 }
 
 func (s *Server) openHolds() []Exchange {
@@ -362,8 +358,6 @@ func (s *Server) setHold(seq int, open bool) {
 	} else {
 		delete(s.open, seq)
 	}
-	close(s.holdsMoved)
-	s.holdsMoved = make(chan struct{})
 }
 
 func (s *Server) close() {

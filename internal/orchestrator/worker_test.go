@@ -27,6 +27,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -372,11 +373,7 @@ func (c *exitCapture) onExit(_ string, result WorkerResult) {
 
 func (c *exitCapture) waitResult(t *testing.T) WorkerResult {
 	t.Helper()
-	select {
-	case <-c.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for OnExit")
-	}
+	waittest.Receive(t, c.done, "OnExit call")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.results) == 0 {
@@ -1330,11 +1327,7 @@ func TestRunWorkerAttempt(t *testing.T) {
 			t.Errorf("ExitKind = %q, want %q", result.ExitKind, WorkerExitCancelled)
 		}
 
-		select {
-		case <-stopCalled:
-		case <-time.After(3 * time.Second):
-			t.Fatal("StopSession was never called")
-		}
+		waittest.Receive(t, stopCalled, "StopSession call")
 
 		if stopCtxCancelled.Load() {
 			t.Error("StopSession received cancelled context, want detached (not cancelled)")
@@ -8059,41 +8052,33 @@ func TestRunWorkerAttempt_StatusSignalLogLines(t *testing.T) {
 	})
 }
 
-// boundedTurnStub emits an event each tick until ctx is done or natural
-// elapses. natural must exceed the test's turn-timeout bound by a
-// measurable margin, so a missing deadline surfaces as a completed turn
-// rather than a hung test.
-type boundedTurnStub struct {
-	natural time.Duration
-}
-
-// boundedTurnStubEventInterval is the fixed tick at which boundedTurnStub
-// emits an event while its RunTurn call is still running.
+// boundedTurnStubEventInterval is the fixed tick at which the turn from
+// newBoundedTurnFn emits an event while it is still running.
 const boundedTurnStubEventInterval = 10 * time.Millisecond
 
-func (s *boundedTurnStub) runTurn(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
-	ticker := time.NewTicker(boundedTurnStubEventInterval)
-	defer ticker.Stop()
-	timer := time.NewTimer(s.natural)
-	defer timer.Stop()
+// newBoundedTurnFn returns a turn that emits an event each tick until ctx is
+// done or waittest.HangGuard elapses. Only a turn deadline or a cancellation
+// ends it earlier, so a missing one surfaces as a completed turn.
+func newBoundedTurnFn() func(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+	return func(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+		ticker := time.NewTicker(boundedTurnStubEventInterval)
+		defer ticker.Stop()
+		timer := time.NewTimer(waittest.HangGuard)
+		defer timer.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return domain.TurnResult{}, ctx.Err()
-		case <-timer.C:
-			return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
-		case <-ticker.C:
-			if params.OnEvent != nil {
-				params.OnEvent(domain.AgentEvent{Type: domain.EventNotification, Timestamp: time.Now().UTC()})
+		for {
+			select {
+			case <-ctx.Done():
+				return domain.TurnResult{}, ctx.Err()
+			case <-timer.C:
+				return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
+			case <-ticker.C:
+				if params.OnEvent != nil {
+					params.OnEvent(domain.AgentEvent{Type: domain.EventNotification, Timestamp: time.Now().UTC()})
+				}
 			}
 		}
 	}
-}
-
-func newBoundedTurnFn(natural time.Duration) func(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
-	stub := &boundedTurnStub{natural: natural}
-	return stub.runTurn
 }
 
 func linesWithAttr(logOutput, key string) []string {
@@ -8118,7 +8103,7 @@ func TestRunWorkerAttempt_TurnTimeoutExpires(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	runTurnFn := newBoundedTurnFn(2 * time.Second)
+	runTurnFn := newBoundedTurnFn()
 	ec := newExitCapture()
 
 	deps := WorkerDeps{
@@ -8131,9 +8116,7 @@ func TestRunWorkerAttempt_TurnTimeoutExpires(t *testing.T) {
 		Logger:                 logger,
 	}
 
-	start := time.Now()
 	RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
-	elapsed := time.Since(start)
 	result := ec.waitResult(t)
 
 	var agentErr *domain.AgentError
@@ -8142,9 +8125,6 @@ func TestRunWorkerAttempt_TurnTimeoutExpires(t *testing.T) {
 	}
 	if agentErr.Kind != domain.ErrTurnTimeout {
 		t.Errorf("AgentError.Kind = %q, want %q", agentErr.Kind, domain.ErrTurnTimeout)
-	}
-	if elapsed >= 1*time.Second {
-		t.Errorf("RunWorkerAttempt took %v, want well under the stub's 2s natural duration", elapsed)
 	}
 
 	lines := linesWithAttr(logBuf.String(), "turn_timeout_ms")
@@ -8171,7 +8151,7 @@ func TestRunWorkerAttempt_TurnTimeoutSchedulesRetry(t *testing.T) {
 	cfg.Agent.StallTimeoutMS = 0
 	cfg.Agent.MaxTurns = 1
 
-	runTurnFn := newBoundedTurnFn(2 * time.Second)
+	runTurnFn := newBoundedTurnFn()
 	ec := newExitCapture()
 
 	deps := WorkerDeps{
@@ -8212,15 +8192,20 @@ func TestRunWorkerAttempt_CancellationNotReportedAsTimeout(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	cfg := defaultWorkerConfig(tmpDir)
-	cfg.Agent.TurnTimeoutMS = 60_000 // far above the stub's natural duration
+	cfg.Agent.TurnTimeoutMS = 60_000
 	cfg.Agent.MaxTurns = 1
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	runTurnFn := newBoundedTurnFn(5 * time.Second)
+	boundedTurn := newBoundedTurnFn()
+	entered := make(chan struct{})
+	runTurnFn := func(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+		close(entered)
+		return boundedTurn(ctx, session, params)
+	}
 	ec := newExitCapture()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(waittest.Context(t))
 
 	deps := WorkerDeps{
 		TrackerAdapter:         &mockTrackerAdapter{},
@@ -8233,8 +8218,11 @@ func TestRunWorkerAttempt_CancellationNotReportedAsTimeout(t *testing.T) {
 	}
 
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		cancel()
+		select {
+		case <-entered:
+			cancel()
+		case <-ctx.Done():
+		}
 	}()
 
 	RunWorkerAttempt(ctx, workerTestIssue(), nil, deps)
@@ -8492,7 +8480,7 @@ func TestRunWorkerAttempt_TurnTimeoutTeardownIgnoresReadTimeout(t *testing.T) {
 	cfg.Agent.MaxTurns = 1
 	cfg.Hooks.AfterRun = fmt.Sprintf("touch %s", markerPath)
 
-	runTurnFn := newBoundedTurnFn(2 * time.Second)
+	runTurnFn := newBoundedTurnFn()
 	ec := newExitCapture()
 
 	// The context itself must be inspected inside the StopSession call:
@@ -8625,7 +8613,7 @@ func TestRunWorkerAttempt_SelfReviewTurnTimeoutFailsAttempt(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	reviewTurnFn := newBoundedTurnFn(2 * time.Second)
+	reviewTurnFn := newBoundedTurnFn()
 	ec := newExitCapture()
 
 	deps := WorkerDeps{
@@ -9677,26 +9665,14 @@ func TestMakeWorkerFn_OnTurnStartedBlocksThenEscapesOnContextDone(t *testing.T) 
 			close(workerDone)
 		}()
 
-		select {
-		case <-entered:
-			t.Fatal("RunTurn was entered while turnStartedCh was still full, want OnTurnStarted to block first")
-		case <-time.After(200 * time.Millisecond):
-		}
+		waittest.Never(t, entered, 200*time.Millisecond, "RunTurn entry while turnStartedCh is full, want OnTurnStarted to block first")
 
 		<-o.turnStartedCh
 
-		select {
-		case <-entered:
-		case <-time.After(5 * time.Second):
-			t.Fatal("RunTurn was never entered after a slot freed")
-		}
+		waittest.Receive(t, entered, "RunTurn entry after a slot freed")
 		close(release)
 
-		select {
-		case <-workerDone:
-		case <-time.After(5 * time.Second):
-			t.Fatal("worker did not exit")
-		}
+		waittest.Receive(t, workerDone, "worker exit")
 		<-o.workerExitCh
 
 		select {
@@ -9732,25 +9708,13 @@ func TestMakeWorkerFn_OnTurnStartedBlocksThenEscapesOnContextDone(t *testing.T) 
 			close(workerDone)
 		}()
 
-		select {
-		case <-entered:
-			t.Fatal("RunTurn was entered while turnStartedCh was still full, want OnTurnStarted to block first")
-		case <-time.After(200 * time.Millisecond):
-		}
+		waittest.Never(t, entered, 200*time.Millisecond, "RunTurn entry while turnStartedCh is full, want OnTurnStarted to block first")
 
 		cancel()
 
-		select {
-		case <-entered:
-		case <-time.After(5 * time.Second):
-			t.Fatal("RunTurn was never entered after cancelling the worker context")
-		}
+		waittest.Receive(t, entered, "RunTurn entry after cancelling the worker context")
 
-		select {
-		case <-workerDone:
-		case <-time.After(5 * time.Second):
-			t.Fatal("worker did not exit")
-		}
+		waittest.Receive(t, workerDone, "worker exit")
 		<-o.workerExitCh
 
 		if got := len(o.turnStartedCh); got != 1 {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/tools/qualify/e2e"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
 )
@@ -323,52 +324,54 @@ func observeProcessCleanup(fixture *sharedFixture, owned *ownedDescendants) evid
 		return evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeFixtureInductionFailed, Detail: "the run registered no launch, so its teardown has no subject"}
 	}
 
-	deadline := time.Now().Add(cleanupSettleWindow)
-	for {
+	var settled evidence.Observation
+	var survivorCount int
+	err = waittest.UntilWithin(cleanupSettleWindow, cleanupPollInterval, func() error {
 		owned.ingestReceipts()
 		snapshot, held, snapErr := owned.readHeld()
 		if snapErr != nil {
-			return evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: "the process-group membership query failed"}
+			settled = evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: "the process-group membership query failed"}
+			return nil
 		}
 		survivors := owned.observe(snapshot, held)
-		if len(survivors) == 0 {
-			if failed := releasedWithCleanupError(fixture.tracker.all()); failed > 0 {
-				return evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: fmt.Sprintf("%d launch(es) were released with a cleanup error", failed)}
-			}
-			return evidence.Observation{Grade: evidence.GradeUsable, Outcome: evidence.OutcomePass, Detail: fmt.Sprintf("checked_groups=%d stopped_sessions=%d", checked, stopped)}
+		if len(survivors) > 0 {
+			survivorCount = len(survivors)
+			return fmt.Errorf("%d process(es) still running", survivorCount)
 		}
-		if time.Now().After(deadline) {
-			return evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: fmt.Sprintf("%d process(es) the run launched, or that a launch of it started, were still running after their own shutdown path", len(survivors))}
+		if failed := releasedWithCleanupError(fixture.tracker.all()); failed > 0 {
+			settled = evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: fmt.Sprintf("%d launch(es) were released with a cleanup error", failed)}
+			return nil
 		}
-		time.Sleep(cleanupPollInterval)
+		settled = evidence.Observation{Grade: evidence.GradeUsable, Outcome: evidence.OutcomePass, Detail: fmt.Sprintf("checked_groups=%d stopped_sessions=%d", checked, stopped)}
+		return nil
+	})
+	if err != nil {
+		return evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeRuntimeFailed, Detail: fmt.Sprintf("%d process(es) the run launched, or that a launch of it started, were still running after their own shutdown path", survivorCount)}
 	}
+	return settled
 }
 
 // drainOwnedProcesses kills whatever the run left running: each launch
 // through its record, an adopted descendant by pid, never by name or
 // command pattern, so it reaches nothing the run did not start.
 func drainOwnedProcesses(owned *ownedDescendants) {
-	deadline := time.Now().Add(e2e.ShutdownDeadline)
-	for {
+	_ = waittest.UntilWithin(e2e.ShutdownDeadline, cleanupPollInterval, func() error {
 		for _, g := range owned.tracker.all() {
 			_ = g.Kill()
 		}
 		snapshot, held, err := owned.readHeld()
 		if err != nil {
-			return
+			return nil
 		}
 		survivors := owned.observe(snapshot, held)
-		if len(survivors) == 0 {
-			return
-		}
 		for _, m := range survivors {
 			_ = syscall.Kill(m.pid, syscall.SIGKILL)
 		}
-		if time.Now().After(deadline) {
-			return
+		if len(survivors) > 0 {
+			return fmt.Errorf("%d process(es) survived the kill", len(survivors))
 		}
-		time.Sleep(cleanupPollInterval)
-	}
+		return nil
+	})
 }
 
 // releasedWithCleanupError counts the records whose reap reported a

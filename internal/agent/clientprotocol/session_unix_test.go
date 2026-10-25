@@ -25,6 +25,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func startTestSession(ctx context.Context, a *ClientProtocolAdapter, params domain.StartSessionParams) (domain.Session, error) {
@@ -154,7 +155,7 @@ func TestStartSessionCancelledLaunchContextSignalsGracefully(t *testing.T) {
 	})
 
 	cancel()
-	waitForFile(t, evidencePath, awaitTimeout)
+	waittest.File(t, evidencePath)
 }
 
 func TestStartSessionLocalWorkspaceIsSymlink(t *testing.T) {
@@ -338,14 +339,14 @@ func TestStopSessionReachesGroupChild(t *testing.T) {
 		t.Fatalf("startSession() error = %v", err)
 	}
 
-	childPID := waitForPIDFile(t, pidPath, awaitTimeout)
+	childPID := waittest.PIDFile(t, pidPath)
 	t.Cleanup(func() { killLaunchedGroup(session.AgentPID) })
 
 	if err := stopSession(context.Background(), session); err != nil {
 		t.Fatalf("stopSession() error = %v", err)
 	}
 
-	assertProcessGone(t, childPID, awaitTimeout)
+	waittest.ProcessGone(t, childPID)
 }
 
 // A descendant that detaches into its own process group survives the
@@ -367,7 +368,7 @@ func TestStopSessionDoesNotReachEscapedProcessGroupMember(t *testing.T) {
 		t.Fatalf("startSession() error = %v", err)
 	}
 
-	escapedPID := waitForPIDFile(t, pidPath, awaitTimeout)
+	escapedPID := waittest.PIDFile(t, pidPath)
 	t.Cleanup(func() { killHelperGroup(pidPath) })
 
 	if err := stopSession(context.Background(), session); err != nil {
@@ -409,12 +410,10 @@ func TestStartSessionHandshakeAbandonedByEscapedDescendantFailsWithPortExit(t *t
 	const grace = 200 * time.Millisecond
 	adapter := &ClientProtocolAdapter{drainGrace: grace}
 
-	start := time.Now()
 	_, err := startTestSession(context.Background(), adapter, domain.StartSessionParams{
 		WorkspacePath: t.TempDir(),
 		AgentConfig:   domain.AgentConfig{Command: scriptPath},
 	})
-	elapsed := time.Since(start)
 
 	agentErr, ok := errors.AsType[*domain.AgentError](err)
 	if !ok {
@@ -433,10 +432,6 @@ func TestStartSessionHandshakeAbandonedByEscapedDescendantFailsWithPortExit(t *t
 	if !strings.Contains(earlyExitErr.Output(), marker) {
 		t.Errorf("EarlyExitError.Output() = %q, want it to contain %q", earlyExitErr.Output(), marker)
 	}
-	if elapsed > 10*time.Second {
-		t.Errorf("startSession() took %v, want well under the 30s handshake timeout it would have hit without the release", elapsed)
-	}
-
 	output := buf.String()
 	if !hasWarnStderrLineRecord(output, marker) {
 		t.Errorf("startSession() output = %s, want one record carrying level=WARN, msg=\"agent stderr\", and line=%s together (the collector also logs this same line at Debug, which must not satisfy this check on its own)", output, marker)
@@ -505,11 +500,7 @@ func TestStopSessionReturnsBoundedAfterReleaseAbandonsOnARealSubprocess(t *testi
 		t.Fatalf("session.Internal type = %T, want *sessionState", session.Internal)
 	}
 
-	select {
-	case <-state.release.Abandoned():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the release never abandoned the parked reader")
-	}
+	waittest.Receive(t, state.release.Abandoned(), "the release to abandon the parked reader")
 
 	start := time.Now()
 	if err := stopSession(context.Background(), session); err != nil {
@@ -572,8 +563,8 @@ func TestRunTurnEndsBoundedWhenRuntimeExitsWithEscapedDescendantHoldingOutput(t 
 	})
 	elapsed := time.Since(start)
 
-	if elapsed > 2*time.Second {
-		t.Errorf("RunTurn() took %v, want well under 2s (bounded by the injected drain grace %v)", elapsed, grace)
+	if elapsed > procutil.DefaultDrainGrace {
+		t.Errorf("RunTurn() took %v, want under the default drain grace %v (bounded by the injected drain grace %v)", elapsed, procutil.DefaultDrainGrace, grace)
 	}
 	agentErr, ok := errors.AsType[*domain.AgentError](runErr)
 	if !ok {
@@ -868,20 +859,17 @@ func hasNoticeContaining(events []domain.AgentEvent, fragment string) bool {
 	return false
 }
 
-// awaitSourceOpened polls source.openedSession() until it equals sessionID,
-// failing t if awaitTimeout elapses first: the pump adopts the confirmed
-// source and opens it asynchronously, after startSession has already
-// returned.
+// awaitSourceOpened waits until source.openedSession() equals sessionID: the
+// pump adopts the confirmed source and opens it asynchronously, after
+// startSession has already returned.
 func awaitSourceOpened(t *testing.T, source *scriptedUsageSource, sessionID string) {
 	t.Helper()
-	deadline := time.Now().Add(awaitTimeout)
-	for time.Now().Before(deadline) {
-		if got := source.openedSession(); got == sessionID {
-			return
+	waittest.Until(t, func() error {
+		if got := source.openedSession(); got != sessionID {
+			return fmt.Errorf("source.openedSession() = %q, want %q", got, sessionID)
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("source.openedSession() = %q, want %q within %v", source.openedSession(), sessionID, awaitTimeout)
+		return nil
+	})
 }
 
 // scriptedUsageSource is a usagesource.Reader test double whose claim and

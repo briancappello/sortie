@@ -12,7 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
+
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestConnectionFailed(t *testing.T) {
@@ -941,11 +942,7 @@ func TestPrefixStdin_CloseUnblocksInFlightWrite(t *testing.T) {
 		writeErrCh <- err
 	}()
 
-	select {
-	case <-bw.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Write did not start within 2s")
-	}
+	waittest.Receive(t, bw.started, "Write start")
 
 	closeDone := make(chan struct{})
 	go func() {
@@ -953,18 +950,9 @@ func TestPrefixStdin_CloseUnblocksInFlightWrite(t *testing.T) {
 		close(closeDone)
 	}()
 
-	select {
-	case <-closeDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not return while a Write was blocked")
-	}
+	waittest.Receive(t, closeDone, "Close return while a Write is blocked")
 
-	select {
-	case err := <-writeErrCh:
-		if err == nil {
-			t.Error("blocked Write returned nil error after Close, want an error")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("blocked Write did not return after Close")
+	if err := waittest.Receive(t, writeErrCh, "blocked Write return after Close"); err == nil {
+		t.Error("blocked Write returned nil error after Close, want an error")
 	}
 }

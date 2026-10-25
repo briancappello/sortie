@@ -10,6 +10,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // mergeConflictMetricsSpy records merge-conflict-specific metric calls while
@@ -1426,7 +1427,7 @@ func runMergeConflictTriageToCompletion(t *testing.T, state *State, params Recon
 	if !ok || entry.Triage == nil {
 		t.Fatalf("PendingReactions[%s] = %+v, want a started triage run", rkey, entry)
 	}
-	waitTriageRunDone(t, entry.Triage)
+	waittest.Receive(t, entry.Triage.Done, "triage run to finish")
 	entry.PendingRetryAt = time.Time{}
 }
 
@@ -1681,7 +1682,7 @@ func TestReconcileMergeConflicts_Triage_DispatchAgent_HeadChangeBlockRunsOnce(t 
 	if !entry.HeadRecordedAt.IsZero() {
 		t.Fatal("HeadRecordedAt set on the starting pass, want zero (the head-change block must not run before the gate resolves)")
 	}
-	waitTriageRunDone(t, entry.Triage)
+	waittest.Receive(t, entry.Triage.Done, "triage run to finish")
 	entry.PendingRetryAt = time.Time{}
 
 	// Resuming pass: dispatch-agent falls through, so the head-change

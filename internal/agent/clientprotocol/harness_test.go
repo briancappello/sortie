@@ -9,14 +9,12 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
-
-const awaitTimeout = 5 * time.Second
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
@@ -65,6 +63,7 @@ func newTestSessionWithLogger(t *testing.T, agentConfig domain.AgentConfig, maxL
 		_ = inPw.Close()
 		state.stopOnce.Do(func() { close(state.stopCh) })
 		<-state.pumpDone
+		state.conn.Close()
 		_ = outPr.Close()
 		_ = outPw.Close()
 		_ = inPr.Close()
@@ -106,17 +105,6 @@ func runTurnAsyncCtx(ctx context.Context, state *sessionState, params domain.Run
 		ch <- turnOutcome{result: result, err: err}
 	}()
 	return ch
-}
-
-func awaitOutcome(t *testing.T, ch <-chan turnOutcome) turnOutcome {
-	t.Helper()
-	select {
-	case outcome := <-ch:
-		return outcome
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for the turn to finish")
-		return turnOutcome{}
-	}
 }
 
 type wireHeader struct {
@@ -167,15 +155,15 @@ func (r *outboundReader) next(t *testing.T) []byte {
 			t.Fatal("outbound stream ended with no more lines")
 		}
 		return line
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for the pump to write a line")
+	case <-waittest.Context(t).Done():
+		t.Fatalf("the pump wrote no line within %v", waittest.HangGuard)
 		return nil
 	}
 }
 
 func (r *outboundReader) awaitMethod(t *testing.T, method string) (id json.RawMessage) {
 	t.Helper()
-	deadline := time.After(awaitTimeout)
+	ctx := waittest.Context(t)
 	for {
 		select {
 		case line, ok := <-r.ch:
@@ -192,8 +180,8 @@ func (r *outboundReader) awaitMethod(t *testing.T, method string) (id json.RawMe
 			if h.Method == method {
 				return h.ID
 			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for method %q", method)
+		case <-ctx.Done():
+			t.Fatalf("method %q not written within %v", method, waittest.HangGuard)
 			return nil
 		}
 	}

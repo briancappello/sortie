@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // mgcTransitionCall records one TransitionIssue invocation.
@@ -1958,11 +1959,7 @@ func TestReconcileMergeCompletion_MissingSHAMarkerDoesNotWaitForOtherDestination
 	now = now.Add(31 * time.Minute)
 	reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 
-	select {
-	case <-store.marked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("observation marker not written while the Slack send is in flight, want it decided by the tracker comment alone")
-	}
+	waittest.Receive(t, store.marked, "observation marker written while the Slack send is in flight")
 	release()
 	state.TrackerOpsWg.Wait()
 

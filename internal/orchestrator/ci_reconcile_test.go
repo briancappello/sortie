@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/scm/scmcore"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // mockCIProvider is a controllable CIStatusProvider for CI reconcile tests.
@@ -1105,7 +1106,7 @@ func TestReconcileCIStatus_PassingVerdictEndsEscalation_NextFailureEscalatesOnce
 				state.PendingReactions[key].PendingRetryAt = time.Time{}
 				reconcileCIStatus(state, params, discardLogger(), context.Background(), metrics)
 				if run := state.PendingReactions[key].Triage; run != nil && !run.Applied {
-					waitTriageRunDone(t, run)
+					waittest.Receive(t, run.Done, "triage run to finish")
 					state.PendingReactions[key].PendingRetryAt = time.Time{}
 					reconcileCIStatus(state, params, discardLogger(), context.Background(), metrics)
 				}
@@ -1347,20 +1348,12 @@ func TestEscalateCIFailure_LabelTracksTrackerOps(t *testing.T) {
 	}()
 
 	// TrackerOpsWg must not resolve while AddLabel blocks on the gate.
-	select {
-	case <-waitDone:
-		t.Fatal("TrackerOpsWg.Wait() returned before AddLabel goroutine completed")
-	case <-time.After(20 * time.Millisecond):
-	}
+	waittest.Never(t, waitDone, 20*time.Millisecond, "TrackerOpsWg.Wait() return before the AddLabel goroutine completed")
 
 	// Release the gate to let AddLabel return and Done() fire.
 	close(gate)
 
-	select {
-	case <-waitDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("TrackerOpsWg.Wait() did not return after AddLabel goroutine completed")
-	}
+	waittest.Receive(t, waitDone, "TrackerOpsWg.Wait() return after the AddLabel goroutine completed")
 }
 
 // TestEscalateCIFailure_CommentTracksTrackerOps verifies that the
@@ -1390,20 +1383,12 @@ func TestEscalateCIFailure_CommentTracksTrackerOps(t *testing.T) {
 	}()
 
 	// TrackerOpsWg must not resolve while CommentIssue blocks on the gate.
-	select {
-	case <-waitDone:
-		t.Fatal("TrackerOpsWg.Wait() returned before CommentIssue goroutine completed")
-	case <-time.After(20 * time.Millisecond):
-	}
+	waittest.Never(t, waitDone, 20*time.Millisecond, "TrackerOpsWg.Wait() return before the CommentIssue goroutine completed")
 
 	// Release the gate to let CommentIssue return and Done() fire.
 	close(gate)
 
-	select {
-	case <-waitDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("TrackerOpsWg.Wait() did not return after CommentIssue goroutine completed")
-	}
+	waittest.Receive(t, waitDone, "TrackerOpsWg.Wait() return after the CommentIssue goroutine completed")
 }
 
 func TestComputeCIPendingDelay(t *testing.T) {
@@ -2651,7 +2636,7 @@ func runCITriageToCompletion(t *testing.T, state *State, params ReconcileParams,
 	if !ok || entry.Triage == nil {
 		t.Fatalf("PendingReactions[%s] = %+v, want a started triage run", rkey, entry)
 	}
-	waitTriageRunDone(t, entry.Triage)
+	waittest.Receive(t, entry.Triage.Done, "triage run to finish")
 	entry.PendingRetryAt = time.Time{}
 }
 

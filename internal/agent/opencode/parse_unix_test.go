@@ -14,13 +14,14 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 const scenarioOpencodeSSHStandIn = "opencode.ssh-stand-in"
@@ -98,34 +99,6 @@ func writeSSHCaptureScript(t *testing.T, dir, carriedName, envCapturePath, setti
 	return agenttest.WriteScript(t, dir, "fake-opencode-ssh", content)
 }
 
-func pollOpencodePIDAndAssertGone(t *testing.T, path string) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-	var pid int
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(path); err == nil {
-			if v, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil && v > 0 {
-				pid = v
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if pid == 0 {
-		t.Fatalf("pid file %q never populated", path)
-	}
-
-	goneDeadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(goneDeadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Errorf("descendant %d still answers signal 0, want it gone", pid)
-}
-
 func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	fixturePath := filepath.Join(tmpDir, "export_usage.json")
@@ -141,8 +114,8 @@ func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 
 	start := time.Now()
 	usage := queryExportUsage(context.Background(), state, 0)
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("queryExportUsage() took %v, want within 3s", elapsed)
+	if elapsed := time.Since(start); elapsed > procutil.DefaultDrainGrace {
+		t.Errorf("queryExportUsage() took %v, want under the default drain grace %v", elapsed, procutil.DefaultDrainGrace)
 	}
 	if usage.Usage.InputTokens != 1750 {
 		t.Errorf("InputTokens = %d, want 1750", usage.Usage.InputTokens)
@@ -151,7 +124,7 @@ func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 300", usage.Usage.OutputTokens)
 	}
 
-	pollOpencodePIDAndAssertGone(t, pidPath)
+	waittest.ProcessGone(t, waittest.PIDFile(t, pidPath))
 }
 
 func writeExportScript(t *testing.T, dir, fixtureName string, exitCode int) (string, string) {

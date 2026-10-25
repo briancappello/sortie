@@ -17,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -1975,7 +1976,7 @@ func runReviewTriageToCompletion(t *testing.T, state *State, params ReconcilePar
 	if !ok || entry.Triage == nil {
 		t.Fatalf("PendingReactions[%s] = %+v, want a started triage run", rkey, entry)
 	}
-	waitTriageRunDone(t, entry.Triage)
+	waittest.Receive(t, entry.Triage.Done, "triage run to finish")
 	entry.PendingRetryAt = time.Time{}
 }
 

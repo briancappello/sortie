@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // MCPRelayScenario names the built-in [Scenario] that stands in for an MCP
@@ -215,17 +217,13 @@ func (r RecordingMCPRelay) outcome(t testing.TB, tool string) toolCallResult {
 // successful tools/list exchange within bound, which shows the runtime has
 // read the server's tools.
 func (r RecordingMCPRelay) WaitToolsListed(bound time.Duration) bool {
-	deadline := time.Now().Add(bound)
-	for {
+	return waittest.UntilWithin(bound, 20*time.Millisecond, func() error {
 		data, _ := os.ReadFile(r.RecordPath) //nolint:gosec // G304: path is the test's own t.TempDir fixture.
-		if listing := requestOutcome(data, "tools/list", ""); listing.answered && !listing.failed {
-			return true
+		if listing := requestOutcome(data, "tools/list", ""); !listing.answered || listing.failed {
+			return errors.New("no successful tools/list exchange recorded")
 		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return nil
+	}) == nil
 }
 
 func reportToolCallOutcome(t testing.TB, tool string, outcome toolCallResult) {

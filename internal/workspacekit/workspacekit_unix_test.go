@@ -7,9 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func mustMkfifo(t *testing.T, path string) {
@@ -19,20 +20,13 @@ func mustMkfifo(t *testing.T, path string) {
 	}
 }
 
-// runWithDeadline runs fn on its own goroutine and fails the test if fn has
-// not returned within d, proving an open that could block on a FIFO with no
-// writer does not.
-func runWithDeadline(t *testing.T, d time.Duration, fn func() error) error {
+// runOnGoroutine runs fn off the test goroutine, so an open that blocks on a
+// FIFO with no writer fails the test at the hang guard instead of hanging it.
+func runOnGoroutine(t *testing.T, fn func() error) error {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- fn() }()
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(d):
-		t.Fatal("call blocked past the deadline, want a non-blocking open")
-		return nil
-	}
+	return waittest.Receive(t, done, "non-blocking open of a FIFO")
 }
 
 func TestOpenSortieDir_FIFOAtWorkspacePathRefusedWithoutHanging(t *testing.T) {
@@ -41,7 +35,7 @@ func TestOpenSortieDir_FIFOAtWorkspacePathRefusedWithoutHanging(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "workspace-fifo")
 	mustMkfifo(t, ws)
 
-	err := runWithDeadline(t, 5*time.Second, func() error {
+	err := runOnGoroutine(t, func() error {
 		_, err := OpenSortieDir(ws, false)
 		return err
 	})
@@ -56,7 +50,7 @@ func TestOpenSortieFile_FIFOAtSortiePathRefusedWithoutHanging(t *testing.T) {
 	ws := prepareWorkspace(t)
 	mustMkfifo(t, filepath.Join(ws, SortieDir, "f.txt"))
 
-	err := runWithDeadline(t, 5*time.Second, func() error {
+	err := runOnGoroutine(t, func() error {
 		_, err := OpenSortieFile(ws, "f.txt")
 		return err
 	})

@@ -16,11 +16,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/adaptertest"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func validConfig(endpoint string) map[string]any {
@@ -543,11 +543,8 @@ func TestFetchCandidateIssues_MaxPagesGuard(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	a := mustAdapter(t, validConfig(srv.URL))
-	issues, err := a.FetchCandidateIssues(ctx)
+	issues, err := a.FetchCandidateIssues(waittest.Context(t))
 	if err != nil {
 		t.Fatalf("FetchCandidateIssues: %v", err)
 	}
