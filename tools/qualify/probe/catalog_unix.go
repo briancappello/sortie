@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/waittest"
@@ -520,7 +521,7 @@ func (f *sharedFixture) launchDirs() []string {
 // its launch record to the tracker, and returns the record, nil when the
 // session's launch was already released.
 func (f *sharedFixture) registerSession(adapter domain.AgentAdapter, session domain.Session) (*procutil.Group, error) {
-	g, err := bindSessionGroup(session)
+	g, err := launchtest.Held(session.AgentPID)
 	if err != nil {
 		return nil, err
 	}

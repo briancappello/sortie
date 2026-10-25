@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
@@ -118,12 +119,12 @@ func requireReleased(t *testing.T, g *procutil.Group) {
 	t.Helper()
 
 	waittest.Until(t, func() error {
-		released, cleanupErr := g.Released()
-		if !released {
-			return errors.New("Released() = false, want the launch's group released")
+		err := launchtest.ReleaseError(g.Released())
+		if errors.Is(err, launchtest.ErrNotReleased) {
+			return err
 		}
-		if cleanupErr != nil {
-			t.Fatalf("Released() cleanup error = %v, want nil", cleanupErr)
+		if err != nil {
+			t.Fatalf("ReleaseError(Released()) = %v, want nil", err)
 		}
 		return nil
 	})

@@ -137,6 +137,8 @@ const (
 	ruleLIFECYCLE   contractRule = "LIFECYCLE"
 	ruleREADTIMEOUT contractRule = "READTIMEOUT"
 	ruleUSAGESUM    contractRule = "USAGESUM"
+
+	ruleGROUPSIGNAL contractRule = "GROUPSIGNAL"
 )
 
 // contractWorkspacekitImportPath is resolved per file so an aliased or
@@ -194,6 +196,7 @@ var contractSharedFamilyPackages = map[string]contractSharedPackage{
 	"github.com/sortie-ai/sortie/internal/agent/agenttest":                 {reason: "shared agent-adapter test support; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest": {reason: "shared turn-disposition conformance assertion, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest":  {reason: "shared credential-verification conformance assertion, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest":      {reason: "shared launch-record bind, kill and release verdict for tests and the qualification tool, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel":       {reason: "shared scripted model endpoint and scripted-model conformance driver; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/notify/route":                    {reason: "shared notification routing for orchestrator events; registers no kind and holds no adapter", coreImportable: true},
 	"github.com/sortie-ai/sortie/internal/notify/notifyhttp":               {reason: "shared JSON-over-HTTP transport for the notifier kinds; registers no kind and holds no adapter", coreImportable: false},
@@ -220,6 +223,8 @@ var contractAllowlist = map[string]map[contractRule]string{
 		ruleSTOPGRACE: "owns DefaultStopGrace, the fallback every other family reaches through StopGrace",
 		ruleCAPTURE:   "owns StartCapture and RunCapture, the capture every other launcher calls",
 		ruleLIFECYCLE: "owns the process-start primitives every other launcher calls",
+
+		ruleGROUPSIGNAL: "owns Group, which signals a launch's process group only while its unreaped direct child pins the number",
 	},
 	"agentcore": {
 		ruleLIFECYCLE:   "owns the fork-per-turn lifecycle built on the process-start primitives",
@@ -3238,6 +3243,120 @@ var contractUsageSumFields = map[string]bool{
 	"CacheWriteTokens": true,
 }
 
+// contractGroupSignalPaths are the import paths whose Kill rule GROUPSIGNAL
+// matches.
+var contractGroupSignalPaths = []string{"syscall", "golang.org/x/sys/unix"}
+
+const contractGroupSignalRemedy = "signal the launch's procutil.Group, obtained from the launch or through procutil.HeldGroup"
+
+// checkContractGroupSignalFile reports every rule GROUPSIGNAL violation in
+// file, and none when dirName is exempt. Resolution is by import path and
+// syntax only: a local shadowing a qualifier or Kill reads as the import.
+func checkContractGroupSignalFile(fset *token.FileSet, file *ast.File, dirName string) []contractViolation {
+	if contractExempt(dirName, ruleGROUPSIGNAL) {
+		return nil
+	}
+	qualifiers := map[string]string{}
+	dotPath := ""
+	for _, imp := range file.Imports {
+		importPath, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || !slices.Contains(contractGroupSignalPaths, importPath) {
+			continue
+		}
+		switch {
+		case imp.Name == nil:
+			qualifiers[path.Base(importPath)] = importPath
+		case imp.Name.Name == ".":
+			if dotPath == "" {
+				dotPath = importPath
+			}
+		case imp.Name.Name != "_":
+			qualifiers[imp.Name.Name] = importPath
+		}
+	}
+	if len(qualifiers) == 0 && dotPath == "" {
+		return nil
+	}
+
+	// referenceName returns the Kill name expr references, or "".
+	referenceName := func(expr ast.Expr) string {
+		switch e := expr.(type) {
+		case *ast.SelectorExpr:
+			if ident, ok := e.X.(*ast.Ident); ok && e.Sel.Name == "Kill" {
+				if importPath, ok := qualifiers[ident.Name]; ok {
+					return path.Base(importPath) + ".Kill"
+				}
+			}
+		case *ast.Ident:
+			if dotPath != "" && e.Name == "Kill" {
+				return path.Base(dotPath) + ".Kill"
+			}
+		}
+		return ""
+	}
+
+	var violations []contractViolation
+	handled := map[ast.Expr]bool{}
+	notReference := map[*ast.Ident]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			notReference[node.Name] = true
+		case *ast.CallExpr:
+			fun := ast.Unparen(node.Fun)
+			name := referenceName(fun)
+			if name == "" {
+				return true
+			}
+			handled[fun] = true
+			if contractGroupSignalArgument(node) {
+				violations = append(violations, contractViolation{
+					pos:  fset.Position(fun.Pos()),
+					text: "signals a process group or a set of processes by a raw number through " + name + "; " + contractGroupSignalRemedy,
+				})
+			}
+		case *ast.SelectorExpr:
+			notReference[node.Sel] = true
+			if name := referenceName(node); name != "" && !handled[node] {
+				violations = append(violations, contractViolation{
+					pos:  fset.Position(node.Pos()),
+					text: "references " + name + " without calling it, so its process argument cannot be checked; " + contractGroupSignalRemedy,
+				})
+			}
+		case *ast.Ident:
+			if name := referenceName(node); name != "" && !notReference[node] && !handled[node] {
+				violations = append(violations, contractViolation{
+					pos:  fset.Position(node.Pos()),
+					text: "references " + name + " without calling it, so its process argument cannot be checked; " + contractGroupSignalRemedy,
+				})
+			}
+		}
+		return true
+	})
+	return violations
+}
+
+// contractGroupSignalArgument reports whether call's first argument is a
+// negated, subtracted, or zero process number.
+func contractGroupSignalArgument(call *ast.CallExpr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	switch arg := ast.Unparen(call.Args[0]).(type) {
+	case *ast.UnaryExpr:
+		return arg.Op == token.SUB
+	case *ast.BinaryExpr:
+		return arg.Op == token.SUB
+	case *ast.BasicLit:
+		if arg.Kind != token.INT {
+			return false
+		}
+		n, err := strconv.ParseInt(arg.Value, 0, 64)
+		return err == nil && n == 0
+	}
+	return false
+}
+
 // checkContractLifecycleFile counts only a StartOutputRelease call as
 // releasing, and only for the function that makes it: a func value naming
 // it releases nothing, and a release elsewhere in the file cannot excuse a
@@ -3425,9 +3544,9 @@ func TestContractLifecycleReadTimeoutUsageSumRules_AppliesAndStaysCurrent(t *tes
 	}
 }
 
-// TestContractCaptureAndTeardown walks every non-test Go file under cmd/
-// and internal/ and fails on rules CAPTURE, SINK, TEARDOWN, REAPER,
-// ANCHOR, and WORKDIR.
+// TestContractCaptureAndTeardown walks every non-test Go file under cmd/,
+// internal/, and tools/qualify and fails on rules CAPTURE, SINK, TEARDOWN,
+// REAPER, ANCHOR, WORKDIR, HANDLER, and GROUPSIGNAL.
 func TestContractCaptureAndTeardown(t *testing.T) {
 	fset := token.NewFileSet()
 	walked := contractWalkCaptureAndTeardown(t, fset)
@@ -3456,6 +3575,13 @@ func TestContractCaptureAndTeardown(t *testing.T) {
 		if !contractExempt(w.pkg.dirName, ruleANCHOR) {
 			for _, file := range w.pkg.files {
 				for _, v := range checkContractAnchorFile(fset, file, w.pkg.importPath) {
+					t.Errorf("%s: %s", v.pos, v.text)
+				}
+			}
+		}
+		if !contractExempt(w.pkg.dirName, ruleGROUPSIGNAL) {
+			for _, file := range w.pkg.files {
+				for _, v := range checkContractGroupSignalFile(fset, file, w.pkg.dirName) {
 					t.Errorf("%s: %s", v.pos, v.text)
 				}
 			}
@@ -5509,10 +5635,10 @@ func TestContractStopGraceRule_StalenessGuardCatchesRealBreaks(t *testing.T) {
 }
 
 // TestContractCaptureAndTeardownRule_AppliesAndStaysCurrent guards rules
-// CAPTURE, SINK, TEARDOWN, and REAPER against going stale: each fails when
-// evaluated for no non-exempt file under internal/agent,
-// internal/orchestrator, or internal/workspace, or when an allowlist entry
-// names a directory the walk did not find.
+// CAPTURE, SINK, TEARDOWN, REAPER, ANCHOR, WORKDIR, and GROUPSIGNAL against
+// going stale: each fails when evaluated for no non-exempt file under
+// internal/agent, internal/orchestrator, or internal/workspace, or when an
+// allowlist entry names a directory the walk did not find.
 func TestContractCaptureAndTeardownRule_AppliesAndStaysCurrent(t *testing.T) {
 	fset := token.NewFileSet()
 	walked := contractWalkCaptureAndTeardown(t, fset)
@@ -5534,6 +5660,8 @@ func TestContractCaptureAndTeardownRule_AppliesAndStaysCurrent(t *testing.T) {
 	contractCheckWideRuleAllowlist(t, ruleANCHOR, found)
 	contractCheckWideRuleEvaluated(t, ruleWORKDIR, walked)
 	contractCheckWideRuleAllowlist(t, ruleWORKDIR, found)
+	contractCheckWideRuleEvaluated(t, ruleGROUPSIGNAL, walked)
+	contractCheckWideRuleAllowlist(t, ruleGROUPSIGNAL, found)
 }
 
 // TestContractCaptureAndTeardownRule_StalenessGuardCatchesRealBreaks
@@ -5542,7 +5670,7 @@ func TestContractCaptureAndTeardownRule_AppliesAndStaysCurrent(t *testing.T) {
 // package-level contractAllowlist a concurrent fixture test reads, so
 // neither runs in parallel.
 func TestContractCaptureAndTeardownRule_StalenessGuardCatchesRealBreaks(t *testing.T) {
-	for _, rule := range []contractRule{ruleCAPTURE, ruleSINK, ruleTEARDOWN, ruleREAPER, ruleANCHOR, ruleWORKDIR, ruleLIFECYCLE, ruleREADTIMEOUT, ruleUSAGESUM} {
+	for _, rule := range []contractRule{ruleCAPTURE, ruleSINK, ruleTEARDOWN, ruleREAPER, ruleANCHOR, ruleWORKDIR, ruleLIFECYCLE, ruleREADTIMEOUT, ruleUSAGESUM, ruleGROUPSIGNAL} {
 		t.Run(string(rule)+": zero files evaluated under a required root", func(t *testing.T) {
 			walked := []contractWalkedPackage{
 				{pkg: contractPackage{dirName: "fixture", importPath: "github.com/sortie-ai/sortie/internal/tracker/fixture"}},
@@ -6285,6 +6413,50 @@ func launch(cmd *exec.Cmd) {
 
 			if len(got) != tt.wantCount {
 				t.Errorf("checkContractLifecycleFile() returned %d violations, want %d: %+v", len(got), tt.wantCount, got)
+			}
+		})
+	}
+}
+
+func TestCheckContractGroupSignal_DetectsViolations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		imp     string
+		stmt    string
+		dirName string
+		wantCol int
+	}{
+		{name: "a negated group id", imp: `"syscall"`, stmt: "syscall.Kill(-pgid, sig)", dirName: "fixture", wantCol: 2},
+		{name: "an aliased x/sys/unix import", imp: `u "golang.org/x/sys/unix"`, stmt: "u.Kill(-cmd.Process.Pid, sig)", dirName: "fixture", wantCol: 2},
+		{name: "a dot import", imp: `. "syscall"`, stmt: "Kill(-pid, sig)", dirName: "fixture", wantCol: 2},
+		{name: "a zero process set", imp: `"golang.org/x/sys/unix"`, stmt: "unix.Kill(0, sig)", dirName: "fixture", wantCol: 2},
+		{name: "a function value", imp: `"syscall"`, stmt: "k := syscall.Kill", dirName: "fixture", wantCol: 7},
+		{name: "a subtraction", imp: `"syscall"`, stmt: "syscall.Kill(0-pgid, sig)", dirName: "fixture", wantCol: 2},
+		{name: "a positive process id is left to other checks", imp: `"syscall"`, stmt: "syscall.Kill(pid, 0)", dirName: "fixture"},
+		{name: "procutil is exempt", imp: `"syscall"`, stmt: "syscall.Kill(-pgid, sig)", dirName: "procutil"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fset, file := parseContractFixture(t, "package fixture\n\nimport "+tt.imp+"\n\nfunc f() {\n\t"+tt.stmt+"\n}\n")
+
+			got := checkContractGroupSignalFile(fset, file, tt.dirName)
+
+			if tt.wantCol == 0 {
+				if len(got) != 0 {
+					t.Errorf("checkContractGroupSignalFile(%q) = %+v, want no violation", tt.stmt, got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("checkContractGroupSignalFile(%q) returned %d violations, want 1: %+v", tt.stmt, len(got), got)
+			}
+			if got[0].pos.Line != 6 || got[0].pos.Column != tt.wantCol {
+				t.Errorf("checkContractGroupSignalFile(%q) reported at %d:%d, want 6:%d", tt.stmt, got[0].pos.Line, got[0].pos.Column, tt.wantCol)
 			}
 		})
 	}

@@ -14,12 +14,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -39,29 +39,15 @@ func requireTornDown(t *testing.T, g *procutil.Group) {
 	t.Helper()
 
 	err := waittest.UntilWithin(e2e.ShutdownDeadline, 10*time.Millisecond, func() error {
-		released, cleanupErr := g.Released()
-		if !released {
-			return errors.New("the launch's process group is not released")
+		err := launchtest.ReleaseError(g.Released())
+		if err != nil && !errors.Is(err, launchtest.ErrNotReleased) {
+			t.Fatalf("%v", err)
 		}
-		if cleanupErr != nil {
-			t.Fatalf("the launch's process group was released with a cleanup error: %v", cleanupErr)
-		}
-		return nil
+		return err
 	})
 	if err != nil {
 		t.Fatalf("the launch did not release its process group: %v", err)
 	}
-}
-
-// bindSessionGroup returns the held record of the launch session.AgentPID
-// names, or nil when that launch was already released. Call it right after
-// StartSession: once the session stops, its number no longer names it.
-func bindSessionGroup(session domain.Session) (*procutil.Group, error) {
-	pid, err := strconv.Atoi(session.AgentPID)
-	if err != nil {
-		return nil, fmt.Errorf("session agent_pid %q did not parse as a process id: %w", session.AgentPID, err)
-	}
-	return procutil.HeldGroup(pid), nil
 }
 
 // nativeProbeBound bounds every native surface launch.
@@ -304,7 +290,7 @@ func runPublishedPostureProbe(t *testing.T, coords Coordinates, envWrapper strin
 	if err != nil {
 		t.Fatalf("published-posture probe argv %v: launch the session: %v; a resolved command that is not the runtime the sample publishes fails here", argv, err)
 	}
-	group, bindErr := bindSessionGroup(session)
+	group, bindErr := launchtest.Held(session.AgentPID)
 	t.Cleanup(func() {
 		if err := adapter.StopSession(context.Background(), session); err != nil {
 			t.Errorf("stop the published-posture probe session: %v", err)

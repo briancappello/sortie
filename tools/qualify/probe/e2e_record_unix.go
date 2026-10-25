@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/waittest"
@@ -54,7 +55,7 @@ func teardownRun(cancel func(), done <-chan struct{}, harness *e2e.Harness, fixt
 	groupClean = true
 	for _, g := range harness.Agent().Groups() {
 		fixture.tracker.register(g)
-		if released, cleanupErr := g.Released(); !released || cleanupErr != nil {
+		if launchtest.ReleaseError(g.Released()) != nil {
 			groupClean = false
 		}
 	}

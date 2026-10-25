@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
@@ -58,6 +59,7 @@ var (
 
 	conformanceKindsOnce     sync.Once
 	errConformanceFactory    = errors.New("conformance factory refused")
+	errConformanceCleanup    = errors.New("conformance cleanup refused")
 	conformanceUnservedKinds = []ExchangeKind{ExchangeExhausted, ExchangeUnmatched, ExchangeUnrouted, ExchangeUnsupported, ExchangeInvalid}
 )
 
@@ -283,7 +285,10 @@ func conformanceGoneRun() conformanceGoneState {
 			Environment: Environment{Scenario: ScenarioStop},
 			Session:     domain.Session{AgentPID: strconv.Itoa(conformanceRuntimePID)},
 		},
-		td:        teardown{snapshot: []int{conformanceRuntimePID, conformanceRuntimePID + 1}},
+		td: teardown{
+			snapshot: []int{conformanceRuntimePID, conformanceRuntimePID + 1},
+			launches: []func() (bool, error){func() (bool, error) { return true, nil }},
+		},
 		remaining: map[int]string{},
 	}
 }
@@ -943,6 +948,18 @@ func TestConformancePropertyRuntimeGone(t *testing.T) {
 			name:   "R-5: a snapshot process outside the reported ones still answers",
 			mutate: func(s *conformanceGoneState) { s.remaining[pid+1] = "process 4243" },
 			want:   []string{strconv.Itoa(pid + 1)},
+		},
+		{
+			name:   "R-6: a launch record is not released",
+			mutate: func(s *conformanceGoneState) { s.td.launches[0] = func() (bool, error) { return false, nil } },
+			want:   []string{launchtest.ErrNotReleased.Error()},
+		},
+		{
+			name: "R-6: a launch record is released with a cleanup error",
+			mutate: func(s *conformanceGoneState) {
+				s.td.launches[0] = func() (bool, error) { return true, errConformanceCleanup }
+			},
+			want: []string{errConformanceCleanup.Error()},
 		},
 	}
 

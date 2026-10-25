@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/waittest"
@@ -302,36 +302,6 @@ func writeFakeAppServerScript(t *testing.T, dir, descendantScript string) string
 	return agenttest.WriteScript(t, dir, "fake-codex-app-server", content)
 }
 
-// killGroupOnCleanup registers a best-effort force kill of the process
-// group led by pid, so a failing assertion cannot strand the subprocess
-// or its descendants for the rest of the run.
-func killGroupOnCleanup(t *testing.T, pid int) {
-	t.Helper()
-	t.Cleanup(func() {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-	})
-}
-
-// killEscapedGroupOnCleanup registers a best-effort SIGKILL of the
-// process group led by the PID recorded in pidFile, read lazily at
-// cleanup time so a setsid-escaped descendant a fixture starts in the
-// background does not need to have already written it when this is
-// called. It tolerates a pidFile that never appears.
-func killEscapedGroupOnCleanup(t *testing.T, pidFile string) {
-	t.Helper()
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
-		if convErr != nil || pid <= 0 {
-			return
-		}
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-	})
-}
-
 // TestStartSession_CancelSignalsProcessGroup verifies that cancelling the
 // context passed to StartSession, after the session has been established,
 // tears the app-server down through its process group: the group receives
@@ -379,7 +349,7 @@ func TestStartSession_CancelSignalsProcessGroup(t *testing.T) {
 	if convErr != nil {
 		t.Fatalf("session.AgentPID = %q, want a PID: %v", session.AgentPID, convErr)
 	}
-	killGroupOnCleanup(t, directPID)
+	launchtest.KillOnCleanup(t, session.AgentPID)
 
 	descendantPID := waittest.PIDFile(t, pidFile)
 
@@ -430,7 +400,7 @@ func TestStartSession_ReleaseEndsTurnWhenEscapedDescendantHoldsOutput(t *testing
 
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "escaped.pid")
-	killEscapedGroupOnCleanup(t, pidFile)
+	t.Cleanup(func() { agenttest.KillEscaped(pidFile) })
 	script := writeFakeAppServerScriptEscapedTurn(t, tmpDir, pidFile)
 
 	adapter := &CodexAdapter{drainGrace: 300 * time.Millisecond}

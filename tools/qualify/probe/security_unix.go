@@ -4,6 +4,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/tools/qualify/e2e"
@@ -376,11 +378,12 @@ func drainOwnedProcesses(owned *ownedDescendants) {
 
 // releasedWithCleanupError counts the records whose reap reported a
 // cleanup error. A released record is out of every process-table read,
-// so a member that outlived its reap shows up only here.
+// so a member that outlived its reap shows up only here; a record still
+// held stays with the process-table read.
 func releasedWithCleanupError(groups []*procutil.Group) int {
 	failed := 0
 	for _, g := range groups {
-		if released, cleanupErr := g.Released(); released && cleanupErr != nil {
+		if err := launchtest.ReleaseError(g.Released()); err != nil && !errors.Is(err, launchtest.ErrNotReleased) {
 			failed++
 		}
 	}

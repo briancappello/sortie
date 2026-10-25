@@ -209,7 +209,7 @@ func TestForkPerTurnSession_ZeroExitIsNotCancelledWhenTheDeadlineFallsDuringTheD
 	tmpDir := t.TempDir()
 	pidFile := filepath.Join(tmpDir, "descendant.pid")
 	script := writeStderrOnlyDescendantScript(t, tmpDir, pidFile, true)
-	killEscapedGroupOnCleanup(t, pidFile)
+	t.Cleanup(func() { agenttest.KillEscaped(pidFile) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -271,25 +271,6 @@ func writeStderrOnlyDescendantScript(t *testing.T, dir, pidFile string, escape b
 	t.Helper()
 	child := agenttest.FakeRuntime(t, dir, "agent-stderr-only-child", agenttest.OutputScenario, agenttest.Output{Hang: true})
 	return agenttest.FakeRuntime(t, dir, "agent-stderr-only-descendant", "stderrOnlyLeader", pgidLeaderParams{ChildPath: child, PIDFile: pidFile, Escape: escape})
-}
-
-// killEscapedGroupOnCleanup registers a best-effort SIGKILL of the
-// process group led by pid, read from pidFile, so a setsid-escaped
-// descendant this file's fixtures leave running does not survive past
-// the test that started it.
-func killEscapedGroupOnCleanup(t *testing.T, pidFile string) {
-	t.Helper()
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		pid, convErr := strconv.Atoi(strings.TrimSpace(string(data)))
-		if convErr != nil || pid <= 0 {
-			return
-		}
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-	})
 }
 
 // TestForkPerTurnSession_Arm5_ExternalSIGTERM verifies that a subprocess
@@ -569,7 +550,7 @@ func TestForkPerTurnSession_EscapedDescendantHoldsStdout(t *testing.T) {
 	}()
 
 	waittest.PIDFile(t, pidFile)
-	killEscapedGroupOnCleanup(t, pidFile)
+	t.Cleanup(func() { agenttest.KillEscaped(pidFile) })
 
 	reapStart := time.Now()
 	cancel()

@@ -12,9 +12,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
@@ -190,13 +190,10 @@ func TestRunHook(t *testing.T) {
 		}
 	})
 
-	// Process group kill prevents orphaned grandchildren.
 	t.Run("timeout kills child processes", func(t *testing.T) {
 		t.Parallel()
 
-		// The script writes its PID (which is also the PGID due to
-		// Setpgid) to stdout, then spawns background sleeps and waits.
-		script := `echo $$; sleep 600 & sleep 600 & wait`
+		script := `sleep 600 & echo $!; sleep 600 & echo $!; wait`
 
 		_, err := RunHook(context.Background(), HookParams{
 			Script:    script,
@@ -209,26 +206,17 @@ func TestRunHook(t *testing.T) {
 		if he.Op != "timeout" {
 			t.Errorf("HookError.Op = %q, want %q", he.Op, "timeout")
 		}
-
-		// Parse the PGID from output. The shell's PID equals the PGID
-		// because Setpgid: true makes it the group leader.
-		pgidStr := strings.TrimSpace(he.Output)
-		// Output may contain multiple lines if sleep printed something;
-		// take just the first line which is the echo $$ output.
-		if idx := strings.IndexByte(pgidStr, '\n'); idx >= 0 {
-			pgidStr = pgidStr[:idx]
+		fields := strings.Fields(he.Output)
+		if len(fields) != 2 {
+			t.Fatalf("HookError.Output = %q, want the pids of two background sleeps", he.Output)
 		}
-		var pgid int
-		if _, err := fmt.Sscanf(pgidStr, "%d", &pgid); err != nil {
-			t.Fatalf("failed to parse PGID from output %q: %v", he.Output, err)
-		}
-
-		waittest.Until(t, func() error {
-			if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
-				return fmt.Errorf("process group %d still answers signal 0 after timeout, want it killed", pgid)
+		for _, field := range fields {
+			pid, err := strconv.Atoi(field)
+			if err != nil {
+				t.Fatalf("HookError.Output = %q, want only pids: %v", he.Output, err)
 			}
-			return nil
-		})
+			waittest.ProcessGone(t, pid)
+		}
 	})
 
 	t.Run("output truncation", func(t *testing.T) {

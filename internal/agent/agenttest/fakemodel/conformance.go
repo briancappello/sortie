@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
@@ -163,7 +164,8 @@ type interruption struct {
 }
 
 type teardown struct {
-	snapshot  []int // agenttest.LiveDescendants(os.Getpid()) once holding closed, before the interrupt
+	snapshot  []int                                      // agenttest.LiveDescendants(os.Getpid()) once holding closed, before the interrupt
+	launches  []func() (released bool, cleanupErr error) // Released of each launch record held for a snapshot pid, bound while the request was held
 	stillHeld []Exchange
 }
 
@@ -540,6 +542,7 @@ func runInterruption(t *testing.T, b Binding, scenario Scenario) {
 	case <-server.holding():
 		in.held = true
 		td.snapshot = agenttest.LiveDescendants(os.Getpid())
+		td.launches = heldLaunches(td.snapshot)
 	case turn = <-outcome:
 		ended = true
 	case <-holdCtx.Done():
@@ -587,7 +590,7 @@ func runInterruption(t *testing.T, b Binding, scenario Scenario) {
 	deadline := time.Now().Add(holdEndBound)
 	td.stillHeld = server.awaitHolds(holdEndBound)
 	if livenessChecked {
-		awaitGone(td.snapshot, remainingRuntime, deadline)
+		awaitGone(td.snapshot, remainingRuntime, td.launches, deadline)
 	}
 
 	run := Run{
@@ -777,10 +780,15 @@ func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, res
 
 // awaitGone's deadline is shared with awaitHolds, which may have spent all
 // of it; the check still runs once then.
-func awaitGone(pids []int, remaining func(pid int) string, deadline time.Time) {
+func awaitGone(pids []int, remaining func(pid int) string, launches []func() (bool, error), deadline time.Time) {
 	_ = waittest.UntilWithin(max(time.Until(deadline), time.Nanosecond), livenessPoll, func() error {
 		if i := slices.IndexFunc(pids, func(pid int) bool { return remaining(pid) != "" }); i >= 0 {
 			return fmt.Errorf("process %d is still running", pids[i])
+		}
+		for _, released := range launches {
+			if done, _ := released(); !done {
+				return launchtest.ErrNotReleased
+			}
 		}
 		return nil
 	})
@@ -1491,6 +1499,11 @@ func runtimeGoneViolations(run Run, remaining func(pid int) string, td teardown)
 	for _, pid := range td.snapshot {
 		if left := remaining(pid); left != "" {
 			v.add("%s of process %d, alive while the request was held, still answers %s after StopSession returned", left, pid, holdEndBound)
+		}
+	}
+	for _, released := range td.launches {
+		if err := launchtest.ReleaseError(released()); err != nil {
+			v.add("launch of a process alive while the request was held, after StopSession returned: %v", err)
 		}
 	}
 	return v.items
