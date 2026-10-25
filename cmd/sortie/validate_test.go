@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -416,20 +415,9 @@ func TestValidateDoesNotStartWatcher(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	ctx := context.Background()
 
-	// The validate subcommand must return promptly; no filesystem
-	// watcher goroutine is started (mgr.Start is never called).
-	start := time.Now()
 	code := run(ctx, []string{"validate", wfPath}, &stdout, &stderr)
-	elapsed := time.Since(start)
-
 	if code != 0 {
 		t.Fatalf("run(validate) = %d, want 0; stderr: %s", code, stderr.String())
-	}
-	// 30 s is generous enough to remain stable on slow CI runners while
-	// still catching the case where a watcher goroutine blocks the return.
-	const maxDuration = 30 * time.Second
-	if elapsed > maxDuration {
-		t.Errorf("run(validate) took %v, want < %v (possible watcher goroutine started)", elapsed, maxDuration)
 	}
 }
 

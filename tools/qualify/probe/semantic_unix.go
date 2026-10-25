@@ -15,6 +15,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	"github.com/sortie-ai/sortie/tools/qualify/eval"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
@@ -235,28 +236,24 @@ func induceRefusalPair(t *testing.T, coords Coordinates, fixture *sharedFixture,
 // in a reading its record was held through. ended=true means the turn
 // finished first, the one case no signal can be sent.
 func awaitProbeUnderTurn(owned *ownedDescendants, probePath string, pgid int, turnEnded <-chan struct{}, bound time.Duration) (observed, ended bool) {
-	deadline := time.Now().Add(bound)
-	for {
+	basename := filepath.Base(probePath)
+	_ = waittest.UntilWithin(bound, probeExecutionPollInterval, func() error {
 		select {
 		case <-turnEnded:
-			return false, true
+			ended = true
+			return nil
 		default:
 		}
 		if snapshot, held, err := owned.readHeld(); err == nil {
 			owned.observe(snapshot, held)
-			if slices.Contains(held, pgid) && launchRunsProgram(snapshot, pgid, filepath.Base(probePath)) {
-				return true, false
+			if slices.Contains(held, pgid) && launchRunsProgram(snapshot, pgid, basename) {
+				observed = true
+				return nil
 			}
 		}
-		if time.Now().After(deadline) {
-			return false, false
-		}
-		select {
-		case <-turnEnded:
-			return false, true
-		case <-time.After(probeExecutionPollInterval):
-		}
-	}
+		return fmt.Errorf("%s is not running under group %d", basename, pgid)
+	})
+	return observed, ended
 }
 
 // The protocol surface needs its context cancelled to reach the

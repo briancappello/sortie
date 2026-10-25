@@ -7,11 +7,11 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 type flakyBlockerResolver struct {
@@ -45,19 +45,21 @@ func newOnceHarness(t *testing.T, tune func(*config.ServiceConfig)) *runHarness 
 func runUntilSettled(t *testing.T, h *runHarness) OnceResult {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	done := make(chan struct{})
 	go func() {
 		h.o.Run(ctx)
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("log: %s", h.logs.String())
+		}
+	})
+	t.Cleanup(func() {
 		cancel()
 		<-done
-		t.Fatalf("Run did not return within 10s; log: %s", h.logs.String())
-	}
+	})
+	waittest.Receive(t, done, "Run return")
 	return h.o.OnceResult()
 }
 

@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 type fakeDrain struct {
@@ -143,7 +143,7 @@ func measuredTurn(t *testing.T, state *sessionState, inPw interface {
 		`{"sessionUpdate":"tool_call_update","toolCallId":"call_001","status":"completed","title":"Read main.go"}}}`)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn, Meta: meta})
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -295,7 +295,7 @@ func TestCancelledTurnRecordsSpendOccurred(t *testing.T) {
 			out.awaitMethod(t, methodSessionCancel)
 			respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonCancelled})
 
-			outcome := awaitOutcome(t, outcomeCh)
+			outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 			if outcome.result.SpendUnaccounted != tt.wantSpendUnaccounted {
 				t.Errorf("result.SpendUnaccounted = %v, want %v",
@@ -375,22 +375,13 @@ func sendModelReachedChunk(t *testing.T, w io.Writer) {
 		`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"`+modelReachedMarker+`"}}}}`)
 }
 
-func awaitReached(t *testing.T, reached <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-reached:
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for the turn's assistant chunk to reach the pump")
-	}
-}
-
 // awaitResponseTo scans until the pump has answered the request carrying rawID.
 // The pump answers inside the call that handles the request, so seeing the
 // answer means the whole of that handling ran.
 func awaitResponseTo(t *testing.T, out *outboundReader, rawID string) {
 	t.Helper()
 
-	deadline := time.After(awaitTimeout)
+	ctx := waittest.Context(t)
 	for {
 		select {
 		case line, ok := <-out.ch:
@@ -404,8 +395,8 @@ func awaitResponseTo(t *testing.T, out *outboundReader, rawID string) {
 			if h.Method == "" && string(h.ID) == rawID {
 				return
 			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for the answer to request %s", rawID)
+		case <-ctx.Done():
+			t.Fatalf("request %s not answered within %v", rawID, waittest.HangGuard)
 			return
 		}
 	}
@@ -421,7 +412,7 @@ func modelReachedTurn(t *testing.T, state *sessionState, inPw io.Writer, out *ou
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: onEvent})
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 	sendModelReachedChunk(t, inPw)
-	awaitReached(t, reached)
+	waittest.Receive(t, reached, "the turn's assistant chunk to reach the pump")
 	return promptID, outcomeCh
 }
 
@@ -481,7 +472,7 @@ func TestAbnormalTurnEndRecoversRecordedSpend(t *testing.T) {
 		_, outcomeCh := modelReachedTurn(t, state, inPw, out, &events)
 		inPw.Close() //nolint:errcheck,gosec // ending the simulated stream
 
-		assertRecoveredOnAbnormalEnd(t, reader, events, awaitOutcome(t, outcomeCh), want, domain.ErrPortExit)
+		assertRecoveredOnAbnormalEnd(t, reader, events, waittest.Receive(t, outcomeCh, "turn outcome"), want, domain.ErrPortExit)
 	})
 
 	t.Run("the prompt is answered with an error", func(t *testing.T) {
@@ -494,7 +485,7 @@ func TestAbnormalTurnEndRecoversRecordedSpend(t *testing.T) {
 		promptID, outcomeCh := modelReachedTurn(t, state, inPw, out, &events)
 		respondErrorLine(t, inPw, promptID, -32603, "internal error")
 
-		assertRecoveredOnAbnormalEnd(t, reader, events, awaitOutcome(t, outcomeCh), want, domain.ErrResponseError)
+		assertRecoveredOnAbnormalEnd(t, reader, events, waittest.Receive(t, outcomeCh, "turn outcome"), want, domain.ErrResponseError)
 	})
 
 	t.Run("the prompt is answered with a result nothing can decode", func(t *testing.T) {
@@ -507,7 +498,7 @@ func TestAbnormalTurnEndRecoversRecordedSpend(t *testing.T) {
 		promptID, outcomeCh := modelReachedTurn(t, state, inPw, out, &events)
 		sendLine(t, inPw, `{"jsonrpc":"2.0","id":`+string(promptID)+`,"result":"not an object"}`)
 
-		assertRecoveredOnAbnormalEnd(t, reader, events, awaitOutcome(t, outcomeCh), want, domain.ErrTurnOutcomeUnknown)
+		assertRecoveredOnAbnormalEnd(t, reader, events, waittest.Receive(t, outcomeCh, "turn outcome"), want, domain.ErrTurnOutcomeUnknown)
 	})
 }
 
@@ -524,15 +515,11 @@ func TestWriteFailureTurnEndRecoversRecordedSpend(t *testing.T) {
 	onEvent, reached := chunkBarrier(&events)
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: onEvent})
 
-	select {
-	case <-state.conn.WriteFailed():
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for the prompt send's write to fail")
-	}
+	waittest.Receive(t, state.conn.WriteFailed(), "the prompt send's write to fail")
 	sendModelReachedChunk(t, inPw)
-	awaitReached(t, reached)
+	waittest.Receive(t, reached, "the turn's assistant chunk to reach the pump")
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 	assertRecoveredOnAbnormalEnd(t, reader, events, outcome, want, domain.ErrPortExit)
 	var agentErr *domain.AgentError
@@ -551,7 +538,7 @@ func TestAbnormalTurnEndWithNoRecordIsNotAMeasuredZero(t *testing.T) {
 	_, outcomeCh := modelReachedTurn(t, state, inPw, out, &events)
 	inPw.Close() //nolint:errcheck,gosec // ending the simulated stream
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 	if calls := reader.drainCallCount(); calls != 1 {
 		t.Errorf("reader.Drain() calls = %d, want 1: an abnormal end must still consult the source", calls)
@@ -578,18 +565,14 @@ func TestRecoveringTurnKeepsTheDispositionItAlreadyObserved(t *testing.T) {
 	promptID, outcomeCh := modelReachedTurn(t, state, inPw, out, &events)
 	respondErrorLine(t, inPw, promptID, -32603, "internal error")
 
-	select {
-	case <-reader.entered:
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for the abnormal end to consult the source")
-	}
+	waittest.Receive(t, reader.entered, "the abnormal end to consult the source")
 
 	sendLine(t, inPw, `{"jsonrpc":"2.0","id":9001,"method":"`+methodElicitationCreate+`","params":{}}`)
 	awaitResponseTo(t, out, "9001")
 	awaitPumpObserved(t, state)
 	close(reader.gate)
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 	assertRecoveredOnAbnormalEnd(t, reader, events, outcome, want, domain.ErrResponseError)
 }
@@ -606,7 +589,7 @@ func TestAbnormalTurnEndWithoutModelEvidenceConsultsNothing(t *testing.T) {
 	awaitPumpObserved(t, state)
 	inPw.Close() //nolint:errcheck,gosec // ending the simulated stream
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 	if calls := reader.drainCallCount(); calls != 0 {
 		t.Errorf("reader.Drain() calls = %d, want 0: nothing in this turn showed it reached a model", calls)
@@ -684,11 +667,7 @@ func awaitPumpObserved(t *testing.T, state *sessionState) {
 
 	done := make(chan struct{})
 	state.inbox.Put(pumpItem{control: &pumpControl{answerOpen: done}})
-	select {
-	case <-done:
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for the pump to drain its inbox")
-	}
+	waittest.Receive(t, done, "the pump to drain its inbox")
 }
 
 func publishHandshake(state *sessionState, reader usageReader) {

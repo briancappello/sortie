@@ -2,14 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
@@ -165,10 +163,7 @@ func TestRunAdapterCloseOnShutdown(t *testing.T) {
 	wfPath := writeCloseableWorkflow(t, dir, "issues.json", token)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0; stderr: %s", code, stderr.String())
 	}

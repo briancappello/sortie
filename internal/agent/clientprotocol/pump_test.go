@@ -24,6 +24,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestRefusalNoticesUseSharedNotificationEmitter(t *testing.T) {
@@ -99,7 +100,7 @@ func TestPumpStreamEndCleanExit(t *testing.T) {
 		t.Fatalf("close the simulated agent stream: %v", err)
 	}
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrPortExit,
@@ -138,7 +139,7 @@ func TestPumpStreamEndReadFailure(t *testing.T) {
 		t.Fatalf("CloseWithError: %v", err)
 	}
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrPortExit,
@@ -165,7 +166,7 @@ func TestFinalizeStreamEndLineBound(t *testing.T) {
 	// writing from a goroutine lets the too-long condition end the stream.
 	go func() { _, _ = inPw.Write(oversized) }()
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrTurnOutcomeUnknown,
@@ -214,42 +215,31 @@ func TestSessionUpdateBeforeAnyPromptNotLost(t *testing.T) {
 		OnEvent: func(e domain.AgentEvent) { eventCh <- e },
 	})
 
-	first := waitEvent(t, eventCh)
+	first := waittest.Receive(t, eventCh, "an agent event")
 	if first.Type != domain.EventSessionStarted {
 		t.Fatalf("first event type = %q, want %q", first.Type, domain.EventSessionStarted)
 	}
-	second := waitEvent(t, eventCh)
+	second := waittest.Receive(t, eventCh, "an agent event")
 	if second.Type != domain.EventNotification {
 		t.Fatalf("second event type = %q, want %q (the once-per-session capability notice)", second.Type, domain.EventNotification)
 	}
-	third := waitEvent(t, eventCh)
+	third := waittest.Receive(t, eventCh, "an agent event")
 	if third.Type != domain.EventNotification || third.Message != "" {
 		t.Fatalf("third event = %+v, want the queued chunk's liveness notification", third)
 	}
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
-	fourth := waitEvent(t, eventCh)
+	fourth := waittest.Receive(t, eventCh, "an agent event")
 	if fourth.Type != domain.EventNotification || fourth.Message != "queued before any turn" {
 		t.Fatalf("fourth event = %+v, want the queued message", fourth)
 	}
 	if !fourth.Timestamp.Equal(third.Timestamp) {
 		t.Errorf("queued message timestamp = %v, want %v, when its chunk arrived before the turn", fourth.Timestamp, third.Timestamp)
-	}
-}
-
-func waitEvent(t *testing.T, ch <-chan domain.AgentEvent) domain.AgentEvent {
-	t.Helper()
-	select {
-	case ev := <-ch:
-		return ev
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for an event")
-		return domain.AgentEvent{}
 	}
 }
 
@@ -334,7 +324,7 @@ func TestToolDeliveryReportSkippedDuringWindDownAndTeardown(t *testing.T) {
 		}
 
 		respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonCancelled})
-		awaitOutcome(t, outcomeCh)
+		waittest.Receive(t, outcomeCh, "turn outcome")
 
 		if got := countToolDeliveryNotifications(events); got != 0 {
 			t.Errorf("tool delivery uncallable notifications during wind-down = %d, want 0", got)
@@ -409,7 +399,7 @@ func TestHandshakeToolServersDeliveredReachesPump(t *testing.T) {
 	out.next(t)
 
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -462,19 +452,14 @@ func TestRunTurn_StalledConsumerDoesNotParkPump(t *testing.T) {
 			_, writeErr := fmt.Fprintln(inPw, line)
 			errCh <- writeErr
 		}()
-		select {
-		case writeErr := <-errCh:
-			if writeErr != nil {
-				t.Fatalf("write session/update chunk %d: %v", i, writeErr)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("peer write %d did not return within 10s while the OnEvent gate was held, want the reader to never park behind the pump's own stalled delivery", i)
+		if writeErr := waittest.Receive(t, errCh, fmt.Sprintf("peer write %d while the OnEvent gate was held, with the reader never parked behind the pump's own stalled delivery", i)); writeErr != nil {
+			t.Fatalf("write session/update chunk %d: %v", i, writeErr)
 		}
 	}
 	close(gate)
 
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -535,7 +520,7 @@ func TestPumpAgentMessageChunksAreCoalesced(t *testing.T) {
 	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"plan","entries":[]}}}`)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
 
-	if outcome := awaitOutcome(t, outcomeCh); outcome.err != nil {
+	if outcome := waittest.Receive(t, outcomeCh, "turn outcome"); outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
 
@@ -676,9 +661,9 @@ func TestPumpAbandonmentFinalizesActiveTurnWithoutWaitingOnConnDone(t *testing.T
 	start := time.Now()
 	close(reaped)
 
-	outcome := awaitOutcome(t, outcomeCh)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("the turn finalized after %v, want it bounded by the injected grace %v rather than the parked reader's own unbounded wait", elapsed, grace)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
+	if elapsed := time.Since(start); elapsed > procutil.DefaultDrainGrace {
+		t.Errorf("the turn finalized after %v, want it bounded by the injected grace %v rather than the default drain grace %v", elapsed, grace, procutil.DefaultDrainGrace)
 	}
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
@@ -701,7 +686,7 @@ func TestPumpReaderDoneInsideGraceLeavesStreamEndOutcomeUntouched(t *testing.T) 
 		t.Fatalf("close the simulated agent stream: %v", err)
 	}
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrPortExit,
@@ -711,11 +696,7 @@ func TestPumpReaderDoneInsideGraceLeavesStreamEndOutcomeUntouched(t *testing.T) 
 	// Waiting out grace, rather than checking right away, proves the release's
 	// ReaderDone arm caught the close rather than the assertion simply running
 	// before an unattended timer could have fired.
-	select {
-	case <-state.release.Abandoned():
-		t.Error("the release abandoned though the reader ended inside its grace, want the latch to stay unset")
-	case <-time.After(grace + 500*time.Millisecond):
-	}
+	waittest.Never(t, state.release.Abandoned(), grace+500*time.Millisecond, "the release to abandon though the reader ended inside its grace")
 }
 
 func TestPumpStartTurnAfterAbandonmentRefusedWithReleaseMessage(t *testing.T) {
@@ -727,14 +708,10 @@ func TestPumpStartTurnAfterAbandonmentRefusedWithReleaseMessage(t *testing.T) {
 	markSessionKnown(state)
 
 	close(reaped)
-	select {
-	case <-state.release.Abandoned():
-	case <-time.After(awaitTimeout):
-		t.Fatal("the release never abandoned within the test's wait bound")
-	}
+	waittest.Receive(t, state.release.Abandoned(), "the release to abandon")
 
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: func(domain.AgentEvent) {}})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 	var agentErr *domain.AgentError
 	if !errors.As(outcome.err, &agentErr) {
@@ -821,7 +798,7 @@ func TestPumpAbandonmentKeepsPendingCancelledOutcome(t *testing.T) {
 
 	close(reaped)
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal: agentcore.TerminalCancelled,
 	}, outcome.result, outcome.err)
@@ -835,19 +812,11 @@ func TestPumpReturnsOnStopChAfterAbandonmentWithReaderDoneNeverClosing(t *testin
 	state, _, _ := newTestSessionWithRelease(t, grace, reaped)
 
 	close(reaped)
-	select {
-	case <-state.release.Abandoned():
-	case <-time.After(awaitTimeout):
-		t.Fatal("the release never abandoned within the test's wait bound")
-	}
+	waittest.Receive(t, state.release.Abandoned(), "the release to abandon")
 
 	state.stopOnce.Do(func() { close(state.stopCh) })
 
-	select {
-	case <-state.pumpDone:
-	case <-time.After(awaitTimeout):
-		t.Fatal("runPump did not return on state.stopCh after abandonment, though the connection's reader never ended")
-	}
+	waittest.Receive(t, state.pumpDone, "runPump to return on state.stopCh after abandonment, though the connection's reader never ended")
 }
 
 func buildAbandonedRelease(t *testing.T) *procutil.OutputRelease {
@@ -861,11 +830,7 @@ func buildAbandonedRelease(t *testing.T) *procutil.OutputRelease {
 		Grace:      time.Millisecond,
 		Logger:     discardLogger(),
 	})
-	select {
-	case <-r.Abandoned():
-	case <-time.After(awaitTimeout):
-		t.Fatal("the release never abandoned")
-	}
+	waittest.Receive(t, r.Abandoned(), "the release to abandon")
 	return r
 }
 
@@ -897,13 +862,9 @@ func TestStreamEndSitesReportAbandonmentMessageOnceReleaseHasGivenUp(t *testing.
 
 		p.handleStreamEnd()
 
-		select {
-		case end := <-turn.resultCh:
-			if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
-				t.Errorf("handleStreamEnd() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
-			}
-		case <-time.After(awaitTimeout):
-			t.Fatal("handleStreamEnd() did not finalize the active turn")
+		end := waittest.Receive(t, turn.resultCh, "handleStreamEnd() to finalize the active turn")
+		if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
+			t.Errorf("handleStreamEnd() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
 		}
 	})
 
@@ -922,13 +883,9 @@ func TestStreamEndSitesReportAbandonmentMessageOnceReleaseHasGivenUp(t *testing.
 
 		p.handleStreamEndMessage(&jsonrpc.Message{Kind: jsonrpc.KindStreamEnd, Err: io.ErrUnexpectedEOF})
 
-		select {
-		case end := <-turn.resultCh:
-			if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
-				t.Errorf("handleStreamEndMessage() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
-			}
-		case <-time.After(awaitTimeout):
-			t.Fatal("handleStreamEndMessage() did not finalize the active turn")
+		end := waittest.Receive(t, turn.resultCh, "handleStreamEndMessage() to finalize the active turn")
+		if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
+			t.Errorf("handleStreamEndMessage() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
 		}
 	})
 }
@@ -958,12 +915,8 @@ func TestHandleAbandonmentDrainsQueuedResponseBeforeFinalizing(t *testing.T) {
 
 	p.handleAbandonment()
 
-	select {
-	case end := <-turn.resultCh:
-		if end.err != nil {
-			t.Errorf("handleAbandonment() with a queued prompt response finalized the turn with error %v, want the queued response's own successful outcome (nil error): the response was already queued and must be drained before the turn is finalized as abandoned", end.err)
-		}
-	case <-time.After(awaitTimeout):
-		t.Fatal("handleAbandonment() did not finalize the active turn")
+	end := waittest.Receive(t, turn.resultCh, "handleAbandonment() to finalize the active turn")
+	if end.err != nil {
+		t.Errorf("handleAbandonment() with a queued prompt response finalized the turn with error %v, want the queued response's own successful outcome (nil error): the response was already queued and must be drained before the turn is finalized as abandoned", end.err)
 	}
 }

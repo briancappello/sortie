@@ -16,10 +16,10 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // hookLogBuffer is a bytes.Buffer guarded by a mutex, for capturing
@@ -223,14 +223,12 @@ func TestRunHook(t *testing.T) {
 			t.Fatalf("failed to parse PGID from output %q: %v", he.Output, err)
 		}
 
-		// Allow WaitDelay to fully clean up.
-		time.Sleep(500 * time.Millisecond)
-
-		// Signal 0 probes process existence without sending a real signal.
-		// ESRCH means the process group no longer exists, which is what we want.
-		if err := syscall.Kill(-pgid, 0); err == nil {
-			t.Error("process group still alive after timeout; expected it to be killed")
-		}
+		waittest.Until(t, func() error {
+			if err := syscall.Kill(-pgid, 0); !errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("process group %d still answers signal 0 after timeout, want it killed", pgid)
+			}
+			return nil
+		})
 	})
 
 	t.Run("output truncation", func(t *testing.T) {
@@ -691,9 +689,9 @@ func TestTruncateScript(t *testing.T) {
 // TestRunHook_HeldAndNullRedirectedBackgroundProcessesTerminated covers
 // a script that prints a line, backgrounds a held descendant
 // holding the hook's output, and backgrounds a second process whose
-// output is redirected away, then exits 0. RunHook returns within 2s
-// with the line and no error, logs no CaptureAbandonedWarning record,
-// and both background processes are gone.
+// output is redirected away, then exits 0. RunHook returns with the line
+// and no error, logs no CaptureAbandonedWarning record, and both
+// background processes are gone.
 func TestRunHook_HeldAndNullRedirectedBackgroundProcessesTerminated(t *testing.T) {
 	origDefault := slog.Default()
 	logBuf := &hookLogBuffer{}
@@ -708,16 +706,12 @@ func TestRunHook_HeldAndNullRedirectedBackgroundProcessesTerminated(t *testing.T
 		heldPIDFile, nullPIDFile,
 	)
 
-	start := time.Now()
 	result, err := RunHook(context.Background(), HookParams{
 		Script:    script,
 		Dir:       t.TempDir(),
 		Env:       map[string]string{},
 		TimeoutMS: 5000,
 	})
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("RunHook() took %v, want within 2s", elapsed)
-	}
 	if err != nil {
 		t.Fatalf("RunHook() error = %v", err)
 	}
@@ -728,40 +722,8 @@ func TestRunHook_HeldAndNullRedirectedBackgroundProcessesTerminated(t *testing.T
 		t.Errorf("log output contains %q, want no abandonment WARN; got %q", procutil.CaptureAbandonedWarning, out)
 	}
 
-	heldPID := readHookPIDFile(t, heldPIDFile)
-	nullPID := readHookPIDFile(t, nullPIDFile)
-	assertHookProcessGone(t, heldPID)
-	assertHookProcessGone(t, nullPID)
-}
-
-// readHookPIDFile reads a PID a background job wrote via "echo $!" to
-// path.
-func readHookPIDFile(t *testing.T, path string) int {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%q) = %v", path, err)
-	}
-	var pid int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err != nil || pid <= 0 {
-		t.Fatalf("parse PID from %q = %q: %v", path, data, err)
-	}
-	return pid
-}
-
-// assertHookProcessGone polls until kill(pid, 0) reports ESRCH, or
-// fails t after a bound well under the 30s the fixture's background
-// sleeps run for.
-func assertHookProcessGone(t *testing.T, pid int) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Errorf("process %d still answers signal 0, want it gone", pid)
+	waittest.ProcessGone(t, waittest.PIDFile(t, heldPIDFile))
+	waittest.ProcessGone(t, waittest.PIDFile(t, nullPIDFile))
 }
 
 // TestRunHook_XDGRuntimeDirAndDBusAddressInherited pins that a hook

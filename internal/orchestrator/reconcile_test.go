@@ -18,6 +18,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // unsupportedReactionObservationStore lets unrelated store doubles satisfy
@@ -3083,13 +3084,9 @@ func TestReconcileOverdueRetries_ReArmsOverdueEntry(t *testing.T) {
 		t.Errorf("Store method calls = %d, want 0", got)
 	}
 
-	select {
-	case id := <-fired:
-		if id != "OVERDUE-1" {
-			t.Errorf("OnRetryFire received %q, want %q", id, "OVERDUE-1")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("OnRetryFire not invoked within 1 second")
+	id := waittest.Receive(t, fired, "OnRetryFire call")
+	if id != "OVERDUE-1" {
+		t.Errorf("OnRetryFire received %q, want %q", id, "OVERDUE-1")
 	}
 
 	if entry.TimerHandle != nil {
@@ -3199,11 +3196,7 @@ func TestReconcileOverdueRetries_StartupReconstructedEntrySkipped(t *testing.T) 
 		t.Errorf(`Warn("overdue retry re-armed") emitted %d times, want 0`, handler.countByMessage("overdue retry re-armed"))
 	}
 
-	select {
-	case id := <-fired:
-		t.Errorf("OnRetryFire invoked with %q, want no invocation for a startup-reconstructed entry", id)
-	case <-time.After(200 * time.Millisecond):
-	}
+	waittest.Never(t, fired, 200*time.Millisecond, "OnRetryFire invocation for a startup-reconstructed entry")
 }
 
 func TestReconcileOverdueRetries_LargeStartupBatchFiresNothing(t *testing.T) {
@@ -3247,11 +3240,7 @@ func TestReconcileOverdueRetries_LargeStartupBatchFiresNothing(t *testing.T) {
 		t.Errorf(`Warn("overdue retry re-armed") emitted %d times, want 0`, handler.countByMessage("overdue retry re-armed"))
 	}
 
-	select {
-	case id := <-fired:
-		t.Errorf("OnRetryFire invoked with %q, want no invocation for a 200-entry startup batch", id)
-	case <-time.After(200 * time.Millisecond):
-	}
+	waittest.Never(t, fired, 200*time.Millisecond, "OnRetryFire invocation for a 200-entry startup batch")
 }
 
 func (m *mockReconcileStore) AddReactionHandedOffComments(_ context.Context, _, _ string, _ []string) error {

@@ -10,14 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"golang.org/x/sys/windows"
-
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 const exportHeldDescendantScenario = "opencode.export-held-descendant"
@@ -54,40 +53,6 @@ func init() {
 	fakeScenarios[exportHeldDescendantScenario] = agenttest.Typed(runExportHeldDescendant)
 }
 
-func pollOpencodeWinPIDAndAssertGone(t *testing.T, path string) {
-	t.Helper()
-
-	deadline := time.Now().Add(5 * time.Second)
-	var pid int
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(path); err == nil {
-			if v, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil && v > 0 {
-				pid = v
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if pid == 0 {
-		t.Fatalf("pid file %q never populated", path)
-	}
-
-	goneDeadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(goneDeadline) {
-		handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid)) //nolint:gosec // G115: pid was read back from an os.Process.Pid
-		if err != nil {
-			return
-		}
-		event, waitErr := windows.WaitForSingleObject(handle, 0)
-		_ = windows.CloseHandle(handle)
-		if waitErr == nil && event == uint32(windows.WAIT_OBJECT_0) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Errorf("descendant %d still running after 3s, want gone", pid)
-}
-
 func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "child.pid")
@@ -113,14 +78,9 @@ func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 		done <- outcome{queryExportUsage(context.Background(), state, 0)}
 	}()
 
-	var oc outcome
-	select {
-	case oc = <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("queryExportUsage() did not return within 5s, want a bounded return despite the held descendant")
-	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("queryExportUsage() took %v, want within 3s", elapsed)
+	oc := waittest.Receive(t, done, "queryExportUsage return despite the held descendant")
+	if elapsed := time.Since(start); elapsed > procutil.DefaultDrainGrace {
+		t.Errorf("queryExportUsage() took %v, want under the default drain grace %v", elapsed, procutil.DefaultDrainGrace)
 	}
 	if oc.usage.Usage.InputTokens != 1750 {
 		t.Errorf("InputTokens = %d, want 1750", oc.usage.Usage.InputTokens)
@@ -129,5 +89,5 @@ func TestQueryExportUsage_HeldDescendantHoldingOutput(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 300", oc.usage.Usage.OutputTokens)
 	}
 
-	pollOpencodeWinPIDAndAssertGone(t, pidPath)
+	waittest.ProcessGone(t, waittest.PIDFile(t, pidPath))
 }

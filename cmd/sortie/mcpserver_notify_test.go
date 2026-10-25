@@ -25,6 +25,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workflow"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
@@ -341,39 +342,11 @@ func startNotifyOrchestrator(t *testing.T, cfg config.ServiceConfig, tracker dom
 	})
 }
 
-func waitHandle(t *testing.T, handles <-chan *turnController) *turnController {
-	t.Helper()
-	select {
-	case tc := <-handles:
-		return tc
-	case <-time.After(20 * time.Second):
-		t.Fatal("StartSession was not called within 20 seconds")
-		return nil
-	}
-}
-
-func waitForDispatchIdentityWritten(t *testing.T, tc *turnController) {
-	t.Helper()
-	select {
-	case <-tc.entered:
-	case <-time.After(20 * time.Second):
-		t.Fatal("RunTurn did not begin within 20 seconds")
-	}
-}
-
 // Wait for OnEvent to return so callers observe post-relay state without sleeps.
 func sendEventAndWait(t *testing.T, tc *turnController, event domain.AgentEvent) {
 	t.Helper()
-	select {
-	case tc.events <- event:
-	case <-time.After(20 * time.Second):
-		t.Fatal("timed out handing an event to the open turn")
-	}
-	select {
-	case <-tc.reported:
-	case <-time.After(20 * time.Second):
-		t.Fatal("timed out waiting for the event to be reported as relayed")
-	}
+	waittest.Send(t, tc.events, event, "event handed to the open turn")
+	waittest.Receive(t, tc.reported, "event reported as relayed")
 }
 
 func readMCPEnv(t *testing.T, mcpConfigPath string) map[string]string {
@@ -542,8 +515,8 @@ func TestMCPServerNotify_EndToEnd(t *testing.T) {
 
 	startNotifyOrchestrator(t, cfg, tracker, agent, filepath.Join(tmpDir, "notify-e2e.db"))
 
-	tc := waitHandle(t, agent.handles)
-	waitForDispatchIdentityWritten(t, tc)
+	tc := waittest.Receive(t, agent.handles, "StartSession call")
+	waittest.Receive(t, tc.entered, "RunTurn start")
 
 	params := sessionParamsFromMCPConfig(t, cfg, tc.startParams.MCPConfigPath)
 	dispatchID := params.DispatchID
@@ -612,8 +585,8 @@ func TestMCPServerNotify_Continuation(t *testing.T) {
 
 	startNotifyOrchestrator(t, cfg, tracker, agent, filepath.Join(tmpDir, "notify-continuation.db"))
 
-	tc1 := waitHandle(t, agent.handles)
-	waitForDispatchIdentityWritten(t, tc1)
+	tc1 := waittest.Receive(t, agent.handles, "StartSession call")
+	waittest.Receive(t, tc1.entered, "RunTurn start")
 	if tc1.sessionID != "S0" {
 		t.Fatalf("first dispatch StartSession returned %q, want %q", tc1.sessionID, "S0")
 	}
@@ -633,8 +606,8 @@ func TestMCPServerNotify_Continuation(t *testing.T) {
 
 	close(tc1.finish)
 
-	tc2 := waitHandle(t, agent.handles)
-	waitForDispatchIdentityWritten(t, tc2)
+	tc2 := waittest.Receive(t, agent.handles, "StartSession call")
+	waittest.Receive(t, tc2.entered, "RunTurn start")
 
 	if tc2.startParams.ResumeSessionID != "S0" {
 		t.Fatalf("continuation StartSessionParams.ResumeSessionID = %q, want %q", tc2.startParams.ResumeSessionID, "S0")
@@ -680,8 +653,8 @@ func TestMCPServerNotify_NoSessionID(t *testing.T) {
 
 	startNotifyOrchestrator(t, cfg, tracker, agent, filepath.Join(tmpDir, "notify-nosession.db"))
 
-	tc := waitHandle(t, agent.handles)
-	waitForDispatchIdentityWritten(t, tc)
+	tc := waittest.Receive(t, agent.handles, "StartSession call")
+	waittest.Receive(t, tc.entered, "RunTurn start")
 
 	params := sessionParamsFromMCPConfig(t, cfg, tc.startParams.MCPConfigPath)
 	dispatchID := params.DispatchID
@@ -728,10 +701,10 @@ func TestMCPServerNotify_Concurrent(t *testing.T) {
 
 	startNotifyOrchestrator(t, cfg, tracker, agent, filepath.Join(tmpDir, "notify-concurrent.db"))
 
-	tcA := waitHandle(t, agent.handles)
-	tcB := waitHandle(t, agent.handles)
-	waitForDispatchIdentityWritten(t, tcA)
-	waitForDispatchIdentityWritten(t, tcB)
+	tcA := waittest.Receive(t, agent.handles, "StartSession call")
+	tcB := waittest.Receive(t, agent.handles, "StartSession call")
+	waittest.Receive(t, tcA.entered, "RunTurn start")
+	waittest.Receive(t, tcB.entered, "RunTurn start")
 
 	paramsA := sessionParamsFromMCPConfig(t, cfg, tcA.startParams.MCPConfigPath)
 	paramsB := sessionParamsFromMCPConfig(t, cfg, tcB.startParams.MCPConfigPath)
@@ -1068,15 +1041,11 @@ func TestMCPServerNotify_MultiProcessCapSharing(t *testing.T) {
 
 	var outcomes []multiProcessTurnOutcome
 	for turn := 1; turn <= 3; turn++ {
-		select {
-		case o := <-agent.turns:
-			if o.err != nil {
-				t.Fatalf("turn %d: %v", turn, o.err)
-			}
-			outcomes = append(outcomes, o)
-		case <-time.After(30 * time.Second):
-			t.Fatalf("timed out waiting for turn %d's notify_operator call", turn)
+		o := waittest.Receive(t, agent.turns, fmt.Sprintf("turn %d's notify_operator call", turn))
+		if o.err != nil {
+			t.Fatalf("turn %d: %v", turn, o.err)
 		}
+		outcomes = append(outcomes, o)
 	}
 
 	if !outcomes[0].res.Success {
@@ -1146,6 +1115,9 @@ func startMCPServerChild(t *testing.T, workflowPath, workspacePath, dispatchID s
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = child.wait()
+		if t.Failed() {
+			t.Logf("mcp-server child stderr:\n%s", child.stderr.String())
+		}
 	})
 	return child
 }
@@ -1237,11 +1209,7 @@ func TestMCPServerNotify_KilledClaimant(t *testing.T) {
 
 	child := startMCPServerChild(t, workflowPath, ws, dispatchID)
 	child.startNotifyCall(t)
-	select {
-	case <-arrived:
-	case <-time.After(20 * time.Second):
-		t.Fatalf("timed out waiting for the claimant's request to reach the webhook (stderr: %s)", child.stderr.String())
-	}
+	waittest.Receive(t, arrived, "the claimant's request to reach the webhook")
 
 	assertRateLimited(t, execNotify(t, tool), "while the claimant lives")
 	if n := bodies.count(); n != 0 {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestPopulateRetries(t *testing.T) {
@@ -397,11 +398,7 @@ func TestActivateReconstructedRetries(t *testing.T) {
 
 		HandleRetryTimer(state, issueID, params)
 
-		select {
-		case <-workerCalled:
-		case <-time.After(time.Second):
-			t.Fatal("worker goroutine did not execute within 1 second")
-		}
+		waittest.Receive(t, workerCalled, "worker goroutine execution")
 
 		entry, ok := state.Running["id-startup"]
 		if !ok {

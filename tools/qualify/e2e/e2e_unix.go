@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/tracker/file"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workflow"
 	"github.com/sortie-ai/sortie/internal/workspace"
 
@@ -756,21 +758,20 @@ func readCeilingSample(harness *Harness) (ceilingSample, error) {
 func ObserveCeilingStop(t *testing.T, harness *Harness) CeilingCondition {
 	t.Helper()
 
-	deadline := time.Now().Add(harness.Observation())
 	var rows []persistence.RunHistory
-	for {
+	err := waittest.UntilWithin(harness.Observation(), 20*time.Millisecond, func() error {
 		var err error
 		rows, err = harness.store.QueryRunHistoryByIssue(context.Background(), issueID)
 		if err != nil {
 			t.Fatalf("query run history: %v", err)
 		}
-		if len(rows) > 0 {
-			break
+		if len(rows) == 0 {
+			return errors.New("no run history row yet")
 		}
-		if !time.Now().Before(deadline) {
-			return CeilingCondition{}
-		}
-		time.Sleep(20 * time.Millisecond)
+		return nil
+	})
+	if err != nil {
+		return CeilingCondition{}
 	}
 
 	row := rows[0]
@@ -794,20 +795,16 @@ func ObserveCeilingStop(t *testing.T, harness *Harness) CeilingCondition {
 	}
 
 	watch := &dispatchWatch{}
-	deadline = time.Now().Add(harness.Observation())
-	for {
+	_ = waittest.UntilWithin(harness.Observation(), 20*time.Millisecond, func() error {
 		sample, err := readCeilingSample(harness)
 		if err != nil {
 			t.Fatalf("read ceiling sample: %v", err)
 		}
-		if watch.add(sample) {
-			break
+		if !watch.add(sample) {
+			return errors.New("the quiet window has not passed")
 		}
-		if !time.Now().Before(deadline) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return nil
+	})
 	condition.HoldObserved, condition.Runs, condition.Running = watch.held, watch.runs, watch.running
 	return condition
 }
@@ -923,12 +920,10 @@ func StartWorkflow(t *testing.T, harness *Harness) (context.CancelFunc, <-chan s
 	}()
 	t.Cleanup(func() {
 		cancel()
-		select {
-		case <-runDone:
-		case <-time.After(ShutdownDeadline):
-			// A run still going after cancellation leaks its goroutine into the
-			// rest of the package's tests. Errorf, not Fatalf, so the remaining
-			// cleanups still run.
+		// A run still going after cancellation leaks its goroutine into the
+		// rest of the package's tests. Errorf, not Fatalf, so the remaining
+		// cleanups still run.
+		if _, ok := waittest.ReceiveWithin(runDone, ShutdownDeadline); !ok {
 			t.Errorf("orchestrator still running %s after cancellation; the harness leaked its run goroutine", ShutdownDeadline)
 		}
 	})

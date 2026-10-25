@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func closeStore(t *testing.T, s *Store) {
@@ -869,8 +871,7 @@ func TestQueryIssueGroups(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
+			ctx := waittest.Context(t)
 			s := openTestStore(t)
 			migrateOrFatal(t, s)
 			var ids []int64

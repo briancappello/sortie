@@ -22,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
@@ -533,15 +534,15 @@ func runInterruption(t *testing.T, b Binding, scenario Scenario) {
 		turn  turnOutcome
 		ended bool
 	)
-	turnTimer := time.NewTimer(turnBound)
-	defer turnTimer.Stop()
+	holdCtx, holdCancel := context.WithTimeout(context.Background(), turnBound)
+	defer holdCancel()
 	select {
 	case <-server.holding():
 		in.held = true
 		td.snapshot = agenttest.LiveDescendants(os.Getpid())
 	case turn = <-outcome:
 		ended = true
-	case <-turnTimer.C:
+	case <-holdCtx.Done():
 	}
 	if !ended {
 		select {
@@ -563,16 +564,16 @@ func runInterruption(t *testing.T, b Binding, scenario Scenario) {
 		} else {
 			cancelTurn()
 		}
-		turn, in.returned = receiveWithin(outcome, interruptBound)
+		turn, in.returned = waittest.ReceiveWithin(outcome, interruptBound)
 		if !in.returned {
 			server.release()
 			cancelTurn()
-			turn, _ = receiveWithin(outcome, interruptBound)
+			turn, _ = waittest.ReceiveWithin(outcome, interruptBound)
 		}
 	}
 
 	if stopIssued {
-		in.stopErr, in.stopped = receiveWithin(stopped, stopBound)
+		in.stopErr, in.stopped = waittest.ReceiveWithin(stopped, stopBound)
 	} else {
 		stopErr := stopSession()
 		if stopErr != nil {
@@ -774,30 +775,15 @@ func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, res
 	return session, events.snapshot()
 }
 
-func receiveWithin[T any](ch <-chan T, bound time.Duration) (T, bool) {
-	timer := time.NewTimer(bound)
-	defer timer.Stop()
-	select {
-	case value := <-ch:
-		return value, true
-	case <-timer.C:
-		var zero T
-		return zero, false
-	}
-}
-
+// awaitGone's deadline is shared with awaitHolds, which may have spent all
+// of it; the check still runs once then.
 func awaitGone(pids []int, remaining func(pid int) string, deadline time.Time) {
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
-	ticker := time.NewTicker(livenessPoll)
-	defer ticker.Stop()
-	for slices.ContainsFunc(pids, func(pid int) bool { return remaining(pid) != "" }) {
-		select {
-		case <-ticker.C:
-		case <-timer.C:
-			return
+	_ = waittest.UntilWithin(max(time.Until(deadline), time.Nanosecond), livenessPoll, func() error {
+		if i := slices.IndexFunc(pids, func(pid int) bool { return remaining(pid) != "" }); i >= 0 {
+			return fmt.Errorf("process %d is still running", pids[i])
 		}
-	}
+		return nil
+	})
 }
 
 // afterToolsListed holds the answer choice makes until the runtime has listed

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func apiResponse(sessionID, model string, input, output, cached, thoughts, tool, total int64) string {
@@ -394,11 +395,7 @@ func TestGeminiCloseIsNotHeldBehindADrainThatIsWaiting(t *testing.T) {
 		reader.Close()
 	}()
 
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Error("Close() during an in-flight Drain() = blocked, want it to return")
-	}
+	waittest.Receive(t, closed, "Close() during an in-flight Drain() to return")
 }
 
 // steppingClock advances an hour per reading, so a drain's deadline has already

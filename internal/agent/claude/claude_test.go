@@ -23,6 +23,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // sequentialOutputScenario is the fake runtime scenario a two-turn
@@ -1676,11 +1677,7 @@ func TestRunTurn_UsageMeasuredPersistsAcrossCancelledTurn(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("RunTurn(second) did not return within 10s")
-	}
+	waittest.Receive(t, done, "RunTurn(second) return")
 
 	var agentErr *domain.AgentError
 	if !errors.As(runErr, &agentErr) || agentErr.Kind != domain.ErrTurnCancelled {

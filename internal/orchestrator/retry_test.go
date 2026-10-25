@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"reflect"
@@ -20,6 +21,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 type mockRetryStore struct {
@@ -1609,12 +1611,8 @@ func TestHandleRetryTimer(t *testing.T) {
 				wf := tt.workerFn(ch)
 				params.MakeWorkerFn = func(_, _, _, _, _ string, _ domain.AgentAdapter, _ AttemptSettings) WorkerFunc { return wf }
 				HandleRetryTimer(state, id, params)
-				select {
-				case <-ch:
-					workerCalled = true
-				case <-time.After(time.Second):
-					t.Fatal("worker goroutine did not execute within 1 second")
-				}
+				waittest.Receive(t, ch, "worker goroutine execution")
+				workerCalled = true
 			} else {
 				HandleRetryTimer(state, id, params)
 			}
@@ -1707,11 +1705,7 @@ func TestHandleRetryTimer_TokenBudgetIncomplete(t *testing.T) {
 				state := retryState(t, "ISS-TOK-INC", "PROJ-TOK-INC", 1)
 				HandleRetryTimer(state, "ISS-TOK-INC", params)
 
-				select {
-				case <-dispatched:
-				case <-time.After(time.Second):
-					t.Fatalf("occurrence %d: worker not dispatched within 1 second (an incomplete figure below the ceiling must not block dispatch)", occurrence)
-				}
+				waittest.Receive(t, dispatched, fmt.Sprintf("occurrence %d: worker dispatch (an incomplete figure below the ceiling must not block dispatch)", occurrence))
 			}
 
 			output := buf.String()
@@ -1751,11 +1745,7 @@ func TestHandleRetryTimer_TokenBudgetFailOpenLogsWarning(t *testing.T) {
 
 	HandleRetryTimer(state, "ISS-TOK-WARN", params)
 
-	select {
-	case <-dispatched:
-	case <-time.After(time.Second):
-		t.Fatal("worker not dispatched within 1 second (fail-open must dispatch)")
-	}
+	waittest.Receive(t, dispatched, "worker dispatch (fail-open must dispatch)")
 
 	output := buf.String()
 	if !strings.Contains(output, "token budget check failed, proceeding with dispatch") {
@@ -1857,11 +1847,7 @@ func TestHandleRetryTimer_SSHHostAcquisition(t *testing.T) {
 
 		HandleRetryTimer(state, "ISS-SSH", params)
 
-		select {
-		case <-ch:
-		case <-time.After(time.Second):
-			t.Fatal("worker did not execute")
-		}
+		waittest.Receive(t, ch, "worker execution")
 
 		if hp.HostFor("ISS-SSH") != "host-b" {
 			t.Errorf("HostFor(ISS-SSH) = %q, want \"host-b\"", hp.HostFor("ISS-SSH"))
@@ -1994,11 +1980,7 @@ func TestHandleRetryTimer_WorkflowFilePropagated(t *testing.T) {
 
 	HandleRetryTimer(state, "ISS-WF", params)
 
-	select {
-	case <-workerCalled:
-	case <-time.After(time.Second):
-		t.Fatal("worker goroutine did not execute within 1 second")
-	}
+	waittest.Receive(t, workerCalled, "worker goroutine execution")
 
 	running, ok := state.Running["ISS-WF"]
 	if !ok {
@@ -2037,11 +2019,7 @@ func TestHandleRetryTimer_UsageDispositionFrozen(t *testing.T) {
 
 	HandleRetryTimer(state, "ISS-UD", params)
 
-	select {
-	case <-workerCalled:
-	case <-time.After(time.Second):
-		t.Fatal("worker goroutine did not execute within 1 second")
-	}
+	waittest.Receive(t, workerCalled, "worker goroutine execution")
 
 	running, ok := state.Running["ISS-UD"]
 	if !ok {
@@ -2563,11 +2541,7 @@ func TestHandleRetryTimer_SessionID_PassedToMakeWorkerFn(t *testing.T) {
 
 	HandleRetryTimer(state, id, params)
 
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not execute within 1 second")
-	}
+	waittest.Receive(t, ch, "worker execution")
 
 	if gotSessionID != wantSessionID {
 		t.Errorf("MakeWorkerFn resumeSessionID = %q, want %q", gotSessionID, wantSessionID)
@@ -2600,11 +2574,7 @@ func TestHandleRetryTimer_PassesReactionKindToMakeWorkerFn(t *testing.T) {
 
 	HandleRetryTimer(state, id, params)
 
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not execute within 1 second")
-	}
+	waittest.Receive(t, ch, "worker execution")
 
 	if gotReactionKind != ReactionKindLabelReview {
 		t.Errorf("MakeWorkerFn reactionKind = %q, want %q", gotReactionKind, ReactionKindLabelReview)

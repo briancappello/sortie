@@ -21,6 +21,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 type trapParams struct {
@@ -51,18 +52,6 @@ func trapScenario(_ []string, p trapParams) int {
 
 func init() {
 	scenarios["trap"] = agenttest.Typed(trapScenario)
-}
-
-func waitForTrap(t *testing.T, marker string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(marker); err == nil {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("subprocess did not install its TERM trap within 5s (marker %q absent)", marker)
 }
 
 // overflowParams parameterizes the "overflow" scenario: it writes Stderr (if
@@ -278,8 +267,7 @@ func assertUsageVerdictCarried(
 
 // runWithSessionStartCancel calls sess.RunTurn, cancelling its context the
 // moment the first EventSessionStarted event arrives from a ParseLine hook
-// that emits it on the first line it sees. It waits up to 5s for RunTurn to
-// return and fails the test if it does not.
+// that emits it on the first line it sees.
 func runWithSessionStartCancel(t *testing.T, sess *ForkPerTurnSession) (domain.TurnResult, []domain.AgentEvent, error) {
 	t.Helper()
 
@@ -302,13 +290,8 @@ func runWithSessionStartCancel(t *testing.T, sess *ForkPerTurnSession) (domain.T
 		done <- outcome{result, err}
 	}()
 
-	select {
-	case got := <-done:
-		return got.result, events, got.err
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunTurn did not return within 5s")
-		return domain.TurnResult{}, nil, nil
-	}
+	got := waittest.Receive(t, done, "RunTurn return")
+	return got.result, events, got.err
 }
 
 // parseLineEmitSessionStartedOnce returns a ParseLine hook that emits
@@ -331,7 +314,8 @@ func TestForkPerTurnSession(t *testing.T) {
 	t.Run("Arm1_CtxCancelBeforeEOF", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
-		script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Hang: true})
+		ready := filepath.Join(tmpDir, "ready")
+		script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Hang: true, ReadyFile: ready})
 		target := newTestTarget(tmpDir, script)
 		sess := NewForkPerTurnSession(target, noopHooks(), slog.Default(), 0)
 
@@ -340,10 +324,10 @@ func TestForkPerTurnSession(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { _, err := sess.RunTurn(ctx, "p", emit); done <- err }()
 
-		time.Sleep(100 * time.Millisecond) // let subprocess start
+		waittest.File(t, ready)
 		cancel()
 
-		err := <-done
+		err := waittest.Receive(t, done, "RunTurn return after cancel")
 		requireAgentError(t, err, domain.ErrTurnCancelled)
 		if !hasEventType(*events, domain.EventTurnCancelled) {
 			t.Errorf("EventTurnCancelled not emitted; got %v", *events)
@@ -353,7 +337,8 @@ func TestForkPerTurnSession(t *testing.T) {
 	t.Run("Arm1_UsageCarriage_CtxCancelBeforeEOF", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
-		script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Hang: true})
+		ready := filepath.Join(tmpDir, "ready")
+		script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Hang: true, ReadyFile: ready})
 		target := newTestTarget(tmpDir, script)
 		stubUsage := domain.TokenUsage{InputTokens: 500, OutputTokens: 100, TotalTokens: 600}
 		hooks := noopHooks()
@@ -372,10 +357,10 @@ func TestForkPerTurnSession(t *testing.T) {
 			done <- outcome{result, err}
 		}()
 
-		time.Sleep(100 * time.Millisecond) // let subprocess start
+		waittest.File(t, ready)
 		cancel()
 
-		got := <-done
+		got := waittest.Receive(t, done, "RunTurn outcome after cancel")
 		requireAgentError(t, got.err, domain.ErrTurnCancelled)
 
 		cancelled, ok := findEventOfType(*events, domain.EventTurnCancelled)
@@ -460,17 +445,30 @@ func TestForkPerTurnSession(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
 		// Emit output continuously so the scanner is actively reading when
-		// the context deadline fires.
+		// the context is cancelled.
 		script := agenttest.FakeRuntime(t, tmpDir, "agent", "repeatLine", repeatLineParams{Line: "{}"})
 		target := newTestTarget(tmpDir, script)
-		sess := NewForkPerTurnSession(target, noopHooks(), slog.Default(), 0)
+		scanning := make(chan struct{})
+		hooks := noopHooks()
+		var scanned bool
+		hooks.ParseLine = func([]byte, func(domain.AgentEvent), string, *TurnSpend) (any, error) {
+			if !scanned {
+				scanned = true
+				close(scanning)
+			}
+			return nil, nil
+		}
+		sess := NewForkPerTurnSession(target, hooks, slog.Default(), 0)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		ctx, cancel := context.WithCancel(waittest.Context(t))
 		defer cancel()
 		emit, _ := sinkEvents()
+		done := make(chan error, 1)
+		go func() { _, err := sess.RunTurn(ctx, "p", emit); done <- err }()
 
-		_, err := sess.RunTurn(ctx, "p", emit)
-		requireAgentError(t, err, domain.ErrTurnCancelled)
+		waittest.Receive(t, scanning, "first scanned line")
+		cancel()
+		requireAgentError(t, waittest.Receive(t, done, "RunTurn error"), domain.ErrTurnCancelled)
 	})
 
 	t.Run("Arm4_Exit127_NoOutputYieldsEarlyExitReport", func(t *testing.T) {
@@ -893,7 +891,8 @@ func TestForkPerTurnSession(t *testing.T) {
 	t.Run("Stop_ConcurrentWithRunTurn", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
-		script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Hang: true})
+		ready := filepath.Join(tmpDir, "ready")
+		script := agenttest.FakeRuntime(t, tmpDir, "agent", agenttest.OutputScenario, agenttest.Output{Hang: true, ReadyFile: ready})
 		target := newTestTarget(tmpDir, script)
 		sess := NewForkPerTurnSession(target, noopHooks(), slog.Default(), 0)
 
@@ -904,16 +903,12 @@ func TestForkPerTurnSession(t *testing.T) {
 			sess.RunTurn(context.Background(), "p", emit) //nolint:errcheck // testing concurrency
 		}()
 
-		time.Sleep(100 * time.Millisecond) // let subprocess start
+		waittest.File(t, ready)
 		if err := sess.Stop(context.Background()); err != nil {
 			t.Errorf("Stop() = %v", err)
 		}
 
-		select {
-		case <-done:
-		case <-time.After(6 * time.Second):
-			t.Fatal("RunTurn did not return within 6s after Stop")
-		}
+		waittest.Receive(t, done, "RunTurn return after Stop")
 	})
 
 	t.Run("StopGrace_ConfiguredValueResolved", func(t *testing.T) {
@@ -1154,17 +1149,12 @@ func TestForkPerTurnSession_EarlyExit_StopSignaledSuppressesReport(t *testing.T)
 		done <- err
 	}()
 
-	waitForTrap(t, marker)
+	waittest.File(t, marker)
 	if err := sess.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() = %v", err)
 	}
 
-	var err error
-	select {
-	case err = <-done:
-	case <-time.After(6 * time.Second):
-		t.Fatal("RunTurn did not return within 6s after Stop")
-	}
+	err := waittest.Receive(t, done, "RunTurn return after Stop")
 
 	requireAgentError(t, err, domain.ErrTurnCancelled)
 	if !hasEventType(*events, domain.EventTurnCancelled) {

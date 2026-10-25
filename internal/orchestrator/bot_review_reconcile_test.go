@@ -12,6 +12,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // botReviewMetricsSpy records bot-review-specific metric calls.
@@ -1428,7 +1429,7 @@ func runBotReviewTriageToCompletion(t *testing.T, state *State, params Reconcile
 	if !ok || entry.Triage == nil {
 		t.Fatalf("PendingReactions[%s] = %+v, want a started triage run", rkey, entry)
 	}
-	waitTriageRunDone(t, entry.Triage)
+	waittest.Receive(t, entry.Triage.Done, "triage run to finish")
 	entry.PendingRetryAt = time.Time{}
 }
 
@@ -1553,7 +1554,7 @@ func TestReconcileBotReviewComments_Triage_Handled(t *testing.T) {
 	reconcileBotReviewComments(restarted, params, discardLogger(), context.Background(), metrics)
 
 	assertCommentsHandled(t, restarted, rkey, false)
-	waitTriageRunDone(t, mustPendingReaction(t, restarted, rkey).Triage)
+	waittest.Receive(t, mustPendingReaction(t, restarted, rkey).Triage.Done, "triage run to finish")
 }
 
 func TestReconcileBotReviewComments_Triage_EscalateAndDispatchAgent(t *testing.T) {

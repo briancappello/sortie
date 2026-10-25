@@ -17,6 +17,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // This file validates the generated wire types, the messages the
@@ -956,7 +957,7 @@ func TestSchemaConformance(t *testing.T) {
 		assertRawID(t, cancelledPermissionRaw, `"cancelled"`)
 
 		respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-		awaitOutcome(t, outcomeCh)
+		waittest.Receive(t, outcomeCh, "turn outcome")
 
 		loadState, loadOutPr, loadInPw := newTestSession(t, domain.AgentConfig{ReadTimeoutMS: 2000}, clientProtocolMaxLineBytes)
 		loadOut := newOutboundReader(loadOutPr)
@@ -972,7 +973,7 @@ func TestSchemaConformance(t *testing.T) {
 		loadRaw, loadReqID := nextRequestLine(t, loadOut, methodSessionLoad)
 		sendLine(t, loadInPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"prior-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replayed"}}}}`)
 		respondLine(t, loadInPw, loadReqID, loadSessionResponse{})
-		awaitResolveSessionOutcome(t, loadOutcomeCh)
+		waittest.Receive(t, loadOutcomeCh, "resolveSession() outcome")
 
 		resumeState, resumeOutPr, resumeInPw := newTestSession(t, domain.AgentConfig{ReadTimeoutMS: 2000}, clientProtocolMaxLineBytes)
 		resumeOut := newOutboundReader(resumeOutPr)
@@ -987,7 +988,7 @@ func TestSchemaConformance(t *testing.T) {
 		respondErrorLine(t, resumeInPw, resumeProbeID, jsonrpc.MethodNotFoundCode, "method not found")
 		resumeRaw, resumeReqID := nextRequestLine(t, resumeOut, methodSessionResume)
 		respondLine(t, resumeInPw, resumeReqID, resumeSessionResponse{})
-		awaitResolveSessionOutcome(t, resumeOutcomeCh)
+		waittest.Receive(t, resumeOutcomeCh, "resolveSession() outcome")
 
 		closeState, closeOutPr, closeInPw := newTestSession(t, domain.AgentConfig{ReadTimeoutMS: 2000}, clientProtocolMaxLineBytes)
 		closeOut := newOutboundReader(closeOutPr)

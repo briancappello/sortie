@@ -15,13 +15,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 var copilotUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
@@ -1244,22 +1244,14 @@ func TestStopSession_TerminatesProcess(t *testing.T) {
 	}()
 
 	// Wait until RunTurn has started the subprocess.
-	select {
-	case <-processStarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for process to start")
-	}
+	waittest.Receive(t, processStarted, "process start")
 
 	if err := adapter.StopSession(context.Background(), session); err != nil {
 		t.Fatalf("StopSession() error = %v", err)
 	}
 
 	// Verify RunTurn unblocked after StopSession terminated the process.
-	select {
-	case <-runDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("RunTurn did not return after StopSession")
-	}
+	waittest.Receive(t, runDone, "RunTurn return after StopSession")
 }
 
 // fakeCopilotBinaryWithStderrAndExit creates a fake copilot runtime
@@ -1776,11 +1768,7 @@ func TestRunTurn_UsageMeasuredPersistsAcrossCancelledTurn(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("RunTurn(second) did not return within 10s")
-	}
+	waittest.Receive(t, done, "RunTurn(second) return")
 
 	requireAgentError(t, runErr, domain.ErrTurnCancelled)
 	if !result2.UsageMeasured {
