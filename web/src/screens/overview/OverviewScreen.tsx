@@ -24,6 +24,7 @@ import { CalmState } from "./CalmState";
 import { EndedToday } from "./EndedToday";
 import { Headline } from "./Headline";
 import { buildHeadline } from "./headline";
+import { HeldList } from "./HeldList";
 import { activeNavKey, attentionNavKey, endedNavKey } from "./rows";
 import { SpendCeilings } from "./SpendCeilings";
 
@@ -330,6 +331,7 @@ function OverviewBody({ state }: OverviewBodyProps) {
         showSelection={showSelection}
         onOpen={(row) => selectAndOpen(activeNavKey(row.issueId), row.identifier)}
       />
+      <HeldList rows={view.state.held ?? []} count={view.state.counts.held} now={view.now} />
       <EndedToday
         rows={endedAll}
         unreadIds={endedUnreadIds}

@@ -1089,7 +1089,7 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 
 				IssueType: "Story", IssueLabels: []string{"backend", "stage:implement"}, State: "In Progress",
 				RuleName: "implement", StagePosition: position, AgentKind: "claude-code", ConfiguredModel: "opus",
-			}),
+			}, sentence.Context{}),
 			want: map[string]any{
 				"issue_id":           "id-5",
 				"issue_identifier":   "PROJ-5",
@@ -1112,9 +1112,58 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 		},
 		{
 			name:   "between stages without times or identity serves null times",
-			body:   toStageHopResponse(orchestrator.SnapshotStageHop{IssueID: "id-6", Identifier: "PROJ-6"}),
-			want:   map[string]any{"hopped_at": nil, "dispatched_at": nil},
+			body:   toStageHopResponse(orchestrator.SnapshotStageHop{IssueID: "id-6", Identifier: "PROJ-6"}, sentence.Context{}),
+			want:   map[string]any{"hopped_at": nil, "dispatched_at": nil, "hold": nil},
 			absent: []string{"display_identifier", "issue_title", "issue_url"},
+		},
+		{
+			name: "hold by a blocker serves its blockers and no slot or reset",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipBlockedBy, Since: startedAt,
+				Blockers: []orchestrator.SnapshotBlocker{{IssueID: "b-1", Identifier: "PROJ-9", DisplayID: "acme/web#9"}},
+			}, sentence.Context{}),
+			want: map[string]any{
+				"reason":     "blocked_by",
+				"held_since": "2026-03-24T12:00:00Z",
+				"blockers":   []any{map[string]any{"issue_id": "b-1", "issue_identifier": "PROJ-9", "display_identifier": "acme/web#9"}},
+				"slot":       nil,
+				"resets_at":  nil,
+			},
+		},
+		{
+			name: "hold by a state slot limit serves its slot and no blockers or reset",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipAgentSlotsFull, Since: startedAt,
+				Slot: &orchestrator.SnapshotSlotHold{Scope: orchestrator.SlotScopeState, State: "In Progress", Used: 2, Limit: 2},
+			}, sentence.Context{}),
+			want: map[string]any{
+				"slot":      map[string]any{"scope": "state", "state": "In Progress", "used": 2, "limit": 2},
+				"blockers":  nil,
+				"resets_at": nil,
+			},
+		},
+		{
+			name: "hold by the global slot limit serves a slot without a state",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipAgentSlotsFull, Since: startedAt,
+				Slot: &orchestrator.SnapshotSlotHold{Scope: orchestrator.SlotScopeGlobal, Used: 1, Limit: 1},
+			}, sentence.Context{}),
+			want: map[string]any{"slot": map[string]any{"scope": "global", "used": 1, "limit": 1}},
+		},
+		{
+			name: "hold by a spend ceiling serves its reset in UTC and no blockers or slot",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipDailySpendCeiling, Since: passAt, ResetsAt: passAt,
+			}, sentence.Context{}),
+			want: map[string]any{"held_since": "2026-03-24T09:00:00Z", "resets_at": "2026-03-24T09:00:00Z", "blockers": nil, "slot": nil},
+		},
+		{
+			name: "held issue without labels serves an empty list",
+			body: toHeldIssueResponse(orchestrator.SnapshotHeldEntry{
+				IssueID: "id-8", Identifier: "PROJ-8", IssueLabels: []string{},
+				Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull, Since: startedAt},
+			}, sentence.Context{}),
+			want: map[string]any{"issue_labels": []any{}},
 		},
 		{
 			name: "parked record",
@@ -1393,6 +1442,36 @@ func TestToStateResponse(t *testing.T) {
 		}
 	})
 
+	t.Run("held rows are counted and leave active and attention as they were", func(t *testing.T) {
+		t.Parallel()
+
+		now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+		base := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: now,
+			Running:     []orchestrator.SnapshotRunningEntry{{IssueID: "id-1", Identifier: "MT-1", StartedAt: now}},
+			Parked:      []orchestrator.SnapshotParkedEntry{{IssueID: "id-2", Identifier: "MT-2", Reason: "agent_blocked", Label: "needs-human"}},
+		}
+		withHeld := base
+		withHeld.Held = []orchestrator.SnapshotHeldEntry{
+			{IssueID: "id-3", Identifier: "MT-3", Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull, Since: now}},
+			{IssueID: "id-4", Identifier: "MT-4", Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull, Since: now}},
+		}
+
+		want := toStateResponse(base, sentence.Context{Now: now}, nil)
+		got := toStateResponse(withHeld, sentence.Context{Now: now}, nil)
+
+		if want.Held == nil || len(want.Held) != 0 || want.Counts.Held != 0 {
+			t.Errorf("toStateResponse(no held).Held, Counts.Held = %v, %d, want an empty non-nil list and 0", want.Held, want.Counts.Held)
+		}
+		if got.Counts.Held != len(got.Held) || len(got.Held) != 2 {
+			t.Errorf("toStateResponse(2 held).Counts.Held, len(Held) = %d, %d, want 2, 2", got.Counts.Held, len(got.Held))
+		}
+		if !reflect.DeepEqual(got.Active, want.Active) || !reflect.DeepEqual(got.Attention, want.Attention) || got.Counts.Attention != want.Counts.Attention {
+			t.Errorf("toStateResponse(held).Active, Attention, Counts.Attention = %+v, %+v, %d, want %+v, %+v, %d",
+				got.Active, got.Attention, got.Counts.Attention, want.Active, want.Attention, want.Counts.Attention)
+		}
+	})
+
 	t.Run("parked entry serves every key and counts", func(t *testing.T) {
 		t.Parallel()
 
@@ -1434,7 +1513,7 @@ func TestToStateResponse(t *testing.T) {
 
 		assertJSONKeys(t, got, map[string]any{
 			"counts": map[string]any{
-				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 2, "between_stages": 0, "attention": 1,
+				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 2, "between_stages": 0, "held": 0, "attention": 1,
 			},
 			"pending_reactions": json.RawMessage(wantPendingReactionsJSON),
 		})
@@ -1451,10 +1530,10 @@ func TestToStateResponse(t *testing.T) {
 
 		assertJSONKeys(t, got, map[string]any{
 			"counts": map[string]any{
-				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1, "attention": 0,
+				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1, "held": 0, "attention": 0,
 			},
 			"between_stages": json.RawMessage(`[{"issue_id": "id-1", "issue_identifier": "MT-1", "source_rule": "specify",
-				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null, "stage_position": null,
+				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null, "stage_position": null, "hold": null,
 				"status_text": "Between stages: specify to implement",
 				"status_text_full": "Moved from stage specify to stage implement, and Sortie added \u0060stage:implement\u0060; implement starts when a poll tick reads that label on the issue."}]`),
 		})
@@ -1840,7 +1919,7 @@ func TestBuildIssueDetail(t *testing.T) {
 		if got.BetweenStages == nil {
 			t.Fatal("buildIssueDetail(MT-4).BetweenStages = nil, want non-nil")
 		}
-		want := toStageHopResponse(hop)
+		want := toStageHopResponse(hop, sentence.Context{})
 		want.StatusText, want.StatusTextFull = got.BetweenStages.StatusText, got.BetweenStages.StatusTextFull
 		if !reflect.DeepEqual(*got.BetweenStages, want) {
 			t.Errorf("buildIssueDetail(MT-4).BetweenStages = %+v, want %+v", got.BetweenStages, want)
@@ -2181,18 +2260,28 @@ func TestHandleState_EveryRowCarriesBothForms(t *testing.T) {
 		Parked:           []orchestrator.SnapshotParkedEntry{{IssueID: "id-5", Identifier: "MT-55", Reason: "agent_blocked", Label: "needs-human"}},
 		PendingReactions: []orchestrator.SnapshotPendingReaction{{IssueID: "id-6", Identifier: "MT-66", Kind: "ci", NextPollAt: now.Add(time.Minute), PullRequest: orchestrator.SnapshotPullRequest{Number: 7}}},
 		BetweenStages:    []orchestrator.SnapshotStageHop{{IssueID: "id-7", Identifier: "MT-77", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"}},
+		Held: []orchestrator.SnapshotHeldEntry{{
+			IssueID: "id-8", Identifier: "MT-88",
+			Hold: orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipBlockedBy, Since: now,
+				Blockers: []orchestrator.SnapshotBlocker{{IssueID: "id-9", Identifier: "MT-99", State: "In Progress"}},
+			},
+		}},
 	}
 	ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
 
 	_, body := getJSON[map[string]json.RawMessage](t, ts, "/api/v1/state")
 
-	lists := []string{"running", "retrying", "budget_exhausted", "parked", "pending_reactions", "between_stages"}
+	lists := []string{"running", "retrying", "budget_exhausted", "parked", "pending_reactions", "between_stages", "held"}
 	served := 0
 	for _, list := range lists {
 		var rows []struct {
 			Identifier string `json:"issue_identifier"`
 			Short      string `json:"status_text"`
 			Long       string `json:"status_text_full"`
+			Hold       *struct {
+				ReasonText string `json:"reason_text"`
+			} `json:"hold"`
 		}
 		if err := json.Unmarshal(body[list], &rows); err != nil {
 			t.Fatalf("GET /api/v1/state %s: %v", list, err)
@@ -2202,10 +2291,13 @@ func TestHandleState_EveryRowCarriesBothForms(t *testing.T) {
 			if row.Short == "" || row.Long == "" || strings.Contains(row.Long, row.Identifier) {
 				t.Errorf("GET /api/v1/state %s %s status_text, status_text_full = %q, %q, want a short form and a long form that does not repeat the issue key", list, row.Identifier, row.Short, row.Long)
 			}
+			if list == "held" && (row.Hold == nil || row.Hold.ReasonText != row.Short) {
+				t.Errorf("GET /api/v1/state held %s status_text = %q, want hold.reason_text %+v", row.Identifier, row.Short, row.Hold)
+			}
 		}
 	}
-	if served != 7 {
-		t.Errorf("GET /api/v1/state served %d rows with a sentence, want 7", served)
+	if served != 8 {
+		t.Errorf("GET /api/v1/state served %d rows with a sentence, want 8", served)
 	}
 }
 

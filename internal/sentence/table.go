@@ -51,6 +51,12 @@ const (
 		"{{else if eq .Ahead \"run\"}} after the current run ends{{end}}"
 )
 
+// Fragments shared by the hold templates.
+const (
+	blockersTerminal = "{{if .Several}}every blocker reaches{{else}}the blocker reaches{{end}} a terminal state"
+	resetsIn         = "{{if .HasReset}}, resets in {{duration .ResetsIn}}{{end}}"
+)
+
 // errorDetail ends a run-error sentence with the text the stored error
 // carried, when it carried any.
 const errorDetail = "{{if .Detail}}: {{.Detail}}{{end}}."
@@ -363,6 +369,62 @@ var table = map[string]parts{
 	"stage_wait": {
 		short: "Between stages: {{.Source}} to {{.Target}}",
 		long:  "Moved from stage {{.Source}} to stage {{.Target}}, and Sortie added `{{.Label}}`; {{.Target}} starts when a poll tick reads that label on the issue.",
+	},
+
+	"hold_blocked_by": {
+		short:  "Blocked by {{list .Blockers}}",
+		long:   "Blocked by {{series .Blockers}}. Sortie dispatches the issue once " + blockersTerminal + ".",
+		clears: "Released when " + blockersTerminal + ".",
+	},
+	"hold_blockers_unresolved": {
+		short:  "Blockers not read: a tracker request failed",
+		long:   "Sortie could not read the issue's blockers because a tracker request failed, and it dispatches no issue whose blockers it has not read. A later poll reads them again.",
+		clears: "Released by the next successful read of its blockers.",
+	},
+	"hold_blockers_not_read": {
+		short:  "Blockers not read on this poll",
+		long:   "Each poll reads the blockers of a limited number of issues, taking them in turn, and this poll did not read the issue's. A later poll reads them.",
+		clears: "Released when a later poll reads its blockers and finds none open.",
+	},
+	"hold_blockers_incomplete": {
+		short:  "Blocker list incomplete",
+		long:   "The tracker returned an incomplete list of the issue's blockers, and Sortie dispatches no issue whose blockers it cannot check.",
+		clears: "Released when the tracker returns the whole blocker list and none is open.",
+	},
+	"hold_agent_slots_global": {
+		short:  "No free agent slot: {{count .Used}} of {{count .Limit}} running",
+		long:   "All agent slots are taken: {{count .Used}} of {{count .Limit}} under `agent.max_concurrent_agents`. Sortie dispatches the issue once a running session ends.",
+		clears: "Released when a running session ends.",
+	},
+	"hold_agent_slots_state": {
+		short:  "No free agent slot for {{.State}}: {{count .Used}} of {{count .Limit}} running",
+		long:   "All agent slots for {{.State}} are taken: {{count .Used}} of {{count .Limit}} under `agent.max_concurrent_agents_by_state`. Sortie dispatches the issue once one of those sessions ends or its issue leaves {{.State}}.",
+		clears: "Released when one of those sessions ends or its issue leaves {{.State}}.",
+	},
+	"hold_ssh_hosts": {
+		short:  "No free SSH host",
+		long:   "Every SSH host runs as many sessions as its per-host limit allows. Sortie dispatches the issue once a session on one of them ends.",
+		clears: "Released when a session on an SSH host ends.",
+	},
+	"hold_spend_daily": {
+		short:  "Daily spend ceiling reached" + resetsIn,
+		long:   "The daily spend ceiling is reached, so Sortie starts no agent session for any issue until the UTC day ends.",
+		clears: "Released once the UTC day ends, or after `agent.max_daily_cost_usd` is raised above the day's spend or removed.",
+	},
+	"hold_spend_weekly": {
+		short:  "Weekly spend ceiling reached" + resetsIn,
+		long:   "The weekly spend ceiling is reached, so Sortie starts no agent session for any issue until the UTC week ends at the start of Monday.",
+		clears: "Released once the UTC week ends at the start of Monday, or after `agent.max_weekly_cost_usd` is raised above the week's spend or removed.",
+	},
+	"hold_spend_monthly": {
+		short:  "Monthly spend ceiling reached" + resetsIn,
+		long:   "The monthly spend ceiling is reached, so Sortie starts no agent session for any issue until the UTC month ends.",
+		clears: "Released once the UTC month ends, or after `agent.max_monthly_cost_usd` is raised above the month's spend or removed.",
+	},
+	"hold_stage_hop": {
+		short:  "Waiting to confirm the stage move",
+		long:   "Sortie dispatches the next stage once a read of the issue confirms the stage move, and the latest read did not. A later poll reads the issue again.",
+		clears: "Released when a later poll reads the issue in an active state.",
 	},
 
 	"ended_handed": {

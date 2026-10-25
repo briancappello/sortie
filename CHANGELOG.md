@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Overview now lists, under 'Not dispatched', the issues in an active state that Sortie holds back from dispatch, each with why it waits and what releases it: an open blocker with its key and state, a blocker read that failed or waits for a later poll, a full agent slot limit with its usage, no free SSH host, or the spend ceiling until it resets. An issue between stages shows its hold on its Active row. The state API serves them as `held`, and a between-stages row carries its hold as `hold`. ([#1387](https://github.com/sortie-ai/sortie/issues/1387))
+
 ## [1.30.0] - 2026-10-23
 
 ### Added

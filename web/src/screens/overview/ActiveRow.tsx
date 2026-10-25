@@ -49,6 +49,9 @@ export function ActiveRow({ row, now, isSelected, showSelection, onOpen }: Activ
         {meta === "" ? undefined : (
           <p className={cn("text-body-sm tabular-nums", secondLineColor(isLook))}>{meta}</p>
         )}
+        {row.holdText === null ? undefined : (
+          <p className={cn("text-body-sm", secondLineColor(isLook))}>{row.holdText}</p>
+        )}
       </div>
       <p
         className={cn(

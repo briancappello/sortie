@@ -149,7 +149,7 @@ export function CalmState({
     <section aria-label="Calm" className="mb-md">
       {allClear ? (
         <p className="text-body-md text-ink-body">
-          Nothing is parked, held, escalated or stopped, and Sortie is healthy.
+          Nothing is parked, escalated, stopped or waiting on a person, and Sortie is healthy.
         </p>
       ) : undefined}
       <div className="mt-xl grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-md">

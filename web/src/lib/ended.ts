@@ -64,6 +64,7 @@ function activeIssueIds(state: StateResponse): Set<string> {
     state.parked,
     state.pending_reactions,
     state.between_stages,
+    state.held,
   ];
   return new Set(lists.flatMap((list) => (list ?? []).map((entry) => entry.issue_id)));
 }

@@ -62,6 +62,8 @@ export interface ActiveRow {
   agentKind: string | null;
   rule: string | null;
   timeBase: string | null;
+  /** `hold.reason_text` of a deciding between-stages row that carries a hold, else `null`. */
+  holdText: string | null;
 }
 
 /** One entry of the Rule menu; `group` is the first rule of the chain a header or member belongs to. */
@@ -269,6 +271,7 @@ function toRow(entry: ActiveIssueResponse, kind: RowKind, state: StateResponse):
     agentKind: entry.agent_kind || null,
     rule: ruleOf(entry),
     timeBase: named === undefined ? null : timeBaseOf(named),
+    holdText: named?.kind === "between_stages" ? (named.entry.hold?.reason_text ?? null) : null,
   };
 }
 

@@ -251,6 +251,20 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface HeldIssueResponse {
+  issue_id: string;
+  issue_identifier: string;
+  display_identifier?: string;
+  issue_title?: string;
+  issue_url?: string;
+  issue_type?: string;
+  issue_labels?: string[];
+  state?: string;
+  hold: HoldResponse;
+  status_text: string;
+  status_text_full: string;
+}
+
 export interface HistoryTotalsResponse {
   run_count: number;
   unmeasured_runs: number;
@@ -259,6 +273,30 @@ export interface HistoryTotalsResponse {
   tokens_complete: boolean;
   estimated_cost_usd: number | null;
   cost_status: string;
+}
+
+export interface HoldBlockerResponse {
+  issue_id: string;
+  issue_identifier: string;
+  display_identifier?: string;
+  state?: string;
+}
+
+export interface HoldResponse {
+  reason: string;
+  held_since: string;
+  blockers: HoldBlockerResponse[] | null;
+  slot: HoldSlotResponse | null;
+  resets_at: string | null;
+  reason_text: string;
+  release_text: string;
+}
+
+export interface HoldSlotResponse {
+  scope: string;
+  state?: string;
+  used: number;
+  limit: number;
 }
 
 export interface HopDecisionResponse {
@@ -946,6 +984,7 @@ export interface StageHopResponse {
   stage_position: StagePositionResponse | null;
   agent_kind?: string;
   configured_model?: string;
+  hold: HoldResponse | null;
   status_text: string;
   status_text_full: string;
 }
@@ -970,6 +1009,7 @@ export interface StateCounts {
   parked: number;
   pending_reactions: number;
   between_stages: number;
+  held: number;
   attention: number;
 }
 
@@ -993,6 +1033,7 @@ export interface StateResponse {
   pending_reactions: PendingReactionResponse[] | null;
   between_stages: StageHopResponse[] | null;
   active: ActiveIssueResponse[] | null;
+  held: HeldIssueResponse[] | null;
   attention: AttentionItemResponse[] | null;
   agent_totals: SnapshotAgentTotals;
   rate_limits: Record<string, unknown> | null;

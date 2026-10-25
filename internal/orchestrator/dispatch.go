@@ -271,6 +271,12 @@ const (
 	SkipDailySpendCeiling   SkipReason = "daily_spend_ceiling"
 	SkipWeeklySpendCeiling  SkipReason = "weekly_spend_ceiling"
 	SkipMonthlySpendCeiling SkipReason = "monthly_spend_ceiling"
+
+	// The reasons below describe a hold only. [EvaluateCandidate] never
+	// returns them and the candidate-hold counter never receives them.
+	SkipAgentSlotsFull      SkipReason = "agent_slots_full"
+	SkipSSHHostsFull        SkipReason = "ssh_hosts_full"
+	SkipStageHopUnconfirmed SkipReason = "stage_hop_unconfirmed"
 )
 
 // CandidateDecision is the outcome of evaluating one candidate.
