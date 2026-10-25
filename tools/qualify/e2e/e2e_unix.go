@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -305,14 +306,12 @@ func (o *AdapterObserver) StartSession(ctx context.Context, params domain.StartS
 		o.sessionIDs = append(o.sessionIDs, session.ID)
 	}
 	o.mu.Unlock()
-	if pid, parseErr := strconv.Atoi(session.AgentPID); parseErr == nil && pid > 0 {
-		if g := procutil.HeldGroup(pid); g != nil {
-			o.mu.Lock()
-			if !slices.Contains(o.groups, g) {
-				o.groups = append(o.groups, g)
-			}
-			o.mu.Unlock()
+	if g, heldErr := launchtest.Held(session.AgentPID); heldErr == nil && g != nil {
+		o.mu.Lock()
+		if !slices.Contains(o.groups, g) {
+			o.groups = append(o.groups, g)
 		}
+		o.mu.Unlock()
 	}
 	return session, nil
 }

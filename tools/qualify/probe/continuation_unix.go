@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol"
 	"github.com/sortie-ai/sortie/internal/domain"
 
@@ -65,7 +66,7 @@ func induceProtocolContinuation(t *testing.T, coords Coordinates, fixture *share
 		seed := transportGraded(evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomePrerequisiteFailed, Detail: "the seed session failed to start"})
 		return seed, unmetRecall
 	}
-	firstGroup, bindErr := bindSessionGroup(firstSession)
+	firstGroup, bindErr := launchtest.Held(firstSession.AgentPID)
 	createdAt := time.Now().UTC()
 
 	seedPrompt := strings.ReplaceAll(coords.Profile.ProbePrompts[promptKeyContinuationSeed], "{nonce}", fixture.nonce)

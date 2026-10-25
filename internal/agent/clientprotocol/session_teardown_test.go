@@ -9,10 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -127,30 +125,15 @@ func newParkedTeardownFixture(t *testing.T, withStderrHolder bool) *parkedTeardo
 	waittest.File(t, readerDonePath)
 
 	release := sync.OnceFunc(func() {
-		// Each helper leads its own process group, so killing only the
-		// recorded pid leaves its idle process holding the pipe end open;
-		// the negative pid signals the whole group.
-		killHelperGroup(readerPIDPath)
-		killHelperGroup(writerPIDPath)
+		agenttest.KillEscaped(readerPIDPath)
+		agenttest.KillEscaped(writerPIDPath)
 		if stderrPIDPath != "" {
-			killHelperGroup(stderrPIDPath)
+			agenttest.KillEscaped(stderrPIDPath)
 		}
 	})
 	t.Cleanup(release)
 
 	return &parkedTeardownFixture{state: state, release: release}
-}
-
-func killHelperGroup(pidFile string) {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 // assertSessionGoroutinesExited fails t unless the pump, the connection's

@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -262,17 +262,6 @@ while :; do sleep 0.05; done
 `
 }
 
-// killLaunchedGroup signals the process group the launched agent leads. A child
-// that stayed in that group leads no group of its own, so killHelperGroup is
-// right only for the detached child, which setsid makes a leader.
-func killLaunchedGroup(agentPID string) {
-	pid, err := strconv.Atoi(strings.TrimSpace(agentPID))
-	if err != nil || pid <= 0 {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-}
-
 // initThenStderrExitScript answers initialize, writes marker to stderr, and
 // exits before session/new, so the failure arrives from resolveSession rather
 // than doInitialize.
@@ -340,7 +329,7 @@ func TestStopSessionReachesGroupChild(t *testing.T) {
 	}
 
 	childPID := waittest.PIDFile(t, pidPath)
-	t.Cleanup(func() { killLaunchedGroup(session.AgentPID) })
+	launchtest.KillOnCleanup(t, session.AgentPID)
 
 	if err := stopSession(context.Background(), session); err != nil {
 		t.Fatalf("stopSession() error = %v", err)
@@ -369,7 +358,7 @@ func TestStopSessionDoesNotReachEscapedProcessGroupMember(t *testing.T) {
 	}
 
 	escapedPID := waittest.PIDFile(t, pidPath)
-	t.Cleanup(func() { killHelperGroup(pidPath) })
+	t.Cleanup(func() { agenttest.KillEscaped(pidPath) })
 
 	if err := stopSession(context.Background(), session); err != nil {
 		t.Fatalf("stopSession() error = %v", err)
@@ -399,7 +388,7 @@ func TestStartSessionHandshakeAbandonedByEscapedDescendantFailsWithPortExit(t *t
 	const marker = "distinguishing-stderr-line-handshake-abandoned"
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "escaped.pid")
-	t.Cleanup(func() { killHelperGroup(pidPath) })
+	t.Cleanup(func() { agenttest.KillEscaped(pidPath) })
 	scriptPath := agenttest.WriteScript(t, dir, "agent.sh", stderrThenExitWithDetachedHolderScript(marker, pidPath))
 
 	var buf syncBuffer
@@ -483,7 +472,7 @@ func TestStopSessionReturnsBoundedAfterReleaseAbandonsOnARealSubprocess(t *testi
 
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "escaped.pid")
-	t.Cleanup(func() { killHelperGroup(pidPath) })
+	t.Cleanup(func() { agenttest.KillEscaped(pidPath) })
 	scriptPath := agenttest.WriteScript(t, dir, "agent.sh", handshakeThenExitWithDetachedHolderScript(pidPath))
 
 	const grace = 200 * time.Millisecond
@@ -543,7 +532,7 @@ func TestRunTurnEndsBoundedWhenRuntimeExitsWithEscapedDescendantHoldingOutput(t 
 
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "escaped.pid")
-	t.Cleanup(func() { killHelperGroup(pidPath) })
+	t.Cleanup(func() { agenttest.KillEscaped(pidPath) })
 	scriptPath := agenttest.WriteScript(t, dir, "agent.sh", promptThenExitWithDetachedHolderScript(pidPath))
 
 	const grace = 200 * time.Millisecond
