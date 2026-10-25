@@ -23,7 +23,8 @@ prompt -> domain, maputil
 httpkit, issuekit, trackermetrics -> domain, typeutil
 logging -> redact
 redact -> httpkit
-domain, maputil, typeutil, workspacekit, server/ui -> no internal deps
+domain, maputil, typeutil, workspacekit, waittest, server/ui -> no internal deps
+test and test-support code (_test.go files, agenttest, tools/qualify) -> waittest
 ```
 
 ## 2. Concurrency safety
