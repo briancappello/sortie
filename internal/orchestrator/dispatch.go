@@ -277,6 +277,7 @@ const (
 	SkipAgentSlotsFull      SkipReason = "agent_slots_full"
 	SkipSSHHostsFull        SkipReason = "ssh_hosts_full"
 	SkipStageHopUnconfirmed SkipReason = "stage_hop_unconfirmed"
+	SkipParkCommentsUnread  SkipReason = "park_comments_unread"
 )
 
 // CandidateDecision is the outcome of evaluating one candidate.

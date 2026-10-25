@@ -1305,6 +1305,19 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			o.once.dispatchFailed(issue)
 			continue
 		}
+		issueLog := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
+		release := o.state.ParkReleases[issue.ID]
+		if release != nil {
+			comments, err := o.trackerAdapter.FetchIssueComments(ctx, issue.ID)
+			if err != nil {
+				o.hostPool.ReleaseHost(issue.ID)
+				issueLog.Warn("park release comment read failed, holding issue", slog.Any("error", err))
+				held.hold(issue, HeldEntry{Reason: SkipParkCommentsUnread})
+				o.once.deferFor(issue.ID, deferTick)
+				continue
+			}
+			issue.Comments = comments
+		}
 		dispatchCtx := ctx
 		seed := freshRunSeed(ctx, o.state, freshRunSeedParams{
 			SCMAdapter:          o.scmAdapter,
@@ -1324,11 +1337,20 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			Previous:        lineage.PreviousRule,
 			PreviousOutcome: lineage.PreviousOutcome,
 		})
+		resumeSessionID := ""
+		var parkCtx prompt.ParkContext
+		if release != nil {
+			parkCtx = parkContextOf(release, issue.Comments)
+			dispatchCtx = withParkRender(dispatchCtx, parkCtx)
+			resumeSessionID = resumeSessionFor(release.SessionID,
+				DispatchResolution{AgentKind: release.AgentKind, TemplateID: release.TemplateID},
+				DispatchResolution{AgentKind: resolution.AgentKind, TemplateID: resolution.TemplateID})
+		}
 		// A park released on this tick reaches the dispatch with no refresh
 		// in between, so a person's answer to a standing escalation is
 		// recognized here, before the claim makes the issue Sortie's own.
 		endOutsideHandoff(ctx, o.state, o.store, o.trackerAdapter, issue.ID, issue.State, cfg.Tracker.HandoffState, cfg.Tracker.TerminalStates, o.logger)
-		DispatchIssue(dispatchCtx, o.state, issue, nil, host, o.makeWorkerFn("", host, resolution.AgentKind, resolution.TemplateID, "", adapter, attemptSettings))
+		DispatchIssue(dispatchCtx, o.state, issue, nil, host, o.makeWorkerFn(resumeSessionID, host, resolution.AgentKind, resolution.TemplateID, "", adapter, attemptSettings))
 		o.once.drop(issue.ID)
 		if entry := o.state.Running[issue.ID]; entry != nil {
 			entry.ContinuationContext = seed
@@ -1337,7 +1359,6 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			entry.RuleName = resolution.RuleName
 			entry.StageLineage = lineage
 			startPass(entry)
-			issueLog := logging.WithIssue(o.logger, issue.ID, issue.Identifier)
 			// Read before the mark below flips RunDispatched.
 			hop := o.state.StageHops[issue.ID]
 			entry.FirstAfterHop = hop != nil && hop.TargetRule == resolution.RuleName && !hop.RunDispatched
@@ -1350,6 +1371,15 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			entry.UsageArrival, entry.UsageAttribution = attemptSettings.UsageArrival, attemptSettings.UsageAttribution
 			freezeIssueTokenBaseline(ctx, o.state, issue.ID, o.store, o.logger)
 			recordRunningPass(ctx, o.store, issue.ID, entry, issueLog)
+			if release != nil {
+				consumeParkRelease(ctx, o.state, o.store, issue.ID, issueLog)
+				issueLog.Info("park release handed to run",
+					slog.String("reason", release.Reason),
+					slog.String("gesture", release.ReleaseGesture),
+					slog.Int("comments", len(parkCtx.Comments)),
+					slog.Bool("resumes_session", resumeSessionID != ""),
+				)
+			}
 		}
 		logging.WithIssue(o.logger, issue.ID, issue.Identifier).Info("issue dispatched",
 			slog.String("agent_kind", resolution.AgentKind),

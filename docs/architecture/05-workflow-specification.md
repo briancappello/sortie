@@ -770,11 +770,18 @@ Template input variables:
   - `previous` (string): the name of the rule whose hop led to this dispatch; filled when the dispatch selects the target of the issue's latest hop and the hop count has not reset since; otherwise empty.
   - `previous_outcome` (string): `succeeded`, or `no_change` when the previous stage's run declared that the requested outcome already held; empty when `previous` is empty.
   - `previous` and `previous_outcome` are frozen with the dispatch selection, so a retry or reaction continuation renders the pair its first dispatch rendered, also after a restart.
+- `park` (object or null)
+  - Always present as a key, so a template that references it never fails; null except on turn 1 of the first run after a person releases a park, which a label removal or a state change does.
+  - `reason` (string): `agent_blocked` or `handoff_absence`.
+  - `statement` (string): the stop statement of the run the park follows; empty when that run declared none.
+  - `parked_at` and `released_at` (strings): RFC 3339 times in UTC, whole seconds.
+  - `gesture` (string): `label_removed` or `state_changed`.
+  - `comments` (list, never null): the comments created since the park, oldest first, each with `id`, `author`, `body`, and `created_at`.
 
 Define blocks and calls:
 
 - A prompt template calls the define blocks of every partial (§5.3.9) and its own with the built-in `template` action. The FuncMap gains no entry for it.
-- A define block executes with the value its call passes as dot, and `$` inside it is that value; the engine has no dynamic scoping. `{{ template "name" . }}` outside every `range` and `with` body passes the whole input data, `issue`, `attempt`, `run`, `stage`, and every continuation key included. A call without an argument passes nil, and any field reference in the block then fails the render.
+- A define block executes with the value its call passes as dot, and `$` inside it is that value; the engine has no dynamic scoping. `{{ template "name" . }}` outside every `range` and `with` body passes the whole input data, `issue`, `attempt`, `run`, `stage`, `park`, and every continuation key included. A call without an argument passes nil, and any field reference in the block then fails the render.
 - A define block executes under the same strict rules as the template that calls it: an unknown variable or function fails the render.
 - An undefined call, a name defined twice, and text outside a define block of a partial are `template_parse_error` at load, never at render. Each is located at the file and line that hold it.
 

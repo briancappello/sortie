@@ -384,9 +384,9 @@ The re-dispatch and re-block cycle is an expected operational pattern:
 2. Orchestrator reads the signal, exits normally, releases claim, records a park, and applies the parking label.
 3. A human acts on the issue: either moves it to a different tracker state, or removes the parking label the orchestrator has confirmed reached the tracker.
 4. The next poll tick observes the state change or the confirmed label's removal and lifts the park.
-5. If the issue is now active and eligible, the orchestrator dispatches a new worker run for it.
+5. If the issue is now active and eligible, the orchestrator reads its comments and dispatches a new worker run for it. When the read fails, the issue waits for a later poll tick and no run starts.
 6. Pre-dispatch cleanup (Section 3.4) removes the stale `.sortie/status` file.
-7. Agent begins fresh work. If still blocked, it writes `blocked` again.
+7. The run continues the agent session that stopped, where the parked run recorded one and the agent kind can resume it, and its first prompt renders the `park` template variable: the statement the agent gave when it wrote `blocked` as `park.statement`, and the comments created since the park as `park.comments`. If still blocked, the agent writes `blocked` again.
 
 An update to the issue that is neither a state change nor a removal of the confirmed parking label, for example adding a comment while leaving both the state and the label untouched, does not lift the park.
 
@@ -591,7 +591,7 @@ The status token comes from a fixed vocabulary and carries no sensitive data. Th
 
 The statement is agent-authored text, and the orchestrator publishes it in a tracker comment that people outside the deployment may read, and to every notification entry subscribed to `session.stopped` (Section 2.7.4). Before publication the orchestrator masks every registered secret, the credential values it holds for its own configuration. It masks only those secrets. It does not detect token-shaped strings, host paths, or other sensitive content, so what keeps those out of the statement is the injected instruction to name files by repository path and never include credentials (Section 4.1), which is a request to the agent and not a guarantee.
 
-The statement also reaches the state database and the run row of the HTTP API, even when no `session.stopped` subscriber exists and for a `needs-human-review` run whose handoff the orchestrator withheld. The orchestrator masks it before it stores the statement and again when it builds the response, so a secret registered after the run is masked too.
+The statement also reaches the state database and the run row of the HTTP API, even when no `session.stopped` subscriber exists and for a `needs-human-review` run whose handoff the orchestrator withheld. The orchestrator masks it before it stores the statement and again when it builds the response, so a secret registered after the run is masked too. The stored statement also reaches the prompt of the first run after a person releases a park, as `park.statement`, whether or not any destination posted it as a comment.
 
 ## 8. Implementation guidance
 

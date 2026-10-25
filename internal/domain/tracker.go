@@ -51,7 +51,7 @@ type TrackerAdapter interface {
 	FetchCandidateIssues(ctx context.Context) ([]Issue, error)
 
 	// FetchIssueByID returns a single fully-populated issue including
-	// comments.
+	// comments, oldest first.
 	//
 	// Used for pre-dispatch revalidation and prompt rendering. Returns
 	// a [*TrackerError] with Kind [ErrTrackerNotFound] if the issue
@@ -96,10 +96,12 @@ type TrackerAdapter interface {
 	// cleanup.
 	FetchIssueStatesByIdentifiers(ctx context.Context, identifiers []string) (map[string]string, error)
 
-	// FetchIssueComments returns comments for the specified issue.
+	// FetchIssueComments returns comments for the specified issue, oldest
+	// first.
 	//
-	// Used for continuation runs and the agent workpad pattern.
-	// Returns an empty non-nil slice when no comments exist.
+	// Used for continuation runs, the first run after a person releases a
+	// park, and the agent workpad pattern. Returns an empty non-nil slice
+	// when no comments exist.
 	// Returns a [*TrackerError] with Kind [ErrTrackerNotFound]
 	// if the issue does not exist.
 	FetchIssueComments(ctx context.Context, issueID string) ([]Comment, error)

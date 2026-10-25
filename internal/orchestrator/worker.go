@@ -1229,6 +1229,10 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	turnNumber := 1
 	activeStates := cfg.Tracker.ActiveStates
 	stageOption := prompt.WithStage(stageRenderFrom(ctx))
+	firstTurnOptions := []prompt.RenderOption{stageOption}
+	if parkContext, ok := parkRenderFrom(ctx); ok {
+		firstTurnOptions = append(firstTurnOptions, prompt.WithPark(parkContext))
+	}
 
 	publishWorkerState := func(turn int) error {
 		if mcpConfigPath == "" {
@@ -1349,7 +1353,7 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				presentedComments = carriedCommentIDs(continuation)
 			}
 		case turnNumber == 1:
-			rendered, presentedComments, err = renderFirstTurnPrompt(tmpl, issueMap, attemptInt, maxTurns, continuation, stageOption)
+			rendered, presentedComments, err = renderFirstTurnPrompt(tmpl, issueMap, attemptInt, maxTurns, continuation, firstTurnOptions...)
 		default:
 			rendered, err = prompt.BuildTurnPrompt(tmpl, issueMap, attemptInt, turnNumber, maxTurns, stageOption)
 		}

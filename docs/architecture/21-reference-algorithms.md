@@ -139,6 +139,9 @@ on_tick(state, once):
   sorted = sort_for_dispatch(issues)
 
   state = rebuild_budget_exhausted(state, sorted)
+  # A release by a person's gesture moves the park from state.parked to
+  # state.park_releases and keeps its persisted row; a release by a worker
+  # exit that observed work deletes the row (Section 14.2).
   state = refresh_parked_issues(state, sorted)
   state = park_exhausted_absences(state, sorted)
 
@@ -172,6 +175,20 @@ on_tick(state, once):
         if once != null:
           once.defer(issue.id, tick)                     // evaluated again on the next tick
         continue
+      # An issue with a pending park release reads its comments once its
+      # agent kind, template, and attempt settings pass (Section 16.4). A
+      # failed read holds the issue and keeps the release, so no run starts
+      # on a partial view.
+      release = state.park_releases[issue.id]
+      if release != null:
+        comments, err = tracker.fetch_issue_comments(issue.id)
+        if err != null:
+          release_host(issue.id)
+          hold(issue, park_comments_unread)
+          if once != null:
+            once.defer(issue.id, tick)                   // the next tick reads again
+          continue
+        issue.comments = comments                        // every other field stays the candidate's
       # The seed holds the pull request's review comments no run of the
       # issue was given, per configured kind without a triage block; nil
       # dispatches as before.
@@ -179,7 +196,9 @@ on_tick(state, once):
       # A candidate that holds a standing escalation is read against the
       # handoff state before it is claimed (Section 16.3).
       state = end_outside_handoff(state, issue.id, issue.state)
-      state = dispatch_issue(issue, state, attempt=null, continuation_context=seed)
+      state = dispatch_issue(issue, state, attempt=null, continuation_context=seed, release=release)
+      if release != null and issue.id in state.running:
+        consume_park_release(state, issue.id)            // deletes the pending release and its row
       if once != null:
         once.dispatched(issue.id)                        // an agent kind, template, or attempt setting dispatch_issue refuses drops the ID and records failed
     else if once != null:
@@ -492,7 +511,7 @@ function reconcile_review_comments(state):
 ### 16.4 Dispatch One Issue
 
 ```text
-function dispatch_issue(issue, state, attempt):
+function dispatch_issue(issue, state, attempt, release):
   (agent_kind, template_id, rule_name) = resolve_rule(
     issue, state.dispatch_cfg, hop_route_of(state, issue.id),
     state.default_agent_kind, state.default_template_id
@@ -509,8 +528,18 @@ function dispatch_issue(issue, state, attempt):
     log_error("agent settings refused")
     return state
 
+  // A release hands the run its park context and, when the selection still
+  // names the kind and template the parked run used, its session. The worker
+  // renders the context as `park` on turn 1 and on no later turn.
+  park_context = null
+  resume_session_id = null
+  if release != null:
+    park_context = park_context_of(release, issue.comments)
+    resume_session_id = resume_session_for(release.session_id,
+      (release.agent_kind, release.template_id), (agent_kind, template_id))
+
   worker = spawn_worker(
-    fn -> run_agent_attempt(issue, attempt, attempt_settings.settings, parent_orchestrator_pid) end
+    fn -> run_agent_attempt(issue, attempt, attempt_settings.settings, parent_orchestrator_pid, park_context, resume_session_id) end
   )
 
   if worker spawn failed:
@@ -1009,6 +1038,10 @@ on_worker_exit(issue_id, reason, worker_result, state):
       # The sequence stops at the ceiling: parking cancels the retry,
       # releases the claim, and holds the issue out of dispatch until a
       # later tick observes a release (Section 14.2).
+      # The park records the session, template, and stop statement of this
+      # run; the session and template only when the run had no reaction kind
+      # and ended normally, so the first run after a release resumes a
+      # trustworthy session (Section 14.2).
       park_issue(state, issue_id, reason="handoff_absence")
       absence_parked = true
 

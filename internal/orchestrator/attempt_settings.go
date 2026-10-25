@@ -95,15 +95,16 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 		}
 	}
 
-	// A continuation, including one restored after a restart, and a stall
-	// retry that fires before any restart resume the earlier session, so a
-	// kind that cannot resume fails every such turn.
+	// A continuation, including one restored after a restart, a stall retry
+	// that fires before any restart, and the first run after a person
+	// releases a park resume the earlier session, so a kind that cannot
+	// resume fails every such turn.
 	if meta.SessionResumeBlockedBy != nil {
 		if key := meta.SessionResumeBlockedBy(settings.Passthrough); key != "" {
 			errs = append(errs, PreflightError{
 				Check: "agent.kind.session_resume",
 				Message: kind + "." + key + " stops this agent kind from resuming a session across separate agent launches, " +
-					"but Sortie resumes an issue's earlier session on a continuation, including one queued before a restart, and on the retry after a stall while Sortie keeps running, " +
+					"but Sortie resumes an issue's earlier session on a continuation, including one queued before a restart, on the retry after a stall while Sortie keeps running, and on the first run after a person releases a park, " +
 					"and every such turn fails. Change " + kind + "." + key + ", or use an agent kind that can resume a session.",
 			})
 		}

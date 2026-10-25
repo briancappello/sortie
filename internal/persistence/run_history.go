@@ -1087,7 +1087,9 @@ func (s *Store) QueryBudgetExhaustedIssues(ctx context.Context, candidateIDs []s
 // LatestAgentRuns returns, per issue ID, the run_history row with the
 // greatest id among the issue's rows whose agent_adapter is non-empty. An
 // issue with no such row is absent; an empty slice runs no query. Only the
-// columns that describe the dispatch are filled.
+// columns that describe the dispatch and the run's outcome are filled: Status,
+// Error, ReactionKind, SessionID, TemplateID, and AgentText. A NULL
+// reaction_kind or session_id reads as empty and a NULL error as nil.
 func (s *Store) LatestAgentRuns(ctx context.Context, issueIDs []string) (map[string]RunHistory, error) {
 	runs := map[string]RunHistory{}
 	if len(issueIDs) == 0 {
@@ -1103,7 +1105,8 @@ func (s *Store) LatestAgentRuns(ctx context.Context, issueIDs []string) (map[str
 	}
 
 	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(issueIDs); no user data in format string
-		`SELECT id, issue_id, rule_name, agent_adapter, configured_model, stage_previous, stage_previous_outcome, chain_id, dispatched_at
+		`SELECT id, issue_id, rule_name, agent_adapter, configured_model, stage_previous, stage_previous_outcome, chain_id, dispatched_at,
+			status, error, reaction_kind, session_id, template_id, agent_text
 		FROM run_history
 		WHERE id IN (
 			SELECT MAX(id) FROM run_history
@@ -1121,10 +1124,17 @@ func (s *Store) LatestAgentRuns(ctx context.Context, issueIDs []string) (map[str
 
 	for rows.Next() {
 		var run RunHistory
+		var runError, reactionKind, sessionID sql.NullString
 		if err := rows.Scan(&run.ID, &run.IssueID, &run.RuleName, &run.AgentAdapter, &run.ConfiguredModel,
-			&run.StagePrevious, &run.StagePreviousOutcome, &run.ChainID, &run.DispatchedAt); err != nil {
+			&run.StagePrevious, &run.StagePreviousOutcome, &run.ChainID, &run.DispatchedAt,
+			&run.Status, &runError, &reactionKind, &sessionID, &run.TemplateID, &run.AgentText); err != nil {
 			return nil, fmt.Errorf("scan latest agent run: %w", err)
 		}
+		if runError.Valid {
+			run.Error = &runError.String
+		}
+		run.ReactionKind = reactionKind.String
+		run.SessionID = sessionID.String
 		runs[run.IssueID] = run
 	}
 	if err := rows.Err(); err != nil {

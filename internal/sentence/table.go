@@ -426,6 +426,11 @@ var table = map[string]parts{
 		long:   "Sortie dispatches the next stage once a read of the issue confirms the stage move, and the latest read did not. A later poll reads the issue again.",
 		clears: "Released when a later poll reads the issue in an active state.",
 	},
+	"hold_park_comments": {
+		short:  "Waiting to read the comments since the park",
+		long:   "Sortie gives the next run the comments posted since the issue was parked, and the latest read of them failed. A later poll reads them again.",
+		clears: "Released when a later poll reads the issue's comments.",
+	},
 
 	"ended_handed": {
 		short: "Handed off to {{.State}}",

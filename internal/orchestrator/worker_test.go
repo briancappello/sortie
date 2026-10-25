@@ -238,6 +238,7 @@ type mockTrackerAdapter struct {
 	transitionCalls   []transitionIssueCall
 	commentIssueFn    func(ctx context.Context, issueID, text string) error
 	fetchIssueByIDFn  func(ctx context.Context, id string) (domain.Issue, error)
+	fetchCommentsFn   func(ctx context.Context, id string) ([]domain.Comment, error)
 
 	fetchStatesAndLabelsFn func(ctx context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error)
 
@@ -304,8 +305,11 @@ func (m *mockTrackerAdapter) FetchIssueStatesByIdentifiers(_ context.Context, _ 
 	return nil, nil
 }
 
-func (m *mockTrackerAdapter) FetchIssueComments(_ context.Context, _ string) ([]domain.Comment, error) {
-	return nil, nil
+func (m *mockTrackerAdapter) FetchIssueComments(ctx context.Context, id string) ([]domain.Comment, error) {
+	if m.fetchCommentsFn != nil {
+		return m.fetchCommentsFn(ctx, id)
+	}
+	return []domain.Comment{}, nil
 }
 
 func (m *mockTrackerAdapter) TransitionIssue(ctx context.Context, issueID string, targetState string) error {
@@ -6173,6 +6177,42 @@ func TestRuntimeStatusSuffixInjection(t *testing.T) {
 			t.Errorf("first-turn prompt missing RuntimeStatusSuffix with empty template:\n%s", p)
 		}
 	})
+}
+
+func TestWorkerRendersParkOnFirstTurnOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultWorkerConfig(t.TempDir())
+	cfg.Agent.MaxTurns = 2
+	tmpl := mustParseTemplate(t, "turn={{ .run.turn_number }} {{ if .park }}park={{ .park.reason }}{{ else }}park=nil{{ end }}")
+	ec := newExitCapture()
+	var mu sync.Mutex
+	var prompts []string
+	deps := WorkerDeps{
+		TrackerAdapter: &mockTrackerAdapter{},
+		AgentAdapter: &mockAgentAdapter{
+			runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+				mu.Lock()
+				prompts = append(prompts, params.Prompt)
+				mu.Unlock()
+				return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
+			},
+		},
+		ConfigFunc:             func() config.ServiceConfig { return cfg },
+		PromptTemplateByIDFunc: func(string) *prompt.Template { return tmpl },
+		OnEvent:                func(string, domain.AgentEvent) {},
+		OnExit:                 ec.onExit,
+		Logger:                 discardLogger(),
+	}
+
+	RunWorkerAttempt(withParkRender(context.Background(), prompt.ParkContext{Reason: parkReasonAgentBlocked}), workerTestIssue(), nil, deps)
+
+	ec.waitResult(t)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(prompts) != 2 || !strings.Contains(prompts[0], "turn=1 park=agent_blocked") || !strings.Contains(prompts[1], "turn=2 park=nil") {
+		t.Errorf("turn prompts = %q, want turn 1 to render the park and turn 2 to render park nil", prompts)
+	}
 }
 
 func TestRunWorkerAttempt_PromptTemplateByIDFunc_ForwardsTemplateID(t *testing.T) {

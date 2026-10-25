@@ -61,7 +61,7 @@ The worker accepts a session id from three sources, in this order: the working s
 
 A turn result's `session_id`, when non-empty, MUST name only the identifier the adapter would continue the session under as of the end of that turn; it MUST NOT name a session id the session has already replaced.
 
-The accepted session id is what the dispatch identity record (§9.5.2), the worker's exit result, the exit's `session_metadata` row, and a continuation retry's resume identifier all carry.
+The accepted session id is what the dispatch identity record (§9.5.2), the worker's exit result, the exit's `session_metadata` row, and a continuation retry's resume identifier all carry. A park record carries the accepted session id of the run it follows when that run had no reaction kind and ended normally, so the first run after a person releases the park resumes it; any other run's session id is not kept, because the retry policy starts a new session after it.
 
 #### 10.2.1 Handoff-Evidence Ownership
 

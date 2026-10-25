@@ -1068,6 +1068,19 @@ type ParkedEntry struct {
 	StageLineage    StageLineage
 	AgentKind       string
 	ConfiguredModel string
+
+	// SessionID, TemplateID, and Statement are what the park hands to the
+	// first run after a release, as parkHandOverOf derives them from the
+	// run the park follows. TemplateID is empty for the workflow body
+	// template.
+	SessionID  string
+	TemplateID string
+	Statement  string
+
+	// ReleasedAt and ReleaseGesture record a person's release; both are
+	// zero while the park holds.
+	ReleasedAt     time.Time
+	ReleaseGesture string // "label_removed" or "state_changed"
 }
 
 // IssueIdentity names an issue to a person beside its key: the tracker's
@@ -1393,6 +1406,13 @@ type State struct {
 	// person acts on it. The durable mirror is the parked_issues table.
 	Parked map[string]*ParkedEntry
 
+	// ParkReleases holds, per issue ID, the park a person released until the
+	// issue's next primary dispatch from the poll tick consumes it or a new
+	// park replaces it. An issue ID is never in both ParkReleases and Parked.
+	// The durable mirror is the same parked_issues row, with its release
+	// columns set. Only the event loop mutates this map.
+	ParkReleases map[string]*ParkedEntry
+
 	// AttentionAcknowledgements maps an attention item ID to when a person
 	// acknowledged the item. The durable mirror is the
 	// attention_acknowledgements table. Only the event loop mutates this map.
@@ -1526,6 +1546,21 @@ func stageRenderFrom(ctx context.Context) prompt.StageContext {
 	return render
 }
 
+type parkRenderCtxKey struct{}
+
+// withParkRender returns a child context carrying the park hand-over the
+// worker renders on turn one of its run.
+func withParkRender(ctx context.Context, pc prompt.ParkContext) context.Context {
+	return context.WithValue(ctx, parkRenderCtxKey{}, pc)
+}
+
+// parkRenderFrom extracts the value injected by [withParkRender] and reports
+// whether one was injected.
+func parkRenderFrom(ctx context.Context) (prompt.ParkContext, bool) {
+	pc, ok := ctx.Value(parkRenderCtxKey{}).(prompt.ParkContext)
+	return pc, ok
+}
+
 // NewState creates an initialized [State] with empty collections and the
 // provided config values. maxConcurrentByState keys must be pre-normalized
 // to lowercase by the caller.
@@ -1546,6 +1581,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		BudgetAnnounced:           make(map[string]BudgetAnnouncement),
 		BudgetHoldNoticed:         make(map[string]string),
 		Parked:                    make(map[string]*ParkedEntry),
+		ParkReleases:              make(map[string]*ParkedEntry),
 		AttentionAcknowledgements: make(map[string]time.Time),
 		StageHops:                 make(map[string]*StageHopEntry),
 		ActiveOrder:               make(map[string]time.Time),
