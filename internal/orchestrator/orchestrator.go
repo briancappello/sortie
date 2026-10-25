@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -1191,20 +1192,35 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	// Break only on exhausted global capacity; skip individual issues whose
 	// per-state limit is full so other states can still dispatch.
 	pass := &TickResolution{offset: o.state.BlockerReadOffset}
+	held := newHeldPass(o.state.Held, time.Now().UTC(), spendHoldEntry(spendHold, o.state.SpendCeilings))
 
 	var dispatched, dispatchedByRule, dispatchedByDefault, dispatchedByFallback int
 	var heldByBlockers, blockersUnresolvedHeld, blockersNotReadHeld, blockersIncompleteHeld int
 	var readFailures int
 	for i, issue := range input {
 		if GlobalAvailableSlots(o.state.MaxConcurrentAgents, len(o.state.Running)) == 0 {
+			held.holdEligible(input[i:], o.state, activeSet, terminalSet, HeldEntry{
+				Reason: SkipAgentSlotsFull,
+				Slot:   &SlotHold{Scope: SlotScopeGlobal, Used: len(o.state.Running), Limit: o.state.MaxConcurrentAgents},
+			})
 			o.once.deferAll(input[i:], deferSlot)
 			break
 		}
 		if o.hostPool.IsSSHEnabled() && !o.hostPool.HasCapacity() {
+			held.holdEligible(input[i:], o.state, activeSet, terminalSet, HeldEntry{Reason: SkipSSHHostsFull})
 			o.once.deferAll(input[i:], deferSlot)
 			break
 		}
 		if !HasAvailableSlots(o.state, issue.State) {
+			held.holdEligible(input[i:i+1], o.state, activeSet, terminalSet, HeldEntry{
+				Reason: SkipAgentSlotsFull,
+				Slot: &SlotHold{
+					Scope: SlotScopeState,
+					State: issue.State,
+					Used:  RunningCountByState(o.state.Running, issue.State),
+					Limit: o.state.MaxConcurrentByState[strings.ToLower(issue.State)],
+				},
+			})
 			o.once.deferFor(issue.ID, deferSlot)
 			continue
 		}
@@ -1217,6 +1233,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			if decision.Err != nil {
 				readFailures++
 			}
+			held.holdDecision(decision, terminalSet)
 			o.recordCandidateHold(decision, pass, terminalSet)
 			switch decision.Reason {
 			case SkipBlockedBy:
@@ -1233,6 +1250,9 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 		}
 		issue, dispatchable := o.holdForStageHop(ctx, decision.Issue, activeSet, terminalSet)
 		if !dispatchable {
+			if o.state.StageHops[issue.ID] != nil {
+				held.hold(issue, HeldEntry{Reason: SkipStageHopUnconfirmed})
+			}
 			o.once.deferFor(issue.ID, deferTick)
 			continue
 		}
@@ -1265,6 +1285,8 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 		host, ok := o.hostPool.AcquireHost(issue.ID, "")
 		if !ok {
+			held.hold(issue, HeldEntry{Reason: SkipSSHHostsFull})
+			held.holdEligible(input[i+1:], o.state, activeSet, terminalSet, HeldEntry{Reason: SkipSSHHostsFull})
 			o.once.deferAll(input[i:], deferSlot)
 			break
 		}
@@ -1354,6 +1376,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	o.once.endPoll(false)
 
 	o.state.BlockerReadOffset = nextBlockerReadOffset(pass)
+	o.state.Held = held.entries()
 
 	switch {
 	case pass.halted:

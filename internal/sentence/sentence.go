@@ -7,7 +7,8 @@
 // an issue, [Attention] for what needs a person, [PollHealth] for the tracker
 // poll check, and [RefreshOutcome], [RetryNowOutcome], [CheckNowOutcome], and
 // [AcknowledgeOutcome] for a refresh, a retry-now, a check-now, and an
-// acknowledge request. [Event] words one retained agent event, and [Stall]
+// acknowledge request. [Hold] words why a candidate is held back and what
+// releases it. [Event] words one retained agent event, and [Stall]
 // and [StallOff] word a running row's quiet marker and its absence, and
 // [RunError] words a finished run's stored error. All are
 // safe for concurrent use and never fail: a template that cannot render
@@ -51,6 +52,7 @@ type Entry struct {
 	Parked          *orchestrator.SnapshotParkedEntry
 	PendingReaction *orchestrator.SnapshotPendingReaction
 	BetweenStages   *orchestrator.SnapshotStageHop
+	Held            *orchestrator.SnapshotHeldEntry
 	Finished        *Finished
 }
 
@@ -96,10 +98,30 @@ func For(e Entry, c Context) Status {
 		return status(selectPendingReaction(e.PendingReaction, c))
 	case e.BetweenStages != nil:
 		return status(selectBetweenStages(e.BetweenStages))
+	case e.Held != nil:
+		return status(selectHold(&e.Held.Hold, c))
 	case e.Finished != nil:
 		return status(selectFinished(e.Finished))
 	}
 	return Status{}
+}
+
+// HoldWords is the operator text of a hold: Reason is the short sentence
+// without a final period, and Release is one sentence ending with a period.
+type HoldWords struct {
+	Reason  string
+	Release string
+}
+
+// Hold returns the words of a hold. Its Reason equals the short form [For]
+// serves for a held row, and a reason the table lacks reads as the fallback
+// text.
+func Hold(h *orchestrator.SnapshotHold, c Context) HoldWords {
+	name, data := selectHold(h, c)
+	return HoldWords{
+		Reason:  render(name, "short", data),
+		Release: render(name, "clears", data),
+	}
 }
 
 // RefreshOutcome returns the outcome sentence of a refresh request.
@@ -625,6 +647,58 @@ func selectBetweenStages(e *orchestrator.SnapshotStageHop) (string, map[string]a
 		"Target": strings.TrimSpace(e.TargetRule),
 		"Label":  strings.TrimSpace(e.TargetLabel),
 	}
+}
+
+// holdTemplates names the template of each hold reason whose words do not
+// depend on the hold's details.
+var holdTemplates = map[orchestrator.SkipReason]string{
+	orchestrator.SkipBlockersUnresolved:  "hold_blockers_unresolved",
+	orchestrator.SkipBlockersNotRead:     "hold_blockers_not_read",
+	orchestrator.SkipBlockersIncomplete:  "hold_blockers_incomplete",
+	orchestrator.SkipSSHHostsFull:        "hold_ssh_hosts",
+	orchestrator.SkipDailySpendCeiling:   "hold_spend_daily",
+	orchestrator.SkipWeeklySpendCeiling:  "hold_spend_weekly",
+	orchestrator.SkipMonthlySpendCeiling: "hold_spend_monthly",
+	orchestrator.SkipStageHopUnconfirmed: "hold_stage_hop",
+}
+
+func selectHold(h *orchestrator.SnapshotHold, c Context) (string, map[string]any) {
+	blockers := make([]string, len(h.Blockers))
+	for i, blocker := range h.Blockers {
+		blockers[i] = blockerWords(blocker)
+	}
+	var slot orchestrator.SnapshotSlotHold
+	if h.Slot != nil {
+		slot = *h.Slot
+	}
+	data := map[string]any{
+		"Blockers": blockers,
+		"Several":  len(blockers) > 1,
+		"State":    strings.TrimSpace(slot.State),
+		"Used":     slot.Used,
+		"Limit":    slot.Limit,
+		"HasReset": h.ResetsAt.After(c.Now),
+		"ResetsIn": secondsUntil(c.Now, h.ResetsAt),
+	}
+
+	switch {
+	case h.Reason == orchestrator.SkipBlockedBy:
+		return "hold_blocked_by", data
+	case h.Reason == orchestrator.SkipAgentSlotsFull && slot.Scope == orchestrator.SlotScopeState:
+		return "hold_agent_slots_state", data
+	case h.Reason == orchestrator.SkipAgentSlotsFull:
+		return "hold_agent_slots_global", data
+	}
+	return holdTemplates[h.Reason], data
+}
+
+// blockerWords names a blocker by its key and state.
+func blockerWords(b orchestrator.SnapshotBlocker) string {
+	state := strings.TrimSpace(b.State)
+	if state == "" {
+		state = "state unknown"
+	}
+	return cmp.Or(b.DisplayID, b.Identifier, b.IssueID) + " (" + state + ")"
 }
 
 func selectFinished(f *Finished) (string, map[string]any) {

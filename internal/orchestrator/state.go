@@ -1470,6 +1470,12 @@ type State struct {
 	// by the event loop. Runtime-only.
 	BlockerReadOffset int
 
+	// Held maps the ID of each candidate the latest dispatch pass held back
+	// to its hold. Replaced wholesale by a pass that ran the dispatch loop
+	// and left alone by a tick that returned before it; never persisted.
+	// Mutated only by the event loop.
+	Held map[string]*HeldEntry
+
 	// TokenBudgetIncomplete is the set of issue IDs whose per-issue token
 	// spend is below max_tokens but only a lower bound, so the ceiling could
 	// not be fully evaluated. Rebuilt wholesale each tick when the token
@@ -1603,12 +1609,58 @@ type SnapshotContinuation struct {
 	Attempt    int    `json:"attempt"`    // 0 for a kind that counts no tries
 }
 
+// SnapshotBlocker is a blocker that holds a candidate. State is masked and
+// empty when the tracker returned none.
+type SnapshotBlocker struct {
+	IssueID    string `json:"issue_id"`
+	Identifier string `json:"issue_identifier"`
+	DisplayID  string `json:"display_identifier,omitempty"`
+	State      string `json:"state,omitempty"`
+}
+
+// SnapshotSlotHold is the agent slot limit that held a candidate. State is
+// masked and set exactly for [SlotScopeState].
+type SnapshotSlotHold struct {
+	Scope SlotScope `json:"scope"`
+	State string    `json:"state,omitempty"`
+	Used  int       `json:"used"`
+	Limit int       `json:"limit"`
+}
+
+// SnapshotHold is a read-only view of the hold the latest dispatch pass gave
+// one candidate. Blockers is nil unless Reason is [SkipBlockedBy], Slot is nil
+// unless it is [SkipAgentSlotsFull], and ResetsAt is zero unless it is a
+// spend reason.
+type SnapshotHold struct {
+	Reason   SkipReason        `json:"reason"`
+	Since    time.Time         `json:"held_since"`
+	Blockers []SnapshotBlocker `json:"blockers"`
+	Slot     *SnapshotSlotHold `json:"slot"`
+	ResetsAt time.Time         `json:"resets_at"`
+}
+
+// SnapshotHeldEntry is a read-only view of one held candidate. IssueTitle,
+// IssueURL, IssueType, IssueLabels, and State are masked, and IssueLabels is
+// never nil.
+type SnapshotHeldEntry struct {
+	IssueID     string       `json:"issue_id"`
+	Identifier  string       `json:"issue_identifier"`
+	DisplayID   string       `json:"display_identifier,omitempty"`
+	IssueTitle  string       `json:"issue_title,omitempty"`
+	IssueURL    string       `json:"issue_url,omitempty"`
+	IssueType   string       `json:"issue_type,omitempty"`
+	IssueLabels []string     `json:"issue_labels,omitzero"`
+	State       string       `json:"state,omitempty"`
+	Hold        SnapshotHold `json:"hold"`
+}
+
 // SnapshotStageHop is a read-only view of one issue between stages: a hop was
 // made and no run of the issue was dispatched since. IssueTitle, IssueURL,
 // IssueType, IssueLabels, and State are masked. IssueLabels is nil exactly
 // when the record holds no read of the labels. StagePosition is nil when
 // RuleName is on no stage chain, and AgentKind and ConfiguredModel are empty
-// when the configuration names no rule with a stage label for it.
+// when the configuration names no rule with a stage label for it. Hold is nil
+// while the latest dispatch pass recorded no hold for the issue.
 type SnapshotStageHop struct {
 	IssueID      string    `json:"issue_id"`
 	Identifier   string    `json:"issue_identifier"`
@@ -1629,6 +1681,7 @@ type SnapshotStageHop struct {
 	StagePosition   *SnapshotStagePosition `json:"stage_position"`
 	AgentKind       string                 `json:"agent_kind,omitempty"`
 	ConfiguredModel string                 `json:"configured_model,omitempty"`
+	Hold            *SnapshotHold          `json:"hold"`
 }
 
 // SnapshotRunningEntry is a read-only view of a running session, produced
@@ -1883,6 +1936,9 @@ type RuntimeSnapshotResult struct {
 	// BetweenStages is never nil.
 	BetweenStages []SnapshotStageHop `json:"between_stages"`
 
+	// Held is never nil.
+	Held []SnapshotHeldEntry `json:"held"`
+
 	// ActiveOrder maps every issue ID the row lists hold to its order time.
 	// It shares nothing with State.
 	ActiveOrder map[string]time.Time `json:"-"`
@@ -2019,7 +2075,7 @@ func spendOfRunningEntry(entry *RunningEntry) pricing.Spend {
 // RuntimeSnapshot captures a point-in-time view of the orchestrator's
 // runtime state. now is normalized to UTC internally.
 //
-// Running, Retrying, Parked, PendingReactions, BetweenStages, and AgentTotals are copied out and
+// Running, Retrying, Parked, PendingReactions, BetweenStages, Held, and AgentTotals are copied out and
 // may be retained without synchronization. RateLimits is shallow-copied and may alias
 // nested mutable values; callers must treat it and its referents as
 // read-only.
@@ -2246,6 +2302,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 
 	snap.PendingReactions = snapshotPendingReactions(state)
 	snap.BetweenStages = snapshotBetweenStages(state)
+	snap.Held = snapshotHeld(state)
 	snap.ActiveOrder = activeOrderOf(state)
 
 	if state.AgentRateLimits != nil {
@@ -2346,7 +2403,7 @@ func snapshotBetweenStages(state *State) []SnapshotStageHop {
 		}
 		identity := maskedIdentity(hop.IssueIdentity)
 		agent := state.RuleAgents[hop.TargetRule]
-		rows = append(rows, SnapshotStageHop{
+		row := SnapshotStageHop{
 			IssueID:      id,
 			Identifier:   hop.Identifier,
 			DisplayID:    hop.DisplayID,
@@ -2366,7 +2423,12 @@ func snapshotBetweenStages(state *State) []SnapshotStageHop {
 			StagePosition:   stagePosition(state, id, hop.TargetRule, hop.SourceRule),
 			AgentKind:       agent.AgentKind,
 			ConfiguredModel: agent.ConfiguredModel,
-		})
+		}
+		if held := state.Held[id]; held != nil {
+			hold := snapshotHold(held)
+			row.Hold = &hold
+		}
+		rows = append(rows, row)
 	}
 	slices.SortFunc(rows, func(a, b SnapshotStageHop) int {
 		return cmp.Or(cmp.Compare(a.Identifier, b.Identifier), cmp.Compare(a.IssueID, b.IssueID))

@@ -29,6 +29,7 @@ type stateResponse struct {
 	PendingReactions       []pendingReactionResponse        `json:"pending_reactions"`
 	BetweenStages          []stageHopResponse               `json:"between_stages"`
 	Active                 []activeIssueResponse            `json:"active"`
+	Held                   []heldIssueResponse              `json:"held"`
 	Attention              []attentionItemResponse          `json:"attention"`
 	AgentTotals            orchestrator.SnapshotAgentTotals `json:"agent_totals"`
 	RateLimits             map[string]any                   `json:"rate_limits"`
@@ -56,6 +57,7 @@ type stateCounts struct {
 	Parked           int `json:"parked"`
 	PendingReactions int `json:"pending_reactions"`
 	BetweenStages    int `json:"between_stages"`
+	Held             int `json:"held"`
 	Attention        int `json:"attention"`
 }
 
@@ -226,8 +228,59 @@ type stageHopResponse struct {
 	AgentKind       string                 `json:"agent_kind,omitempty"`
 	ConfiguredModel string                 `json:"configured_model,omitempty"`
 
+	Hold *holdResponse `json:"hold"`
+
 	StatusText     string `json:"status_text"`
 	StatusTextFull string `json:"status_text_full"`
+}
+
+// holdBlockerResponse is the JSON wire format for one blocker that holds a
+// candidate.
+type holdBlockerResponse struct {
+	IssueID           string `json:"issue_id"`
+	IssueIdentifier   string `json:"issue_identifier"`
+	DisplayIdentifier string `json:"display_identifier,omitempty"`
+	State             string `json:"state,omitempty"`
+}
+
+// holdSlotResponse is the JSON wire format for the agent slot limit that held
+// a candidate.
+type holdSlotResponse struct {
+	Scope string `json:"scope"`
+	State string `json:"state,omitempty"`
+	Used  int    `json:"used"`
+	Limit int    `json:"limit"`
+}
+
+// holdResponse is the JSON wire format for why a candidate is held back.
+// Blockers is non-null exactly for a blocked_by hold, Slot exactly for an
+// agent_slots_full hold, and ResetsAt exactly for a spend ceiling hold. A
+// client MUST tolerate a Reason it does not know and show the served texts.
+// Used by GET /api/v1/state and GET /api/v1/{identifier}.
+type holdResponse struct {
+	Reason      string                `json:"reason"`
+	HeldSince   time.Time             `json:"held_since"`
+	Blockers    []holdBlockerResponse `json:"blockers"`
+	Slot        *holdSlotResponse     `json:"slot"`
+	ResetsAt    *time.Time            `json:"resets_at"`
+	ReasonText  string                `json:"reason_text"`
+	ReleaseText string                `json:"release_text"`
+}
+
+// heldIssueResponse is the JSON wire format for an eligible candidate the
+// latest dispatch pass held back. Used by GET /api/v1/state.
+type heldIssueResponse struct {
+	IssueID           string       `json:"issue_id"`
+	IssueIdentifier   string       `json:"issue_identifier"`
+	DisplayIdentifier string       `json:"display_identifier,omitempty"`
+	IssueTitle        string       `json:"issue_title,omitempty"`
+	IssueURL          string       `json:"issue_url,omitempty"`
+	IssueType         string       `json:"issue_type,omitempty"`
+	IssueLabels       []string     `json:"issue_labels,omitzero"`
+	State             string       `json:"state,omitempty"`
+	Hold              holdResponse `json:"hold"`
+	StatusText        string       `json:"status_text"`
+	StatusTextFull    string       `json:"status_text_full"`
 }
 
 // parkedEntryResponse is the JSON wire format for one issue held out of
@@ -724,7 +777,7 @@ func toStagePositionResponse(p *orchestrator.SnapshotStagePosition) *stagePositi
 	}
 }
 
-func toStageHopResponse(e orchestrator.SnapshotStageHop) stageHopResponse {
+func toStageHopResponse(e orchestrator.SnapshotStageHop, words sentence.Context) stageHopResponse {
 	return stageHopResponse{
 		IssueID:           e.IssueID,
 		IssueIdentifier:   e.Identifier,
@@ -744,7 +797,60 @@ func toStageHopResponse(e orchestrator.SnapshotStageHop) stageHopResponse {
 		StagePosition:   toStagePositionResponse(e.StagePosition),
 		AgentKind:       e.AgentKind,
 		ConfiguredModel: e.ConfiguredModel,
+
+		Hold: toHoldResponse(e.Hold, words),
 	}
+}
+
+// toHoldResponse returns the served view of a hold with its operator texts,
+// or nil for no hold.
+func toHoldResponse(h *orchestrator.SnapshotHold, words sentence.Context) *holdResponse {
+	if h == nil {
+		return nil
+	}
+	resp := &holdResponse{
+		Reason:    string(h.Reason),
+		HeldSince: h.Since.UTC(),
+		ResetsAt:  utcOrNil(h.ResetsAt),
+	}
+	if h.Blockers != nil {
+		resp.Blockers = make([]holdBlockerResponse, 0, len(h.Blockers))
+		for _, blocker := range h.Blockers {
+			resp.Blockers = append(resp.Blockers, holdBlockerResponse{
+				IssueID:           blocker.IssueID,
+				IssueIdentifier:   blocker.Identifier,
+				DisplayIdentifier: blocker.DisplayID,
+				State:             blocker.State,
+			})
+		}
+	}
+	if h.Slot != nil {
+		resp.Slot = &holdSlotResponse{
+			Scope: string(h.Slot.Scope),
+			State: h.Slot.State,
+			Used:  h.Slot.Used,
+			Limit: h.Slot.Limit,
+		}
+	}
+	text := sentence.Hold(h, words)
+	resp.ReasonText, resp.ReleaseText = text.Reason, text.Release
+	return resp
+}
+
+func toHeldIssueResponse(e orchestrator.SnapshotHeldEntry, words sentence.Context) heldIssueResponse {
+	row := heldIssueResponse{
+		IssueID:           e.IssueID,
+		IssueIdentifier:   e.Identifier,
+		DisplayIdentifier: e.DisplayID,
+		IssueTitle:        e.IssueTitle,
+		IssueURL:          e.IssueURL,
+		IssueType:         e.IssueType,
+		IssueLabels:       e.IssueLabels,
+		State:             e.State,
+		Hold:              *toHoldResponse(&e.Hold, words),
+	}
+	row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Held: &e}, words)
+	return row
 }
 
 func toRetryEntryResponse(e orchestrator.SnapshotRetryEntry) retryEntryResponse {
@@ -1030,9 +1136,14 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Con
 
 	betweenStages := make([]stageHopResponse, 0, len(snap.BetweenStages))
 	for _, e := range snap.BetweenStages {
-		row := toStageHopResponse(e)
+		row := toStageHopResponse(e, words)
 		row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{BetweenStages: &e}, words)
 		betweenStages = append(betweenStages, row)
+	}
+
+	held := make([]heldIssueResponse, 0, len(snap.Held))
+	for _, e := range snap.Held {
+		held = append(held, toHeldIssueResponse(e, words))
 	}
 
 	attention := toAttentionResponses(sentence.Attention(snap, health, words))
@@ -1051,6 +1162,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Con
 			Parked:           len(parked),
 			PendingReactions: len(pendingReactions),
 			BetweenStages:    len(betweenStages),
+			Held:             len(held),
 			Attention:        countUnacknowledged(attention),
 		},
 		Running:          running,
@@ -1059,6 +1171,7 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Con
 		Parked:           parked,
 		PendingReactions: pendingReactions,
 		BetweenStages:    betweenStages,
+		Held:             held,
 		Attention:        attention,
 		AgentTotals:      snap.AgentTotals,
 		RateLimits:       rateLimits,
@@ -1744,7 +1857,7 @@ func buildIssueDetail(identifier, issueID string, snap orchestrator.RuntimeSnaps
 	for _, e := range snap.BetweenStages {
 		if matches(e.Identifier, e.IssueID) {
 			situation.BetweenStages = &e
-			hopEntry = new(toStageHopResponse(e))
+			hopEntry = new(toStageHopResponse(e, words))
 			hopEntry.StatusText, hopEntry.StatusTextFull = sentencesOf(sentence.Entry{BetweenStages: &e}, words)
 			break
 		}

@@ -3423,6 +3423,192 @@ func TestDispatchLoopPerStateExhaustion(t *testing.T) {
 	}
 }
 
+func newHeldHarness(t *testing.T, tune func(*config.ServiceConfig), candidates ...domain.Issue) *runHarness {
+	t.Helper()
+	cfg := runConfig(t, map[string]any{"agent": map[string]any{"kind": "kind-a", "command": "a-cmd"}})
+	if tune != nil {
+		tune(&cfg)
+	}
+	h := newRunHarness(t, cfg, "kind-a")
+	h.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
+	h.state.MaxConcurrentByState = cfg.Agent.MaxConcurrentByState
+	h.tracker.candidates = candidates
+	h.build()
+	return h
+}
+
+func requireHeld(t *testing.T, h *runHarness, id string, reason SkipReason) *HeldEntry {
+	t.Helper()
+	got := h.state.Held[id]
+	if got == nil || got.Reason != reason {
+		t.Fatalf("State.Held[%q] = %+v, want a hold for %q", id, got, reason)
+	}
+	return got
+}
+
+func blockedCandidate(state string) domain.Issue {
+	issue := candidate("id-1", "A-1")
+	issue.BlockedBy = []domain.BlockerRef{{ID: "b-1", Identifier: "B-1", State: state}}
+	return issue
+}
+
+func TestHandleTick_Held(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	oneSlot := func(cfg *config.ServiceConfig) { cfg.Agent.MaxConcurrentAgents = 1 }
+	spendHeld := func(h *runHarness) {
+		h.store.windowUsage = persistence.IssueTokenUsage{RecordedCostUSD: 5, PricedSessions: 1, Sessions: 1}
+	}
+	dailyCeiling := func(cfg *config.ServiceConfig) { cfg.Agent.MaxDailyCostUSD = 5 }
+	dailyResetsAt := func(h *runHarness) time.Time {
+		for _, status := range h.state.SpendCeilings {
+			if status.Window == SpendWindowDaily {
+				return status.ResetsAt
+			}
+		}
+		return time.Time{}
+	}
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"an open blocker holds the issue until it turns terminal", func(t *testing.T) {
+			h := newHeldHarness(t, nil, blockedCandidate("In Progress"))
+
+			h.o.handleTick(ctx)
+
+			got := requireHeld(t, h, "id-1", SkipBlockedBy)
+			if len(got.Blockers) != 1 || got.Blockers[0].Identifier != "B-1" || got.Blockers[0].State != "In Progress" {
+				t.Errorf("State.Held[id-1].Blockers = %+v, want B-1 in In Progress", got.Blockers)
+			}
+
+			h.tracker.candidates = []domain.Issue{blockedCandidate("Done")}
+			h.o.handleTick(ctx)
+
+			h.waitForSessions(1)
+			if len(h.state.Held) != 0 {
+				t.Errorf("State.Held after the blocker turned terminal = %+v, want none", h.state.Held)
+			}
+		}},
+		{"a full global slot limit holds the issue without reading its blockers", func(t *testing.T) {
+			h := newHeldHarness(t, oneSlot, blockedCandidate("In Progress"))
+			h.state.Running["r"] = &RunningEntry{Issue: candidate("r", "R-1")}
+			resolver := &fakeBlockerResolver{needsReadFn: func(domain.Issue) bool { return true }}
+			h.o.blockerResolver = resolver
+
+			h.o.handleTick(ctx)
+
+			got := requireHeld(t, h, "id-1", SkipAgentSlotsFull)
+			if want := (SlotHold{Scope: SlotScopeGlobal, Used: 1, Limit: 1}); got.Slot == nil || *got.Slot != want {
+				t.Errorf("State.Held[id-1].Slot = %+v, want %+v", got.Slot, want)
+			}
+			if len(resolver.callOrder) != 0 {
+				t.Errorf("blocker reads under a full slot limit = %v, want none", resolver.callOrder)
+			}
+
+			delete(h.state.Running, "r")
+			h.tracker.candidates = []domain.Issue{candidate("id-1", "A-1")}
+			h.o.handleTick(ctx)
+
+			h.waitForSessions(1)
+			if len(h.state.Held) != 0 {
+				t.Errorf("State.Held after a slot freed = %+v, want none", h.state.Held)
+			}
+		}},
+		{"a full per-state slot limit holds the issue", func(t *testing.T) {
+			h := newHeldHarness(t, func(cfg *config.ServiceConfig) {
+				cfg.Agent.MaxConcurrentByState = map[string]int{"to do": 1}
+			}, candidate("id-1", "A-1"))
+			h.state.Running["r"] = &RunningEntry{Issue: candidate("r", "R-1")}
+
+			h.o.handleTick(ctx)
+
+			got := requireHeld(t, h, "id-1", SkipAgentSlotsFull)
+			if want := (SlotHold{Scope: SlotScopeState, State: "To Do", Used: 1, Limit: 1}); got.Slot == nil || *got.Slot != want {
+				t.Errorf("State.Held[id-1].Slot = %+v, want %+v", got.Slot, want)
+			}
+		}},
+		{"a full SSH host pool holds the issue", func(t *testing.T) {
+			raw := map[string]any{"agent": map[string]any{"kind": "kind-a", "command": "a-cmd"}}
+			raw["worker"] = map[string]any{"ssh_hosts": []any{"host-1"}, "max_concurrent_agents_per_host": 1}
+			h := newRunHarness(t, runConfig(t, raw), "kind-a")
+			h.tracker.candidates = []domain.Issue{candidate("id-1", "A-1")}
+			h.build()
+			h.o.applyWorkerConfig(h.wm.Config())
+			if _, ok := h.o.hostPool.AcquireHost("r", ""); !ok {
+				t.Fatal("AcquireHost() = false on an empty pool, want true")
+			}
+
+			h.o.handleTick(ctx)
+
+			requireHeld(t, h, "id-1", SkipSSHHostsFull)
+		}},
+		{"a failed candidate fetch keeps the hold and its first-held time", func(t *testing.T) {
+			h := newHeldHarness(t, nil, blockedCandidate("In Progress"))
+			h.o.handleTick(ctx)
+			since := requireHeld(t, h, "id-1", SkipBlockedBy).Since
+
+			h.tracker.fetchErr = errors.New("tracker unreachable")
+			h.o.handleTick(ctx)
+			requireHeld(t, h, "id-1", SkipBlockedBy)
+
+			h.tracker.fetchErr = nil
+			h.o.handleTick(ctx)
+
+			if got := requireHeld(t, h, "id-1", SkipBlockedBy).Since; !got.Equal(since) {
+				t.Errorf("State.Held[id-1].Since after a failed fetch = %v, want %v", got, since)
+			}
+		}},
+		{"an unconfirmed stage move holds the issue on its between-stages row", func(t *testing.T) {
+			h := newHeldHarness(t, nil, candidate("id-1", "A-1"))
+			h.state.StageHops["id-1"] = &StageHopEntry{Identifier: "A-1", TargetRule: "review", TargetLabel: "stage:review"}
+
+			h.o.handleTick(ctx)
+
+			requireHeld(t, h, "id-1", SkipStageHopUnconfirmed)
+			snap := RuntimeSnapshot(h.state, time.Now())
+			if len(snap.Held) != 0 || len(snap.BetweenStages) != 1 || snap.BetweenStages[0].Hold == nil || snap.BetweenStages[0].Hold.Reason != SkipStageHopUnconfirmed {
+				t.Errorf("RuntimeSnapshot() Held, BetweenStages = %+v, %+v, want no held row and a between-stages row holding %q",
+					snap.Held, snap.BetweenStages, SkipStageHopUnconfirmed)
+			}
+		}},
+		{"a spend ceiling holds every candidate with its reset while a slot is free", func(t *testing.T) {
+			h := newHeldHarness(t, dailyCeiling, candidate("id-1", "A-1"), candidate("id-2", "A-2"))
+			spendHeld(h)
+
+			h.o.handleTick(ctx)
+
+			resetsAt := dailyResetsAt(h)
+			for _, id := range []string{"id-1", "id-2"} {
+				if got := requireHeld(t, h, id, SkipDailySpendCeiling); resetsAt.IsZero() || !got.ResetsAt.Equal(resetsAt) {
+					t.Errorf("State.Held[%s].ResetsAt = %v, want the window's reset %v", id, got.ResetsAt, resetsAt)
+				}
+			}
+		}},
+		{"a spend ceiling outranks a full slot limit and an open blocker", func(t *testing.T) {
+			h := newHeldHarness(t, func(cfg *config.ServiceConfig) { oneSlot(cfg); dailyCeiling(cfg) }, blockedCandidate("In Progress"), candidate("id-2", "A-2"))
+			spendHeld(h)
+			h.state.Running["r"] = &RunningEntry{Issue: candidate("r", "R-1")}
+
+			h.o.handleTick(ctx)
+
+			for _, id := range []string{"id-1", "id-2"} {
+				requireHeld(t, h, id, SkipDailySpendCeiling)
+			}
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tt.run(t)
+		})
+	}
+}
+
 func TestOrchestratorDynamicConfigReload(t *testing.T) {
 	t.Parallel()
 
@@ -10168,13 +10354,14 @@ type runTracker struct {
 	candidates       []domain.Issue
 	issues           map[string]domain.Issue
 	candidateFetches atomic.Int64
+	fetchErr         error
 }
 
 func (r *runTracker) FetchCandidateIssues(context.Context) ([]domain.Issue, error) {
 	r.candidateFetches.Add(1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return slices.Clone(r.candidates), nil
+	return slices.Clone(r.candidates), r.fetchErr
 }
 
 func (r *runTracker) SetTrackerStates(func() domain.TrackerStates) {}

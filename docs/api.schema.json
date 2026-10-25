@@ -1128,6 +1128,54 @@
       ],
       "type": "object"
     },
+    "HeldIssueResponse": {
+      "properties": {
+        "display_identifier": {
+          "type": "string"
+        },
+        "hold": {
+          "$ref": "#/$defs/HoldResponse"
+        },
+        "issue_id": {
+          "type": "string"
+        },
+        "issue_identifier": {
+          "type": "string"
+        },
+        "issue_labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "issue_title": {
+          "type": "string"
+        },
+        "issue_type": {
+          "type": "string"
+        },
+        "issue_url": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "status_text": {
+          "type": "string"
+        },
+        "status_text_full": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id",
+        "issue_identifier",
+        "hold",
+        "status_text",
+        "status_text_full"
+      ],
+      "type": "object"
+    },
     "HistoryTotalsResponse": {
       "properties": {
         "cost_status": {
@@ -1174,6 +1222,110 @@
         "tokens_complete",
         "estimated_cost_usd",
         "cost_status"
+      ],
+      "type": "object"
+    },
+    "HoldBlockerResponse": {
+      "properties": {
+        "display_identifier": {
+          "type": "string"
+        },
+        "issue_id": {
+          "type": "string"
+        },
+        "issue_identifier": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issue_id",
+        "issue_identifier"
+      ],
+      "type": "object"
+    },
+    "HoldResponse": {
+      "properties": {
+        "blockers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/HoldBlockerResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "held_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reason_text": {
+          "type": "string"
+        },
+        "release_text": {
+          "type": "string"
+        },
+        "resets_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "slot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HoldSlotResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reason",
+        "held_since",
+        "blockers",
+        "slot",
+        "resets_at",
+        "reason_text",
+        "release_text"
+      ],
+      "type": "object"
+    },
+    "HoldSlotResponse": {
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "used": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "used",
+        "limit"
       ],
       "type": "object"
     },
@@ -4602,6 +4754,16 @@
         "display_identifier": {
           "type": "string"
         },
+        "hold": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HoldResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "hopped_at": {
           "anyOf": [
             {
@@ -4675,6 +4837,7 @@
         "hopped_at",
         "dispatched_at",
         "stage_position",
+        "hold",
         "status_text",
         "status_text_full"
       ],
@@ -4739,6 +4902,9 @@
         "budget_exhausted": {
           "type": "integer"
         },
+        "held": {
+          "type": "integer"
+        },
         "parked": {
           "type": "integer"
         },
@@ -4759,6 +4925,7 @@
         "parked",
         "pending_reactions",
         "between_stages",
+        "held",
         "attention"
       ],
       "type": "object"
@@ -4873,6 +5040,19 @@
         "health": {
           "$ref": "#/$defs/StateHealthResponse"
         },
+        "held": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/HeldIssueResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "parked": {
           "anyOf": [
             {
@@ -4966,6 +5146,7 @@
         "pending_reactions",
         "between_stages",
         "active",
+        "held",
         "attention",
         "agent_totals",
         "rate_limits"
