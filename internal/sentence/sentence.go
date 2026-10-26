@@ -660,6 +660,7 @@ var holdTemplates = map[orchestrator.SkipReason]string{
 	orchestrator.SkipWeeklySpendCeiling:  "hold_spend_weekly",
 	orchestrator.SkipMonthlySpendCeiling: "hold_spend_monthly",
 	orchestrator.SkipStageHopUnconfirmed: "hold_stage_hop",
+	orchestrator.SkipParkCommentsUnread:  "hold_park_comments",
 }
 
 func selectHold(h *orchestrator.SnapshotHold, c Context) (string, map[string]any) {

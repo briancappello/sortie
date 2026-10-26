@@ -59,6 +59,10 @@ func ParsePriorityIntFromString(s string) *int {
 }
 
 // NormalizeComments maps adapter-local comment values to [domain.Comment] values.
+//
+// CreatedAt passes through unchanged, so every source comment must carry a
+// form the [domain.Comment] CreatedAt documentation lists; the
+// orchestrator parses it with [domain.Comment.CreatedTime].
 func NormalizeComments(in []SourceComment) []domain.Comment {
 	if in == nil {
 		return []domain.Comment{}

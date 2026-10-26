@@ -620,6 +620,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		StageLineage:    entry.StageLineage,
 		AgentKind:       entry.AgentKind,
 		ConfiguredModel: entry.ConfiguredModel,
+		HandOver:        parkHandOverOf(runHistory),
 	}
 
 	consecutiveAbsences := 0

@@ -1828,7 +1828,7 @@ func TestValidateAgentConfigOfflineVerdict_ClaudeCodePermissionMode(t *testing.T
 // diagnostic must match exactly for kind "claude-code" and key
 // "session_persistence".
 const wantSessionResumeMessage = "claude-code.session_persistence stops this agent kind from resuming a session across separate agent launches, " +
-	"but Sortie resumes an issue's earlier session on a continuation, including one queued before a restart, and on the retry after a stall while Sortie keeps running, " +
+	"but Sortie resumes an issue's earlier session on a continuation, including one queued before a restart, on the retry after a stall while Sortie keeps running, and on the first run after a person releases a park, " +
 	"and every such turn fails. Change claude-code.session_persistence, or use an agent kind that can resume a session."
 
 // claudeCodeSessionResumeWorkflow returns a workflow selecting the

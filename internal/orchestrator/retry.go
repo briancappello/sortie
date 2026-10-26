@@ -32,6 +32,7 @@ type RetryTimerStore interface {
 	DeleteLivePass(ctx context.Context, issueID, kind string) error
 	CountRunHistoryByIssue(ctx context.Context, issueID string) (int, error)
 	QueryConsecutiveHandoffAbsenceCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
+	LatestAgentRuns(ctx context.Context, issueIDs []string) (map[string]persistence.RunHistory, error)
 	TokenUsageByIssue(ctx context.Context, issueID string) (persistence.IssueTokenUsage, error)
 	MarkReactionDispatched(ctx context.Context, issueID, kind string) error
 	UpsertParkedIssue(ctx context.Context, entry persistence.ParkedIssue) error
@@ -338,6 +339,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 						StageLineage:    popped.StageLineage,
 						AgentKind:       popped.AgentKind,
 						ConfiguredModel: popped.ConfiguredModel,
+						HandOver:        latestParkHandOver(ctx, params.Store, issueID, log),
 					},
 					"",
 					consecutiveAbsences,
@@ -816,9 +818,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 				slog.String("dispatch_rule_name", selection.RuleName),
 			)
 		}
-		if selection.AgentKind != frozen.AgentKind || selection.TemplateID != frozen.TemplateID {
-			resumeSessionID = ""
-		}
+		resumeSessionID = resumeSessionFor(resumeSessionID, frozen, selection)
 		agentKind, templateID, ruleName = selection.AgentKind, selection.TemplateID, selection.RuleName
 	}
 
@@ -975,6 +975,30 @@ func retryEntryRow(entry *RetryEntry) persistence.RetryEntry {
 		ChainID:              entry.StageLineage.ChainID,
 		DispatchedAt:         formatDispatchedAt(entry.StageLineage.DispatchedAt),
 	}
+}
+
+// latestParkHandOver reads the issue's newest agent run and derives the
+// hand-over a park taken now keeps from it. A failed read logs and yields
+// the zero hand-over, since the park must proceed whatever the store says.
+func latestParkHandOver(ctx context.Context, store RetryTimerStore, issueID string, log *slog.Logger) parkHandOver {
+	runs, err := store.LatestAgentRuns(ctx, []string{issueID})
+	if err != nil {
+		log.Warn("park dispatch context read failed", slog.Any("error", err))
+		return parkHandOver{}
+	}
+	return parkHandOverOf(runs[issueID])
+}
+
+// resumeSessionFor returns sessionID when a run on the ran selection may
+// continue it under the selection in force, which holds when both name the
+// same agent kind and template, and "" otherwise. The rule name does not
+// matter: a rule that picks the same kind and template keeps the session
+// usable.
+func resumeSessionFor(sessionID string, ran, inForce DispatchResolution) string {
+	if ran.AgentKind != inForce.AgentKind || ran.TemplateID != inForce.TemplateID {
+		return ""
+	}
+	return sessionID
 }
 
 // persistRetryEntry saves the in-memory retry entry for issueID to SQLite.

@@ -2859,6 +2859,7 @@ The `hold` object of a held row and of a between-stages row has these members.
 | `ssh_hosts_full`                                              | Every SSH host runs as many sessions as its per-host limit allows. |
 | `daily_spend_ceiling`, `weekly_spend_ceiling`, `monthly_spend_ceiling` | A spend window holds dispatch. |
 | `stage_hop_unconfirmed`                                       | The read that should confirm the issue's stage move failed or did not show the hop's label. |
+| `park_comments_unread`                                        | A person released the issue's park, and the read of the comments the next run receives failed. |
 
 While a spend window holds, an issue whose blockers are clear shows the spend reason, and so does every issue a full capacity limit stops, because a freed slot would not dispatch it while the window holds. Without a spend window, a full global agent slot limit or SSH capacity stops the pass before it checks blockers, so an issue that also has an open blocker shows the capacity reason until a pass reaches it with capacity free; the pass reads no blocker for the issues it classifies this way.
 
@@ -4936,7 +4937,7 @@ template.New("prompt").
 
 ### 5.2 Template Input Variables
 
-The data map passed to `Execute` contains **four core top-level keys** (`issue`, `attempt`, `run`, `stage`) plus **continuation context keys** (`ci_failure`, `review_comments`, `bot_review_comments`, `merge_conflict`, `label_review`, `label_fix`) that are `nil` by default and populated on reaction-triggered dispatches. A reaction run is a run that a reaction starts, error retries included. Its key stays set on every turn of the run, so a `.run.is_continuation` test inside the key's branch tells the first turn from later ones (see Section 5.5). `review_comments` and `bot_review_comments` are also populated on turn 1 of a new run of an issue whose pull request holds comments no earlier run was given (see `reactions.review_comments` and `reactions.bot_review` in Section 2.9):
+The data map passed to `Execute` contains the **core top-level keys** (`issue`, `attempt`, `run`, `stage`, `park`) plus **continuation context keys** (`ci_failure`, `review_comments`, `bot_review_comments`, `merge_conflict`, `label_review`, `label_fix`) that are `nil` by default and populated on reaction-triggered dispatches. `park` is `nil` except on turn 1 of the first run after a person releases a park (see the `park` variable below). A reaction run is a run that a reaction starts, error retries included. Its key stays set on every turn of the run, so a `.run.is_continuation` test inside the key's branch tells the first turn from later ones (see Section 5.5). `review_comments` and `bot_review_comments` are also populated on turn 1 of a new run of an issue whose pull request holds comments no earlier run was given (see `reactions.review_comments` and `reactions.bot_review` in Section 2.9):
 
 #### `issue` — Normalized Issue Object
 
@@ -4956,7 +4957,7 @@ All fields from the tracker, normalized into a stable structure regardless of th
 | `.issue.assignee`    | string          | Assignee identity from the tracker. Empty string when absent.                                                                                    |
 | `.issue.issue_type`  | string          | Tracker-defined type (Bug, Story, Task, Epic). Empty string when absent.                                                                         |
 | `.issue.parent`      | object or nil   | Parent issue reference (sub-task relationship). `nil` when no parent.                                                                            |
-| `.issue.comments`    | list or nil     | Comment records (feedback, review notes, workpad entries). `nil` means comments were not fetched; an empty non-nil list means no comments exist. |
+| `.issue.comments`    | list or nil     | Comment records (feedback, review notes, workpad entries), oldest first. Each carries `id`, `author`, `body`, and `created_at`, the tracker's timestamp text: RFC 3339, or the same with a `±hhmm` offset. Filled on runs a retry timer starts and on the first run after a person releases a park; `nil` on other runs the poll tick starts, meaning comments were not fetched. An empty non-nil list means no comments exist. |
 | `.issue.blocked_by`  | list or nil     | Blocker references, each with `.id`, `.identifier`, `.state`, `.display_id`. `nil` means the blockers were not resolved; an empty non-nil list means no blockers exist. `.display_id` is the qualified form when the tracker's identifier alone is ambiguous (for example GitHub's `owner/repo#5` against an `identifier` of `5`) and empty otherwise. |
 | `.issue.created_at`  | string          | ISO-8601 creation timestamp. Empty string when absent.                                                                                           |
 | `.issue.updated_at`  | string          | ISO-8601 last-update timestamp. Empty string when absent.                                                                                        |
@@ -4992,6 +4993,29 @@ A retry or reaction continuation that keeps its rule renders the `previous` pair
 
 ```markdown
 {{ if .stage.previous }}The {{ .stage.previous }} stage finished first ({{ .stage.previous_outcome }}). Read its output in the workspace before you start.{{ end }}
+```
+
+#### `park`: Park Hand-Over Context
+
+Present as a key on every render, so `{{ .park }}` and `{{ if .park }}` render under `missingkey=error` in every template. It is non-nil only on turn 1 of the first run after a person releases a park, by removing the parking label or moving the issue to another tracker state. It is `nil` on every other render: later turns of that run, later runs, retry fires, reaction runs, and a run after a release that observed work (`evidence_observed`).
+
+| Field                | Type   | Description                                                                                                                                                                                                                  |
+| -------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.park.reason`       | string | `agent_blocked` or `handoff_absence`.                                                                                                                                                                                        |
+| `.park.statement`    | string | The stop statement of the run the park follows: the reason after `blocked` for `agent_blocked`, and for `handoff_absence` the statement of the declaration whose handoff Sortie withheld. Empty when that run declared none or the park recorded no run. |
+| `.park.parked_at`    | string | Park time, RFC 3339 in UTC, whole seconds. Empty when the stored park time cannot be read.                                                                                                                                   |
+| `.park.released_at`  | string | Release time in the same form.                                                                                                                                                                                               |
+| `.park.gesture`      | string | `label_removed` or `state_changed`.                                                                                                                                                                                          |
+| `.park.comments`     | list   | The comments created since the park, in tracker order, oldest first. Never `nil`; empty when nobody commented since the park. Each element has the shape of an `.issue.comments` element: `id`, `author`, `body`, `created_at`. |
+
+A comment is in `.park.comments` when its creation time is at or after the park time truncated to the whole second. A comment whose creation time cannot be read is included, and when the park time cannot be read every comment is. `.issue.comments` carries every comment of the issue, on every turn of that run.
+
+The run resumes the agent session of the run the park follows when that run had no reaction and ended normally, and the agent kind and template are the ones that run used. Otherwise it starts a new session, and `.park.statement` still tells it why the run stopped. When Sortie posts a stop comment to the tracker, that comment is among `.park.comments` and the run sees the statement twice. When the comments cannot be read, Sortie does not start the run: the issue waits for the next poll and appears under `held` with the reason `park_comments_unread`.
+
+```markdown
+{{ if .park }}A person released this issue ({{ .park.gesture }}). You stopped earlier: {{ .park.statement }}
+{{ range .park.comments }}{{ .author }}: {{ .body }}
+{{ end }}{{ end }}
 ```
 
 #### `ci_failure` — CI Failure Context (continuation key)
@@ -5265,6 +5289,7 @@ The prompt template supports three distinct modes within a single file. Workflow
 | **First run**         | `0`            | `false`               | Full task instructions, context gathering steps.              |
 | **Continuation turn** | same as turn 1 | `true`                | Resume guidance — review state, pick up where left off.       |
 | **Retry after error** | integer `>= 1` | `false`               | Diagnostic steps — check prior failure, approach differently. |
+| **First run after a released park** | `0` | `false` | `park` is set on turn 1 only. The run continues the agent's earlier session where the parked run recorded one and the agent kind can resume it; answer the comments in `park.comments`. |
 
 **Template pattern:**
 

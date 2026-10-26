@@ -13,6 +13,12 @@ Inputs to prompt rendering:
   - `previous`: the name of the rule whose hop led to the dispatch. It is filled when the dispatch selects the target of the issue's latest stage hop and the issue's hop count has not reset since (Section 7.3); otherwise it is empty.
   - `previous_outcome`: `succeeded`, or `no_change` when the previous stage's run declared that the requested outcome already held; empty whenever `previous` is empty.
   - The pair is frozen with the dispatch selection and persisted with the retry entry and the run-history row, so a retry, a reaction continuation, and a pending reaction recovered at startup render the pair their first dispatch rendered. A retry routed afresh to another rule renders the pair as a poll tick does.
+- `park` (map or nil): the hand-over of a park a person released. The key is present on every render, set to nil, so a template that references it never fails under strict `missingkey=error` evaluation; the renderer seeds it ahead of any option. It is non-nil only on turn 1 of the first run after a person releases a park, and nil on later turns and on every other run. When non-nil, it contains:
+  - `reason`: `agent_blocked` or `handoff_absence`
+  - `statement`: the stop statement stored with the run the park follows; empty when that run declared none or the park recorded no run
+  - `parked_at` and `released_at`: RFC 3339 times in UTC, whole seconds; empty when the stored time cannot be read
+  - `gesture`: `label_removed` or `state_changed`
+  - `comments`: the comments created since the park, oldest first, never nil, each with `id`, `author`, `body`, and `created_at`. A comment whose time cannot be read is included, and a park time that cannot be read includes every comment
 - `ci_failure` (map or nil): CI failure context injected into CI-fix continuation prompts via `CIResult.ToTemplateMap()`. Nil on initial dispatch and non-CI retries. When non-nil, contains:
   - `status`: aggregate CI pipeline status string (`failing`)
   - `check_runs`: list of individual check run maps (each with `name`, `status`, `conclusion`, `details_url`)
@@ -66,6 +72,7 @@ A reaction run presents every comment it carries: the operator's render is chose
 - first run (`attempt` null or absent)
 - continuation turn within an active multi-turn session (`run.is_continuation == true`)
 - retry after error/timeout/stall (`attempt >= 1`, `run.is_continuation == false`)
+- first run after a person releases a park (`attempt` null or absent, `run.is_continuation == false`, `park` set on turn 1): the run resumes the parked run's agent session where one was recorded and the agent kind can resume it, and `issue.comments` carries every comment of the issue
 
 ### 12.4 Failure Semantics
 

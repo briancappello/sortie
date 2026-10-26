@@ -65,6 +65,9 @@ type mockRetryStore struct {
 	markDispatchedKind    string
 	markDispatchedErr     error
 
+	latestRuns    map[string]persistence.RunHistory
+	latestRunsErr error
+
 	parkedIssues     []persistence.ParkedIssue
 	deletedParkedIDs []string
 	absenceResetOf   []string
@@ -104,6 +107,10 @@ func (m *mockRetryStore) QueryConsecutiveHandoffAbsenceCounts(_ context.Context,
 		result[id] = m.absenceCounts[id]
 	}
 	return result, nil
+}
+
+func (m *mockRetryStore) LatestAgentRuns(_ context.Context, _ []string) (map[string]persistence.RunHistory, error) {
+	return m.latestRuns, m.latestRunsErr
 }
 
 func (m *mockRetryStore) TokenUsageByIssue(_ context.Context, issueID string) (persistence.IssueTokenUsage, error) {

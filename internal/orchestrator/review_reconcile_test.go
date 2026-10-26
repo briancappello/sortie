@@ -401,6 +401,10 @@ func (s *fingerprintModelStore) QueryConsecutiveHandoffAbsenceCounts(_ context.C
 	return make(map[string]int, len(issueIDs)), nil
 }
 
+func (s *fingerprintModelStore) LatestAgentRuns(context.Context, []string) (map[string]persistence.RunHistory, error) {
+	return nil, nil
+}
+
 func (s *fingerprintModelStore) TokenUsageByIssue(context.Context, string) (persistence.IssueTokenUsage, error) {
 	return persistence.IssueTokenUsage{}, nil
 }

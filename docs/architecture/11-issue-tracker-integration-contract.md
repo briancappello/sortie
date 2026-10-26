@@ -31,7 +31,7 @@ A tracker adapter must support these operations:
    - Return the current state for each requested issue identifier (human-readable key). Issues not found are omitted. Used for startup terminal workspace cleanup.
 
 7. `fetch_issue_comments(issue_id)`
-   - Return comments for an issue. Used for continuation runs and the agent workpad pattern.
+   - Return comments for an issue, oldest first. Used for continuation runs, the first run after a person releases a park, and the agent workpad pattern. A failed read for a pending park release holds the issue for a later tick (Section 8.1).
 
 8. `transition_issue(issue_id, target_state)`
    - Transition an issue to the named target state in the tracker's native workflow system.
@@ -70,6 +70,7 @@ Additional normalization details:
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
+- comments -> oldest first, whether they arrive with `fetch_issue_by_id` or through `fetch_issue_comments`; each comment's `created_at` passes through as the tracker's text and MUST be RFC 3339 (fractional seconds optional, `Z` or `±hh:mm` offset) or the same form with a `±hhmm` offset, because the window of comments handed to the first run after a park release is computed from it
 
 Every issue returned by `fetch_candidate_issues` either carries an authoritative `blocked_by` or is marked `blockers_unresolved`, so the dispatch gate never treats an unread blocker list as an empty one. Each adapter declares which of three blocker sources it implements at registration: candidates carry every blocker already, the tracker has no blocking relation to carry, or a shared layer between the registry and the orchestrator completes the list per candidate, after the cheaper dispatch gates pass, for a candidate that reaches that gate. The declaration decides whether a per-issue read happens; nothing about it is inferred from a normalized field.
 

@@ -327,6 +327,11 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"dispatched_at", "TEXT", true, 0},
 				{"issue_type", "TEXT", true, 0},
 				{"issue_labels", "TEXT", true, 0},
+				{"session_id", "TEXT", true, 0},
+				{"template_id", "TEXT", true, 0},
+				{"statement", "TEXT", true, 0},
+				{"released_at", "TEXT", true, 0},
+				{"release_gesture", "TEXT", true, 0},
 			},
 		},
 		{
@@ -675,6 +680,56 @@ func TestMigrate_Migration031_FillsParkedRuns(t *testing.T) {
 			FROM parked_issues WHERE issue_id = ?`, tt.issueID).Scan(&got)
 		if err != nil || got != tt.want {
 			t.Errorf("park of %s after upgrade = %q, %v, want %q, nil", tt.issueID, got, err, tt.want)
+		}
+	}
+}
+
+func TestMigrate_Migration047_BackfillsParkHandOver(t *testing.T) {
+	t.Parallel()
+
+	// i1's attempt 3 starts after the park but sorts before it as text; i2 to
+	// i5 differ only in how the run the park follows ended.
+	seed := []string{
+		`INSERT INTO parked_issues (issue_id, identifier, reason, label, parked_at)
+			VALUES ('i1', 'MT-1', 'agent_blocked', 'needs-human', '2026-02-01T10:00:00Z'),
+				('i2', 'MT-2', 'agent_blocked', 'needs-human', '2026-02-01T10:00:00Z'),
+				('i3', 'MT-3', 'handoff_absence', 'needs-human', '2026-02-01T10:00:00Z'),
+				('i4', 'MT-4', 'agent_blocked', 'needs-human', '2026-02-01T10:00:00Z'),
+				('i5', 'MT-5', 'agent_blocked', 'needs-human', 'not a time')`,
+		`INSERT INTO run_history (issue_id, identifier, attempt, agent_adapter, workspace, started_at, completed_at, status, error, reaction_kind, session_id, template_id, agent_text)
+			VALUES ('i1', 'MT-1', 1, 'claude-code', '/tmp', '2026-02-01T08:00:00Z', '2026-02-01T08:01:00Z', 'succeeded', NULL, NULL, 's-old', 'old', 'old question'),
+				('i1', 'MT-1', 2, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'succeeded', NULL, NULL, 's-1', 'tpl-1', 'which database?'),
+				('i1', 'MT-1', 3, 'claude-code', '/tmp', '2026-02-01T09:30:00-01:00', '2026-02-01T09:31:00-01:00', 'succeeded', NULL, NULL, 's-late', 'late', 'after the park'),
+				('i2', 'MT-2', 1, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'succeeded', NULL, 'review', 's-2', 'tpl-2', 'review stopped'),
+				('i3', 'MT-3', 1, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'failed', 'handoff withheld: no work observed', NULL, NULL, 'tpl-3', 'done, I think'),
+				('i4', 'MT-4', 1, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'failed', 'agent crashed', '', 's-4', 'tpl-4', 'crash text'),
+				('i5', 'MT-5', 1, 'claude-code', '/tmp', '2026-02-01T09:30:00Z', '2026-02-01T09:31:00Z', 'succeeded', NULL, NULL, 's-5', 'tpl-5', 'unreachable')`,
+	}
+	tests := []struct{ name, issueID, want string }{
+		{"eligible run", "i1", "which database?|s-1|tpl-1"},
+		{"reaction run keeps the statement only", "i2", "review stopped||"},
+		{"withheld handoff without a session", "i3", "done, I think||tpl-3"},
+		{"error exit keeps the statement only", "i4", "crash text||"},
+		{"park time that does not parse", "i5", "||"},
+	}
+
+	s := openTestStore(t)
+	migrateToVersion(t, s, 46)
+	for _, stmt := range seed {
+		if _, err := s.db.ExecContext(context.Background(), stmt); err != nil {
+			t.Fatalf("seed version 46 store: %v", err)
+		}
+	}
+
+	migrateOrFatal(t, s)
+
+	for _, tt := range tests {
+		var got string
+		err := s.db.QueryRowContext(context.Background(),
+			`SELECT statement || '|' || session_id || '|' || template_id || '|' || released_at || release_gesture
+			FROM parked_issues WHERE issue_id = ?`, tt.issueID).Scan(&got)
+		if want := tt.want + "|"; err != nil || got != want {
+			t.Errorf("%s: park of %s after upgrade = %q, %v, want %q, nil", tt.name, tt.issueID, got, err, want)
 		}
 	}
 }
