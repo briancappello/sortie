@@ -52,3 +52,4 @@ Consult these for the area you are working on, not as a blanket prerequisite:
 - `docs/decisions/*.md` - accepted ADRs. Read when discussing or revising a prior design choice.
 - `docs/workflow-reference.md` - WORKFLOW.md syntax.
 - `docs/*-adapter-notes.md` - API details, response examples and implementation tips per integration.
+- `RELEASING.md` - the ordered checklist for cutting a release.

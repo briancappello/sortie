@@ -90,3 +90,6 @@ These pages are for working on Sortie itself. To install, configure, and run Sor
     - [Keep both kinds registered and retire a hand-written one only at parity](decisions/0030-keep-both-kinds-registered-and-retire-only-at-parity.md)
     - [Let a dispatch rule carry the settings of the agent kind it selects](decisions/0031-let-a-dispatch-rule-carry-its-agent-kinds-settings.md)
     - [Route Outbound Messages Through Per-Destination Event Subscriptions](decisions/0032-route-outbound-messages-through-per-destination-event-subscriptions.md)
+- **Process**
+  - [Contributing](../CONTRIBUTING.md) - setup, making a change, code and testing conventions, commits and PRs
+  - [Releasing](../RELEASING.md) - the ordered checklist for cutting a release
