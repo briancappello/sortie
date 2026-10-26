@@ -420,6 +420,20 @@ func slowClock() func() time.Time {
 	}
 }
 
+func slowClockWritingAfterFirstPoll(t *testing.T, reader *geminiReader, tail string) func() time.Time {
+	t.Helper()
+
+	clock := slowClock()
+	reads := 0
+	return func() time.Time {
+		reads++
+		if reads == 2 {
+			writeOutfile(t, reader, tail)
+		}
+		return clock()
+	}
+}
+
 func writeJournal(t *testing.T, home, name string, lines []string) {
 	t.Helper()
 
@@ -680,23 +694,10 @@ func TestGeminiWaitsForTheTailOfAMultiRequestTurn(t *testing.T) {
 	reader.dir = dir
 	reader.home = filepath.Join(dir, "home")
 	reader.outfile = filepath.Join(dir, "telemetry.json")
-	reader.now = slowClock()
+	reader.now = slowClockWritingAfterFirstPoll(t, reader, apiResponse("sess-a", "model-x", 600, 5, 0, 0, 0, 605))
 	reader.Open("sess-a")
 
 	writeOutfile(t, reader, apiResponse("sess-a", "model-x", 400, 5, 0, 0, 0, 405))
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		time.Sleep(250 * time.Millisecond)
-		file, err := os.OpenFile(reader.outfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return
-		}
-		defer file.Close()                                                       //nolint:errcheck // test handle
-		file.WriteString(apiResponse("sess-a", "model-x", 600, 5, 0, 0, 0, 605)) //nolint:errcheck,gosec // best effort
-	}()
-	t.Cleanup(func() { <-done })
 
 	recovered, source, found := drain(t, reader, 1000)
 	if !found {
@@ -719,25 +720,12 @@ func TestGeminiARecordSplitAcrossPollsIsCountedOnce(t *testing.T) {
 	reader.dir = dir
 	reader.home = filepath.Join(dir, "home")
 	reader.outfile = filepath.Join(dir, "telemetry.json")
-	reader.now = slowClock()
-	reader.Open("sess-a")
-
 	full := apiResponse("sess-a", "model-x", 400, 5, 0, 0, 0, 405)
 	split := len(full) / 2
-	writeOutfile(t, reader, full[:split])
+	reader.now = slowClockWritingAfterFirstPoll(t, reader, full[split:])
+	reader.Open("sess-a")
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		time.Sleep(250 * time.Millisecond)
-		file, err := os.OpenFile(reader.outfile, os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return
-		}
-		defer file.Close()             //nolint:errcheck // test handle
-		file.WriteString(full[split:]) //nolint:errcheck,gosec // best effort
-	}()
-	t.Cleanup(func() { <-done })
+	writeOutfile(t, reader, full[:split])
 
 	recovered, source, found := drain(t, reader, 405)
 	if !found {

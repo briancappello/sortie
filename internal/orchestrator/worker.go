@@ -436,6 +436,10 @@ type WorkerDeps struct {
 	// the worker goroutine; must be concurrency-safe. May be nil when
 	// self-review is not configured.
 	OnProgress func(selfReviewProgressMsg)
+
+	// VerificationCache holds the credential proofs shared by the runs of one
+	// orchestrator. Nil verifies the credential on every run.
+	VerificationCache *verificationCache
 }
 
 // normalizeAttempt converts the nullable attempt to a plain integer; nil
@@ -768,7 +772,18 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	// cancelledAtEnding is read right after the call that last ended a run attempt.
 	var cancelledAtEnding bool
 
+	var cacheKey verificationKey
+	var cacheKeyed bool
+	var workingTurnProven bool
+
+	credentialProofVoided := func(result WorkerResult) bool {
+		return result.ExitKind == WorkerExitError && (!workingTurnProven || refusesCredential(result.Error))
+	}
+
 	report := func(result WorkerResult) {
+		if cacheKeyed && credentialProofVoided(result) {
+			deps.VerificationCache.evict(cacheKey)
+		}
 		result.StoppedByCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errCeilingStop)
 		result.SessionID = acceptedSessionID
 		result.ResumeUsage = resumeUsage
@@ -1113,11 +1128,20 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		Settings:                 deps.AgentSettings.Passthrough,
 	}
 
-	deps.OnEvent(issue.ID, domain.AgentEvent{
-		Type:      domain.EventNotification,
-		Timestamp: time.Now().UTC(),
-		Message:   "verifying the agent credential",
-	})
+	cacheKey, cacheKeyed = verificationKeyFor(agentKind, params)
+	var provenAt time.Time
+	var verificationSkipped bool
+	if cacheKeyed {
+		provenAt, verificationSkipped = deps.VerificationCache.fresh(cacheKey, time.Now())
+	}
+
+	if !verificationSkipped {
+		deps.OnEvent(issue.ID, domain.AgentEvent{
+			Type:      domain.EventNotification,
+			Timestamp: time.Now().UTC(),
+			Message:   "verifying the agent credential",
+		})
+	}
 
 	relayVerificationEvent := func(event domain.AgentEvent) {
 		foldRelayedEvent(event)
@@ -1148,46 +1172,55 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	redact.AddEnviron(config.DotEnvEntries())
 
-	verificationStarted := time.Now()
-	verificationResult, verificationErr := agentcore.VerifyCredential(ctx, deps.AgentAdapter, agentcore.CredentialVerification{
-		Session:   params,
-		Issue:     issue,
-		TurnBound: time.Duration(effectiveTurnTimeoutMS(cfg.Agent.TurnTimeoutMS)) * time.Millisecond,
-		StopBound: stopSessionDeadline(cfg),
-		OnRequest: func() { localMeasured = false },
-		OnEvent:   relayVerificationEvent,
-		Logger:    logger,
-	})
-	cancelledAtEnding = ctx.Err() != nil
-
-	foldTurnResult(verificationResult)
-
-	verificationSpend := localLastUsage
-	verificationUsageByModel := maps.Clone(localUsageByModel)
-
-	if verificationErr != nil {
-		startErr := fmt.Errorf("agent session start: %w", verificationErr)
-		finishWorkspace(workerRunOutcome(ctx, exitKindAtEnding(ctx, cancelledAtEnding), startErr, ""))
-		report(WorkerResult{
-			IssueID:          issue.ID,
-			Identifier:       issue.Identifier,
-			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
-			Error:            startErr,
-			StartupError:     verificationErr,
-			WorkspacePath:    wsResult.Path,
-			AgentAdapter:     agentKind,
-			Attempt:          attempt,
-			SSHHost:          deps.SSHHost,
-			Usage:            localUsage,
-			UsageMeasured:    localMeasured,
-			UnaccountedTurns: localUnaccounted,
-			ModelName:        localModelName,
-			APIRequestCount:  localRequestCount,
+	var verificationSpend domain.TokenUsage
+	var verificationUsageByModel map[string]domain.TokenUsage
+	if verificationSkipped {
+		logger.Info("agent credential verification skipped", slog.Time("proven_at", provenAt.UTC()))
+	} else {
+		verificationStarted := time.Now()
+		verificationResult, verificationErr := agentcore.VerifyCredential(ctx, deps.AgentAdapter, agentcore.CredentialVerification{
+			Session:   params,
+			Issue:     issue,
+			TurnBound: time.Duration(effectiveTurnTimeoutMS(cfg.Agent.TurnTimeoutMS)) * time.Millisecond,
+			StopBound: stopSessionDeadline(cfg),
+			OnRequest: func() { localMeasured = false },
+			OnEvent:   relayVerificationEvent,
+			Logger:    logger,
 		})
-		return
-	}
+		cancelledAtEnding = ctx.Err() != nil
 
-	logger.Info("agent credential verified", slog.Int64("duration_ms", time.Since(verificationStarted).Milliseconds()))
+		foldTurnResult(verificationResult)
+
+		verificationSpend = localLastUsage
+		verificationUsageByModel = maps.Clone(localUsageByModel)
+
+		if verificationErr != nil {
+			startErr := fmt.Errorf("agent session start: %w", verificationErr)
+			finishWorkspace(workerRunOutcome(ctx, exitKindAtEnding(ctx, cancelledAtEnding), startErr, ""))
+			report(WorkerResult{
+				IssueID:          issue.ID,
+				Identifier:       issue.Identifier,
+				ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+				Error:            startErr,
+				StartupError:     verificationErr,
+				WorkspacePath:    wsResult.Path,
+				AgentAdapter:     agentKind,
+				Attempt:          attempt,
+				SSHHost:          deps.SSHHost,
+				Usage:            localUsage,
+				UsageMeasured:    localMeasured,
+				UnaccountedTurns: localUnaccounted,
+				ModelName:        localModelName,
+				APIRequestCount:  localRequestCount,
+			})
+			return
+		}
+
+		logger.Info("agent credential verified", slog.Int64("duration_ms", time.Since(verificationStarted).Milliseconds()))
+		if cacheKeyed && !cancelledAtEnding {
+			deps.VerificationCache.record(cacheKey, time.Now())
+		}
+	}
 
 	session, err = deps.AgentAdapter.StartSession(ctx, params)
 	cancelledAtEnding = ctx.Err() != nil
@@ -1407,6 +1440,12 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			rendered += "\n\n" + prompt.RuntimeStatusSuffix
 		}
 
+		// A skipped verification never flipped the mark, and a run under
+		// arrival none would otherwise report a measured zero.
+		if verificationSkipped && turnNumber == 1 {
+			localMeasured = false
+		}
+
 		logger.Info("turn started", slog.Int("turn_number", turnNumber), slog.Int("max_turns", maxTurns))
 		turnsStarted++
 		if deps.OnTurnStarted != nil {
@@ -1454,6 +1493,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 				APIRequestCount:    localRequestCount,
 			})
 			return
+		}
+
+		if isTurnSuccess(turnResult.ExitReason) && !cancelledAtEnding {
+			workingTurnProven = true
+			if cacheKeyed {
+				deps.VerificationCache.record(cacheKey, time.Now())
+			}
 		}
 
 		turnsCompleted++

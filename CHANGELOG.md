@@ -11,6 +11,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Overview now lists, under 'Not dispatched', the issues in an active state that Sortie holds back from dispatch, each with why it waits and what releases it: an open blocker with its key and state, a blocker read that failed or waits for a later poll, a full agent slot limit with its usage, no free SSH host, or the spend ceiling until it resets. An issue between stages shows its hold on its Active row. The state API serves them as `held`, and a between-stages row carries its hold as `hold`. ([#1387](https://github.com/sortie-ai/sortie/issues/1387))
 - After a person releases a parked issue, its next run continues the agent's earlier session where the agent supports it, and prompt templates can hand the agent its own stop reason and the person's reply through the new `park` variable. ([#1394](https://github.com/sortie-ai/sortie/issues/1394))
 
+### Changed
+
+- Sortie now checks an agent's credential only when it has not proved the same agent setup in the last 15 minutes. Every successful turn renews the proof, and a failed check, a run whose turns all failed, or a credential the agent refused drops it, so the next run checks again. A run that skips the check pays for no request and logs `agent credential verification skipped`. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+- The credential check now leaves out the agent's instructions, tools, and skills wherever the runtime lets a single launch drop them without changing its credential, model, provider, or endpoint, local `agent-client-protocol` launches of Gemini CLI, Copilot CLI, OpenCode, and Kiro CLI included (Kiro CLI only when its command sets `--model`). A runtime build too old for one of the switches is checked once more with its full context, after a warning in the log. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+- The credential check's request is counted in the run's token usage, API request count, and cost estimate when the run performs it, and the workflow reference now says so and lists what the request still carries for each agent. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+
+### Fixed
+
+- The OpenCode credential check no longer calls tools, so it makes one model request instead of several and writes nothing into the issue workspace. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+- A credential that Claude Code, Codex, or an `agent-client-protocol` runtime refuses during a turn is now reported as `credential_unverified` with the runtime's own message, as it is at session start, instead of as a generic turn failure. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+- A Codex turn that fails on a connection error now keeps its error message in the run's failure. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+
 ## [1.30.0] - 2026-10-23
 
 ### Added

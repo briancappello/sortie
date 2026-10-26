@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -1409,4 +1410,108 @@ func TestStopSessionClosesEveryClaimedSourceIncludingAReleasedOne(t *testing.T) 
 	if got := sourceA.closeCallCount(); got == 0 {
 		t.Error("source-a.Close() calls = 0, want at least 1 after StopSession")
 	}
+}
+
+const probeExecutable = "verification-probe-agent"
+
+type probeVerification struct{ dir string }
+
+func init() {
+	usagesource.VerificationAdditions.Register("verification-probe", func() usagesource.VerificationAddition {
+		return &probeVerification{}
+	})
+}
+
+func (v *probeVerification) Claim(target agentcore.LaunchTarget) (usagesource.VerificationSwitches, bool) {
+	if target.RemoteCommand != "" || filepath.Base(target.Command) != probeExecutable {
+		return usagesource.VerificationSwitches{}, false
+	}
+	dir, err := os.MkdirTemp("", "sortie-probe-")
+	if err != nil {
+		return usagesource.VerificationSwitches{}, false
+	}
+	path := filepath.Join(dir, "marker")
+	if err := os.WriteFile(path, []byte("probe"), 0o600); err != nil {
+		return usagesource.VerificationSwitches{}, false
+	}
+	v.dir = dir
+	return usagesource.VerificationSwitches{Args: []string{"--probe-flag"}, Env: []string{"PROBE_FILE=" + path}}, true
+}
+
+func (v *probeVerification) Context() registry.VerificationContext {
+	return registry.DeclareVerificationContext(
+		registry.VerificationKeepsAllTools,
+		registry.VerificationKeepsProjectInstructions,
+		registry.VerificationKeepsUserInstructions,
+		registry.VerificationKeepsSystemPrompt,
+	)
+}
+
+func (v *probeVerification) Close() {
+	if v.dir != "" {
+		_ = os.RemoveAll(v.dir) //nolint:errcheck // best-effort test cleanup
+	}
+}
+
+func TestStartSessionVerificationLaunch(t *testing.T) {
+	tests := []struct {
+		name        string
+		executable  string
+		working     bool
+		fullContext bool
+		wantClaimed bool
+	}{
+		{name: "a claimed launch gets its switches after the operator's, and teardown removes its file", executable: probeExecutable, wantClaimed: true},
+		{name: "an unclaimed command line is unchanged", executable: "plain-agent"},
+		{name: "a full-context verification is unchanged", executable: probeExecutable, fullContext: true},
+		{name: "a working session is unchanged", executable: probeExecutable, working: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			argsPath, envPath := filepath.Join(dir, "args"), filepath.Join(dir, "env")
+			script := `printf '%s\n' "$@" > '` + argsPath + `'
+printf '%s\n' "$PROBE_FILE" > '` + envPath + `'
+` + captureCwdAndFirstLineThenHandshakeScript(filepath.Join(dir, "cwd"), filepath.Join(dir, "first"))
+			agentPath := agenttest.WriteScript(t, dir, tt.executable, script)
+
+			session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, domain.StartSessionParams{
+				WorkspacePath:           t.TempDir(),
+				AgentConfig:             domain.AgentConfig{Command: agentPath + " --acp"},
+				CredentialVerification:  !tt.working,
+				VerificationFullContext: tt.fullContext,
+			})
+			if err != nil {
+				t.Fatalf("startSession() error = %v, want nil", err)
+			}
+			if err := stopSession(context.Background(), session); err != nil {
+				t.Errorf("stopSession() error = %v", err)
+			}
+
+			wantArgs, wantFile := []string{"--acp"}, false
+			if tt.wantClaimed {
+				wantArgs, wantFile = []string{"--acp", "--probe-flag"}, true
+			}
+			if gotArgs := readCapturedLines(t, argsPath); !slices.Equal(gotArgs, wantArgs) {
+				t.Errorf("runtime args = %q, want %q", gotArgs, wantArgs)
+			}
+			file := readCapturedLines(t, envPath)[0]
+			if (file != "") != wantFile {
+				t.Fatalf("PROBE_FILE = %q, want set = %v", file, wantFile)
+			}
+			if wantFile {
+				assertDirGone(t, filepath.Dir(file))
+			}
+		})
+	}
+}
+
+func readCapturedLines(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
 }

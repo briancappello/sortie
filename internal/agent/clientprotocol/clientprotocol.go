@@ -26,6 +26,12 @@ func init() {
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv(),
 		EffortForwarding:    registry.EffortNotForwarded,
+		VerificationContext: registry.DeclareVerificationContext(
+			registry.VerificationKeepsAllTools,
+			registry.VerificationKeepsProjectInstructions,
+			registry.VerificationKeepsUserInstructions,
+			registry.VerificationKeepsSystemPrompt,
+		),
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
 				// The measurement source reads a local filesystem, while a

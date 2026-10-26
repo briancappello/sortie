@@ -67,9 +67,10 @@ type ToolChoice func(declared []Tool) (FunctionCall, error)
 type Wire string
 
 const (
-	WireGenerateContent Wire = "generateContent"
-	WireMessages        Wire = "messages"
-	WireResponses       Wire = "responses"
+	WireGenerateContent           Wire = "generateContent"
+	WireMessages                  Wire = "messages"
+	WireResponses                 Wire = "responses"
+	WireGenerateAssistantResponse Wire = "generateAssistantResponse"
 )
 
 // ExchangeKind classifies how the server answered one request.
@@ -156,6 +157,7 @@ var auxiliaryUsage = Usage{Prompt: 7, Candidates: 3, Thoughts: 2}
 type route struct {
 	model     string
 	streaming bool
+	operation string // the operation a wire carries in a header rather than the path
 }
 
 // responseSchema is the top-level object schema a request asks its answer to
@@ -167,6 +169,7 @@ type responseSchema struct {
 type decoded struct {
 	model       string
 	streaming   bool
+	operation   string
 	tools       []Tool
 	toolResults []ToolResult
 	schema      *responseSchema
@@ -175,6 +178,7 @@ type decoded struct {
 
 type reply struct {
 	seq       int
+	operation string
 	model     string
 	streaming bool
 	text      string
@@ -193,7 +197,7 @@ type rendered struct {
 // answers and errors are written.
 type codec interface {
 	wire() Wire
-	route(method, path string) (route, bool)
+	route(method, path string, header http.Header) (route, bool)
 	decode(rt route, body []byte) (decoded, error)
 	render(r reply) rendered
 	errorBody(status int, message string) []byte
@@ -201,7 +205,7 @@ type codec interface {
 }
 
 // wireCodecs lists the codecs the server routes to, in routing order.
-var wireCodecs = []codec{generateContentCodec{}, messagesCodec{}, responsesCodec{}}
+var wireCodecs = []codec{generateContentCodec{}, messagesCodec{}, responsesCodec{}, generateAssistantCodec{}}
 
 // unroutedCredentialHeaders are the credential headers read from a request no
 // wire routes: the union of every wire's own.
@@ -443,7 +447,7 @@ func (s *Server) respond(ex *Exchange, r *http.Request) (contentType, failure st
 			label+" is encoded as "+encoding+", which this server does not decode")
 	}
 
-	c, rt, routed := findRoute(r.Method, r.URL.Path)
+	c, rt, routed := findRoute(r.Method, r.URL.Path, r.Header)
 	if !routed {
 		return failGeneric(ex, http.StatusNotFound, ExchangeUnrouted, label+" matches no route")
 	}
@@ -467,7 +471,7 @@ func (s *Server) respond(ex *Exchange, r *http.Request) (contentType, failure st
 	}
 	if len(dec.tools) == 0 {
 		text := auxiliaryText(dec.schema)
-		return answerWire(ex, c, ExchangeAuxiliary, reply{seq: ex.Seq, model: dec.model, streaming: dec.streaming, text: text, usage: auxiliaryUsage})
+		return answerWire(ex, c, ExchangeAuxiliary, reply{seq: ex.Seq, model: dec.model, streaming: dec.streaming, operation: dec.operation, text: text, usage: auxiliaryUsage})
 	}
 
 	step := s.claimStep()
@@ -482,7 +486,7 @@ func (s *Server) respond(ex *Exchange, r *http.Request) (contentType, failure st
 		ex.Kind = ExchangeHeld
 		return "", ""
 	}
-	turn := reply{seq: ex.Seq, model: dec.model, streaming: dec.streaming, text: entry.Text, usage: entry.Usage}
+	turn := reply{seq: ex.Seq, model: dec.model, streaming: dec.streaming, operation: dec.operation, text: entry.Text, usage: entry.Usage}
 	if entry.Call != nil {
 		call, err := entry.Call(dec.tools)
 		if err == nil && !isJSONObject(call.Arguments) {
@@ -524,7 +528,7 @@ func (s *Server) hold(w http.ResponseWriter, r *http.Request, ex Exchange) {
 		return
 	}
 
-	c, _, _ := findRoute(r.Method, r.URL.Path)
+	c, _, _ := findRoute(r.Method, r.URL.Path, r.Header)
 	text := failureLabel(ex) + " was still held when the server released it"
 	ex.Answer = Answer{Status: http.StatusBadRequest, Text: text, Body: c.errorBody(http.StatusBadRequest, text)}
 	s.record(ex)
@@ -563,9 +567,9 @@ func answerWire(ex *Exchange, c codec, kind ExchangeKind, r reply) (contentType,
 	return out.contentType, ""
 }
 
-func findRoute(method, path string) (codec, route, bool) {
+func findRoute(method, path string, header http.Header) (codec, route, bool) {
 	for _, c := range wireCodecs {
-		if rt, ok := c.route(method, path); ok {
+		if rt, ok := c.route(method, path, header); ok {
 			return c, rt, true
 		}
 	}

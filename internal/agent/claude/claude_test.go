@@ -1399,6 +1399,40 @@ func TestRunTurn_ErrorResult(t *testing.T) {
 	}, result, err)
 }
 
+func TestRunTurn_RefusedLoginEndsAsCredentialUnverified(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := fakeSequentialClaude(t, dir,
+		agenttest.Output{Stdout: `{"type":"assistant","error":"authentication_failed","message":{"content":[]}}
+{"type":"result","subtype":"success","result":"Not logged in","is_error":true}
+`},
+		agenttest.Output{Stdout: `{"type":"result","subtype":"error_max_turns","result":"","is_error":true}
+`},
+	)
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{WorkspacePath: dir, AgentConfig: domain.AgentConfig{Command: script}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	turns := []struct {
+		wantKind    domain.AgentErrorKind
+		wantMessage string
+	}{
+		{domain.ErrCredentialUnverified, agentcore.CredentialRefusedMessage("Not logged in")},
+		{domain.ErrTurnFailed, "error_max_turns"},
+	}
+	for i, want := range turns {
+		_, err := adapter.RunTurn(t.Context(), session, domain.RunTurnParams{Prompt: "p", OnEvent: func(domain.AgentEvent) {}})
+
+		var agentErr *domain.AgentError
+		if !errors.As(err, &agentErr) || agentErr.Kind != want.wantKind || agentErr.Message != want.wantMessage {
+			t.Errorf("RunTurn(turn %d) error = %v, want kind %q message %q", i+1, err, want.wantKind, want.wantMessage)
+		}
+	}
+}
+
 func TestRunTurn_NonZeroExit(t *testing.T) {
 	t.Parallel()
 

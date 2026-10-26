@@ -111,12 +111,15 @@ func settleUsageSources(claims usageClaims, info *implementation, remote bool) u
 	return verdict
 }
 
-// releaseUsageSources closes every source state.claimed carries. It runs
-// after teardown, once the pump has stopped and no drain is still reading
-// what a source removes.
+// releaseUsageSources closes every source state.claimed carries and the
+// verification addition that claimed the launch. It runs after teardown, once
+// the pump has stopped and no drain is still reading what a source removes.
 func releaseUsageSources(state *sessionState) {
 	for _, source := range state.claimed {
 		source.Close()
+	}
+	if state.verification != nil {
+		state.verification.Close()
 	}
 }
 

@@ -42,6 +42,26 @@
 //	                                  in a posture that asks before
 //	                                  running a tool; unset skips the
 //	                                  refusal case with a logged reason
+//	SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS
+//	                                  the path of the runtime's user-level
+//	                                  instruction file relative to the
+//	                                  scenario home, for a runtime whose
+//	                                  verification request keeps no user
+//	                                  instructions
+//	SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT
+//	                                  a provider document for a runtime that
+//	                                  takes its model endpoint from a file;
+//	                                  {url} stands for the endpoint, and the
+//	                                  path of the file written from it goes to
+//	                                  the variable the model base address
+//	                                  names
+//	SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH
+//	                                  the path, relative to the scenario
+//	                                  home, where the model document is
+//	                                  written for a runtime that reads its
+//	                                  endpoint from a fixed location; it
+//	                                  replaces the model base address
+//	                                  variable
 //
 // Run:
 //
@@ -65,7 +85,9 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel"
+	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 type liveProtocolCapture struct {
@@ -514,18 +536,44 @@ func TestIntegration_EarlyExit(t *testing.T) {
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+func claimedVerificationContext(command string) registry.VerificationContext {
+	words := strings.Fields(command)
+	if len(words) == 0 {
+		return registry.VerificationContext{}
+	}
+	addition, _, claimed := usagesource.ClaimVerification(agentcore.LaunchTarget{Command: words[0], Args: words[1:]}, os.Environ())
+	if !claimed {
+		return registry.VerificationContext{}
+	}
+	defer addition.Close()
+	return addition.Context()
+}
+
+func writeModelDocument(t *testing.T, path, template, url string) string {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("create %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(template, "{url}", url)), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
 func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessClientProtocolIntegration(t)
 
 	baseURLEnv := os.Getenv("SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV")
-	if baseURLEnv == "" {
-		t.Skip("skipping scripted model cases: SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV must name the variable through which the runtime takes its model base address")
+	documentPath := os.Getenv("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH")
+	if baseURLEnv == "" && documentPath == "" {
+		t.Skip("skipping scripted model cases: SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV must name the variable through which the runtime takes its model base address, or SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH the file it reads it from")
 	}
 	credentialNames := credentialtest.CredentialNames("SORTIE_CLIENTPROTOCOL_CREDENTIAL_ENV")
 	if len(credentialNames) == 0 {
 		t.Skip("skipping scripted model cases: SORTIE_CLIENTPROTOCOL_CREDENTIAL_ENV must name the credential variables, or a real key in the environment would reach the endpoint")
 	}
-	if !environmentNamePattern.MatchString(baseURLEnv) {
+	if baseURLEnv != "" && !environmentNamePattern.MatchString(baseURLEnv) {
 		t.Fatalf("SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV = %q, want a name matching %s", baseURLEnv, environmentNamePattern)
 	}
 
@@ -535,11 +583,18 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		skipRefusal = "skipping permission refusal: SORTIE_CLIENTPROTOCOL_ASKING_COMMAND must name the runtime's launch command in a posture that asks before running a tool"
 	}
 
+	modelDocument := os.Getenv("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT")
+	if documentPath != "" && (modelDocument == "" || !filepath.IsLocal(documentPath)) {
+		t.Fatalf("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH = %q, want a path inside the scenario home and a non-empty SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT", documentPath)
+	}
+
 	fakemodel.AssertConformance(t, fakemodel.Binding{
-		Kind:          "agent-client-protocol",
-		Passthrough:   map[string]any{},
-		CredentialEnv: credentialNames,
-		Read:          fakemodel.ReadFile,
+		Kind:                "agent-client-protocol",
+		Passthrough:         map[string]any{},
+		CredentialEnv:       credentialNames,
+		UserInstructions:    os.Getenv("SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS"),
+		VerificationContext: claimedVerificationContext(os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND")),
+		Read:                fakemodel.ReadFile,
 		PermissionRefusal: &fakemodel.PermissionRefusal{
 			Guarded: fakemodel.CatFile,
 			Notice:  agentcore.DecideHumanRequest(agentcore.ClassPermission, true, agentcore.AnswerPending).Notice,
@@ -551,15 +606,24 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			switch env.Scenario {
 			case fakemodel.ScenarioExhaustion, fakemodel.ScenarioCancellation, fakemodel.ScenarioCancellationAfterOutput, fakemodel.ScenarioStop:
 				expect = expectHandshakeOnly
-			case fakemodel.ScenarioContinuation:
+			case fakemodel.ScenarioContinuation, fakemodel.ScenarioVerificationContext:
 				expect = expectCompletedTurn
 			case fakemodel.ScenarioPermissionRefusal:
 				command = askingCommand
 			}
 			config, capture := captureAgentConfig(t, command, expect, env.Events)
+			launchEnv := map[string]string{}
+			switch {
+			case documentPath != "":
+				writeModelDocument(t, filepath.Join(env.Home, documentPath), modelDocument, env.URL)
+			case modelDocument != "":
+				launchEnv[baseURLEnv] = writeModelDocument(t, filepath.Join(env.Home, "model-document.json"), modelDocument, env.URL)
+			default:
+				launchEnv[baseURLEnv] = env.URL
+			}
 			return fakemodel.Launch{
 				Config:  config,
-				Env:     map[string]string{baseURLEnv: env.URL},
+				Env:     launchEnv,
 				Streams: []string{capture.clientPath, capture.agentPath},
 			}
 		},

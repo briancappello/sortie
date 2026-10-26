@@ -46,6 +46,7 @@ func init() {
 		UsageArrival:           registry.UsageArrivalIncremental,
 		UsageAttribution:       registry.UsageAttributionPerModel,
 		CredentialEnv:          registry.DeclareCredentialEnv("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+		VerificationContext:    registry.DeclareVerificationContext(),
 		EffortForwarding:       registry.EffortForwarded,
 	})
 }
@@ -68,6 +69,8 @@ var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // so it must not replace the model that did the work.
 const syntheticModel = "<synthetic>"
 
+const authenticationFailedError = "authentication_failed"
+
 type ClaudeCodeAdapter struct{}
 
 // sessionState is adapter-internal state stored in [domain.Session]
@@ -85,6 +88,8 @@ type sessionState struct {
 	mcpConfigPath string
 
 	credentialVerification bool
+
+	reducedVerificationContext bool
 
 	// forkSession owns the subprocess lifecycle for this session.
 	forkSession *agentcore.ForkPerTurnSession
@@ -130,6 +135,10 @@ type sessionState struct {
 	// [agentcore.FinalizeTurn].
 	humanInputEnds   bool
 	humanInputDetail string
+
+	// authRefused records an assistant event reporting a refused login,
+	// observed in ParseLine and applied in OnFinalize to a failed result.
+	authRefused bool
 
 	// effortReported records that the session has already logged the
 	// runtime's report of an unrecognized effort value. Touched only from
@@ -290,6 +299,8 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		credentialVerification: params.CredentialVerification,
 		acc:                    agentcore.NewRunUsage(),
 		resume:                 *agentcore.NewResumeBaseline(resumeFrom, resumeFromByModel),
+
+		reducedVerificationContext: params.ReducedVerificationContext(),
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
@@ -350,6 +361,9 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 				}
 
 			case "assistant":
+				if event.ErrorField == authenticationFailedError {
+					state.authRefused = true
+				}
 				if len(event.Message) > 0 {
 					var meta rawAssistantMessageMeta
 					if err := json.Unmarshal(event.Message, &meta); err == nil {
@@ -483,6 +497,10 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 					} else {
 						ev.TerminalMessage = lastResult.Subtype
 					}
+					if state.authRefused {
+						ev.TerminalErrorKind = domain.ErrCredentialUnverified
+						ev.TerminalMessage = agentcore.CredentialRefusedMessage(ev.TerminalMessage)
+					}
 				}
 			}
 
@@ -537,6 +555,7 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 	state.work = agentcore.NewWorkObserver(agentcore.WorkSignals{AssistantOutput: true, ToolActivity: true})
 	state.humanInputEnds = false
 	state.humanInputDetail = ""
+	state.authRefused = false
 
 	return state.forkSession.RunTurn(ctx, params.Prompt, params.OnEvent)
 }

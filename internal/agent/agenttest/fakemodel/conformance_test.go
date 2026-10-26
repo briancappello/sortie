@@ -239,6 +239,8 @@ func conformanceRegisterKinds() {
 		registry.Agents.RegisterWithMeta(conformanceCommandKind, refuse, registry.AgentMeta{
 			RequiresCommand: true,
 			CredentialEnv:   registry.DeclareCredentialEnv(conformanceDeclaredToken),
+
+			VerificationContext: registry.DeclareVerificationContext(),
 		})
 		registry.Agents.RegisterWithMeta(conformancePlainKind, refuse, registry.AgentMeta{})
 	})
@@ -1570,9 +1572,10 @@ func TestConformanceFatalArmChild(t *testing.T) {
 
 	conformanceRegisterKinds()
 	binding := Binding{
-		Kind:   conformanceCommandKind,
-		Read:   ReadFile,
-		Launch: func(*testing.T, Environment) Launch { return Launch{} },
+		Kind:             conformanceCommandKind,
+		Read:             ReadFile,
+		UserInstructions: "instructions.md",
+		Launch:           func(*testing.T, Environment) Launch { return Launch{} },
 	}
 	switch arm {
 	case "unregistered":

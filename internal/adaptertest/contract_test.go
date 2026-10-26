@@ -1918,18 +1918,8 @@ func contractPackageUnderKindPackage(checkedImportPath, kindPackageImportPath st
 	return contractPathIsUnder(checkedImportPath, kindPackageImportPath)
 }
 
-// contractIdentityExcludedTokens returns the tokens the identity rule does
-// not enforce against pkg: its own directory name, and the directory name
-// and registered kinds of any kind package that is pkg's import path or an
-// ancestor. The ancestor case lets a package nested under a kind package
-// name that kind.
-func contractIdentityExcludedTokens(pkg contractPackage, kindImportPaths map[string][]string) map[string]bool {
+func contractIdentityKindExcludedTokens(pkg contractPackage, kindImportPaths map[string][]string) map[string]bool {
 	excluded := map[string]bool{strings.ToLower(pkg.dirName): true}
-	if contractIdentitySeamImportPath(pkg.importPath) {
-		for _, tok := range contractWideScopedTokens(contractAgentIdentitySnapshotData()) {
-			excluded[strings.ToLower(tok)] = true
-		}
-	}
 	for kindImportPath, kinds := range kindImportPaths {
 		if !contractPackageUnderKindPackage(pkg.importPath, kindImportPath) {
 			continue
@@ -1937,6 +1927,16 @@ func contractIdentityExcludedTokens(pkg contractPackage, kindImportPaths map[str
 		excluded[strings.ToLower(path.Base(kindImportPath))] = true
 		for _, kind := range kinds {
 			excluded[strings.ToLower(kind)] = true
+		}
+	}
+	return excluded
+}
+
+func contractIdentityExcludedTokens(pkg contractPackage, kindImportPaths map[string][]string) map[string]bool {
+	excluded := contractIdentityKindExcludedTokens(pkg, kindImportPaths)
+	if contractIdentitySeamImportPath(pkg.importPath) {
+		for _, tok := range contractSeamLegalTokens(contractAgentIdentitySnapshotData()) {
+			excluded[strings.ToLower(tok)] = true
 		}
 	}
 	return excluded
@@ -2116,15 +2116,30 @@ func contractWideScopedTokens(snapshot contractAgentIdentitySnapshot) []string {
 	return wide
 }
 
+func contractAnchoredTokens(snapshot contractAgentIdentitySnapshot) []string {
+	var anchored []string
+	for _, tok := range snapshot.tokens {
+		if contractTokenIsKindAnchored(tok, snapshot.kindImportPaths) {
+			anchored = append(anchored, tok)
+		}
+	}
+	return anchored
+}
+
+func contractSeamLegalTokens(snapshot contractAgentIdentitySnapshot) []string {
+	return append(contractWideScopedTokens(snapshot), contractAnchoredTokens(snapshot)...)
+}
+
 // contractWideIdentityRoots are the roots the wide scope walks beyond the
 // per-family walks the two contract tests already cover.
 var contractWideIdentityRoots = []string{filepath.Join("..", "..", "cmd"), filepath.Join("..", "..", "internal")}
 
-// contractIdentityMeasurementSeam is the one directory where a
-// profile-declared, unanchored token is legal: the transport's
-// measurement sources, which read a runtime's own output format and are
-// vendor-specific by construction. Every other directory under the wide
-// roots stays bound by the rule.
+// contractIdentityMeasurementSeam is the one directory where both a
+// profile-declared token no kind package anchors and a token a kind package
+// anchors are legal: the transport's per-runtime measurement sources and
+// verification additions read a runtime's own output and settings, so they are
+// vendor-specific by construction. Every other directory under the wide roots
+// stays bound by the rule.
 var contractIdentityMeasurementSeam = filepath.Join("internal", "agent", "clientprotocol", "usagesource")
 
 // contractIdentitySeamImportPath reports whether importPath is the
@@ -2336,6 +2351,116 @@ func TestContractIdentitySeamIsNarrow(t *testing.T) {
 		if !contractIdentitySeamDir(filepath.Dir(v.pos.Filename)) {
 			t.Errorf("%s: %s, outside the one exempted seam", v.pos, v.text)
 		}
+	}
+}
+
+func TestContractIdentitySeamAnchoredExemptionIsNarrow(t *testing.T) {
+	fset := token.NewFileSet()
+	snapshot := contractAgentIdentitySnapshotData()
+	anchored := contractAnchoredTokens(snapshot)
+	if len(anchored) == 0 {
+		t.Fatal("contractAnchoredTokens() returned none, want the kind-anchored tokens the seam exemption widens to")
+	}
+
+	walked, _ := contractWalkRoot(t, fset, filepath.Join("..", "agent"), contractAgentFamilyPath)
+
+	var inSeam, outsideSeam []contractViolation
+	for _, w := range walked {
+		if contractExempt(w.pkg.dirName, ruleIDENTITY) {
+			continue
+		}
+		excluded := contractIdentityKindExcludedTokens(w.pkg, snapshot.kindImportPaths)
+		for _, file := range w.pkg.files {
+			violations := contractIdentityArm1Violations(fset, file, anchored, excluded)
+			if contractIdentitySeamImportPath(w.pkg.importPath) {
+				inSeam = append(inSeam, violations...)
+			} else {
+				outsideSeam = append(outsideSeam, violations...)
+			}
+		}
+	}
+
+	if len(inSeam) == 0 {
+		t.Fatal("removing the seam exemption for anchored tokens produced no violation, so the widened exemption is dead and this check proves nothing")
+	}
+	for _, v := range outsideSeam {
+		t.Errorf("%s: %s, outside the one exempted seam", v.pos, v.text)
+	}
+}
+
+func TestContractIdentityRule_SeamScopeOfAnchoredTokens(t *testing.T) {
+	t.Parallel()
+
+	const src = `package fixture
+
+const runtime = "copilot-cli"
+`
+	const unprofiledSrc = `package fixture
+
+const runtime = "cursor"
+`
+	const seamImportPath = "github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
+
+	tests := []struct {
+		name       string
+		dirName    string
+		importPath string
+		src        string
+		wantAny    bool
+	}{
+		{
+			name:       "the seam may name an anchored runtime",
+			dirName:    "usagesource",
+			importPath: seamImportPath,
+			src:        src,
+		},
+		{
+			name:       "the seam stays bound for a token no profile declares",
+			dirName:    "usagesource",
+			importPath: seamImportPath,
+			src:        unprofiledSrc,
+			wantAny:    true,
+		},
+		{
+			name:       "a package beside the seam may not name an anchored runtime",
+			dirName:    "procutil",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/procutil",
+			src:        src,
+			wantAny:    true,
+		},
+		{
+			name:       "clientprotocol itself may not name an anchored runtime",
+			dirName:    "clientprotocol",
+			importPath: "github.com/sortie-ai/sortie/internal/agent/clientprotocol",
+			src:        src,
+			wantAny:    true,
+		},
+		{
+			name:       "a package nested under the seam may not name an anchored runtime",
+			dirName:    "nested",
+			importPath: seamImportPath + "/nested",
+			src:        src,
+			wantAny:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "fixture.go", tt.src, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatalf("parse fixture: %v", err)
+			}
+			pkg := contractPackage{dirName: tt.dirName, importPath: tt.importPath, files: []*ast.File{file}}
+
+			got := checkContractIdentity(fset, pkg)
+
+			if (len(got) > 0) != tt.wantAny {
+				t.Errorf("checkContractIdentity(%s) = %v, want violations: %t", tt.importPath, got, tt.wantAny)
+			}
+		})
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -164,20 +166,63 @@ func TestBuildArgs_MCPConfig(t *testing.T) {
 func TestBuildArgs_CredentialVerificationSwitches(t *testing.T) {
 	t.Parallel()
 
-	state := &sessionState{
-		claudeSessionID:        "verify-session-id",
-		isContinuation:         false,
-		credentialVerification: true,
-		mcpConfigPath:          "/ws/.sortie/mcp.json",
+	tests := []struct {
+		name                            string
+		verification, full, wantReduced bool
+	}{
+		{name: "working launch"},
+		{name: "verification launch", verification: true, wantReduced: true},
+		{name: "verification launch with full context", verification: true, full: true},
 	}
-	pt := passthroughConfig{MCPConfig: "/op/mcp.json", SessionPersistence: true}
 
-	args := buildArgs(state, 1, "Say exactly: SORTIE_CREDENTIAL_OK", pt)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	assertHasArgPair(t, args, "--tools", "")
-	assertHasFlag(t, args, "--strict-mcp-config")
-	assertHasFlag(t, args, "--no-session-persistence")
-	assertNoFlag(t, args, "--mcp-config")
+			command := agenttest.FakeRuntime(t, t.TempDir(), "fake-claude", agenttest.OutputScenario, agenttest.Output{})
+			adapter, _ := NewClaudeCodeAdapter()
+			session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{
+				WorkspacePath:           t.TempDir(),
+				AgentConfig:             domain.AgentConfig{Command: command},
+				CredentialVerification:  tt.verification,
+				VerificationFullContext: tt.full,
+				Settings:                map[string]any{"system_prompt": "operator-sentinel", "mcp_config": "/op/mcp.json"},
+			})
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+			state := session.Internal.(*sessionState)
+
+			args := buildArgs(state, 1, "Say exactly: SORTIE_CREDENTIAL_OK", state.passthrough)
+
+			if tt.verification {
+				assertHasArgPair(t, args, "--tools", "")
+				assertHasFlag(t, args, "--strict-mcp-config")
+				assertHasFlag(t, args, "--no-session-persistence")
+				assertNoFlag(t, args, "--mcp-config")
+			}
+			if !tt.wantReduced {
+				assertNoFlag(t, args, "--safe-mode")
+				assertNoFlag(t, args, "--system-prompt")
+				assertHasArgPair(t, args, "--append-system-prompt", "operator-sentinel")
+				return
+			}
+			assertNoFlag(t, args, "--append-system-prompt")
+			assertHasArgPair(t, args, "--system-prompt", agentcore.VerificationSystemPrompt)
+			if n, m := countArg(args, "--safe-mode"), countArg(args, "--system-prompt"); n != 1 || m != 1 {
+				t.Errorf("buildArgs() carries --safe-mode %d and --system-prompt %d times, want 1 and 1 in [%s]", n, m, strings.Join(args, " "))
+			}
+		})
+	}
+}
+
+func countArg(args []string, arg string) (n int) {
+	for _, a := range args {
+		if a == arg {
+			n++
+		}
+	}
+	return n
 }
 
 func assertHasFlag(t *testing.T, args []string, flag string) {

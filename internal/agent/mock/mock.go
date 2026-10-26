@@ -20,11 +20,12 @@ import (
 
 func init() {
 	registry.Agents.RegisterWithMeta("mock", NewMockAdapter, registry.AgentMeta{
-		MCPInjection:     registry.MCPInjectionUnsupported,
-		UsageArrival:     registry.UsageArrivalIncremental,
-		UsageAttribution: registry.UsageAttributionSessionTotal,
-		CredentialEnv:    registry.DeclareCredentialEnv(),
-		EffortForwarding: registry.EffortNotForwarded,
+		MCPInjection:        registry.MCPInjectionUnsupported,
+		UsageArrival:        registry.UsageArrivalIncremental,
+		UsageAttribution:    registry.UsageAttributionSessionTotal,
+		CredentialEnv:       registry.DeclareCredentialEnv(),
+		EffortForwarding:    registry.EffortNotForwarded,
+		VerificationContext: registry.DeclareVerificationContext(),
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
 				// Shares the session's own read of report_token_usage so

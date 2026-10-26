@@ -228,7 +228,8 @@ func TestMapCodexErrorInfo(t *testing.T) {
 		info string
 		want domain.AgentErrorKind
 	}{
-		{"Unauthorized", domain.ErrResponseError},
+		{"Unauthorized", domain.ErrCredentialUnverified},
+		{"unauthorized", domain.ErrCredentialUnverified},
 		{"BadRequest", domain.ErrResponseError},
 		{"ContextWindowExceeded", domain.ErrTurnFailed},
 		{"UsageLimitExceeded", domain.ErrTurnFailed},

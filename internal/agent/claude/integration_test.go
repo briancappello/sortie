@@ -126,8 +126,10 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		Kind: "claude-code",
 		// Persistence stays on: the continuation scenario resumes a session the
 		// runtime stored, and the files stay in the test's temporary home.
-		Passthrough: map[string]any{"model": "claude-haiku-4-5"},
-		Read:        fakemodel.ReadFile,
+		Passthrough:         map[string]any{"model": "claude-haiku-4-5"},
+		UserInstructions:    filepath.Join(".claude", "CLAUDE.md"),
+		ProjectInstructions: "CLAUDE.md",
+		Read:                fakemodel.ReadFile,
 		Launch: func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
 			return fakemodel.Launch{
 				Config: domain.AgentConfig{

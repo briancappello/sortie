@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -573,6 +574,54 @@ func TestBuildInlineConfig(t *testing.T) {
 			}
 			if _, ok := doc["mcp"]; ok != tt.wantMCP {
 				t.Errorf("buildInlineConfig() mcp present = %v, want %v", ok, tt.wantMCP)
+			}
+		})
+	}
+}
+
+func TestStartSession_VerificationPermissionPolicy(t *testing.T) {
+	t.Parallel()
+
+	const operatorPolicy = `{"bash":"deny","external_directory":"ask"}`
+	operator := map[string]any{"dangerously_skip_permissions": false, "denied_tools": []any{"bash"}}
+
+	tests := []struct {
+		name               string
+		settings           map[string]any
+		verification, full bool
+		wantPermission     string
+	}{
+		{name: "working launch", settings: operator, wantPermission: operatorPolicy},
+		{
+			name:           "verification launch",
+			settings:       map[string]any{"dangerously_skip_permissions": false, "denied_tools": []any{"bash"}, "allowed_tools": []any{"read"}},
+			verification:   true,
+			wantPermission: `{"*":"deny"}`,
+		},
+		{name: "verification launch with full context", settings: operator, verification: true, full: true, wantPermission: operatorPolicy},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			command := agenttest.FakeRuntime(t, t.TempDir(), "opencode", agenttest.OutputScenario, agenttest.Output{Version: "2.0.18"})
+			adapter, _ := NewOpenCodeAdapter()
+			session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{
+				WorkspacePath:           t.TempDir(),
+				AgentConfig:             domain.AgentConfig{Command: command},
+				CredentialVerification:  tt.verification,
+				VerificationFullContext: tt.full,
+				Settings:                tt.settings,
+			})
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+
+			doc := decodeConfigDocument(t, session.Internal.(*sessionState).turnConfigContent)
+
+			if got := string(doc["permission"]); got != tt.wantPermission {
+				t.Errorf("StartSession(%v) permission = %s, want %s", tt.settings, got, tt.wantPermission)
 			}
 		})
 	}

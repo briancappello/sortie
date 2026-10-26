@@ -45,6 +45,10 @@ func init() {
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv(),
 		EffortForwarding:    registry.EffortForwarded,
+		VerificationContext: registry.DeclareVerificationContext(
+			registry.VerificationKeepsSomeTools,
+			registry.VerificationKeepsUserInstructions,
+		),
 	})
 }
 
@@ -160,6 +164,8 @@ type sessionState struct {
 	reaper *procutil.Reaper
 
 	credentialVerification bool
+
+	reducedVerificationContext bool
 }
 
 func (state *sessionState) sshConnectionFailed() bool {
@@ -422,6 +428,8 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 		passthrough:            pt,
 		acc:                    agentcore.NewRunUsage(),
 		credentialVerification: params.CredentialVerification,
+
+		reducedVerificationContext: params.ReducedVerificationContext(),
 	}
 
 	var cmd *exec.Cmd
@@ -955,8 +963,11 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					ev.TerminalErrorKind = domain.ErrTurnFailed
 				case tc.Turn.Status == "failed" && tc.Turn.Error != nil:
 					ev.Terminal = agentcore.TerminalFailure
-					ev.TerminalErrorKind = mapCodexErrorInfo(tc.Turn.Error.CodexErrorInfo)
+					ev.TerminalErrorKind = mapCodexErrorInfo(string(tc.Turn.Error.CodexErrorInfo))
 					ev.TerminalMessage = tc.Turn.Error.Message
+					if ev.TerminalErrorKind == domain.ErrCredentialUnverified {
+						ev.TerminalMessage = agentcore.CredentialRefusedMessage(tc.Turn.Error.Message)
+					}
 				default:
 					ev.Terminal = agentcore.TerminalFailure
 					ev.TerminalErrorKind = domain.ErrTurnFailed

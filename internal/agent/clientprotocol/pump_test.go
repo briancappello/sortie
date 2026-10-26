@@ -920,3 +920,40 @@ func TestHandleAbandonmentDrainsQueuedResponseBeforeFinalizing(t *testing.T) {
 		t.Errorf("handleAbandonment() with a queued prompt response finalized the turn with error %v, want the queued response's own successful outcome (nil error): the response was already queued and must be drained before the turn is finalized as abandoned", end.err)
 	}
 }
+
+func TestPumpPromptErrorKind(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		code     int
+		wantKind domain.AgentErrorKind
+	}{
+		{"authentication required ends as a refused credential", -32000, domain.ErrCredentialUnverified},
+		{"any other code stays a response error", -32603, domain.ErrResponseError},
+	}
+
+	const runtimeText = "API key is invalid."
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state, outPr, inPw := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
+			out := newOutboundReader(outPr)
+			markSessionKnown(state)
+
+			var events []domain.AgentEvent
+			outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&events)})
+			respondErrorLine(t, inPw, out.awaitMethod(t, methodSessionPrompt), tt.code, runtimeText)
+			outcome := waittest.Receive(t, outcomeCh, "turn outcome")
+
+			agentErr, ok := errors.AsType[*domain.AgentError](outcome.err)
+			if !ok || agentErr.Kind != tt.wantKind {
+				t.Fatalf("RunTurn(prompt error %d) error = %v, want *domain.AgentError of kind %q", tt.code, outcome.err, tt.wantKind)
+			}
+			if !strings.Contains(agentErr.Message, runtimeText) {
+				t.Errorf("RunTurn(prompt error %d) message = %q, want it to carry the runtime text %q", tt.code, agentErr.Message, runtimeText)
+			}
+		})
+	}
+}

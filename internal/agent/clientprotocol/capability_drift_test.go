@@ -394,7 +394,9 @@ func TestNightlyReachability(t *testing.T) {
 			t.Errorf("rows %q and %q both drive this package with %s %q and reaches=%v, want one row per runtime and tier", previous, name, capabilityDriftCommandEnv, command, reaches)
 		}
 		shards[key] = name
-		commandReached[command] = commandReached[command] || reaches
+		if !rowRunsOnlyContextScenario(row.row) {
+			commandReached[command] = commandReached[command] || reaches
+		}
 
 		if !reaches {
 			continue

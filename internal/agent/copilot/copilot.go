@@ -52,6 +52,7 @@ func init() {
 		UsageArrival:        registry.UsageArrivalTurnEnd,
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
+		VerificationContext: registry.DeclareVerificationContext(registry.VerificationKeepsSomeTools, registry.VerificationKeepsSystemPrompt),
 		EffortForwarding:    registry.EffortForwarded,
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
@@ -91,6 +92,8 @@ type sessionState struct {
 	isContinuation bool
 
 	credentialVerification bool
+
+	reducedVerificationContext bool
 
 	// forkSession owns the subprocess lifecycle for this session.
 	forkSession *agentcore.ForkPerTurnSession
@@ -328,6 +331,8 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 		credentialVerification: params.CredentialVerification,
 		usage:                  agentcore.NewTurnEndUsage(),
 		resume:                 seedResumeBaseline(params, target, copilotSessionID, logging.WithSession(baseLogger, copilotSessionID)),
+
+		reducedVerificationContext: params.ReducedVerificationContext(),
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{

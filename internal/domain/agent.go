@@ -284,8 +284,21 @@ type StartSessionParams struct {
 	Settings map[string]any
 
 	// CredentialVerification marks a session that carries only the
-	// request proving the runtime's credential works.
+	// request proving the runtime's credential works. The session runs
+	// under the contract its kind declares in
+	// `registry.AgentMeta.VerificationContext`.
 	CredentialVerification bool
+
+	// VerificationFullContext is set only together with
+	// CredentialVerification. It asks for a verification session
+	// without the switches that drop agent context.
+	VerificationFullContext bool
+}
+
+// ReducedVerificationContext reports whether the session is a
+// credential-verification session that drops agent context.
+func (p StartSessionParams) ReducedVerificationContext() bool {
+	return p.CredentialVerification && !p.VerificationFullContext
 }
 
 // RunTurnParams contains the inputs for [AgentAdapter.RunTurn].

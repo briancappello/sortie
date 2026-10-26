@@ -69,7 +69,7 @@ When a handshake advertises `sessionCapabilities.delete`, a verification session
 
 The `initialize` wait during credential verification is the larger of `agent.read_timeout_ms` and `agentcore.CredentialExchangeBound`, because a runtime may talk to its own backend before it answers. `kiro-cli` with an API key takes far longer than the 5-second default read timeout to answer `initialize`; with a stored device login it answers in well under a second. With the longer wait, a refused key fails its first prompt with a `-32603` error whose `data` names the invalid bearer token.
 
-A `-32000` response to `initialize` or `session/new` means the runtime refused its credential, on a verification session and a working one alike. A runtime that exits before it answers any startup request gets the shared early-exit report, not a credential diagnosis. A connection lost while the runtime stays alive past the observation grace keeps `port_exit`'s transport message. A failed `session/load` or `session/resume` still falls back to a fresh session and is never read as a credential refusal.
+A `-32000` response to `initialize`, `session/new`, or `session/prompt` means the runtime refused its credential, on a verification session and a working one alike. A runtime that exits before it answers any startup request gets the shared early-exit report, not a credential diagnosis. A connection lost while the runtime stays alive past the observation grace keeps `port_exit`'s transport message. A failed `session/load` or `session/resume` still falls back to a fresh session and is never read as a credential refusal.
 
 ## Session load spacing
 

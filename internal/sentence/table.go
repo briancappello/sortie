@@ -535,7 +535,7 @@ var table = map[string]parts{
 	"run_error_turn_outcome_unknown":  {text: "The agent ended {{.Turn}} with an outcome Sortie could not read" + errorDetail},
 	"run_error_turn_token_limit":      {text: "The agent ended {{.Turn}} because a token limit was reached" + errorDetail},
 	"run_error_turn_request_limit":    {text: "The agent ended {{.Turn}} because it used up its request limit" + errorDetail},
-	"run_error_credential_unverified": {text: "The agent could not confirm its credential before the first turn" + errorDetail},
+	"run_error_credential_unverified": {text: "The agent's credential was refused or could not be confirmed" + errorDetail},
 	"run_error_agent_other":           {text: "The agent reported an error" + errorDetail},
 	"run_error_turn_ended":            {text: "The agent ended {{.Turn}} early{{if .Detail}} ({{.Detail}}){{end}}."},
 	"run_error_stage_stopped":         {text: "Sortie stopped the run while {{.Doing}}."},

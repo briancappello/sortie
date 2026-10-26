@@ -358,6 +358,7 @@ type Orchestrator struct {
 	scmProvider                       string
 	draining                          atomic.Bool
 	hostPool                          *HostPool
+	verificationCache                 *verificationCache
 	workflowFileFunc                  func() string
 	dbPath                            string
 	mcpServerBinary                   string
@@ -518,6 +519,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		toolRegistry:                      params.ToolRegistry,
 		sessionToolRegistryFunc:           params.SessionToolRegistryFunc,
 		hostPool:                          hostPool,
+		verificationCache:                 newVerificationCache(),
 		workflowFileFunc:                  params.WorkflowFileFunc,
 		dbPath:                            params.DBPath,
 		mcpServerBinary:                   params.MCPServerBinary,
@@ -1612,6 +1614,8 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			MCPServerBinary: o.mcpServerBinary,
 			ReactionKind:    reactionKind,
 			Posture:         posture,
+
+			VerificationCache: o.verificationCache,
 		}
 
 		RunWorkerAttempt(ctx, issue, attempt, deps)

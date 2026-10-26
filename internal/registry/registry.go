@@ -228,6 +228,11 @@ type AgentMeta struct {
 	// EffortForwarding declares what this adapter does with the effort
 	// key of its own settings block. The empty value means undeclared.
 	EffortForwarding EffortForwarding
+
+	// VerificationContext declares which agent context components the
+	// kind's credential-verification request still carries. The zero
+	// value means undeclared.
+	VerificationContext VerificationContext
 }
 
 // CredentialEnv declares the environment variable names an agent
@@ -260,6 +265,70 @@ func (c CredentialEnv) Names() []string {
 		return nil
 	}
 	return slices.Clone(c.names)
+}
+
+// VerificationResidual names one context component that a kind's
+// credential-verification request still carries, because its runtime
+// offers no qualifying switch that drops it.
+type VerificationResidual string
+
+const (
+	// VerificationKeepsSomeTools declares that the request carries
+	// strictly fewer tool definitions than a working request.
+	VerificationKeepsSomeTools VerificationResidual = "some_tools"
+
+	// VerificationKeepsAllTools declares that the request carries no
+	// more tool definitions than a working request.
+	VerificationKeepsAllTools VerificationResidual = "all_tools"
+
+	// VerificationKeepsProjectInstructions declares that the request
+	// carries the instruction files read from the workspace.
+	VerificationKeepsProjectInstructions VerificationResidual = "project_instructions"
+
+	// VerificationKeepsUserInstructions declares that the request
+	// carries the instruction files and skill catalogues read from the
+	// operator's home.
+	VerificationKeepsUserInstructions VerificationResidual = "user_instructions"
+
+	// VerificationKeepsSystemPrompt declares that the request carries
+	// the runtime's built-in system prompt.
+	VerificationKeepsSystemPrompt VerificationResidual = "system_prompt"
+)
+
+// VerificationContext declares the residuals of a kind's
+// credential-verification request: the context components it still
+// carries. The zero value is undeclared; construct a declared value
+// with [DeclareVerificationContext].
+//
+// Tool definitions of every origin count toward the tool components:
+// built-in, skill, and tool-server tools.
+type VerificationContext struct {
+	residuals []VerificationResidual
+	declared  bool
+}
+
+// DeclareVerificationContext returns a declared [VerificationContext]
+// keeping the given residuals. Called with no arguments, it declares a
+// request that keeps nothing. It panics when given both
+// [VerificationKeepsSomeTools] and [VerificationKeepsAllTools], which
+// bound the same component differently.
+func DeclareVerificationContext(residuals ...VerificationResidual) VerificationContext {
+	if slices.Contains(residuals, VerificationKeepsSomeTools) && slices.Contains(residuals, VerificationKeepsAllTools) {
+		panic("registry: verification context declares both some_tools and all_tools")
+	}
+	return VerificationContext{residuals: slices.Clone(residuals), declared: true}
+}
+
+// Declared reports whether v was built by [DeclareVerificationContext].
+// The zero value reports false.
+func (v VerificationContext) Declared() bool {
+	return v.declared
+}
+
+// Keeps reports whether v declares that the request carries r. An
+// undeclared value keeps nothing.
+func (v VerificationContext) Keeps(r VerificationResidual) bool {
+	return slices.Contains(v.residuals, r)
 }
 
 // UsageArrival declares when a usage figure for the agent session
