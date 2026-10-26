@@ -931,7 +931,9 @@ func TestRenderEveryTopLevelKeyWithoutOptions(t *testing.T) {
 
 	var body strings.Builder
 	for _, key := range topLevelOrder {
-		body.WriteString("{{ with ." + key + " }}{{ end }}")
+		body.WriteString("{{ with .")
+		body.WriteString(key)
+		body.WriteString(" }}{{ end }}")
 	}
 	body.WriteString("{{ if .park }}park set{{ else }}park nil{{ end }}")
 	tmpl, err := Parse(body.String(), "WORKFLOW.md", 0)
