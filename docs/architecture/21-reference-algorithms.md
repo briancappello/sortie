@@ -711,18 +711,36 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  // Credential-verification step (§10.9): a separate session, one
-  // fixed request, stopped, before the working session starts.
-  notify("verifying the agent credential")
-  verify_result, verify_err = agent_adapter.verify_credential(workspace=workspace.path, settings=settings.passthrough)
-  fold verify_result into the run's usage mirror
-  offset = the mirror's componentwise watermark
-  if verify_err failed:
-    run_hook_best_effort("after_run", workspace.path, {
-      SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, worker_ctx is done), verify_err)
-    })
-    fail_worker("agent session start error", verify_err)
-  log_info("agent credential verified", duration_ms)
+  // Credential-verification step (§10.9): a separate session, one fixed
+  // request, stopped, before the working session starts, unless the
+  // process-lifetime cache holds a fresh proof of the same agent setup.
+  // The key digests the setup and never reaches a log, an event, or an error.
+  key, keyed = verification_key(agent_kind, settings)
+  skipped = false
+  if keyed and verification_cache.fresh(key, now()):
+    log_info("agent credential verification skipped", proven_at)
+    verify_result = zero usage  // no verification event, no request count, a zero offset
+    skipped = true
+  else:
+    notify("verifying the agent credential")
+    verify_result, verify_err = agent_adapter.verify_credential(workspace=workspace.path, settings=settings.passthrough)
+    fold verify_result into the run's usage mirror
+    offset = the mirror's componentwise watermark
+    if verify_err failed:
+      if keyed and worker_ctx is not done:
+        verification_cache.evict(key)  // a failure is never cached
+      run_hook_best_effort("after_run", workspace.path, {
+        SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, worker_ctx is done), verify_err)
+      })
+      fail_worker("agent session start error", verify_err)
+    log_info("agent credential verified", duration_ms)
+    if keyed:
+      verification_cache.record(key, now())
+
+  // Every later fail_worker with an error exit evicts the key when keyed and
+  // either no working turn of this run has succeeded or the error carries
+  // kind credential_unverified. A cancelled run evicts nothing.
+  proven = false
 
   session = agent_adapter.start_session(workspace=workspace.path, settings=settings.passthrough)
   if session failed:
@@ -730,6 +748,11 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
       SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, worker_ctx is done), "agent session startup error")
     })
     fail_worker("agent session startup error")
+
+  if skipped:
+    // A skipped run has no verification request to mark its local usage as
+    // measured, so under usage arrival "none" it reports unmeasured.
+    run_measured_locally = false
 
   max_turns = config.agent.max_turns
   turn_number = 1
@@ -791,6 +814,13 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
         SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, cancelled_at_ending), turn_err)
       })
       fail_worker(exit_kind_at_ending(worker_ctx, cancelled_at_ending), turn_err)
+
+    // A turn proves the setup when it returned no error and ended as
+    // completed; a turn that returned no error with another ending does not.
+    if turn_err == null AND turn_result.exit_reason == turn_completed:
+      proven = true
+      if keyed:
+        verification_cache.record(key, now())
 
     status = read_sortie_status(workspace.path)  // token, plus the statement when the token is recognized
     if status.token in ["blocked", "needs-human-review", "no-change-needed"]:
