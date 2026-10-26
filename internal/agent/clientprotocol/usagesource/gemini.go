@@ -9,12 +9,12 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 const geminiAgentName = "gemini-cli"
@@ -24,10 +24,6 @@ const geminiAgentName = "gemini-cli"
 const geminiExecutableName = "gemini"
 
 const geminiPackageName = "@google/gemini-cli"
-
-// geminiExecutableSuffixes are the platform-specific extensions a launcher may
-// append to the executable name; namesGeminiCLI strips at most one.
-var geminiExecutableSuffixes = []string{".cmd", ".ps1", ".exe", ".js"}
 
 const (
 	geminiSourceTelemetry = "telemetry"
@@ -159,64 +155,7 @@ func newGeminiReader() *geminiReader {
 
 func init() {
 	Sources.Register(geminiAgentName, func() Reader { return newGeminiReader() })
-}
-
-// namesGeminiCLI reports whether target's command line identifies Gemini
-// CLI, checked by an empty-runtime Claim before it arms anything. The tokens
-// are target.Command and every element of target.Args: a token naming the
-// gemini executable (bare, or the last path element after one platform
-// launcher suffix is stripped) claims the launch unless it is the value of a
-// preceding option flag with nothing to identify it as a path; a token naming
-// the @google/gemini-cli npm package, standalone, versioned, or inside a
-// node_modules path, always claims it.
-func namesGeminiCLI(target agentcore.LaunchTarget) bool {
-	tokens := append([]string{target.Command}, target.Args...)
-	for i, token := range tokens {
-		var optionValue bool
-		if i > 0 {
-			prev := tokens[i-1]
-			optionValue = strings.HasPrefix(prev, "-") && prev != "--"
-		}
-		if geminiToken(token, optionValue) {
-			return true
-		}
-	}
-	return false
-}
-
-// geminiToken reports whether one command-line token, given whether it is the
-// value of a preceding option flag, identifies Gemini CLI.
-func geminiToken(token string, optionValue bool) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(token, `\`, "/"))
-	if geminiExecutableToken(normalized, optionValue) {
-		return true
-	}
-	if normalized == geminiPackageName || strings.HasPrefix(normalized, geminiPackageName+"@") {
-		return true
-	}
-	return strings.Contains(normalized, "/"+geminiPackageName+"/") || strings.HasSuffix(normalized, "/"+geminiPackageName)
-}
-
-// geminiExecutableToken reports whether a normalized token names the gemini
-// executable itself, bare or as a path. A bare option value with no path
-// separator is ambiguous with an unrelated flag argument and is not matched.
-func geminiExecutableToken(normalized string, optionValue bool) bool {
-	hasPathSeparator := strings.Contains(normalized, "/")
-	if !hasPathSeparator && optionValue {
-		return false
-	}
-
-	base := normalized
-	if idx := strings.LastIndex(normalized, "/"); idx >= 0 {
-		base = normalized[idx+1:]
-	}
-	for _, suffix := range geminiExecutableSuffixes {
-		if trimmed, ok := strings.CutSuffix(base, suffix); ok {
-			base = trimmed
-			break
-		}
-	}
-	return base == geminiExecutableName
+	VerificationAdditions.Register(geminiAgentName, func() VerificationAddition { return &geminiVerification{} })
 }
 
 // Claim arms the source for a local launch, taking a session-private directory
@@ -234,7 +173,7 @@ func (r *geminiReader) Claim(target agentcore.LaunchTarget, runtime string) ([]s
 		if !r.Recognize(runtime) {
 			return nil, false
 		}
-	} else if !namesGeminiCLI(target) {
+	} else if !namesRuntime(target, geminiExecutableName, geminiPackageName) {
 		return nil, false
 	}
 
@@ -689,4 +628,53 @@ func (r *geminiReader) journalNames(path string) bool {
 		return false
 	}
 	return header.SessionID == r.sessionID
+}
+
+// geminiVerification replaces the runtime's built-in system prompt for a
+// verification session. The runtime reads the replacement from a file named by
+// an environment variable and fails its handshake when the file is missing, so
+// the file is written here, on the launching host, and removed with the
+// session.
+type geminiVerification struct {
+	dir string
+}
+
+func (v *geminiVerification) Claim(target agentcore.LaunchTarget) (VerificationSwitches, bool) {
+	if !namesRuntime(target, geminiExecutableName, geminiPackageName) {
+		return VerificationSwitches{}, false
+	}
+
+	dir, err := os.MkdirTemp("", "sortie-verification-")
+	if err != nil {
+		return VerificationSwitches{}, false
+	}
+	path := filepath.Join(dir, "system.md")
+	if err := os.WriteFile(path, []byte(agentcore.VerificationSystemPrompt), 0o600); err != nil {
+		_ = os.RemoveAll(dir) //nolint:errcheck // best-effort; the claim is refused either way
+		return VerificationSwitches{}, false
+	}
+
+	v.dir = dir
+	return VerificationSwitches{Env: []string{"GEMINI_SYSTEM_MD=" + path}}, true
+}
+
+// Context keeps tools and instruction files because the runtime offers no
+// switch that drops them.
+func (v *geminiVerification) Context() registry.VerificationContext {
+	return registry.DeclareVerificationContext(
+		registry.VerificationKeepsAllTools,
+		registry.VerificationKeepsProjectInstructions,
+		registry.VerificationKeepsUserInstructions,
+	)
+}
+
+// Close retries a removal that failed on its next call.
+func (v *geminiVerification) Close() {
+	if v.dir == "" {
+		return
+	}
+	if err := os.RemoveAll(v.dir); err != nil {
+		return
+	}
+	v.dir = ""
 }

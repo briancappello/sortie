@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
@@ -178,6 +179,63 @@ func authenticateIfNeeded(ctx context.Context, state *sessionState, logger *slog
 	}
 }
 
+// verificationDisabledFeatures are flags from the runtime's published
+// configuration reference; a build that does not know one ignores it.
+var verificationDisabledFeatures = []string{
+	"shell_tool", "unified_exec", "multi_agent", "apps", "plugins", "goals",
+	"browser_use", "computer_use", "hooks", "in_app_browser",
+}
+
+// verificationThreadConfig uses flat, dotted keys and gives each value the JSON
+// type the configuration reference gives it: a wrong type fails thread/start,
+// where an unknown key is only ignored.
+func verificationThreadConfig(serverIDs []string) map[string]any {
+	config := map[string]any{
+		"project_doc_max_bytes": 0,
+		"web_search":            "disabled",
+	}
+	for _, name := range verificationDisabledFeatures {
+		config["features."+name] = false
+	}
+	for _, id := range serverIDs {
+		config["mcp_servers."+id+".enabled"] = false
+	}
+	return config
+}
+
+// readConfiguredServerIDs reads the MCP server ids from the app-server's
+// configuration because thread/start fails on an id the configuration does not
+// hold. Any failure or unexpected shape yields no ids, so an older build saves
+// less and the session still starts.
+func readConfiguredServerIDs(ctx context.Context, state *sessionState, logger *slog.Logger) []string {
+	callCtx, cancel := context.WithTimeout(ctx, agentcore.ReadTimeout(state.agentConfig))
+	defer cancel()
+	resp, err := state.conn.Call(callCtx, "config/read", map[string]any{
+		"cwd":           state.target.WorkspacePath,
+		"includeLayers": false,
+	})
+	if err != nil {
+		logger.Debug("config/read failed, no MCP servers disabled", slog.Any("error", err))
+		return nil
+	}
+	if resp.Error != nil {
+		logger.Debug("config/read refused, no MCP servers disabled",
+			slog.Int("code", resp.Error.Code), slog.String("message", resp.Error.Message))
+		return nil
+	}
+
+	var result struct {
+		Config struct {
+			MCPServers map[string]json.RawMessage `json:"mcp_servers"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		logger.Debug("config/read result not decoded, no MCP servers disabled", slog.Any("error", err))
+		return nil
+	}
+	return slices.Sorted(maps.Keys(result.Config.MCPServers))
+}
+
 // startThread sends thread/start and waits for the thread/started
 // notification. Returns the thread ID and the effective model the
 // response reported, empty when the response omitted it. An empty
@@ -209,7 +267,10 @@ func startThread(ctx context.Context, state *sessionState, pt passthroughConfig,
 	if pt.Model != "" {
 		params["model"] = pt.Model
 	}
-	if pt.Personality != "" {
+	if state.reducedVerificationContext {
+		params["baseInstructions"] = agentcore.VerificationSystemPrompt
+		params["config"] = verificationThreadConfig(readConfiguredServerIDs(ctx, state, logger))
+	} else if pt.Personality != "" {
 		params["personality"] = pt.Personality
 	}
 

@@ -50,8 +50,34 @@ type turnCompletedParams struct {
 // turnError is the error object inside a failed turn/completed
 // notification.
 type turnError struct {
-	Message        string `json:"message"`
-	CodexErrorInfo string `json:"codexErrorInfo,omitempty"`
+	Message        string         `json:"message"`
+	CodexErrorInfo codexErrorInfo `json:"codexErrorInfo,omitempty"`
+}
+
+// codexErrorInfo is the variant name of a turn error's codexErrorInfo
+// member. The wire carries a unit variant as a camelCase string and a
+// variant with data as a one-member object keyed by the variant name.
+type codexErrorInfo string
+
+// UnmarshalJSON accepts both wire forms and never fails: an
+// unrecognized shape leaves the variant empty, so the turn's error
+// message survives whatever the member holds.
+func (c *codexErrorInfo) UnmarshalJSON(data []byte) error {
+	*c = ""
+	var name string
+	if json.Unmarshal(data, &name) == nil {
+		*c = codexErrorInfo(name)
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(data, &object) == nil {
+		for key := range object {
+			if *c == "" || key < string(*c) {
+				*c = codexErrorInfo(key)
+			}
+		}
+	}
+	return nil
 }
 
 // itemParams is the params payload of item/started and item/completed
@@ -194,20 +220,20 @@ func parseModelRerouted(params json.RawMessage) (modelReroutedParams, error) {
 	return p, nil
 }
 
-// mapCodexErrorInfo maps a codexErrorInfo string to a domain error
-// kind. Retryable vs non-retryable classification is encoded in the
-// AgentErrorKind value.
+// mapCodexErrorInfo maps a codexErrorInfo variant name to a domain error
+// kind, comparing names case-insensitively. Retryable vs non-retryable
+// classification is encoded in the AgentErrorKind value.
 func mapCodexErrorInfo(info string) domain.AgentErrorKind {
-	switch info {
-	case "Unauthorized":
+	switch strings.ToLower(info) {
+	case "unauthorized":
+		return domain.ErrCredentialUnverified
+	case "badrequest":
 		return domain.ErrResponseError
-	case "BadRequest":
-		return domain.ErrResponseError
-	case "ContextWindowExceeded", "UsageLimitExceeded", "SandboxError":
+	case "contextwindowexceeded", "usagelimitexceeded", "sandboxerror":
 		return domain.ErrTurnFailed
-	case "HttpConnectionFailed", "ResponseStreamConnectionFailed",
-		"ResponseStreamDisconnected", "ResponseTooManyFailedAttempts",
-		"InternalServerError", "Other":
+	case "httpconnectionfailed", "responsestreamconnectionfailed",
+		"responsestreamdisconnected", "responsetoomanyfailedattempts",
+		"internalservererror", "other":
 		return domain.ErrTurnFailed
 	default:
 		return domain.ErrTurnFailed

@@ -135,10 +135,11 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessCopilotIntegration(t)
 
 	fakemodel.AssertConformance(t, fakemodel.Binding{
-		Kind:          "copilot-cli",
-		Passthrough:   map[string]any{"model": "scripted-model", "max_autopilot_continues": float64(5)},
-		CredentialEnv: []string{"COPILOT_PROVIDER_API_KEY"},
-		Read:          fakemodel.ReadFile,
+		Kind:             "copilot-cli",
+		Passthrough:      map[string]any{"model": "scripted-model", "max_autopilot_continues": float64(5)},
+		CredentialEnv:    []string{"COPILOT_PROVIDER_API_KEY"},
+		UserInstructions: filepath.Join(".copilot", "copilot-instructions.md"),
+		Read:             fakemodel.ReadFile,
 		Finish: func(text string) fakemodel.ToolChoice {
 			summary, _ := json.Marshal(map[string]string{"summary": text})
 			return fakemodel.Named("task_complete", summary)

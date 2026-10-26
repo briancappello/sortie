@@ -598,11 +598,7 @@ func (p *pumpState) handleResponse(msg *jsonrpc.Message) {
 	}
 
 	if msg.Error != nil {
-		p.recoverThenFinalize(agentcore.TurnEvidence{
-			Terminal:          agentcore.TerminalFailure,
-			TerminalErrorKind: domain.ErrResponseError,
-			TerminalMessage:   fmt.Sprintf("session/prompt error %d: %s", msg.Error.Code, quoteJSONRPCError(msg.Error)),
-		})
+		p.recoverThenFinalize(promptErrorEvidence(msg.Error))
 		return
 	}
 
@@ -629,6 +625,21 @@ func (p *pumpState) handleResponse(msg *jsonrpc.Message) {
 		return
 	}
 	p.armDrain(turn, evidence, bound)
+}
+
+func promptErrorEvidence(e *jsonrpc.Error) agentcore.TurnEvidence {
+	if e.Code == errorCodeAuthRequired {
+		return agentcore.TurnEvidence{
+			Terminal:          agentcore.TerminalFailure,
+			TerminalErrorKind: domain.ErrCredentialUnverified,
+			TerminalMessage:   agentcore.CredentialRefusedMessage(quoteJSONRPCError(e)),
+		}
+	}
+	return agentcore.TurnEvidence{
+		Terminal:          agentcore.TerminalFailure,
+		TerminalErrorKind: domain.ErrResponseError,
+		TerminalMessage:   fmt.Sprintf("session/prompt error %d: %s", e.Code, quoteJSONRPCError(e)),
+	}
 }
 
 // armDrain hands one turn's measurement wait to its own goroutine and leaves the

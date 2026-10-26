@@ -39,6 +39,11 @@ func init() {
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv(),
 		EffortForwarding:    registry.EffortForwarded,
+		VerificationContext: registry.DeclareVerificationContext(
+			registry.VerificationKeepsProjectInstructions,
+			registry.VerificationKeepsUserInstructions,
+			registry.VerificationKeepsSystemPrompt,
+		),
 	})
 }
 
@@ -68,6 +73,8 @@ type sessionState struct {
 	turnConfigContent string
 
 	credentialVerification bool
+
+	reducedVerificationContext bool
 
 	// Per-turn state, reset by RunTurn and touched only from the hooks,
 	// which run on RunTurn's goroutine.
@@ -121,13 +128,19 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 		runStartedAtMS:         time.Now().UnixMilli(),
 		usage:                  agentcore.NewTurnEndUsage(),
 		credentialVerification: params.CredentialVerification,
+
+		reducedVerificationContext: params.ReducedVerificationContext(),
 	}
 
 	if versionErr := checkRuntimeVersion(ctx, state); versionErr != nil {
 		return domain.Session{}, versionErr
 	}
 
-	turnConfigContent, buildErr := buildInlineConfig(state.passthrough, servers)
+	buildConfig := buildInlineConfig
+	if state.reducedVerificationContext {
+		buildConfig = buildVerificationInlineConfig
+	}
+	turnConfigContent, buildErr := buildConfig(state.passthrough, servers)
 	if buildErr != nil {
 		return domain.Session{}, &domain.AgentError{
 			Kind:    domain.ErrResponseError,

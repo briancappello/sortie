@@ -106,6 +106,54 @@ jobs:
             clientprotocol_asking_command: "gemini --acp"
             clientprotocol_model_base_url_env: GOOGLE_GEMINI_BASE_URL
 
+          - name: GitHub Copilot CLI - ACP
+            adapter: acp-copilot
+            kind: agent
+            guard: SORTIE_CLIENTPROTOCOL_TEST
+            credential_env: COPILOT_PROVIDER_API_KEY
+            run_filter: ^TestIntegration_ScriptedModel$/^credential_verification_context$
+            test_path: ./internal/agent/clientprotocol/...
+            timeout: 300s
+            node: true
+            install: npm install -g @github/copilot
+            version_cmd: copilot --version
+            source: "npm: @github/copilot (unpinned, installs latest)"
+            clientprotocol_command: "env COPILOT_PROVIDER_TYPE=anthropic COPILOT_OFFLINE=1 COPILOT_MODEL=scripted-model copilot --acp"
+            clientprotocol_model_base_url_env: COPILOT_PROVIDER_BASE_URL
+            clientprotocol_user_instructions: .copilot/copilot-instructions.md
+
+          - name: OpenCode - ACP
+            adapter: acp-opencode
+            kind: agent
+            guard: SORTIE_CLIENTPROTOCOL_TEST
+            credential_env: GOOGLE_GENERATIVE_AI_API_KEY
+            run_filter: ^TestIntegration_ScriptedModel$/^credential_verification_context$
+            test_path: ./internal/agent/clientprotocol/...
+            timeout: 300s
+            node: true
+            install: npm install -g --ignore-scripts=false @opencode/cli@2
+            version_cmd: opencode --version
+            source: "npm: @opencode/cli@2 (latest 2.x)"
+            clientprotocol_command: "opencode acp"
+            clientprotocol_model_base_url_env: OPENCODE_CONFIG
+            clientprotocol_model_document: '{"$schema":"https://opencode.ai/config.json","model":"scripted/scripted-model","provider":{"scripted":{"npm":"@ai-sdk/google","name":"scripted","options":{"baseURL":"{url}/v1beta","apiKey":"{env:GOOGLE_GENERATIVE_AI_API_KEY}"},"models":{"scripted-model":{"name":"scripted-model"}}}}}'
+
+          - name: Kiro CLI - ACP (scripted)
+            adapter: acp-kiro
+            kind: agent
+            guard: SORTIE_CLIENTPROTOCOL_TEST
+            credential_env: KIRO_API_KEY
+            run_filter: ^TestIntegration_ScriptedModel$/^credential_verification_context$
+            test_path: ./internal/agent/clientprotocol/...
+            timeout: 300s
+            node: false
+            install: curl -fsSL https://cli.kiro.dev/install | bash
+            version_cmd: kiro-cli --version
+            source: "curl https://cli.kiro.dev/install (unpinned, installs latest)"
+            clientprotocol_command: "kiro-cli acp -a --model scripted-model"
+            clientprotocol_model_document_path: .kiro/settings/cli.json
+            clientprotocol_model_document: '{"api.krs.service":{"endpoint":"{url}","region":"us-east-1"},"api.cps.service":{"endpoint":"{url}","region":"us-east-1"},"api.codewhisperer.service":{"endpoint":"{url}","region":"us-east-1"}}'
+
           - name: Jira
             adapter: jira
             kind: tracker
@@ -269,6 +317,9 @@ jobs:
           SORTIE_CLIENTPROTOCOL_ASKING_COMMAND: ${{ matrix.clientprotocol_asking_command }}
           SORTIE_CLIENTPROTOCOL_PROFILE: ${{ matrix.clientprotocol_profile }}
           SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV: ${{ matrix.clientprotocol_model_base_url_env }}
+          SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS: ${{ matrix.clientprotocol_user_instructions }}
+          SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT: ${{ matrix.clientprotocol_model_document }}
+          SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH: ${{ matrix.clientprotocol_model_document_path }}
           GH_TOKEN: ${{ secrets.SORTIE_COPILOT_TOKEN }}
         run: |
           # The runner's default bash uses -e; disable it so a failing test is

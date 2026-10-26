@@ -157,8 +157,9 @@ const (
 	// exhausted.
 	ErrTurnRequestLimit AgentErrorKind = "turn_request_limit"
 
-	// ErrCredentialUnverified indicates the runtime did not complete a
-	// request with its credential before the first turn.
+	// ErrCredentialUnverified indicates the runtime refused its
+	// credential on any turn, or did not complete a
+	// credential-verification request.
 	ErrCredentialUnverified AgentErrorKind = "credential_unverified" //nolint:gosec // G101: an error-kind label, not a credential
 )
 

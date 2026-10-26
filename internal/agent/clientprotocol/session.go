@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -112,6 +113,10 @@ type sessionState struct {
 	// order they claimed. Set on each start's state before its go runPump(state);
 	// read-only afterward. Teardown closes each.
 	claimed []usageReader
+
+	// verification is nil when no addition claimed the launch. Set before the
+	// pump starts; teardown closes it.
+	verification usagesource.VerificationAddition
 
 	// earlyExit is translateCallError's observation of whether the runtime
 	// exited on its own before this start's connection loss, recorded on the
@@ -263,13 +268,23 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		claimed = append(claimed, claim.source)
 	}
 
+	var verification usagesource.VerificationAddition
+	var verificationSwitches usagesource.VerificationSwitches
+	if params.ReducedVerificationContext() {
+		verification, verificationSwitches, _ = usagesource.ClaimVerification(target, os.Environ())
+	}
+
 	// Every failure below returns without a session, so nothing else releases
 	// what a claim armed across every start.
 	var state *sessionState
 	started := false
 	defer func() {
-		if !started && state != nil {
+		switch {
+		case started:
+		case state != nil:
 			releaseUsageSources(state)
+		case verification != nil:
+			verification.Close()
 		}
 	}()
 
@@ -288,6 +303,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 			origins:                &a.origins,
 			credentialVerification: params.CredentialVerification,
 			claimed:                claimed,
+			verification:           verification,
 		}
 		state.drainGrace = a.drainGrace
 		if state.drainGrace <= 0 {
@@ -301,9 +317,9 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 			launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, target.SSHOptions())
 			cmd = exec.CommandContext(ctx, target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 		} else {
-			cmd = exec.CommandContext(ctx, target.Command, target.Args...) //nolint:gosec // args are constructed programmatically
+			cmd = exec.CommandContext(ctx, target.Command, slices.Concat(target.Args, verificationSwitches.Args)...) //nolint:gosec // args are constructed programmatically
 		}
-		cmd.Env = append(os.Environ(), readerEnv...)
+		cmd.Env = slices.Concat(os.Environ(), readerEnv, verificationSwitches.Env)
 		if !remote {
 			if bindErr := target.BindWorkspace(cmd); bindErr != nil {
 				return domain.Session{}, bindErr

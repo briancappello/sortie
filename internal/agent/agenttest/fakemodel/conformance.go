@@ -1,6 +1,7 @@
 package fakemodel
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -63,6 +65,12 @@ const (
 	// answer; the driver cancels the turn's context once the endpoint holds
 	// the request that follows the tool result, after the model served output.
 	ScenarioCancellationAfterOutput
+
+	// ScenarioVerificationContext scripts one plain answer per model request,
+	// across a credential-verification session and a working session that share
+	// one home and one workspace, each running one turn with the verification
+	// prompt.
+	ScenarioVerificationContext
 )
 
 // Binding is one agent kind's fixture for [AssertConformance]: how to reach
@@ -85,6 +93,20 @@ type Binding struct {
 	ToolServerPassthrough map[string]any
 
 	PermissionRefusal *PermissionRefusal // nil runs no refusal scenario
+
+	// UserInstructions is the path, relative to Environment.Home, of the
+	// runtime's user-level instruction file. Required when the binding's
+	// declaration does not keep user instructions.
+	UserInstructions string
+
+	// ProjectInstructions is the path, relative to the workspace, of a project
+	// instruction file the runtime reads beside the generic one the kit always
+	// seeds.
+	ProjectInstructions string
+
+	// VerificationContext overrides the kind's declaration for this binding's
+	// launch, as a protocol runtime's addition does. Zero uses the kind's.
+	VerificationContext registry.VerificationContext
 }
 
 // PermissionRefusal is a binding's fixture for the permission refusal
@@ -133,6 +155,8 @@ var (
 	secondTurnUsage = Usage{Prompt: 307, Candidates: 17, Thoughts: 7, CachedContent: 61, CacheWrite: 23}
 )
 
+const verificationScriptLength = 16
+
 const (
 	turnBound             = 180 * time.Second
 	stopBound             = 30 * time.Second
@@ -177,20 +201,15 @@ const sortieStatusTurn = 731948265
 // call, after the preamble read.
 const serverCallStep = 1
 
-// AssertConformance launches b's installed runtime through its adapter
-// against a scripted model endpoint and fails t unless the turn completes, the
-// reported usage equals everything the endpoint served, each scripted tool
-// call reaches one normalized tool result, the credential stays in its header,
-// requests beyond the script fail the turn with the endpoint's last message, a
-// sortie_status call succeeds through the relay identity the MCP configuration
-// declares, and, when b.PermissionRefusal is set, a refused call reaches the
-// model as one errored tool result with the notice and without the file's
-// content. A turn interrupted while the endpoint holds its model request ends
-// within a bound and reports SpendUnaccounted exactly when the model had served
-// output, and once the session's stop returns every process the
-// session reported is gone. A session resumed by its reported identifier sends
-// the earlier turns' prompts and answers back to the model, and a fresh session
-// in the same home and workspace sends none of them.
+// AssertConformance drives b's installed runtime through its adapter against a
+// scripted model endpoint and fails t when the runtime breaks the adapter
+// contract: a turn that does not complete, usage that differs from what the
+// endpoint served, a scripted tool call without one normalized tool result, a
+// credential outside its header, a refused call that does not reach the model
+// as one errored tool result, an interrupted turn or session stop that overruns
+// its bound or leaves a process behind, a resumed or fresh session that sends
+// the wrong history, or a credential-verification session that carries more
+// agent context than its declaration allows.
 //
 // It sets environment variables for the rest of the test, so it must not be
 // called from a test that uses t.Parallel.
@@ -208,6 +227,7 @@ func AssertConformance(t *testing.T, b Binding) {
 	t.Run("turn cancellation after output", func(t *testing.T) { runInterruption(t, b, ScenarioCancellationAfterOutput) })
 	t.Run("session stop", func(t *testing.T) { runInterruption(t, b, ScenarioStop) })
 	t.Run("session continuation", func(t *testing.T) { runContinuation(t, b) })
+	t.Run("credential verification context", func(t *testing.T) { runVerificationContext(t, b) })
 }
 
 func requireValidBinding(t *testing.T, b Binding) {
@@ -776,6 +796,244 @@ func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, res
 		}
 	}
 	return session, events.snapshot()
+}
+
+type instructionSeeds struct {
+	project string
+	user    string
+}
+
+// scriptReporter drops unused-entry failures: a request without tools is
+// answered outside the script, so how many entries the verification session
+// consumes depends on its declaration.
+type scriptReporter struct {
+	testing.TB
+}
+
+func (r scriptReporter) Errorf(format string, args ...any) {
+	if strings.HasSuffix(fmt.Sprintf(format, args...), " was never requested") {
+		return
+	}
+	r.TB.Errorf(format, args...)
+}
+
+func runVerificationContext(t *testing.T, b Binding) {
+	t.Helper()
+
+	declaration := b.VerificationContext
+	if !declaration.Declared() {
+		meta, _ := registry.Agents.Meta(b.Kind)
+		declaration = meta.VerificationContext
+	}
+	if !declaration.Declared() {
+		t.Fatalf("kind %q declares no verification context, want AgentMeta.VerificationContext or Binding.VerificationContext", b.Kind)
+	}
+	if !declaration.Keeps(registry.VerificationKeepsUserInstructions) && b.UserInstructions == "" {
+		t.Fatalf("Binding.UserInstructions is empty, want the runtime's user-level instruction file, since its verification request drops user instructions")
+	}
+
+	seeds := instructionSeeds{
+		project: "sortie-project-instructions-" + randomHex(t, 8),
+		user:    "sortie-user-instructions-" + randomHex(t, 8),
+	}
+	workspace := newWorkspace(t)
+	home := t.TempDir()
+	writeSeed(t, filepath.Join(workspace, "AGENTS.md"), seeds.project)
+	if b.ProjectInstructions != "" {
+		writeSeed(t, filepath.Join(workspace, b.ProjectInstructions), seeds.project)
+	}
+	if b.UserInstructions != "" {
+		writeSeed(t, filepath.Join(home, b.UserInstructions), seeds.user)
+	}
+
+	// A scripted tool call would fail a runtime that declares no tool by that
+	// name, and the verification session declares fewer tools. A runtime that
+	// ends a turn only on a tool call keeps requesting after a plain answer, so
+	// the script outlasts its continuation ceiling.
+	answers := slices.Repeat([]Response{{Text: "SORTIE_CREDENTIAL_OK", Usage: secondTurnUsage}}, verificationScriptLength)
+	c := verificationSessions{
+		binding:   b,
+		server:    Start(scriptReporter{t}, answers),
+		adapter:   newKindAdapter(t, b.Kind),
+		workspace: workspace,
+		home:      home,
+		sentinel:  "sortie-scripted-credential-" + randomHex(t, 16),
+	}
+	isolateEnvironment(t, b, home, c.sentinel)
+
+	verificationExchanges := c.run(t, true)
+	working := exchangesOfKind(c.run(t, false), ExchangeTurn)
+	if len(working) == 0 {
+		t.Fatalf("the working session sent no model request declaring tools%s", exchangeLines(c.server.Exchanges()))
+	}
+	verification := modelRequests(verificationExchanges, working[0].Model)
+	if len(verification) == 0 {
+		t.Fatalf("no verification request reached the working session's model %q: the verification session sent no request carrying %q to it%s",
+			working[0].Model, agentcore.CredentialVerificationPrompt, exchangeLines(c.server.Exchanges()))
+	}
+	reportViolations(t, verificationContextViolations(declaration, seeds, verification, working[0]))
+}
+
+func writeSeed(t *testing.T, path, content string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("create %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content+"\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func newKindAdapter(t *testing.T, kind string) domain.AgentAdapter {
+	t.Helper()
+
+	newAdapter, err := registry.Agents.Get(kind)
+	if err != nil {
+		t.Fatalf("registry.Agents.Get(%q) error = %v", kind, err)
+	}
+	adapter, err := newAdapter()
+	if err != nil {
+		t.Fatalf("construct %q adapter error = %v", kind, err)
+	}
+	return adapter
+}
+
+// modelRequests keeps auxiliary exchanges too, because the request of a
+// tool-free verification session is answered outside the script. A prompt sent
+// to another model is the runtime's own routing, not the verification request.
+func modelRequests(exchanges []Exchange, workingModel string) []Exchange {
+	return slices.DeleteFunc(slices.Clone(exchanges), func(ex Exchange) bool {
+		return (ex.Kind != ExchangeTurn && ex.Kind != ExchangeAuxiliary) ||
+			ex.Model != workingModel ||
+			!strings.Contains(string(ex.Body), agentcore.CredentialVerificationPrompt)
+	})
+}
+
+// verificationSessions holds what the two sessions share, because a runtime
+// keys the context it loads by home and workspace.
+type verificationSessions struct {
+	binding   Binding
+	server    *Server
+	adapter   domain.AgentAdapter
+	workspace string
+	home      string
+	sentinel  string
+}
+
+func (c verificationSessions) run(t *testing.T, credentialVerification bool) []Exchange {
+	t.Helper()
+
+	before := len(c.server.Exchanges())
+	c.drive(t, credentialVerification)
+	return c.server.Exchanges()[before:]
+}
+
+func (c verificationSessions) drive(t *testing.T, credentialVerification bool) {
+	t.Helper()
+
+	events := &eventCollector{}
+	launch := c.binding.Launch(t, Environment{
+		Scenario:  ScenarioVerificationContext,
+		URL:       c.server.URL(),
+		Home:      c.home,
+		Workspace: c.workspace,
+		Sentinel:  c.sentinel,
+		Events:    events.snapshot,
+	})
+	for _, key := range slices.Sorted(maps.Keys(launch.Env)) {
+		t.Setenv(key, launch.Env[key])
+	}
+
+	// A persistent runtime exits when this context ends, so the deferred stop
+	// below must run before the cancel.
+	ctx, cancel := context.WithTimeout(context.Background(), turnBound)
+	defer cancel()
+	session, err := c.adapter.StartSession(ctx, domain.StartSessionParams{
+		WorkspacePath:          c.workspace,
+		AgentConfig:            launch.Config,
+		Settings:               c.binding.Passthrough,
+		CredentialVerification: credentialVerification,
+	})
+	if err != nil {
+		t.Fatalf("StartSession(CredentialVerification = %t) error = %v%s", credentialVerification, err, exchangeLines(c.server.Exchanges()))
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), stopBound)
+		defer stopCancel()
+		if err := c.adapter.StopSession(stopCtx, session); err != nil {
+			t.Logf("StopSession() error = %v", err)
+		}
+	}()
+
+	result, runErr := c.adapter.RunTurn(ctx, session, domain.RunTurnParams{
+		Prompt:  agentcore.CredentialVerificationPrompt,
+		OnEvent: events.collect,
+	})
+	if !endedAfterModelAnswer(result, runErr) {
+		t.Fatalf("RunTurn(CredentialVerification = %t) error = %v, ExitReason = %q, want nil and %q%s",
+			credentialVerification, runErr, result.ExitReason, domain.EventTurnCompleted, exchangeLines(c.server.Exchanges()))
+	}
+}
+
+// endedAfterModelAnswer accepts an incomplete turn too: it still proves the
+// request reached the model, which is how the credential check reads it.
+func endedAfterModelAnswer(result domain.TurnResult, runErr error) bool {
+	if runErr == nil {
+		return result.ExitReason == domain.EventTurnCompleted
+	}
+	agentErr, ok := errors.AsType[*domain.AgentError](runErr)
+	return ok && agentErr.Kind == domain.ErrTurnIncomplete
+}
+
+// verificationContextViolations uses the working request as the control: a seed
+// the runtime never reads must fail, not pass the absence checks.
+func verificationContextViolations(declaration registry.VerificationContext, seeds instructionSeeds, verification []Exchange, working Exchange) []string {
+	v := &findings{property: "verification context"}
+
+	for _, ex := range verification {
+		label := requestLabel(ex)
+		if ex.Model != working.Model {
+			v.add("%s names model %q, want the working session's %q", label, ex.Model, working.Model)
+		}
+		if !slices.Equal(ex.Credentials, working.Credentials) {
+			v.add("%s carries credentials %q, want the working session's %q", label, ex.Credentials, working.Credentials)
+		}
+		switch {
+		case declaration.Keeps(registry.VerificationKeepsSomeTools):
+			if len(ex.Tools) >= len(working.Tools) {
+				v.add("%s declares %d tools, want fewer than the working request's %d", label, len(ex.Tools), len(working.Tools))
+			}
+		case declaration.Keeps(registry.VerificationKeepsAllTools):
+			if len(ex.Tools) > len(working.Tools) {
+				v.add("%s declares %d tools, want at most the working request's %d", label, len(ex.Tools), len(working.Tools))
+			}
+		case len(ex.Tools) != 0:
+			v.add("%s declares %d tools, want none", label, len(ex.Tools))
+		}
+		if !declaration.Keeps(registry.VerificationKeepsProjectInstructions) && strings.Contains(string(ex.Body), seeds.project) {
+			v.add("%s carries the project instruction file, want it dropped", label)
+		}
+		if !declaration.Keeps(registry.VerificationKeepsUserInstructions) && strings.Contains(string(ex.Body), seeds.user) {
+			v.add("%s carries the user instruction file, want it dropped", label)
+		}
+	}
+
+	if !declaration.Keeps(registry.VerificationKeepsProjectInstructions) && !strings.Contains(string(working.Body), seeds.project) {
+		v.add("the working %s does not carry the project instruction file, so its absence from the verification requests proves nothing", requestLabel(working))
+	}
+	if !declaration.Keeps(registry.VerificationKeepsUserInstructions) && !strings.Contains(string(working.Body), seeds.user) {
+		v.add("the working %s does not carry the user instruction file, so its absence from the verification requests proves nothing", requestLabel(working))
+	}
+	if !declaration.Keeps(registry.VerificationKeepsSystemPrompt) && !carriesText(verification[0].Body, agentcore.VerificationSystemPrompt) {
+		v.add("%s does not carry the verification system prompt %q", requestLabel(verification[0]), agentcore.VerificationSystemPrompt)
+	}
+	return v.items
+}
+
+func carriesText(body []byte, text string) bool {
+	escaped, err := json.Marshal(text)
+	return bytes.Contains(body, []byte(text)) || (err == nil && bytes.Contains(body, escaped[1:len(escaped)-1]))
 }
 
 // awaitGone's deadline is shared with awaitHolds, which may have spent all

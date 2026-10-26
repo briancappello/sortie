@@ -1,18 +1,22 @@
 package orchestrator
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
@@ -79,11 +83,11 @@ func (a *credentialPropertyAdapter) workspacePath() string {
 	return a.verifyWorkspacePath
 }
 
-func runCredentialWorker(t *testing.T, ctx context.Context, cfg config.ServiceConfig, adapter domain.AgentAdapter, onEvent func(domain.AgentEvent)) WorkerResult {
+func runCredentialWorker(t *testing.T, ctx context.Context, cfg config.ServiceConfig, adapter domain.AgentAdapter, onEvent func(domain.AgentEvent), opts ...func(*WorkerDeps)) WorkerResult {
 	t.Helper()
 	cfg.Agent.MaxTurns = 1
 	ec := newExitCapture()
-	RunWorkerAttempt(ctx, workerTestIssue(), nil, WorkerDeps{
+	deps := WorkerDeps{
 		TrackerAdapter:         &mockTrackerAdapter{},
 		AgentAdapter:           adapter,
 		ConfigFunc:             func() config.ServiceConfig { return cfg },
@@ -96,7 +100,11 @@ func runCredentialWorker(t *testing.T, ctx context.Context, cfg config.ServiceCo
 		},
 		OnExit: ec.onExit,
 		Logger: discardLogger(),
-	})
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	RunWorkerAttempt(ctx, workerTestIssue(), nil, deps)
 	return ec.waitResult(t)
 }
 
@@ -497,6 +505,129 @@ func TestRunWorkerAttempt_VerificationSessionIdentifierNeverAccepted(t *testing.
 					t.Errorf("dispatch identity record = %+v, want SessionID never %q", rec, "V")
 				}
 			}
+		})
+	}
+}
+
+type scriptedTurn struct {
+	reason domain.AgentEventType
+	err    error
+	cancel bool
+}
+
+type cacheStep struct {
+	after        int
+	arrival      registry.UsageArrival
+	verify       scriptedTurn
+	work         []scriptedTurn
+	wantVerifies bool
+	wantProven   []int
+	wantRequests int
+}
+
+func runCacheStep(t *testing.T, cache *verificationCache, root string, step cacheStep) (result WorkerResult, verified, announced bool) {
+	t.Helper()
+	work := step.work
+	if len(work) == 0 {
+		work = []scriptedTurn{{}}
+	}
+	cfg := defaultWorkerConfig(root)
+	cfg.Agent.MaxTurns = len(work)
+	ctx, cancel := context.WithCancel(waittest.Context(t))
+	defer cancel()
+	play := func(s scriptedTurn, onEvent func(domain.AgentEvent)) (domain.TurnResult, error) {
+		if s.cancel {
+			cancel()
+		}
+		usage := domain.TokenUsage{TotalTokens: 100}
+		onEvent(domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Usage: usage})
+		return domain.TurnResult{ExitReason: cmp.Or(s.reason, domain.EventTurnCompleted), Usage: usage, UsageMeasured: true}, s.err
+	}
+	turn := 0
+	adapter := &credentialPropertyAdapter{
+		verifyRunFn: func(_ context.Context, params domain.RunTurnParams) (domain.TurnResult, error) {
+			return play(step.verify, params.OnEvent)
+		},
+		workRunFn: func(params domain.RunTurnParams) (domain.TurnResult, error) {
+			turn++
+			return play(work[turn-1], params.OnEvent)
+		},
+	}
+
+	result = runCredentialWorker(t, ctx, cfg, adapter, func(e domain.AgentEvent) {
+		announced = announced || e.Message == "verifying the agent credential"
+	}, func(d *WorkerDeps) {
+		d.VerificationCache, d.UsageArrival = cache, step.arrival
+		d.ConfigFunc = func() config.ServiceConfig { return cfg }
+	})
+
+	return result, adapter.workspacePath() != "", announced
+}
+
+func provenMinutes(cache *verificationCache, start time.Time) []int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	var minutes []int
+	for _, at := range cache.proven {
+		minutes = append(minutes, int(at.Sub(start)/time.Minute))
+	}
+	slices.Sort(minutes)
+	return minutes
+}
+
+func TestRunWorkerAttempt_VerificationCacheAcrossRuns(t *testing.T) {
+	t.Parallel()
+
+	turnFailed := &domain.AgentError{Kind: domain.ErrTurnFailed}
+	refused := &domain.AgentError{Kind: domain.ErrCredentialUnverified}
+	first := cacheStep{wantVerifies: true, wantProven: []int{0}, wantRequests: 2}
+	none := registry.UsageArrivalNone
+
+	tests := []struct {
+		name  string
+		steps []cacheStep
+	}{
+		{"skipped run counts no verification usage and relays no verification event", []cacheStep{first, {after: 14, wantProven: []int{14}, wantRequests: 1}}},
+		{"skipped run under arrival none reports no measurement", []cacheStep{{arrival: none, wantVerifies: true, wantProven: []int{0}}, {after: 1, arrival: none, wantProven: []int{1}}}},
+		{"successful working turn moves the window", []cacheStep{first, {after: 10, wantProven: []int{10}}, {after: 10, wantProven: []int{20}}}},
+		{"no-error turn with another ending evicts without moving the window", []cacheStep{first,
+			{after: 10, work: []scriptedTurn{{reason: domain.EventTurnFailed}}},
+			{after: 1, wantVerifies: true, wantProven: []int{11}}}},
+		{"error after a successful turn keeps the proof", []cacheStep{first,
+			{after: 10, work: []scriptedTurn{{}, {err: turnFailed}}, wantProven: []int{10}},
+			{after: 1, wantProven: []int{11}}}},
+		{"refused credential after a successful turn evicts", []cacheStep{first,
+			{after: 10, work: []scriptedTurn{{}, {err: refused}}},
+			{after: 1, wantVerifies: true, wantProven: []int{11}}}},
+		{"failed verification evicts the stale proof", []cacheStep{first, {after: 16, verify: scriptedTurn{err: turnFailed}, wantVerifies: true}}},
+		{"verification cancelled mid-flight keeps the stale proof", []cacheStep{first,
+			{after: 16, verify: scriptedTurn{cancel: true, err: context.Canceled}, wantVerifies: true, wantProven: []int{0}}}},
+		{"working turn cancelled mid-flight neither refreshes nor evicts", []cacheStep{first, {after: 10, work: []scriptedTurn{{cancel: true}}, wantProven: []int{0}}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				cache := newVerificationCache()
+				root := t.TempDir()
+				start := time.Now()
+
+				for i, step := range tt.steps {
+					time.Sleep(time.Duration(step.after) * time.Minute)
+
+					result, verified, announced := runCacheStep(t, cache, root, step)
+
+					if got := provenMinutes(cache, start); verified != step.wantVerifies || announced != step.wantVerifies || !slices.Equal(got, step.wantProven) {
+						t.Errorf("run %d = {verified: %v, announced: %v, proofs at minutes %v}, want {%v, %v, %v}", i+1, verified, announced, got, step.wantVerifies, step.wantVerifies, step.wantProven)
+					}
+					countsOff := step.wantRequests > 0 && (result.APIRequestCount != step.wantRequests || int(result.Usage.TotalTokens) != step.wantRequests*100)
+					if countsOff || (step.arrival == registry.UsageArrivalNone && result.UsageMeasured) {
+						t.Errorf("run %d = {APIRequestCount: %d, Usage.TotalTokens: %d, UsageMeasured: %v}, want {%d requests of 100 tokens, none under arrival none}", i+1, result.APIRequestCount, result.Usage.TotalTokens, result.UsageMeasured, step.wantRequests)
+					}
+				}
+			})
 		})
 	}
 }

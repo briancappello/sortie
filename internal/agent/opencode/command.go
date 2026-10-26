@@ -377,7 +377,6 @@ func translateMCPServers(mcpConfigPath string, remote bool) (map[string]mcpConfi
 // external_directory to ask when the tool lists leave it undecided,
 // because OpenCode 2.x applies no default for it.
 func buildInlineConfig(pt passthroughConfig, servers map[string]mcpConfigDocumentEntry) (string, error) {
-	doc := inlineConfigDocument{Share: "disabled", Agent: titleAgentDisabled()}
 	policy, _ := buildPermissionPolicy(pt)
 	if !pt.DangerousSkipPermissions {
 		if policy == nil {
@@ -387,7 +386,19 @@ func buildInlineConfig(pt passthroughConfig, servers map[string]mcpConfigDocumen
 			policy["external_directory"] = permissionAsk
 		}
 	}
-	doc.Permission = policy
+	return marshalInlineConfig(pt, policy, servers)
+}
+
+// buildVerificationInlineConfig denies every tool because the runtime offers no
+// other switch that removes tool definitions without touching its provider or
+// model resolution, and denied tools also end the tool calls that wrote a file
+// into the workspace.
+func buildVerificationInlineConfig(pt passthroughConfig, servers map[string]mcpConfigDocumentEntry) (string, error) {
+	return marshalInlineConfig(pt, permissionPolicy{"*": permissionDeny}, servers)
+}
+
+func marshalInlineConfig(pt passthroughConfig, policy permissionPolicy, servers map[string]mcpConfigDocumentEntry) (string, error) {
+	doc := inlineConfigDocument{Share: "disabled", Agent: titleAgentDisabled(), Permission: policy}
 	if pt.DisableAutocompact {
 		doc.Compaction = &inlineCompaction{Auto: false}
 	}

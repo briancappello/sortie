@@ -28,7 +28,7 @@ func (responsesCodec) credentialHeaders() []string {
 	return []string{"Authorization"}
 }
 
-func (responsesCodec) route(method, path string) (route, bool) {
+func (responsesCodec) route(method, path string, _ http.Header) (route, bool) {
 	return route{}, method == http.MethodPost && path == "/v1/responses"
 }
 

@@ -458,6 +458,10 @@ func TestRunTurn_CompletedNotificationUnderCancelledContext(t *testing.T) {
 	}
 }
 
+func turnFailedFixture(codexErrorInfo string) string {
+	return `{"method":"turn/completed","params":{"turn":{"id":"turn-001","status":"failed","error":{"message":"token expired","codexErrorInfo":` + codexErrorInfo + `}}}}` + "\n"
+}
+
 // TestRunTurn_FailedOrUnrecognizedStatus pins that a failed status with
 // no turn.error object, and any status other than completed,
 // interrupted, and failed, both produce turn_failed with a non-nil
@@ -469,16 +473,23 @@ func TestRunTurn_FailedOrUnrecognizedStatus(t *testing.T) {
 	tests := []struct {
 		name        string
 		fixture     string
+		wantKind    domain.AgentErrorKind
 		wantMessage string
 	}{
 		{
 			name:        "failed status with no turn.error object",
 			fixture:     `{"method":"turn/completed","params":{"turn":{"id":"turn-001","status":"failed"}}}` + "\n",
+			wantKind:    domain.ErrTurnFailed,
 			wantMessage: "turn failed",
 		},
+		{name: "unauthorized as a string", fixture: turnFailedFixture(`"unauthorized"`), wantKind: domain.ErrCredentialUnverified, wantMessage: agentcore.CredentialRefusedMessage("token expired")},
+		{name: "unauthorized as an object", fixture: turnFailedFixture(`{"unauthorized":{"httpStatusCode":401}}`), wantKind: domain.ErrCredentialUnverified, wantMessage: agentcore.CredentialRefusedMessage("token expired")},
+		{name: "connection error as an object", fixture: turnFailedFixture(`{"httpConnectionFailed":{"httpStatusCode":502}}`), wantKind: domain.ErrTurnFailed, wantMessage: "token expired"},
+		{name: "unrecognized error info shape", fixture: turnFailedFixture(`7`), wantKind: domain.ErrTurnFailed, wantMessage: "token expired"},
 		{
 			name:        "unrecognized status",
 			fixture:     `{"method":"turn/completed","params":{"turn":{"id":"turn-001","status":"queued_for_review"}}}` + "\n",
+			wantKind:    domain.ErrTurnFailed,
 			wantMessage: "turn queued_for_review",
 		},
 	}
@@ -503,8 +514,8 @@ func TestRunTurn_FailedOrUnrecognizedStatus(t *testing.T) {
 			if !errors.As(err, &agentErr) {
 				t.Fatalf("error type = %T, want *domain.AgentError", err)
 			}
-			if agentErr.Kind != domain.ErrTurnFailed {
-				t.Errorf("AgentError.Kind = %q, want %q", agentErr.Kind, domain.ErrTurnFailed)
+			if agentErr.Kind != tt.wantKind {
+				t.Errorf("AgentError.Kind = %q, want %q", agentErr.Kind, tt.wantKind)
 			}
 			if agentErr.Message != tt.wantMessage {
 				t.Errorf("AgentError.Message = %q, want %q", agentErr.Message, tt.wantMessage)
@@ -512,7 +523,7 @@ func TestRunTurn_FailedOrUnrecognizedStatus(t *testing.T) {
 
 			dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 				Terminal:          agentcore.TerminalFailure,
-				TerminalErrorKind: domain.ErrTurnFailed,
+				TerminalErrorKind: tt.wantKind,
 				TerminalMessage:   tt.wantMessage,
 			}, result, err)
 		})
@@ -733,7 +744,7 @@ var fakeScenarios = map[string]agenttest.Scenario{
 		return serveHandshakeBurstThread(newFakeAppServerScanner(), os.Stdout)
 	}),
 	scenarioRecordFrames: agenttest.Typed(func(_ []string, params recordFramesParams) int {
-		return serveRecordFrames(newFakeAppServerScanner(), os.Stdout, params.RecordPath)
+		return serveRecordFrames(newFakeAppServerScanner(), os.Stdout, params)
 	}),
 }
 
@@ -747,14 +758,27 @@ type burstBetweenTurnsParams struct {
 }
 
 type recordFramesParams struct {
-	RecordPath string `json:"recordPath"`
+	RecordPath        string   `json:"recordPath"`
+	ConfigReadServers []string `json:"configReadServers,omitempty"`
+	ConfigReadFails   bool     `json:"configReadFails,omitempty"`
 }
 
-func serveRecordFrames(client *bufio.Scanner, out io.Writer, recordPath string) int {
+func answerConfigRead(out io.Writer, id json.RawMessage, params recordFramesParams) bool {
+	if params.ConfigReadFails {
+		return writeJSON(out, map[string]any{"id": id, "error": map[string]any{"code": -32601, "message": "method not found"}})
+	}
+	servers := map[string]any{}
+	for _, name := range params.ConfigReadServers {
+		servers[name] = struct{}{}
+	}
+	return writeJSON(out, rpcResult{ID: id, Result: map[string]any{"config": map[string]any{"mcp_servers": servers}}})
+}
+
+func serveRecordFrames(client *bufio.Scanner, out io.Writer, params recordFramesParams) int {
 	if !answerPreThreadHandshake(client, out) {
 		return 1
 	}
-	record, err := os.OpenFile(recordPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	record, err := os.OpenFile(params.RecordPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return 1
 	}
@@ -767,6 +791,11 @@ func serveRecordFrames(client *bufio.Scanner, out io.Writer, recordPath string) 
 		}
 		var result, completed any
 		switch frame.Method {
+		case "config/read":
+			if !answerConfigRead(out, frame.ID, params) {
+				return 1
+			}
+			continue
 		case "thread/start", "thread/resume":
 			result, completed = map[string]any{"thread": map[string]any{"id": "fake-thread-1"}}, rpcNotification{Method: "thread/started"}
 		case "turn/start":

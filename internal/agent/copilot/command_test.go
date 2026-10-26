@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -19,6 +20,15 @@ func assertHasArgPair(t *testing.T, args []string, flag, value string) {
 		}
 	}
 	t.Errorf("buildArgs() missing %q %q in [%s]", flag, value, strings.Join(args, " "))
+}
+
+func countArg(args []string, arg string) (n int) {
+	for _, a := range args {
+		if a == arg {
+			n++
+		}
+	}
+	return n
 }
 
 // assertHasFlag fails if flag does not appear anywhere in args.
@@ -415,6 +425,58 @@ func TestBuildArgs_AlwaysPresent(t *testing.T) {
 	// The prompt value must follow -p.
 	assertHasArgPair(t, got, "-p", "test prompt")
 	assertHasArgPair(t, got, "--output-format", "json")
+}
+
+func TestBuildArgs_VerificationLaunch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		verification, full    bool
+		noCustom, wantReduced bool
+		wantNoCustom          int
+	}{
+		{name: "working launch"},
+		{name: "verification launch", verification: true, wantReduced: true, wantNoCustom: 1},
+		{name: "verification launch with no_custom_instructions set", verification: true, noCustom: true, wantReduced: true, wantNoCustom: 1},
+		{name: "verification launch with full context", verification: true, full: true, noCustom: true, wantNoCustom: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			adapter, _ := NewCopilotAdapter()
+			session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{
+				WorkspacePath:           t.TempDir(),
+				AgentConfig:             domain.AgentConfig{Command: fakeCopilotBinary(t)},
+				CredentialVerification:  tt.verification,
+				VerificationFullContext: tt.full,
+				Settings: map[string]any{
+					"agent": "reviewer", "available_tools": "sentinel-available",
+					"excluded_tools": "sentinel-excluded", "no_custom_instructions": tt.noCustom,
+				},
+			})
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+			state := session.Internal.(*sessionState)
+
+			args := buildArgs(state, 1, "p", state.passthrough)
+
+			assertHasArgPair(t, args, "--agent", "reviewer")
+			if tt.wantReduced {
+				assertHasArgPair(t, args, "--available-tools", "view")
+				assertNoFlag(t, args, "--excluded-tools")
+			} else {
+				assertHasArgPair(t, args, "--available-tools", "sentinel-available")
+				assertHasArgPair(t, args, "--excluded-tools", "sentinel-excluded")
+			}
+			if n, m := countArg(args, "--available-tools"), countArg(args, "--no-custom-instructions"); n != 1 || m != tt.wantNoCustom {
+				t.Errorf("buildArgs() carries --available-tools %d and --no-custom-instructions %d times, want 1 and %d in [%s]", n, m, tt.wantNoCustom, strings.Join(args, " "))
+			}
+		})
+	}
 }
 
 // TestBuildArgs_LaunchPosture asserts the launch posture the refusal path
