@@ -14,6 +14,7 @@ import (
 type tokenUsageBreakdown struct {
 	InputTokens           int64 `json:"inputTokens"`
 	CachedInputTokens     int64 `json:"cachedInputTokens"`
+	CacheWriteInputTokens int64 `json:"cacheWriteInputTokens"`
 	OutputTokens          int64 `json:"outputTokens"`
 	ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
 	TotalTokens           int64 `json:"totalTokens"`
@@ -176,17 +177,19 @@ type accountLoginNotification struct {
 
 // normalizeBreakdown converts a raw [tokenUsageBreakdown] into a
 // [domain.TokenUsage]. InputTokens is taken from b.InputTokens, already
-// inclusive of b.CachedInputTokens; OutputTokens is taken from
-// b.OutputTokens, already inclusive of b.ReasoningOutputTokens;
-// CacheReadTokens is set from b.CachedInputTokens; TotalTokens is
+// inclusive of b.CachedInputTokens and b.CacheWriteInputTokens;
+// OutputTokens is taken from b.OutputTokens, already inclusive of
+// b.ReasoningOutputTokens; CacheReadTokens is set from b.CachedInputTokens
+// and CacheWriteTokens from b.CacheWriteInputTokens; TotalTokens is
 // computed as InputTokens plus OutputTokens rather than taken from
 // b.TotalTokens.
 func normalizeBreakdown(b tokenUsageBreakdown) domain.TokenUsage {
 	return domain.TokenUsage{
-		InputTokens:     b.InputTokens,
-		OutputTokens:    b.OutputTokens,
-		TotalTokens:     b.InputTokens + b.OutputTokens,
-		CacheReadTokens: b.CachedInputTokens,
+		InputTokens:      b.InputTokens,
+		OutputTokens:     b.OutputTokens,
+		TotalTokens:      b.InputTokens + b.OutputTokens,
+		CacheReadTokens:  b.CachedInputTokens,
+		CacheWriteTokens: b.CacheWriteInputTokens,
 	}
 }
 
