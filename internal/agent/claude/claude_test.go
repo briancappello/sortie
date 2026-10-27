@@ -1089,6 +1089,42 @@ func TestRunTurn_ParallelToolCalls_DedupesMessageID(t *testing.T) {
 	agenttest.AssertModelReported(t, events, "claude-haiku-4-5-20251001")
 }
 
+func usageLimitRefusalCase(t *testing.T, name, stream string, wantModelOnly bool) agenttest.UsageLimitRefusalCase {
+	t.Helper()
+
+	dir := t.TempDir()
+	adapter, err := NewClaudeCodeAdapter()
+	if err != nil {
+		t.Fatalf("NewClaudeCodeAdapter: %v", err)
+	}
+	return agenttest.UsageLimitRefusalCase{
+		Name:    name,
+		Adapter: adapter,
+		Start: domain.StartSessionParams{
+			WorkspacePath: dir,
+			AgentConfig:   domain.AgentConfig{Command: fakeClaude(t, dir, agenttest.Output{Stdout: stream})},
+		},
+		Turn:          domain.RunTurnParams{Prompt: "hello"},
+		WantResetsAt:  time.Unix(4102444800, 0).UTC(),
+		WantModelOnly: wantModelOnly,
+	}
+}
+
+func TestUsageLimitRefusal(t *testing.T) {
+	t.Parallel()
+
+	recorded := string(loadFixture(t, "usage_limit_rejected.jsonl"))
+	opusScoped := strings.ReplaceAll(recorded, `"rateLimitType":"five_hour"`, `"rateLimitType":"seven_day_opus"`)
+	if opusScoped == recorded {
+		t.Fatal("fixture carries no five_hour rateLimitType to derive the model-scoped variant from")
+	}
+
+	agenttest.AssertUsageLimitRefusal(t, "claude-code", []agenttest.UsageLimitRefusalCase{
+		usageLimitRefusalCase(t, "recorded five_hour refusal", recorded, false),
+		usageLimitRefusalCase(t, "seven_day_opus refusal is model-scoped", opusScoped, true),
+	})
+}
+
 // TestAssertUsageReporting proves claude-code's registered
 // usage-reporting declaration (incremental, per_model) against its
 // own real event stream: two token_usage events, one per first-seen
@@ -1932,7 +1968,7 @@ func TestRunTurn_UnknownEventType(t *testing.T) {
 	tmpDir := t.TempDir()
 	script := fakeClaude(t, tmpDir, agenttest.Output{Stdout: `{"type":"unknown_future_type","data":"something"}
 {"type":"system","subtype":"task_started","task_id":"t1"}
-{"type":"rate_limit_event"}
+{"type":"another_future_type"}
 {"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}
 {"type":"result","subtype":"success","result":"ok","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}
 `})

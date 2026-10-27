@@ -369,6 +369,7 @@ func reconcileOverdueRetries(state *State, params ReconcileParams, log *slog.Log
 			Logger:              entryLog,
 			Trigger:             entry.Trigger,
 			OriginTrigger:       entry.OriginTrigger,
+			UsageLimitNotified:  entry.UsageLimitNotified,
 		}, params.OnRetryFire)
 
 		if rearmed, ok := state.RetryAttempts[issueID]; ok {

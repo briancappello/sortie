@@ -1248,6 +1248,9 @@
     },
     "HoldResponse": {
       "properties": {
+        "agent_kind": {
+          "type": "string"
+        },
         "blockers": {
           "anyOf": [
             {
@@ -1265,7 +1268,27 @@
           "format": "date-time",
           "type": "string"
         },
+        "model": {
+          "type": "string"
+        },
+        "model_only": {
+          "type": "boolean"
+        },
         "reason": {
+          "enum": [
+            "agent_slots_full",
+            "ssh_hosts_full",
+            "blockers_not_read",
+            "blockers_unresolved",
+            "blockers_incomplete",
+            "blocked_by",
+            "daily_spend_ceiling",
+            "weekly_spend_ceiling",
+            "monthly_spend_ceiling",
+            "stage_hop_unconfirmed",
+            "usage_limit",
+            "park_comments_unread"
+          ],
           "type": "string"
         },
         "reason_text": {

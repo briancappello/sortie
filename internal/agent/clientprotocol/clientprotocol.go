@@ -19,13 +19,15 @@ const mcpConfigKey = "mcp_config"
 
 func init() {
 	registry.Agents.RegisterWithMeta("agent-client-protocol", NewClientProtocolAdapter, registry.AgentMeta{
-		RequiresCommand:     true,
-		ValidateAgentConfig: validateConfig,
-		MCPDialect:          registry.MCPDialectACPSession,
-		UsageArrival:        registry.UsageArrivalTurnEnd,
-		UsageAttribution:    registry.UsageAttributionPerModel,
-		CredentialEnv:       registry.DeclareCredentialEnv(),
-		EffortForwarding:    registry.EffortNotForwarded,
+		RequiresCommand:               true,
+		ValidateAgentConfig:           validateConfig,
+		MCPDialect:                    registry.MCPDialectACPSession,
+		UsageArrival:                  registry.UsageArrivalTurnEnd,
+		UsageAttribution:              registry.UsageAttributionPerModel,
+		CredentialEnv:                 registry.DeclareCredentialEnv(),
+		EffortForwarding:              registry.EffortNotForwarded,
+		UsageLimitRecognition:         registry.UsageLimitNotRecognized,
+		UsageLimitNotRecognizedReason: "the protocol carries no usage-limit refusal",
 		VerificationContext: registry.DeclareVerificationContext(
 			registry.VerificationKeepsAllTools,
 			registry.VerificationKeepsProjectInstructions,

@@ -47,6 +47,7 @@ const RUN_STATUSES: Record<string, { word: string; mark: Mark | null }> = {
   ci_failed: { word: "CI failed", mark: "failed" },
   needs_person: { word: "Stopped for a person", mark: "stopped" },
   budget_stopped: { word: "Stopped at a budget", mark: "stopped" },
+  usage_limited: { word: "Stopped at a usage limit", mark: "stopped" },
   cancelled: { word: "Cancelled", mark: null },
 };
 

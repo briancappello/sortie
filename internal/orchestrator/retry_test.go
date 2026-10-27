@@ -288,6 +288,58 @@ func defaultRetryParams(t *testing.T, store *mockRetryStore, tracker *mockRetryT
 	}
 }
 
+var usageResetsAt = time.Date(2100, 1, 1, 12, 0, 0, 0, time.UTC)
+
+func usageHeldState(id string, entry RetryEntry, holds ...UsageLimitHoldKey) *State {
+	entry.AgentKind = "mock"
+	state := frozenRetryState(id, entry)
+	for _, key := range holds {
+		state.UsageLimitHolds[key] = UsageLimitHold{ResetsAt: usageResetsAt}
+	}
+	return state
+}
+
+func usageFetchesIssue(id string) *mockRetryTracker {
+	return &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")}
+}
+
+func atUsageReset(p *HandleRetryTimerParams) {
+	p.NowFunc = func() time.Time { return usageResetsAt }
+	p.PollIntervalMS = 60_000
+}
+
+func workerSignals(ch chan<- struct{}) WorkerFunc {
+	return func(context.Context, domain.Issue, *int) { ch <- struct{}{} }
+}
+
+func requireUsageDispatched(t *testing.T, id string, state *State, _ *mockRetryStore, _ *mockRetryTracker, workerCalled bool) {
+	t.Helper()
+	if _, running := state.Running[id]; !running || !workerCalled {
+		t.Errorf("HandleRetryTimer: Running[%s] present = %v, worker invoked = %v, want both true", id, running, workerCalled)
+	}
+}
+
+func requireUsageRearmed(attempt int) func(*testing.T, string, *State, *mockRetryStore, *mockRetryTracker, bool) {
+	return func(t *testing.T, id string, state *State, store *mockRetryStore, _ *mockRetryTracker, _ bool) {
+		t.Helper()
+		stopRetryTimer(state, id)
+		entry, queued := state.RetryAttempts[id]
+		if !queued {
+			t.Fatalf("RetryAttempts[%s] missing, want re-armed", id)
+		}
+		wantDue := usageResetsAt.Add(time.Minute).UnixMilli()
+		if entry.Attempt != attempt || entry.DueAtMS != wantDue {
+			t.Errorf("HandleRetryTimer re-armed attempt, due_at_ms = %d, %d, want %d, %d", entry.Attempt, entry.DueAtMS, attempt, wantDue)
+		}
+		if _, claimed := state.Claimed[id]; !claimed || len(state.Running) != 0 {
+			t.Errorf("HandleRetryTimer claimed = %v, running = %d, want true, 0", claimed, len(state.Running))
+		}
+		if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 {
+			t.Errorf("persisted retry rows saved, deleted = %d, %v, want none touched", len(store.savedEntries), store.deletedIssueID)
+		}
+	}
+}
+
 func requireMoneyHold(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker) *BudgetExhaustedEntry {
 	t.Helper()
 	state.TrackerOpsWg.Wait()
@@ -345,6 +397,7 @@ func TestHandleRetryTimer(t *testing.T) {
 		maxSessions int
 		maxTokens   int
 		maxCostUSD  float64
+		configure   func(p *HandleRetryTimerParams)
 		workerFn    func(ch chan<- struct{}) WorkerFunc
 		check       func(t *testing.T, issueID string, state *State, store *mockRetryStore, tracker *mockRetryTracker, workerCalled bool)
 	}{
@@ -1597,6 +1650,91 @@ func TestHandleRetryTimer(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:    "usage-limit retry of the refused issue dispatches at the reset",
+			issueID: "ISS-UL-OWN",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{OriginTrigger: triggerUsageLimit}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			workerFn:  workerSignals,
+			check:     requireUsageDispatched,
+		},
+		{
+			name:    "other retry inside the grace re-arms at the reset plus the poll interval",
+			issueID: "ISS-UL-GRACE",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{Attempt: 3}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			check:     requireUsageRearmed(3),
+		},
+		{
+			name:    "model hold of the configured model re-arms the retry",
+			issueID: "ISS-UL-MODEL",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{Attempt: 2, ConfiguredModel: "opus"}, UsageLimitHoldKey{AgentKind: "mock", ModelOnly: true, Model: "opus"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			check:     requireUsageRearmed(2),
+		},
+		{
+			name:    "retry held by a usage limit releases the claim and keeps the persisted row",
+			issueID: "ISS-UL-RELEASE",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{Attempt: 3}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:   func() *mockRetryStore { return &mockRetryStore{} },
+			tracker: usageFetchesIssue,
+			configure: func(p *HandleRetryTimerParams) {
+				atUsageReset(p)
+				p.ReleaseHeld = true
+			},
+			check: func(t *testing.T, id string, state *State, store *mockRetryStore, _ *mockRetryTracker, _ bool) {
+				t.Helper()
+				_, claimed := state.Claimed[id]
+				_, queued := state.RetryAttempts[id]
+				if claimed || queued {
+					t.Errorf("HandleRetryTimer(ReleaseHeld) claimed, queued = %v, %v, want false, false", claimed, queued)
+				}
+				if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 {
+					t.Errorf("persisted retry rows saved, deleted = %d, %v, want none touched", len(store.savedEntries), store.deletedIssueID)
+				}
+			},
+		},
+		{
+			name:    "retry-now fire dispatches through a usage-limit hold",
+			issueID: "ISS-UL-NOW",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{dueBeforeRequestMS: 1}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			workerFn:  workerSignals,
+			check:     requireUsageDispatched,
+		},
+		{
+			name:    "fire on another configured model passes a model hold",
+			issueID: "ISS-UL-OTHER",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{ConfiguredModel: "opus"}, UsageLimitHoldKey{AgentKind: "mock", ModelOnly: true, Model: "opus"})
+			},
+			store:   func() *mockRetryStore { return &mockRetryStore{} },
+			tracker: usageFetchesIssue,
+			configure: func(p *HandleRetryTimerParams) {
+				atUsageReset(p)
+				p.ConfiguredModelOf = func(DispatchResolution) string { return "sonnet" }
+			},
+			workerFn: workerSignals,
+			check:    requireUsageDispatched,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1611,6 +1749,9 @@ func TestHandleRetryTimer(t *testing.T) {
 			params.MaxSessions = tt.maxSessions
 			params.MaxTokens = tt.maxTokens
 			params.MaxCostUSD = tt.maxCostUSD
+			if tt.configure != nil {
+				tt.configure(&params)
+			}
 
 			var workerCalled bool
 			if tt.workerFn != nil {

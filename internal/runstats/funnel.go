@@ -18,6 +18,7 @@ const (
 	reasonRunFailed       = "run_failed"
 	reasonNeedsPerson     = "needs_person"
 	reasonBudgetHeld      = "budget_held"
+	reasonUsageLimited    = "usage_limited"
 	reasonOperatorStopped = "operator_stopped"
 	reasonVerdictWithheld = "verdict_withheld"
 )
@@ -27,6 +28,7 @@ var noHopReasonOrder = []string{
 	reasonRunFailed,
 	reasonNeedsPerson,
 	reasonBudgetHeld,
+	reasonUsageLimited,
 	reasonOperatorStopped,
 	reasonVerdictWithheld,
 }
@@ -291,6 +293,8 @@ func (stage *FunnelStage) countOutcome(p *passAccum, held, budget bool) string {
 		return stage.noHop(reasonNeedsPerson)
 	case latest.status == "budget_stopped":
 		return stage.noHop(reasonBudgetHeld)
+	case latest.status == "usage_limited":
+		return stage.noHop(reasonUsageLimited)
 	case latest.status == "cancelled":
 		return stage.noHop(reasonOperatorStopped)
 	default:

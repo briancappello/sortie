@@ -56,6 +56,9 @@ const VerificationSystemPrompt = "You are a helpful assistant."
 // A session that never reached the model, because the runtime rejected
 // a switch that drops agent context, is repeated once with the full
 // context under a fresh TurnBound; that session's outcome is returned.
+//
+// A turn the provider refused for a usage limit returns its
+// [domain.ErrUsageLimit] error unchanged, so the caller's reset wait applies.
 func VerifyCredential(ctx context.Context, adapter domain.AgentAdapter, v CredentialVerification) (domain.TurnResult, error) {
 	logger := v.Logger
 	if logger == nil {
@@ -156,7 +159,7 @@ func isTerminalVerificationError(err error) bool {
 	if !errors.As(err, &agentErr) {
 		return false
 	}
-	if agentErr.Kind == domain.ErrCredentialUnverified {
+	if agentErr.Kind == domain.ErrCredentialUnverified || agentErr.Kind == domain.ErrUsageLimit {
 		return true
 	}
 	return !agentErr.Kind.RetryClassification().Retryable

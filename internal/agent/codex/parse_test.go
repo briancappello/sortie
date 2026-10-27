@@ -215,7 +215,7 @@ func TestMapCodexErrorInfo(t *testing.T) {
 		{"unauthorized", domain.ErrCredentialUnverified},
 		{"BadRequest", domain.ErrResponseError},
 		{"ContextWindowExceeded", domain.ErrTurnFailed},
-		{"UsageLimitExceeded", domain.ErrTurnFailed},
+		{"UsageLimitExceeded", domain.ErrUsageLimit},
 		{"SandboxError", domain.ErrTurnFailed},
 		{"HttpConnectionFailed", domain.ErrTurnFailed},
 		{"ResponseStreamConnectionFailed", domain.ErrTurnFailed},

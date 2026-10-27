@@ -53,6 +53,8 @@ type WorkerExitStore interface {
 	RecordRunStageResult(ctx context.Context, runID int64, targetRule, result string) error
 	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
 	RecordReactionActivity(ctx context.Context, records []persistence.ReactionActivity) error
+	SaveUsageLimitHold(ctx context.Context, hold persistence.UsageLimitHold) error
+	DeleteUsageLimitHold(ctx context.Context, agentKind string, modelOnly bool, model string) error
 }
 
 // HandleWorkerExitParams holds the dependencies for [HandleWorkerExit] that
@@ -66,6 +68,11 @@ type HandleWorkerExitParams struct {
 	RunEventRetry *RunEventRetry
 
 	MaxRetryBackoffMS int
+
+	// ReleaseHeld releases the claim of a run refused by a usage limit
+	// instead of scheduling its retry; the persisted hold stays for a later
+	// process.
+	ReleaseHeld bool
 
 	MaxConsecutiveAbsences int
 
@@ -413,6 +420,19 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 		runError = evidenceErr
 	}
 
+	var usageReset time.Time
+	var usageLimit *domain.UsageLimit
+	var usageWaits, usageRefused bool
+	if workerResult.ExitKind == WorkerExitError {
+		usageReset, usageLimit, usageWaits = usageLimitReset(workerResult.Error, now)
+		usageRefused = isUsageLimitRefusal(workerResult.Error)
+	}
+	// A run with no token figure, or one known only in vendor units, cannot
+	// prove it did no work, so it keeps counting toward the session budget.
+	if usageWaits && measured && entry.AgentOutputTokens == 0 {
+		status = "usage_limited"
+	}
+
 	issueIdentity := issueIdentityOf(entry.Issue)
 
 	// Prefer workerResult.SessionID (authoritative from the adapter) over
@@ -710,6 +730,7 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	switch workerResult.ExitKind {
 	case WorkerExitNormal:
 		state.Completed[workerResult.IssueID] = struct{}{}
+		clearUsageLimitHolds(ctx, log, params.Store, state, entry)
 
 		for kind, commentIDs := range workerResult.HandedOffComments {
 			recordHandedOffComments(ctx, state, params.Store, workerResult.IssueID, kind, commentIDs, log)
@@ -1437,27 +1458,38 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 
 	default: // WorkerExitError and any unknown kind
 		classification := classifyWorkerError(workerResult.Error)
+		var usageHold UsageLimitHold
+		if usageWaits {
+			key := UsageLimitHoldKey{AgentKind: entry.AgentKind, ModelOnly: usageLimit.ModelOnly}
+			if key.ModelOnly {
+				key.Model = entry.ConfiguredModel
+			}
+			usageHold = holdUsageLimit(ctx, log, params.Store, state, key, usageReset, now)
+		}
 		if classification.Retryable {
-			if incumbent := retrySlotIncumbent(state, workerResult.IssueID); incumbent != nil {
+			incumbent := retrySlotIncumbent(state, workerResult.IssueID)
+			switch {
+			case usageWaits && params.ReleaseHeld:
+				log.Warn("worker run refused by usage limit, releasing claim",
+					slog.Time("resets_at", usageHold.ResetsAt),
+				)
+				delete(state.Claimed, workerResult.IssueID)
+
+			case incumbent != nil:
 				logRetrySlotDeferral(log, "error-backoff", incumbent)
 				nextAttempt = incumbent.Attempt
 				retryDeferred = true
-			} else {
+
+			default:
 				nextAttempt = NextAttempt(entry.RetryAttempt)
 				delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
-
-				log.Warn("worker run failed, scheduling retry",
-					slog.Any("error", workerResult.Error),
-					slog.Int("next_attempt", nextAttempt),
-					slog.Int64("delay_ms", delayMS),
-				)
 
 				var errMsg string
 				if workerResult.Error != nil {
 					errMsg = redact.Mask(WorkerExitedErrorPrefix + workerResult.Error.Error())
 				}
 
-				ScheduleRetry(state, ScheduleRetryParams{
+				retry := ScheduleRetryParams{
 					IssueID:             workerResult.IssueID,
 					Identifier:          workerResult.Identifier,
 					DisplayID:           entry.Issue.DisplayID,
@@ -1476,10 +1508,29 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 					TemplateID:          entry.TemplateID,
 					Logger:              log,
 
-					IssueIdentity: issueIdentityOf(entry.Issue),
-					Trigger:       triggerError,
-				}, params.OnRetryFire)
-				metrics.IncRetries(triggerError)
+					IssueIdentity:      issueIdentityOf(entry.Issue),
+					Trigger:            triggerError,
+					UsageLimitNotified: usageRefused,
+				}
+				if usageWaits {
+					retry.DelayMS = 0
+					retry.DueAtMS = usageLimitRetryDue(usageHold, now, delayMS).UnixMilli()
+					retry.Trigger = triggerUsageLimit
+					log.Warn("worker run refused by usage limit, retrying at reset",
+						slog.Time("resets_at", usageHold.ResetsAt),
+						slog.Int("next_attempt", nextAttempt),
+						slog.Bool("model_only", usageLimit.ModelOnly),
+					)
+				} else {
+					log.Warn("worker run failed, scheduling retry",
+						slog.Any("error", workerResult.Error),
+						slog.Int("next_attempt", nextAttempt),
+						slog.Int64("delay_ms", delayMS),
+					)
+				}
+
+				ScheduleRetry(state, retry, params.OnRetryFire)
+				metrics.IncRetries(retry.Trigger)
 				retryScheduled = true
 			}
 		} else {
@@ -1488,6 +1539,10 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 			)
 			delete(state.Claimed, workerResult.IssueID)
 		}
+	}
+
+	if retryDeferred {
+		carryRefusalEpisode(ctx, log, params.Store, state, workerResult.IssueID, usageRefused)
 	}
 
 	if retryScheduled {
@@ -1518,6 +1573,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	var severity, agentText, lifecycle string
 	switch {
 	case workerResult.ExitKind == WorkerExitCancelled:
+		return outcome
+	case usageRefused && entry.UsageLimitNotified:
 		return outcome
 	case workerResult.ExitKind == WorkerExitNormal && !evidenceWithheld:
 		lifecycle = "completion"

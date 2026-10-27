@@ -159,10 +159,11 @@ A verdict that withholds the write is, immediately before any of its effects, ch
    Then load persisted stage hop records and reconstruct each issue's hop count, latest hop, and hold flag, so the count and the hold survive the restart. A record with an empty issue ID is skipped with a warning, and a failed load starts with none.
 5. Load persisted budget-hold notice records from SQLite and reconstruct the runtime notice memory before the event loop starts, so a hold already announced to its destinations before the restart is not announced again after it. A record exists only for a notice that had at least one destination.
 6. Load persisted attention acknowledgements from SQLite before the event loop starts, so an attention item whose `id` survives the restart keeps its acknowledgement (§13.7.2). A record that does not parse is skipped with a warning, and a failed load starts with none.
-7. Map existing workspace directories to issue identifiers, query the tracker for the states of those specific issues, and clean the ones in terminal states.
-8. Construct reaction providers and call `RecoverPendingReactions` to restore eligible CI and review pending entries for handoff-stage issues.
-9. Query tracker for active issues and reconcile with persisted state.
-10. Begin normal polling loop.
+7. Load persisted usage-limit holds from SQLite before the first tick, so a hold a provider usage limit began before the restart still stops new sessions of its agent kind, or of that kind on one model, until its reset. A hold whose reset has passed loads and has no effect, and a failed load starts with none. The restored retry entries keep the reset as their due time and their `usage_limit` origin trigger, so a refused issue's retry is still the first dispatch the hold admits.
+8. Map existing workspace directories to issue identifiers, query the tracker for the states of those specific issues, and clean the ones in terminal states.
+9. Construct reaction providers and call `RecoverPendingReactions` to restore eligible CI and review pending entries for handoff-stage issues.
+10. Query tracker for active issues and reconcile with persisted state.
+11. Begin normal polling loop.
 
 ### 7.5 Retry-Slot Arbitration
 

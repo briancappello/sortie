@@ -13,7 +13,11 @@ interface Segment {
 function segmentsOf(summary: Summary): Segment[] {
   return [
     { label: "Succeeded", count: summary.succeeded, fill: "bg-outcome-ok" },
-    { label: "Stopped for a person or budget", count: summary.stopped, fill: "bg-outcome-stopped" },
+    {
+      label: "Stopped for a person, budget or usage limit",
+      count: summary.stopped,
+      fill: "bg-outcome-stopped",
+    },
     { label: "Cancelled", count: summary.cancelled, fill: "bg-outcome-cancelled" },
     { label: "Failed", count: summary.failed, fill: "bg-outcome-failed" },
   ].filter((segment) => segment.count > 0);

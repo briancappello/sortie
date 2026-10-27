@@ -36,14 +36,15 @@ const defaultCommand = "codex app-server"
 
 func init() {
 	registry.Agents.RegisterWithMeta("codex", NewCodexAdapter, registry.AgentMeta{
-		RequiresCommand:     true,
-		DefaultCommand:      defaultCommand,
-		ValidateAgentConfig: validateConfig,
-		MCPDialect:          registry.MCPDialectMCPServersTOML,
-		UsageArrival:        registry.UsageArrivalIncremental,
-		UsageAttribution:    registry.UsageAttributionPerModel,
-		CredentialEnv:       registry.DeclareCredentialEnv(),
-		EffortForwarding:    registry.EffortForwarded,
+		RequiresCommand:       true,
+		DefaultCommand:        defaultCommand,
+		ValidateAgentConfig:   validateConfig,
+		MCPDialect:            registry.MCPDialectMCPServersTOML,
+		UsageArrival:          registry.UsageArrivalIncremental,
+		UsageAttribution:      registry.UsageAttributionPerModel,
+		UsageLimitRecognition: registry.UsageLimitRecognized,
+		CredentialEnv:         registry.DeclareCredentialEnv(),
+		EffortForwarding:      registry.EffortForwarded,
 		VerificationContext: registry.DeclareVerificationContext(
 			registry.VerificationKeepsSomeTools,
 			registry.VerificationKeepsUserInstructions,
@@ -132,6 +133,11 @@ type sessionState struct {
 	// resume separates this run's usage from the thread-cumulative total
 	// the app-server reports. Never reset between turns.
 	resume agentcore.ResumeBaseline
+
+	// rateLimits holds the latest usage windows the runtime reported,
+	// kept across turns because a window is announced before the turn
+	// it refuses ends. Touched only by the goroutine running RunTurn.
+	rateLimits rateLimitStore
 
 	// usageMeasured reports whether at least one
 	// thread/tokenUsage/updated notification carrying a token-usage
@@ -982,6 +988,9 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					if ev.TerminalErrorKind == domain.ErrCredentialUnverified {
 						ev.TerminalMessage = agentcore.CredentialRefusedMessage(tc.Turn.Error.Message)
 					}
+					if ev.TerminalErrorKind == domain.ErrUsageLimit {
+						ev.UsageLimit = &domain.UsageLimit{ResetsAt: state.rateLimits.exhaustedResetsAt()}
+					}
 				default:
 					ev.Terminal = agentcore.TerminalFailure
 					ev.TerminalErrorKind = domain.ErrTurnFailed
@@ -1160,6 +1169,14 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 
 			case "mcpServer/startupStatus/updated":
 				reportMCPStartupFailure(msg, logger)
+
+			case "account/rateLimits/updated":
+				if p, parseErr := parseRateLimitsUpdated(msg.Params); parseErr != nil {
+					logger.Debug("account/rateLimits/updated unmarshal failed", slog.Any("error", parseErr))
+				} else {
+					state.rateLimits.record(p)
+				}
+				agentcore.EmitNotification(emit, "")
 
 			case "model/rerouted":
 				p, parseErr := parseModelRerouted(msg.Params)

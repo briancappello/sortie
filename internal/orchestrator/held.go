@@ -28,8 +28,9 @@ type SlotHold struct {
 }
 
 // HeldEntry is the hold the latest dispatch pass gave one candidate. Blockers
-// is set for [SkipBlockedBy] only, Slot for [SkipAgentSlotsFull] only, and
-// ResetsAt for the spend reasons only.
+// is set for [SkipBlockedBy] only, Slot for [SkipAgentSlotsFull] only,
+// ResetsAt for the spend reasons and [SkipUsageLimit] only, and AgentKind,
+// ModelOnly, and Model for [SkipUsageLimit] only.
 type HeldEntry struct {
 	Identifier string
 	DisplayID  string
@@ -39,23 +40,29 @@ type HeldEntry struct {
 	Blockers   []domain.BlockerRef
 	Slot       *SlotHold
 	ResetsAt   time.Time
+	AgentKind  string
+	ModelOnly  bool
+	Model      string
 }
 
 // heldPass collects the holds of one dispatch pass. Like [TickResolution] it
 // belongs to one pass, is not safe for concurrent use, and is discarded when
 // the pass ends.
 type heldPass struct {
-	prev  map[string]*HeldEntry
-	now   time.Time
-	spend *HeldEntry
-	next  map[string]*HeldEntry
+	prev      map[string]*HeldEntry
+	now       time.Time
+	spend     *HeldEntry
+	usageHold func(domain.Issue) *HeldEntry
+	next      map[string]*HeldEntry
 }
 
 // newHeldPass returns a recorder that takes each issue's first-held time from
 // prev and stamps a new hold with now. spend is the hold every candidate gets
-// while a spend window holds, and nil otherwise.
-func newHeldPass(prev map[string]*HeldEntry, now time.Time, spend *HeldEntry) *heldPass {
-	return &heldPass{prev: prev, now: now, spend: spend, next: make(map[string]*HeldEntry)}
+// while a spend window holds, and nil otherwise. usageHold returns the hold a
+// usage limit gives a candidate, or nil for one it does not hold; it is nil
+// itself while no usage-limit hold is active.
+func newHeldPass(prev map[string]*HeldEntry, now time.Time, spend *HeldEntry, usageHold func(domain.Issue) *HeldEntry) *heldPass {
+	return &heldPass{prev: prev, now: now, spend: spend, usageHold: usageHold, next: make(map[string]*HeldEntry)}
 }
 
 // hold records entry as the hold of issue. A pass holds an issue once; a
@@ -75,16 +82,24 @@ func (p *heldPass) hold(issue domain.Issue, entry HeldEntry) {
 }
 
 // holdEligible holds every candidate of rest that passes the eligibility
-// gates with entry, or with the pass's spend hold while one applies. It reads
-// no blockers, so a capacity break costs the tracker nothing.
+// gates with the pass's spend hold while one applies, else with the hold a
+// usage limit gives the candidate, else with entry. It reads no blockers, so a
+// capacity break costs the tracker nothing.
 func (p *heldPass) holdEligible(rest []domain.Issue, state *State, activeSet, terminalSet map[string]struct{}, entry HeldEntry) {
 	if p.spend != nil {
 		entry = *p.spend
 	}
 	for _, candidate := range rest {
-		if passesEligibilityGates(candidate, state, activeSet, terminalSet) {
-			p.hold(candidate, entry)
+		if !passesEligibilityGates(candidate, state, activeSet, terminalSet) {
+			continue
 		}
+		held := entry
+		if p.spend == nil && p.usageHold != nil {
+			if usage := p.usageHold(candidate); usage != nil {
+				held = *usage
+			}
+		}
+		p.hold(candidate, held)
 	}
 }
 
@@ -196,7 +211,14 @@ func snapshotHeld(state *State) []SnapshotHeldEntry {
 // snapshotHold returns the view of one hold record. Blockers is non-nil
 // exactly for [SkipBlockedBy] and Slot exactly for [SkipAgentSlotsFull].
 func snapshotHold(e *HeldEntry) SnapshotHold {
-	hold := SnapshotHold{Reason: e.Reason, Since: e.Since, ResetsAt: e.ResetsAt}
+	hold := SnapshotHold{
+		Reason:    e.Reason,
+		Since:     e.Since,
+		ResetsAt:  e.ResetsAt,
+		AgentKind: e.AgentKind,
+		ModelOnly: e.ModelOnly,
+		Model:     e.Model,
+	}
 	if e.Reason == SkipBlockedBy {
 		hold.Blockers = make([]SnapshotBlocker, 0, len(e.Blockers))
 		for _, blocker := range e.Blockers {

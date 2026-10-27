@@ -427,6 +427,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	state.MaxCostUSD = br.cfg.Agent.MaxCostUSD
 	orchestrator.PopulateRetries(state, pendingRetries, br.logger)
 
+	usageLimitHolds, err := store.LoadUsageLimitHolds(ctx)
+	if err != nil {
+		br.logger.Error("failed to load usage limit holds, starting with none", slog.Any("error", err))
+	} else {
+		orchestrator.PopulateUsageLimitHolds(state, usageLimitHolds)
+	}
+
 	parkedRows, err := store.ListParkedIssues(ctx)
 	if err != nil {
 		br.logger.Warn("failed to load park records, starting with none", slog.Any("error", err))

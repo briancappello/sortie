@@ -49,8 +49,8 @@ type Metrics interface {
 	IncWorkerExits(exitType string, model string)
 
 	// IncRetries increments the retry scheduling counter.
-	// trigger is "error", "continuation", "timer", "stall", or
-	// "ci_fix" (sortie_retries_total{trigger} counter).
+	// trigger is "error", "usage_limit", "continuation", "timer",
+	// "stall", or "ci_fix" (sortie_retries_total{trigger} counter).
 	IncRetries(trigger string)
 
 	// IncReconciliationActions increments the reconciliation outcome

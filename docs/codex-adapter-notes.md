@@ -88,6 +88,8 @@ Stdout closing before a turn completes is reported as a port failure, and it is 
 
 The stdio reader caps a single line, and that cap is ours rather than a documented server limit. A single very large notification would fail the read rather than being split. If a turn dies mid-way on a read error after a large diff or tool output, suspect the cap first.
 
+A usage limit ends a turn with a failed `turn/completed` whose `error.codexErrorInfo` is `usageLimitExceeded`, preceded by a standalone `error` notification that carries the same info. The adapter maps that name to `usage_limit` and takes the reset instant from the `account/rateLimits/updated` notifications that arrive before the failure. Each carries `params.rateLimits` with a `limitId` and `primary` and `secondary` windows holding `usedPercent` and `resetsAt` in Unix seconds. The adapter stores the windows per session by `limitId`, a null window keeps the stored one, and on the failure it takes the latest `resetsAt` among windows at `usedPercent` 100 or more, or no instant when none qualifies. The hold is never model-only. The refused turn reports no token usage, so the run stays unmeasured and counts toward `agent.max_sessions`. The error message ("try again at 3:45 PM") is the app-server host's local time with no zone and is never parsed. The same name also covers account states that never reset on their own, which carry no usable instant and take the ordinary backoff.
+
 A handshake or authentication failure tears the subprocess down and returns before any session exists, so those never present as turn failures.
 
 ## Verifying a change

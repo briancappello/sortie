@@ -48,7 +48,7 @@ func runOutcomeOf(status, declared string) RunOutcome {
 			return RunOutcomeStopped
 		}
 		return RunOutcomeSucceeded
-	case "needs_person", "budget_stopped":
+	case "needs_person", "budget_stopped", "usage_limited":
 		return RunOutcomeStopped
 	case "cancelled":
 		return RunOutcomeCancelled

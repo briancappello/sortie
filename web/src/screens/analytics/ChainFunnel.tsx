@@ -19,6 +19,7 @@ const REASON_WORDS: Record<string, string> = {
   run_failed: "failed run",
   needs_person: "needs a person",
   budget_held: "budget held",
+  usage_limited: "usage limit",
   operator_stopped: "stopped by an operator",
   verdict_withheld: "verdict withheld",
 };
@@ -152,7 +153,7 @@ export function ChainFunnel({ funnel, config }: ChainFunnelProps) {
         <TableHead align="right">Hop failed</TableHead>
         <TableHead
           align="right"
-          title="The run failed, stopped for a person or at a budget, was stopped by an operator, or had its handoff withheld, so no hop was due"
+          title="The run failed, stopped for a person, at a budget or at a usage limit, was stopped by an operator, or had its handoff withheld, so no hop was due"
         >
           No hop
         </TableHead>

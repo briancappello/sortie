@@ -296,7 +296,7 @@ func TestHandleTick_SpendCeilingHoldsOnlyWhatIsOtherwiseStartable(t *testing.T) 
 	}
 }
 
-func TestHandleRetryTimer_ReleaseSpendHeld(t *testing.T) {
+func TestHandleRetryTimer_ReleaseHeld(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -319,7 +319,7 @@ func TestHandleRetryTimer_ReleaseSpendHeld(t *testing.T) {
 			params := defaultRetryParams(t, store, &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")})
 			params.SpendCeilings = map[SpendWindow]float64{SpendWindowDaily: 5}
 			params.PollIntervalMS = 60_000
-			params.ReleaseSpendHeld = tt.release
+			params.ReleaseHeld = tt.release
 			t.Cleanup(func() { stopRetryTimer(state, id) })
 
 			got := HandleRetryTimer(state, id, params)
@@ -327,7 +327,7 @@ func TestHandleRetryTimer_ReleaseSpendHeld(t *testing.T) {
 			_, claimed := state.Claimed[id]
 			_, queued := state.RetryAttempts[id]
 			if got != tt.wantReleased || claimed != tt.wantKept || queued != tt.wantKept {
-				t.Errorf("HandleRetryTimer(ReleaseSpendHeld=%v) = %v with claim, queued retry = %v, %v, want %v with %v, %v",
+				t.Errorf("HandleRetryTimer(ReleaseHeld=%v) = %v with claim, queued retry = %v, %v, want %v with %v, %v",
 					tt.release, got, claimed, queued, tt.wantReleased, tt.wantKept, tt.wantKept)
 			}
 			if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 {

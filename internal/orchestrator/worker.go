@@ -327,6 +327,10 @@ type WorkerDeps struct {
 	// AgentSettings is the settings block resolved for this attempt.
 	AgentSettings config.AgentSettings
 
+	// UsageLimitNotified reports that the dispatch is a retry after a provider
+	// usage-limit refusal, which publishes no session.started event.
+	UsageLimitNotified bool
+
 	// OnEvent relays agent events to the serialized event loop. Called from
 	// the worker goroutine; must be concurrency-safe.
 	OnEvent func(issueID string, event domain.AgentEvent)

@@ -53,6 +53,11 @@ func TestVerifyCredential_Verdict(t *testing.T) {
 	cancelledStart := errors.New("adapter-specific start cancellation")
 	cancelledRun := errors.New("adapter-specific cancellation")
 	notFound := &domain.AgentError{Kind: domain.ErrAgentNotFound, Message: "no binary"}
+	usageLimit := &domain.AgentError{
+		Kind:       domain.ErrUsageLimit,
+		Message:    "weekly allowance exhausted",
+		UsageLimit: &domain.UsageLimit{ResetsAt: time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)},
+	}
 	startTimeout := &domain.AgentError{Kind: domain.ErrResponseTimeout, Message: "timed out"}
 	connFailed := ConnectionFailedError()
 	portExit := &domain.AgentError{Kind: domain.ErrPortExit, Message: "exited"}
@@ -176,6 +181,13 @@ func TestVerifyCredential_Verdict(t *testing.T) {
 				return domain.TurnResult{}, notFound
 			},
 			wantUnchanged: notFound,
+		},
+		{
+			name: "usage_limit returned unchanged without a retry",
+			run: func(context.Context, context.CancelFunc) (domain.TurnResult, error) {
+				return domain.TurnResult{}, usageLimit
+			},
+			wantUnchanged: usageLimit,
 		},
 		{
 			name: "credential_unverified from RunTurn returned unchanged",

@@ -186,7 +186,7 @@ type FunnelOutcomes struct {
 
 // NoHopReason counts the passes of one stage that stopped without a hop
 // decision for Reason: run_failed, needs_person, budget_held,
-// operator_stopped, or verdict_withheld.
+// usage_limited, operator_stopped, or verdict_withheld.
 type NoHopReason struct {
 	Reason string `json:"reason"`
 	Passes int    `json:"passes"`

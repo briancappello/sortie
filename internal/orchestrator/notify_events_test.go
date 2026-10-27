@@ -896,3 +896,49 @@ func TestNotifyEvents_OrchestratorEventsCreateNoSlotFiles(t *testing.T) {
 		t.Errorf("Stat(.sortie/notification_slots) error = %v, want not-exist", err)
 	}
 }
+
+func TestNotifyEvents_SessionStartedWithheldInsideNotifiedEpisode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		usageLimitNotified bool
+		wantPublished      int
+	}{
+		{name: "retry inside a notified episode", usageLimitNotified: true, wantPublished: 0},
+		{name: "dispatch outside an episode", usageLimitNotified: false, wantPublished: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			slack := &notifierSpy{}
+			tracker := &mockTrackerAdapter{}
+			router := mustRouter(t, tracker, spyLookup(slack), route.Inputs{
+				Entries:  []config.NotificationBackend{subscribe("slack", domain.EventTypeSessionStarted)},
+				Comments: config.TrackerCommentsConfig{OnDispatch: true},
+			})
+			var wg sync.WaitGroup
+			deps := WorkerDeps{
+				Router:             router,
+				TrackerOpsWg:       &wg,
+				Metrics:            &spyMetrics{},
+				UsageLimitNotified: tt.usageLimitNotified,
+			}
+
+			publishSessionStarted(context.Background(), workerTestIssue(), nil, "mock", deps, discardLogger())
+			wg.Wait()
+
+			tracker.commentMu.Lock()
+			comments := len(tracker.commentCalls)
+			tracker.commentMu.Unlock()
+			if got := len(slack.notifications()); got != tt.wantPublished {
+				t.Errorf("session.started notifications with UsageLimitNotified %v = %d, want %d", tt.usageLimitNotified, got, tt.wantPublished)
+			}
+			if comments != tt.wantPublished {
+				t.Errorf("dispatch comments with UsageLimitNotified %v = %d, want %d", tt.usageLimitNotified, comments, tt.wantPublished)
+			}
+		})
+	}
+}

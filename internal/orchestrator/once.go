@@ -138,13 +138,13 @@ func (s *onceState) drop(issueID string) {
 
 // declined updates the bookkeeping for a candidate the evaluation did not
 // dispatch. A blocker read that failed or was not made waits for a later
-// tick; a spend window hold ends the issue's part of the run as stopped;
-// every other reason is final.
+// tick; a spend window or usage-limit hold ends the issue's part of the run
+// as stopped; every other reason is final.
 func (s *onceState) declined(issue domain.Issue, reason SkipReason) {
 	switch {
 	case reason == SkipBlockersNotRead || reason == SkipBlockersUnresolved:
 		s.deferFor(issue.ID, deferTick)
-	case isSpendCeilingReason(reason):
+	case isSpendCeilingReason(reason) || reason == SkipUsageLimit:
 		s.drop(issue.ID)
 		s.record(issue.ID, issue.Identifier, RunOutcomeStopped)
 	default:

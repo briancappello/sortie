@@ -20,13 +20,14 @@ import (
 
 func init() {
 	registry.Agents.RegisterWithMeta("mock", NewMockAdapter, registry.AgentMeta{
-		MCPDialect:           registry.MCPDialectNone,
-		MCPDialectNoneReason: "launches no process",
-		UsageArrival:         registry.UsageArrivalIncremental,
-		UsageAttribution:     registry.UsageAttributionSessionTotal,
-		CredentialEnv:        registry.DeclareCredentialEnv(),
-		EffortForwarding:     registry.EffortNotForwarded,
-		VerificationContext:  registry.DeclareVerificationContext(),
+		MCPDialect:            registry.MCPDialectNone,
+		MCPDialectNoneReason:  "launches no process",
+		UsageLimitRecognition: registry.UsageLimitRecognized,
+		UsageArrival:          registry.UsageArrivalIncremental,
+		UsageAttribution:      registry.UsageAttributionSessionTotal,
+		CredentialEnv:         registry.DeclareCredentialEnv(),
+		EffortForwarding:      registry.EffortNotForwarded,
+		VerificationContext:   registry.DeclareVerificationContext(),
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
 				// Shares the session's own read of report_token_usage so
@@ -51,6 +52,8 @@ func init() {
 		},
 	})
 }
+
+const usageLimitOutcome = "usage_limit"
 
 // Compile-time interface satisfaction check.
 var _ domain.AgentAdapter = (*MockAdapter)(nil)
@@ -82,6 +85,7 @@ type mockSettings struct {
 	toolCalls              []mockToolCall
 	reportTokenUsage       bool
 	credentialError        string
+	usageLimitResetsAt     time.Time
 }
 
 func (s *mockSessionState) accrueTurnUsage() {
@@ -113,7 +117,7 @@ type mockToolCall struct {
 // Accepted settings keys: session_id, agent_pid, start_error,
 // turn_outcomes, events_per_turn, input_tokens_per_turn,
 // output_tokens_per_turn, turn_delay_ms, stop_error,
-// report_token_usage. input_tokens_per_turn counts all input including
+// report_token_usage, usage_limit_resets_at. input_tokens_per_turn counts all input including
 // cache reads, so cache_read_tokens_per_turn is a subset of it rather
 // than an addition to it. The adapter reports run-cumulative counts by
 // construction: each turn's contribution accrues onto the totals of
@@ -124,6 +128,13 @@ type mockToolCall struct {
 // reported nothing. A verification session's turn emits no event,
 // consumes no turn_outcomes entry, and fails with credential_error when
 // it is set.
+//
+// turn_outcomes entries are completed, failed, cancelled, error,
+// input_required, incomplete, and usage_limit. A usage_limit turn
+// fails with [domain.ErrUsageLimit], accrues no usage because a refused
+// request bills nothing, and carries the reset instant from
+// usage_limit_resets_at (RFC 3339; absent or unparseable gives a zero
+// instant).
 func NewMockAdapter() (domain.AgentAdapter, error) {
 	return &MockAdapter{}, nil
 }
@@ -179,6 +190,12 @@ func parseSettings(config map[string]any) mockSettings {
 	m.reportTokenUsage = typeutil.BoolFrom(config, "report_token_usage", m.reportTokenUsage)
 	if v, ok := config["model_name"].(string); ok {
 		m.modelName = v
+	}
+
+	if v, ok := config["usage_limit_resets_at"].(string); ok {
+		if resetsAt, err := time.Parse(time.RFC3339, v); err == nil {
+			m.usageLimitResetsAt = resetsAt.UTC()
+		}
 	}
 
 	m.apiDurationMS = int64FromConfig(config, "api_duration_ms", 0)
@@ -263,7 +280,7 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 	currentIndex := m.turnIndex
 	m.turnIndex++
 	outcome := state.outcomeAt(currentIndex)
-	if state.reportTokenUsage {
+	if state.reportTokenUsage && outcome != usageLimitOutcome {
 		state.accrueTurnUsage()
 	}
 	usage := state.usage
@@ -370,10 +387,14 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 	}
 
 	if isError {
-		return turnResult, &domain.AgentError{
+		agentErr := &domain.AgentError{
 			Kind:    errKind,
 			Message: fmt.Sprintf("mock turn %s", outcome),
 		}
+		if errKind == domain.ErrUsageLimit {
+			agentErr.UsageLimit = &domain.UsageLimit{ResetsAt: state.usageLimitResetsAt}
+		}
+		return turnResult, agentErr
 	}
 
 	return turnResult, nil
@@ -410,6 +431,8 @@ func outcomeToEvent(outcome string) (domain.AgentEventType, domain.AgentErrorKin
 		return domain.EventTurnCancelled, domain.ErrTurnCancelled, true
 	case "error":
 		return domain.EventTurnEndedWithError, domain.ErrPortExit, true
+	case usageLimitOutcome:
+		return domain.EventTurnFailed, domain.ErrUsageLimit, true
 	default:
 		return domain.EventTurnCompleted, "", false
 	}
