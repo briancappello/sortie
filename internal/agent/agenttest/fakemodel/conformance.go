@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -501,8 +500,6 @@ func (r remoteLaunch) attach(t *testing.T, b Binding, d drive, env Environment, 
 	return lab.Host, names
 }
 
-var versionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`)
-
 func labInstall(t *testing.T, v *SSHVariant) string {
 	t.Helper()
 
@@ -517,8 +514,8 @@ func labInstall(t *testing.T, v *SSHVariant) string {
 	if err != nil {
 		t.Fatalf("%s --version: %v\n%s", binary, err, out)
 	}
-	version := versionPattern.FindString(string(out))
-	if version == "" {
+	version, _, ok := agentcore.ParseRuntimeVersion(out)
+	if !ok {
 		t.Fatalf("%s --version printed no version: %q", binary, out)
 	}
 	return "npm install -g " + v.Package + "@" + version

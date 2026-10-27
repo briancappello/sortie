@@ -4,10 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
-
-	"golang.org/x/mod/semver"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
@@ -70,10 +66,10 @@ func checkRuntimeVersion(ctx context.Context, state *sessionState) *domain.Agent
 		return agentcore.ExitedEarly(state.target, result).Report(stderr.Collector(state.logger()))
 	}
 
-	version, major, ok := parseRuntimeVersion(stdout.Bytes(), stdout.Truncated())
-	if !ok {
+	version, major, ok := agentcore.ParseRuntimeVersion(stdout.Bytes())
+	if !ok || stdout.Truncated() {
 		message := "no output"
-		if line := firstReadableLine(stdout.Bytes()); line != "" {
+		if line := agentcore.FirstReadableLine(stdout.Bytes()); line != "" {
 			message = redact.Truncate(line, 200)
 		}
 		return &domain.AgentError{
@@ -104,54 +100,4 @@ func versionQueryEnv(base []string) []string {
 		env = append(env, entry)
 	}
 	return append(env, "OPENCODE_DISABLE_AUTOUPDATE=true")
-}
-
-// parseRuntimeVersion extracts the version and major number from a
-// version query's standard output. ok is false when out is truncated
-// or carries no field, among the first non-empty line's whitespace-
-// separated fields, that (after dropping one leading "v") is a full
-// semantic version.
-func parseRuntimeVersion(out []byte, truncated bool) (version string, major int, ok bool) {
-	if truncated {
-		return "", 0, false
-	}
-
-	line := firstReadableLine(out)
-	if line == "" {
-		return "", 0, false
-	}
-
-	for field := range strings.FieldsSeq(line) {
-		candidate := strings.TrimPrefix(field, "v")
-		prefixed := "v" + candidate
-		if !isFullSemver(prefixed) {
-			continue
-		}
-		majorInt, err := strconv.Atoi(strings.TrimPrefix(semver.Major(prefixed), "v"))
-		if err != nil {
-			return "", 0, false
-		}
-		return candidate, majorInt, true
-	}
-	return "", 0, false
-}
-
-// isFullSemver reports whether version, with its leading "v", is valid
-// semver that spells out major, minor and patch. semver.IsValid alone
-// also accepts shorthand such as "v1.18".
-func isFullSemver(version string) bool {
-	return semver.Canonical(version) == strings.TrimSuffix(version, semver.Build(version))
-}
-
-// firstReadableLine returns the first line of out that is non-empty
-// after [agentcore.SanitizeLine] and trimming, or "" when every line is
-// empty.
-func firstReadableLine(out []byte) string {
-	for raw := range strings.SplitSeq(string(out), "\n") {
-		line := strings.TrimSpace(agentcore.SanitizeLine(raw))
-		if line != "" {
-			return line
-		}
-	}
-	return ""
 }
