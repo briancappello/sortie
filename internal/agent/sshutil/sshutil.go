@@ -3,6 +3,7 @@
 package sshutil
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ErrConnectionFailed marks an ssh client that failed to connect, as
@@ -115,6 +117,10 @@ type SSHOptions struct {
 	// command runs only after the outcome resolves; see
 	// [SSHLaunch.WatchStderr].
 	Forward *ReverseForward
+
+	// StopGrace is how long the remote agent has between SIGTERM and SIGKILL
+	// once its SSH connection is gone, rounded up to whole seconds.
+	StopGrace time.Duration
 }
 
 func (o SSHOptions) forwardHostPort() (int, bool) {
@@ -267,6 +273,20 @@ func agentGroup(remoteCommand string, agentArgs []string, positional bool) strin
 	return "{ " + strings.Join(parts, " ") + "\n}"
 }
 
+//go:embed supervise.sh
+var supervisor string
+
+// supervisedAgent runs agent under supervisor, which ends the session's
+// process group once the SSH connection is gone, granting the agent grace
+// rounded up to whole seconds between SIGTERM and SIGKILL.
+func supervisedAgent(agent string, grace time.Duration) string {
+	graceSeconds := strconv.Itoa(int((grace + time.Second - 1) / time.Second))
+	return "{\n" + supervisor +
+		"sortie_agent() {\n" + agent + "\n}\n" +
+		`sortie_start_agent sortie_agent "$@"` + "\n" +
+		"sortie_supervise " + graceSeconds + "\n}"
+}
+
 // shellBlanks holds the trailing characters a POSIX shell either
 // ignores or reads as the end of a command, so dropping them from a
 // fragment leaves the operator's own command unchanged. A carriage
@@ -371,6 +391,7 @@ func BuildSSHLaunch(host, workspacePath, remoteCommand string, agentArgs []strin
 	if len(opts.Unset) > 0 {
 		agent = "unset " + strings.Join(opts.Unset, " ") + " && " + agent
 	}
+	agent = supervisedAgent(agent, opts.StopGrace)
 
 	if opts.Forward != nil {
 		return buildForwardedLaunch(sshOpts, workspacePath, agent, opts)
