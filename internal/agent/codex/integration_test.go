@@ -237,7 +237,8 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		CredentialEnv: []string{"CODEX_API_KEY"},
 		Read:          fakemodel.CatFile,
 		SSH: &fakemodel.SSHVariant{
-			Install: "npm install -g @openai/codex@0.164.0",
+			Package:     "@openai/codex",
+			HostCommand: integrationCommand(),
 			RemoteCommand: func(env fakemodel.Environment) string {
 				return scriptedProviderCommand("codex app-server", env.URL)
 			},

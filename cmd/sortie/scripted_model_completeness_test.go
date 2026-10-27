@@ -39,7 +39,7 @@ func TestEveryCommandKindHasScriptedModelCoverage(t *testing.T) {
 		t.Fatal("no command-requiring agent kind declares an MCP dialect that delivers tools, want at least one")
 	}
 	if noSSH := kindsMissingSSHVariant(delivering, mcpCompletenessAgentRoot, scriptedModelImportPath); len(noSSH) != 0 {
-		t.Errorf("agent kind(s) %v deliver tools but their fakemodel.Binding declares no SSH variant, want an SSH field naming an install step or a skip reason", noSSH)
+		t.Errorf("agent kind(s) %v deliver tools but their fakemodel.Binding declares no SSH variant, want an SSH field naming the runtime package, an install script or a skip reason", noSSH)
 	}
 }
 

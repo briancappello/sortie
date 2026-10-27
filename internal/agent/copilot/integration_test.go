@@ -141,7 +141,8 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		UserInstructions: filepath.Join(".copilot", "copilot-instructions.md"),
 		Read:             fakemodel.ReadFile,
 		SSH: &fakemodel.SSHVariant{
-			Install:       "npm install -g @github/copilot@1.0.103",
+			Package:       "@github/copilot",
+			HostCommand:   integrationCommand(),
 			RemoteCommand: func(fakemodel.Environment) string { return "copilot" },
 		},
 		Finish: func(text string) fakemodel.ToolChoice {

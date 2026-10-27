@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -121,7 +122,17 @@ type Binding struct {
 // SSHVariant is a binding's fixture for the SSH variant of the tool-server
 // scenario.
 type SSHVariant struct {
-	// Install is the [agenttest.SSHLabParams].Install script.
+	// Package is the npm package the lab installs at the version HostCommand
+	// reports, so the remote run never drifts from the runtime the local
+	// scenarios drive.
+	Package string
+
+	// HostCommand is the host runtime's command line; its first word is run
+	// with --version.
+	HostCommand string
+
+	// Install, when not empty, is the [agenttest.SSHLabParams].Install script
+	// in place of the one Package and HostCommand derive.
 	Install string
 
 	// RemoteCommand returns the remote shell's command line in place of the
@@ -468,7 +479,7 @@ func (r remoteLaunch) attach(t *testing.T, b Binding, d drive, env Environment, 
 	t.Helper()
 
 	lab := agenttest.StartSSHLab(t, agenttest.SSHLabParams{
-		Install: r.variant.Install,
+		Install: labInstall(t, r.variant),
 		Dirs:    []string{d.workspace},
 		Seed:    []string{env.Home},
 	})
@@ -488,6 +499,29 @@ func (r remoteLaunch) attach(t *testing.T, b Binding, d drive, env Environment, 
 		return lab.RefusedHost, names
 	}
 	return lab.Host, names
+}
+
+var versionPattern = regexp.MustCompile(`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`)
+
+func labInstall(t *testing.T, v *SSHVariant) string {
+	t.Helper()
+
+	if v.Install != "" {
+		return v.Install
+	}
+	binary, _, _ := strings.Cut(strings.TrimSpace(v.HostCommand), " ")
+	if v.Package == "" || binary == "" {
+		t.Fatal("SSHVariant names neither Install nor both Package and HostCommand")
+	}
+	out, err := exec.CommandContext(t.Context(), binary, "--version").CombinedOutput() //nolint:gosec // G204: the binding's own runtime.
+	if err != nil {
+		t.Fatalf("%s --version: %v\n%s", binary, err, out)
+	}
+	version := versionPattern.FindString(string(out))
+	if version == "" {
+		t.Fatalf("%s --version printed no version: %q", binary, out)
+	}
+	return "npm install -g " + v.Package + "@" + version
 }
 
 type drive struct {

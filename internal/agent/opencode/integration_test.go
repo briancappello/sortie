@@ -126,7 +126,8 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		CredentialEnv: []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
 		Read:          fakemodel.ReadFile,
 		SSH: &fakemodel.SSHVariant{
-			Install:       "npm install -g @opencode/cli@2.1.4",
+			Package:       "@opencode/cli",
+			HostCommand:   integrationCommand(),
 			RemoteCommand: func(fakemodel.Environment) string { return "opencode" },
 		},
 		PermissionRefusal: &fakemodel.PermissionRefusal{
