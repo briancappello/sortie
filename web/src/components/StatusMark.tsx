@@ -35,7 +35,7 @@ const STATUS: Record<Mark, StatusEntry> = {
   needs: { Glyph: CircleAlertFilledIcon, word: "Needs attention", tone: "attention" },
   stopped: {
     Glyph: CirclePauseIcon,
-    word: "Stopped for a person, budget or usage limit",
+    word: "Stopped",
     tone: "attention",
   },
   handed: { Glyph: ArrowRightIcon, word: "Handed off", tone: "neutral" },

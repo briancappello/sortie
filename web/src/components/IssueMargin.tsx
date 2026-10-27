@@ -166,14 +166,21 @@ function RetryPanel({ detail, now }: RetryPanelProps) {
     return undefined;
   }
   const isDue = (parseInstant(retry.due_at) ?? 0) <= now;
+  const isUsageLimit = retry.trigger === "usage_limit";
   return (
     <Panel title={`Retry ${retry.attempt}`}>
       <Pairs>
         <Pair label="Due">{dueText(retry.due_at, now)}</Pair>
-        {retry.trigger ? (
-          <Pair label="Started by">{startLabel(retry.trigger, "trigger")}</Pair>
-        ) : undefined}
-        {retry.error === "" ? undefined : <Pair label="Error">{retry.error}</Pair>}
+        {isUsageLimit ? (
+          <Pair label="Waiting for">the usage limit to reset</Pair>
+        ) : (
+          <>
+            {retry.trigger ? (
+              <Pair label="Started by">{startLabel(retry.trigger, "trigger")}</Pair>
+            ) : undefined}
+            {retry.error === "" ? undefined : <Pair label="Error">{retry.error}</Pair>}
+          </>
+        )}
       </Pairs>
       <EffectButton
         label="Retry now"

@@ -5,8 +5,8 @@ import type { Summary } from "@/api/types.gen";
 
 /** The tally line of Ended today: the figures, and the cost apart so it can carry its own hover. */
 export interface TallyLine {
-  /** Every part but the cost, joined. */
-  text: string;
+  /** Every part but the cost. */
+  parts: string[];
   /** The cost part; undefined when no run finished or no cost is shown. */
   cost: string | undefined;
 }
@@ -17,7 +17,7 @@ const RECORDED_TIER = "full";
 /** Words the tally line of Ended today from the stats summary of today's runs. */
 export function tallyLine(summary: Summary, endedCount: number, hasCost: boolean): TallyLine {
   if (summary.runs === 0) {
-    return { text: "No run finished today.", cost: undefined };
+    return { parts: ["No run finished today."], cost: undefined };
   }
   const parts = [
     `${plural(endedCount, "issue", "issues")} ended`,
@@ -32,7 +32,7 @@ export function tallyLine(summary: Summary, endedCount: number, hasCost: boolean
     parts.push(`${fmtCount(summary.cancelled)} cancelled`);
   }
   parts.push(tokensPart(summary));
-  return { text: parts.join(" · "), cost: hasCost ? costPart(summary) : undefined };
+  return { parts, cost: hasCost ? costPart(summary) : undefined };
 }
 
 /** Gives the hover of the tally cost, or undefined while it has no amount to state. */

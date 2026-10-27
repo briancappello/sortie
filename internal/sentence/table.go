@@ -549,6 +549,13 @@ var table = map[string]parts{
 	"run_error_stage":                 {text: "Sortie hit an error while {{.Doing}}" + errorDetail},
 	"run_error_panic":                 {text: "Sortie hit an internal error while running the agent" + errorDetail},
 	"run_error_stopped":               {text: "Sortie stopped the run before it finished."},
+	"run_error_ci_failed":             {text: "The CI checks failed on commit {{.Ref}}."},
+	"run_error_money_ceiling":         {text: "Sortie stopped the run because the issue's estimated cost, {{.Used}}, reached its limit of {{.Budget}}."},
+	"run_error_token_ceiling":         {text: "Sortie stopped the run because the issue used {{tokens .Used}} tokens, reaching its limit of {{tokens .Budget}}."},
+	"run_error_stall":                 {text: "The agent sent no event within the stall timeout, so Sortie stopped the run."},
+	"run_error_shutdown":              {text: "Sortie stopped the run because the service was shutting down."},
+	"run_error_terminal":              {text: "Sortie stopped the run because the issue moved to {{.State}}, a final state."},
+	"run_error_inactive":              {text: "Sortie stopped the run because the issue is no longer in an active state{{if .State}} (now {{.State}}){{end}}."},
 	"run_error_out_of_time":           {text: "The run ran out of time."},
 
 	"stall_marker": {

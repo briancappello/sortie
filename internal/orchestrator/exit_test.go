@@ -1668,6 +1668,52 @@ func TestHandleWorkerExit_CancelledWithoutTokenCeilingStopStaysCancelled(t *test
 	}
 }
 
+func TestHandleWorkerExit_CancelledExitStoresCauseError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cause     error
+		ceiling   bool
+		wantError string
+	}{
+		{name: "service shutdown", cause: errCancelShutdown, wantError: "service shutting down"},
+		{name: "parent context ended", cause: context.Canceled, wantError: "service shutting down"},
+		{name: "terminal state", cause: terminalCancelCause("Done"), wantError: "issue reached terminal state: Done"},
+		{name: "no longer active", cause: inactiveCancelCause("Backlog"), wantError: "issue left the active states: Backlog"},
+		{name: "budget stop keeps its own error", cause: errCeilingStop, ceiling: true, wantError: "token ceiling reached: used 0 of 500 tokens"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockExitStore{}
+			state := exitState(t, "ISSUE-CAUSE", nil)
+			if tt.ceiling {
+				state.Running["ISSUE-CAUSE"].CeilingStopRequest = &CeilingStopRequest{BudgetTokens: 500}
+			}
+
+			HandleWorkerExit(state, WorkerResult{
+				IssueID:          "ISSUE-CAUSE",
+				Identifier:       "ISSUE-CAUSE-ident",
+				ExitKind:         WorkerExitCancelled,
+				CancelCause:      tt.cause,
+				StoppedByCeiling: tt.ceiling,
+				AgentAdapter:     "mock",
+				WorkspacePath:    "/tmp/ws",
+			}, defaultExitParams(t, store))
+
+			if len(store.runHistories) != 1 {
+				t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
+			}
+			if got := store.runHistories[0].Error; got == nil || *got != tt.wantError {
+				t.Errorf("RunHistory.Error = %v, want %q", got, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestHandleWorkerExit_CancelledWithStopRequestButNotAttributedStaysCancelled(t *testing.T) {
 	t.Parallel()
 

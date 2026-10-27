@@ -162,7 +162,7 @@ export function SessionsPanel({ identifier, dispatchId }: SessionsPanelProps) {
 
   return (
     <Panel title="Sessions">
-      <Table aria-label="Sessions">
+      <Table aria-label="Sessions" isCompact>
         <TableBody>
           {rows.map((row) => (
             <SessionRowView

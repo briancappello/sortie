@@ -142,19 +142,35 @@ function EventLine({ event, isFresh }: EventLineProps) {
   );
 }
 
+interface FailedLeadProps {
+  event: RunEventResponse;
+  end: PaneEnd | undefined;
+}
+
+/** Marks a failed turn end as failed, except the one that closes a finished session, which carries the run's own outcome. */
+function FailedLead({ event, end }: FailedLeadProps) {
+  if (end === undefined) {
+    return <StatusMark mark="failed" label={<ServedText text={event.text} />} />;
+  }
+  const { word, mark } = runOutcome(end);
+  return mark === null ? <span>{word}</span> : <StatusMark mark={mark} label={word} />;
+}
+
 interface TurnLineProps {
   line: Extract<TimelineLine, { kind: "turn" }>;
+  /** How the run ended, given for the line that closes a finished session. */
+  end?: PaneEnd;
   isFresh: boolean;
 }
 
-function TurnLine({ line, isFresh }: TurnLineProps) {
+function TurnLine({ line, end, isFresh }: TurnLineProps) {
   const { event, turn, tokens, seconds } = line;
   const isFailed = event.event === "turn_failed" || event.event === "turn_ended_with_error";
   const isAsk = event.event === "turn_input_required";
   const isNumbered = event.event === "turn_completed" && turn !== null;
   let lead: ReactNode;
   if (isFailed) {
-    lead = <StatusMark mark="failed" label={<ServedText text={event.text} />} />;
+    lead = <FailedLead event={event} end={end} />;
   } else if (isNumbered) {
     lead = <span>{`Turn ${turn} completed`}</span>;
   } else {
@@ -251,25 +267,10 @@ function GapLine({ missing }: { missing: number }) {
 
 /** How a finished session ended. */
 export interface PaneEnd {
-  /** The run's `completed_at`. */
-  at: string;
   /** The run's persisted status. */
   status: string;
   /** The run's declared outcome. */
   declared_outcome: string | null;
-}
-
-function EndLine({ end }: { end: PaneEnd }) {
-  const { word, mark } = runOutcome(end);
-  return (
-    <Row title="run history" time={end.at}>
-      {mark === null ? (
-        <span className="text-ink-body">{word}</span>
-      ) : (
-        <StatusMark mark={mark} label={word} />
-      )}
-    </Row>
-  );
 }
 
 interface FootProps {
@@ -458,7 +459,7 @@ export function EventPane({ timeline, end, isNotRetained, isPaused, lastEventAt 
             <span className="text-ink-muted">No events retained</span>
           </Row>
         ) : undefined}
-        {timeline.lines.map((line) => {
+        {timeline.lines.map((line, index) => {
           switch (line.kind) {
             case "event":
               return (
@@ -470,7 +471,12 @@ export function EventPane({ timeline, end, isNotRetained, isPaused, lastEventAt 
               );
             case "turn":
               return (
-                <TurnLine key={line.key} line={line} isFresh={isFreshAt(line.event.at, isLive)} />
+                <TurnLine
+                  key={line.key}
+                  line={line}
+                  end={index === timeline.lines.length - 1 ? (end ?? undefined) : undefined}
+                  isFresh={isFreshAt(line.event.at, isLive)}
+                />
               );
             case "tools":
               return (
@@ -486,7 +492,6 @@ export function EventPane({ timeline, end, isNotRetained, isPaused, lastEventAt 
               return <GapLine key={line.key} missing={line.missing} />;
           }
         })}
-        {end === null ? undefined : <EndLine end={end} />}
         {isJumpShown ? (
           <div className="sticky bottom-xs ml-auto w-max transition-[opacity,translate] duration-(--duration-enter-small) ease-enter starting:translate-y-(--offset-anchored) starting:opacity-0">
             <Button variant="primary" onClick={handleJump}>

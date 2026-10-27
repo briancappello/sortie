@@ -11,8 +11,8 @@ import (
 // finished run.
 type RunOutcome string
 
-// The stopped outcome covers an attempt stopped for a person, stopped at a
-// budget, or declared blocked by the agent.
+// The stopped outcome covers an attempt that needed input, stopped at a budget
+// or a usage limit, or ended with its agent declaring blocked.
 const (
 	RunOutcomeSucceeded RunOutcome = "succeeded"
 	RunOutcomeStopped   RunOutcome = "stopped"

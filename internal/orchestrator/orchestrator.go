@@ -2496,9 +2496,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 	)
 
 	for _, entry := range o.state.Running {
-		if entry.CancelFunc != nil {
-			entry.CancelFunc()
-		}
+		entry.cancelRun(errCancelShutdown)
 	}
 
 	cfg := o.workflowManager.Config()

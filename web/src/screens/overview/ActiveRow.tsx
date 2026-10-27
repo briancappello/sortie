@@ -1,4 +1,5 @@
 import { StandingMark } from "@/components/Lane";
+import { Parts } from "@/components/Parts";
 import { cn } from "@/lib/cn";
 import { fmtClock, parseInstant } from "@/lib/format";
 import { timeCell } from "@/lib/active-rows";
@@ -27,9 +28,9 @@ export interface ActiveRowProps {
 export function ActiveRow({ row, now, isSelected, showSelection, onOpen }: ActiveRowProps) {
   const isLook = isSelected && showSelection;
   const hasTitle = row.title !== null;
-  const meta = [hasTitle ? row.displayKey : null, row.route, row.agentKind]
-    .filter((part) => part !== null)
-    .join(" · ");
+  const meta = [hasTitle ? row.displayKey : null, row.route, row.agentKind].filter(
+    (part) => part !== null,
+  );
   const base = parseInstant(row.timeBase);
 
   return (
@@ -46,8 +47,10 @@ export function ActiveRow({ row, now, isSelected, showSelection, onOpen }: Activ
       </span>
       <div className="min-w-0">
         <p className="text-body-md font-medium text-ink">{row.title ?? row.displayKey}</p>
-        {meta === "" ? undefined : (
-          <p className={cn("text-body-sm tabular-nums", secondLineColor(isLook))}>{meta}</p>
+        {meta.length === 0 ? undefined : (
+          <p className={cn("text-body-sm tabular-nums", secondLineColor(isLook))}>
+            <Parts parts={meta} />
+          </p>
         )}
         {row.holdText === null ? undefined : (
           <p className={cn("text-body-sm", secondLineColor(isLook))}>{row.holdText}</p>
