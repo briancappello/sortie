@@ -177,7 +177,7 @@ Per-issue effort budget (defense-in-depth):
 - When `agent.max_sessions > 0`, two lanes evaluate it: the retry handler counts completed sessions for the issue from `run_history` before fetching candidates, once per retry; the poll tick's rebuild runs the same count as one batch query over the whole candidate set, once per tick, before dispatch (see the rebuild bullet below).
 - If the count reaches `max_sessions`, a warning is logged on both lanes. The retry handler releases the claim it holds and does not re-dispatch; the rebuild writes the candidate into the exhausted-issue set instead, because a candidate the rebuild holds never held a claim to release.
 - If the retry handler's count query fails, its check is skipped (fail-open) and dispatch proceeds normally for that issue. The rebuild's own fail-open, which differs because it rebuilds a whole set rather than deciding one dispatch, is described in the rebuild bullet below.
-- Both lanes count every `run_history` entry except one with the status `usage_limited`, which is written only for a run that a usage limit refused before it produced output (Usage-limit hold, below). A refused run that produced output, or has no token figure, is recorded `failed` and counts.
+- Both lanes count every `run_history` entry except one with the status `usage_limited`, which is written only for a run that a usage limit refused with a future reset time before it produced output (Usage-limit hold, below). A refused run with no future reset time, one that produced output, and one with no token figure are recorded `failed` and count.
 - `max_sessions = 0` (default) disables the budget entirely.
 
 Per-issue token budget (cost ceiling):

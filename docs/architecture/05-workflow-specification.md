@@ -210,7 +210,7 @@ Fields:
   - An entry outside the range an integer setting accepts, positive or negative, is rejected when the configuration is parsed; other invalid entries (non-positive or non-numeric) are ignored.
 - `max_sessions` (integer)
   - Default: `0` (unlimited; no effort budget enforced).
-  - Maximum number of completed worker sessions for a single issue before the orchestrator stops re-dispatching it. Counted from `run_history` entries, except a `usage_limited` entry: a run that a provider usage limit refused before it produced output does not count. A refusal after output, or on a run with no token figure, counts.
+  - Maximum number of completed worker sessions for a single issue before the orchestrator stops re-dispatching it. Counted from `run_history` entries, except a `usage_limited` entry: a run that a provider usage limit refused with a future reset time, and whose token figure records no output token, does not count. A refusal with no future reset time, after output, or on a run with no token figure, counts.
   - When the count reaches `max_sessions`, a warning is logged. The retry handler releases the claim it holds; the poll tick's own rebuild of the exhausted-issue set writes the candidate into that set instead, because a held candidate never held a claim to release.
   - `0` disables the budget (unlimited retries).
   - Changes are re-applied at runtime and affect future retry timer evaluations.
