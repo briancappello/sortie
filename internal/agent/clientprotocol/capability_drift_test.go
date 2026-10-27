@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/agent/toolrelay"
 	"github.com/sortie-ai/sortie/internal/domain"
 
 	"gopkg.in/yaml.v3"
@@ -33,7 +34,7 @@ const capabilityDriftCommandEnv = "SORTIE_CLIENTPROTOCOL_COMMAND"
 // capabilityGapLabelSet is the four labels a session's capability-gap
 // notice may report, in the record's own field order.
 var capabilityGapLabelSet = []string{
-	capabilityLabelToolServers, capabilityLabelTokenCounts,
+	toolrelay.ToolServersLabel, capabilityLabelTokenCounts,
 	capabilityLabelSessionContinuation, capabilityLabelAgentVersion,
 }
 
@@ -302,21 +303,21 @@ func TestLiveCapabilityGapLabelsAddsTokenCountsOnlyWhenUnmeasured(t *testing.T) 
 	}{
 		{
 			name:   "an unmeasured result adds token counts to a notice naming a different gap",
-			events: notify(capabilityGapNoticeStem + capabilityLabelAgentVersion),
+			events: notify(toolrelay.GapNoticeStem + capabilityLabelAgentVersion),
 			result: domain.TurnResult{UsageMeasured: false},
 			want:   []string{capabilityLabelAgentVersion, capabilityLabelTokenCounts},
 		},
 		{
 			name:   "an unmeasured result whose notice already names token counts adds nothing more",
-			events: notify(capabilityGapNoticeStem + capabilityLabelTokenCounts),
+			events: notify(toolrelay.GapNoticeStem + capabilityLabelTokenCounts),
 			result: domain.TurnResult{UsageMeasured: false},
 			want:   []string{capabilityLabelTokenCounts},
 		},
 		{
 			name:   "a measured result leaves notice-derived labels unchanged",
-			events: notify(capabilityGapNoticeStem + capabilityLabelToolServers),
+			events: notify(toolrelay.GapNoticeStem + toolrelay.ToolServersLabel),
 			result: domain.TurnResult{UsageMeasured: true},
-			want:   []string{capabilityLabelToolServers},
+			want:   []string{toolrelay.ToolServersLabel},
 		},
 	}
 

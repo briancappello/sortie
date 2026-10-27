@@ -89,7 +89,11 @@ Limits:
 
 ## What a delivered tool server needs to be callable
 
-Delivery is not the problem: `session/new` carries the declaration, and the runtime launches the server and lists its tools. But a runtime that asks the client for consent before a tool call gets a refusal, and the tool is not called. The protocol's stdio server declaration has no trust or approval field, so Sortie cannot mark a server as pre-approved on the wire. The only lever is the runtime's own configuration, reached through `agent.command`: an approval mode that does not ask, or a rule that pre-approves the tools of Sortie's server.
+A runtime that advertises `mcpCapabilities.http` receives Sortie's tool server as an HTTP server hosted on the orchestrator host, on every launch. The entry names a loopback address and carries a per-session bearer as an `Authorization` header inside the request, which is the only place the protocol lets a header value travel. On a remote launch the address is the remote end of a reverse SSH forward. A runtime without HTTP support receives the stdio entries on a local launch and runs without Sortie's tools on a remote launch, with the gap declared in the opening notice.
+
+`copilot --acp` rejects every stdio entry a client sends, with no error and no notification, so an operator stdio server never reaches it, and the session is told nothing. It accepts HTTP entries. `kiro-cli` at its debug log level writes the `Authorization` value to its log; the bearer is useless once its session ends.
+
+Delivery is not the problem: `session/new` carries the declaration, and the runtime reaches the server and lists its tools. But a runtime that asks the client for consent before a tool call gets a refusal, and the tool is not called. The protocol's server declaration has no trust or approval field, so Sortie cannot mark a server as pre-approved on the wire. The only lever is the runtime's own configuration, reached through `agent.command`: an approval mode that does not ask, or a rule that pre-approves the tools of Sortie's server.
 
 Both `gemini` and `kiro-cli` behave this way: under a posture that asks, the declared server is delivered and its tool is never called. The other runtimes are unmeasured on this point.
 

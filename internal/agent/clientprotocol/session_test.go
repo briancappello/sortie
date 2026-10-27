@@ -171,7 +171,7 @@ func TestRunTurnPreTurnWaits(t *testing.T) {
 			state := &sessionState{
 				agentConfig: domain.AgentConfig{ReadTimeoutMS: 50},
 				inbox:       jsonrpc.NewInbox[pumpItem](),
-				caps:        newCapabilityRecord(false, false),
+				caps:        newCapabilityRecord(false),
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -224,7 +224,7 @@ func TestDelayedTurnVerdictCannotBlockPump(t *testing.T) {
 		agentConfig: domain.AgentConfig{ReadTimeoutMS: 20},
 		inbox:       jsonrpc.NewInbox[pumpItem](),
 		logger:      discardLogger(),
-		caps:        newCapabilityRecord(false, false),
+		caps:        newCapabilityRecord(false),
 	}
 
 	outcome := waittest.Receive(t, runTurnAsyncCtx(context.Background(), state, domain.RunTurnParams{
@@ -258,7 +258,7 @@ func TestAbandonedTurnIsNotStarted(t *testing.T) {
 		agentConfig: domain.AgentConfig{ReadTimeoutMS: 20},
 		inbox:       jsonrpc.NewInbox[pumpItem](),
 		logger:      discardLogger(),
-		caps:        newCapabilityRecord(false, false),
+		caps:        newCapabilityRecord(false),
 	}
 
 	outcome := waittest.Receive(t, runTurnAsyncCtx(context.Background(), state, domain.RunTurnParams{

@@ -20,6 +20,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/typeutil"
 )
 
@@ -55,6 +56,9 @@ const (
 type sessionState struct {
 	target      agentcore.LaunchTarget
 	agentConfig domain.AgentConfig
+
+	// launch is the zero value on a local launch.
+	launch sshutil.SSHLaunch
 
 	// caps is built before the pump starts and owned by the pump from that point
 	// on: nothing outside the pump goroutine may mutate the value it points to.
@@ -117,6 +121,9 @@ type sessionState struct {
 	// verification is nil when no addition claimed the launch. Set before the
 	// pump starts; teardown closes it.
 	verification usagesource.VerificationAddition
+
+	// tools is closed by stopSession or by a failed start.
+	tools *agentcore.ToolSession
 
 	// earlyExit is translateCallError's observation of whether the runtime
 	// exited on its own before this start's connection loss, recorded on the
@@ -188,11 +195,6 @@ type handshakeFacts struct {
 	agentInfoPresent bool
 	caps             agentCapabilities
 
-	// toolServersWithheld reports whether the generated configuration declared
-	// an HTTP tool server the handshake's MCP capabilities do not support, so it
-	// was omitted from session/new.
-	toolServersWithheld bool
-
 	// toolServersDelivered reports whether the session-creation request carried
 	// at least one tool server.
 	toolServersDelivered bool
@@ -252,7 +254,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 
 	remote := target.RemoteCommand != ""
 
-	parsedServers, agentErr := parseMCPServers(params.MCPConfigPath, remote)
+	tools, agentErr := agentcore.ResolveToolDelivery(ctx, params, target, registry.MCPDialectACPSession, slog.Default())
 	if agentErr != nil {
 		return domain.Session{}, agentErr
 	}
@@ -279,8 +281,11 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 	var state *sessionState
 	started := false
 	defer func() {
+		if started {
+			return
+		}
+		tools.Close() //nolint:errcheck,gosec // best-effort; the start failure is what the caller needs
 		switch {
-		case started:
 		case state != nil:
 			releaseUsageSources(state)
 		case verification != nil:
@@ -304,6 +309,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 			credentialVerification: params.CredentialVerification,
 			claimed:                claimed,
 			verification:           verification,
+			tools:                  tools,
 		}
 		state.drainGrace = a.drainGrace
 		if state.drainGrace <= 0 {
@@ -314,7 +320,9 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		var cmd *exec.Cmd
 		var launch sshutil.SSHLaunch
 		if remote {
-			launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, target.SSHOptions())
+			opts := target.SSHOptions()
+			opts.Forward = tools.Forward(nil)
+			launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, opts)
 			cmd = exec.CommandContext(ctx, target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 		} else {
 			cmd = exec.CommandContext(ctx, target.Command, slices.Concat(target.Args, verificationSwitches.Args)...) //nolint:gosec // args are constructed programmatically
@@ -361,7 +369,8 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		state.group = group
 		state.stdinCloser = prefixedStdin
 		state.pipes = pipes
-		state.stderrCollector = procutil.NewStderrCollector(pipes.Stderr, state.logger)
+		state.launch = launch
+		state.stderrCollector = procutil.NewStderrCollector(launch.WatchStderr(pipes.Stderr), state.logger)
 
 		state.conn = jsonrpc.NewConn(prefixedStdin, pipes.Stdout, jsonrpc.Deliver(state.inbox, wrapPumpMessage),
 			jsonrpc.WithVersionMember(), jsonrpc.WithMaxLineBytes(clientProtocolMaxLineBytes))
@@ -391,7 +400,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		// The capability record is built here, before the pump starts, so the pump
 		// is its sole mutator afterward: StartSession must not touch state.caps past
 		// this point.
-		state.caps = newCapabilityRecord(remote, len(claims.claimed) > 0)
+		state.caps = newCapabilityRecord(len(claims.claimed) > 0)
 		state.usage = usage
 
 		// Start the pump before the handshake, so it is the sole mutator of session
@@ -437,7 +446,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		}
 
 		if len(verdict.released) == 0 && !relaunchArmed {
-			session, err := finishSession(ctx, state, params, target, parsedServers, initResp, verdict)
+			session, err := finishSession(ctx, state, params, target, initResp, verdict)
 			started = err == nil
 			return session, err
 		}
@@ -462,11 +471,9 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 	}
 }
 
-// finishSession completes a final start: negotiating tool servers, creating
-// or continuing the session, and publishing the handshake and session
-// identifier to the pump. verdict.confirmed's source, or nil, becomes the
-// only source the pump ever receives.
-func finishSession(ctx context.Context, state *sessionState, params domain.StartSessionParams, target agentcore.LaunchTarget, parsedServers parsedMCPServers, initResp *initializeResponse, verdict usageVerdict) (domain.Session, error) {
+// finishSession completes a final start. verdict.confirmed's source, or nil,
+// becomes the only source the pump ever receives.
+func finishSession(ctx context.Context, state *sessionState, params domain.StartSessionParams, target agentcore.LaunchTarget, initResp *initializeResponse, verdict usageVerdict) (domain.Session, error) {
 	grace := procutil.StopGrace(state.agentConfig.StopGraceMS)
 	teardownOnFailure := func() {
 		graceCtx, cancel := context.WithTimeout(ctx, grace)
@@ -478,13 +485,14 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 		initResp.AgentCapabilities.MCPCapabilities != nil &&
 		initResp.AgentCapabilities.MCPCapabilities.HTTP != nil &&
 		*initResp.AgentCapabilities.MCPCapabilities.HTTP
-	wireServers, withheld := parsedServers.wireServers(allowHTTP)
-	if withheld {
-		state.logger.Warn("configured tool servers were not delivered: the agent does not advertise HTTP tool-server support")
+	wired, agentErr := settleToolDelivery(ctx, state, allowHTTP)
+	if agentErr != nil {
+		teardownOnFailure()
+		return domain.Session{}, agentErr
 	}
 	if params.CredentialVerification {
 		// Non-nil so the wire carries mcpServers: [] rather than null.
-		wireServers = []mcpServer{}
+		wired = []mcpServer{}
 	}
 
 	var caps agentCapabilities
@@ -492,7 +500,7 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 		caps = *initResp.AgentCapabilities
 	}
 
-	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, target.WorkspacePath, wireServers)
+	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, target.WorkspacePath, wired)
 	if agentErr != nil {
 		teardownOnFailure()
 		procutil.EmitWarnLines(state.stderrCollector.Lines(), state.logger)
@@ -510,7 +518,7 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 		state.closeMethod = methodSessionClose
 	}
 
-	facts := &handshakeFacts{toolServersWithheld: withheld, toolServersDelivered: len(wireServers) > 0, caps: caps}
+	facts := &handshakeFacts{toolServersDelivered: len(wired) > 0, caps: caps}
 	if initResp.AgentInfo != nil {
 		facts.agentInfo = *initResp.AgentInfo
 		facts.agentInfoPresent = true
@@ -522,11 +530,48 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 	state.inbox.Put(pumpItem{control: &pumpControl{handshake: facts}})
 	state.inbox.Put(pumpItem{control: &pumpControl{sessionID: sessionID}})
 
+	if agentErr := state.tools.AwaitConnection(ctx); agentErr != nil {
+		teardownOnFailure()
+		return domain.Session{}, agentErr
+	}
+
 	return domain.Session{
-		ID:       sessionID,
-		AgentPID: strconv.Itoa(state.pid),
-		Internal: state,
+		ID:            sessionID,
+		AgentPID:      strconv.Itoa(state.pid),
+		NoToolChannel: state.tools.NoToolChannel(),
+		Internal:      state,
 	}, nil
+}
+
+// settleToolDelivery returns the tool servers for the session-creation
+// request: Sortie's server reaches a runtime advertising HTTP support through
+// the local relay, or on a remote launch through the forward whose outcome it
+// waits for. A runtime without HTTP support gets no HTTP server.
+func settleToolDelivery(ctx context.Context, state *sessionState, allowHTTP bool) ([]mcpServer, *domain.AgentError) {
+	var outcome sshutil.ForwardOutcome
+	if state.target.RemoteCommand != "" {
+		var err error
+		outcome, err = state.launch.WaitOutcome(ctx)
+		if err != nil {
+			return nil, agentcore.SessionStartCancelledError(ctx, &procutil.StartError{
+				Stage:     procutil.StageProcessStart,
+				Err:       err,
+				Cancelled: true,
+			})
+		}
+	} else if allowHTTP {
+		state.tools.ServeLocal(ctx)
+	}
+
+	if !allowHTTP && state.tools.WithholdForRuntime() {
+		state.logger.Warn("configured tool servers were not delivered: the agent does not advertise HTTP tool-server support")
+	}
+
+	servers, err := decodeServers(state.tools.Delivery(outcome).Entries)
+	if err != nil {
+		return nil, &domain.AgentError{Kind: domain.ErrResponseError, Message: err.Error(), Err: err}
+	}
+	return servers, nil
 }
 
 // wrapPumpMessage wraps msg, over its own copy, as the pump item the reader
@@ -822,6 +867,9 @@ func stopSession(ctx context.Context, session domain.Session) error {
 	defer cancel()
 	runTeardown(state, defaultTeardownOrder(ctx, graceCtx, grace))
 	releaseUsageSources(state)
+	if state.tools != nil {
+		return state.tools.Close()
+	}
 	return nil
 }
 

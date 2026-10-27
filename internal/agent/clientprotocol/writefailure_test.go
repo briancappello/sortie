@@ -27,7 +27,7 @@ func newFailWriteSession(t *testing.T, agentConfig domain.AgentConfig, writeErr 
 	inPr, inPw := io.Pipe()
 	state := &sessionState{
 		agentConfig: agentConfig,
-		caps:        newCapabilityRecord(false, false),
+		caps:        newCapabilityRecord(false),
 		usage:       agentcore.NewTurnEndUsage(),
 		stopCh:      make(chan struct{}),
 		pumpDone:    make(chan struct{}),

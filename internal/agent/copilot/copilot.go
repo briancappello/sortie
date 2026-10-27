@@ -24,11 +24,35 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
+
+const derivedConfigName = "copilot-mcp.json"
+
+// writeDerivedConfig returns the path a local launch hands to
+// --additional-mcp-config.
+func writeDerivedConfig(workspacePath string, tools *agentcore.ToolSession) (string, error) {
+	doc := tools.Delivery(sshutil.ForwardOutcome{}).Document
+	if err := workspacekit.WriteSortieFile(workspacePath, derivedConfigName, doc); err != nil {
+		return "", err
+	}
+	return filepath.Join(workspacePath, workspacekit.SortieDir, derivedConfigName), nil
+}
+
+// placeMCPConfig passes the delivery inline: a host path names nothing on the
+// remote host.
+func placeMCPConfig(d mcpconfig.Delivery) sshutil.LatePreamble {
+	if len(d.Document) == 0 {
+		return sshutil.LatePreamble{}
+	}
+	return sshutil.LatePreamble{Args: []string{"--additional-mcp-config", string(d.Document)}}
+}
 
 // sessionIDPattern matches the safe path-segment character set a
 // copilot session id must satisfy before it is joined into a
@@ -48,7 +72,7 @@ func init() {
 		RequiresCommand:     true,
 		DefaultCommand:      defaultCommand,
 		ValidateAgentConfig: validateConfig,
-		MCPInjection:        registry.MCPInjectionSupported,
+		MCPDialect:          registry.MCPDialectMCPServersJSON,
 		UsageArrival:        registry.UsageArrivalTurnEnd,
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
@@ -86,7 +110,8 @@ type sessionState struct {
 	agentConfig      domain.AgentConfig
 	baseLogger       *slog.Logger
 
-	// mcpConfigPath is the worker-generated MCP config file path.
+	// mcpConfigPath is empty on a remote launch, where the declaration travels
+	// inline.
 	mcpConfigPath string
 
 	isContinuation bool
@@ -320,13 +345,32 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 	baseLogger := slog.Default().With(slog.String("component", "copilot-adapter"))
 
+	tools, toolsErr := agentcore.ResolveToolDelivery(ctx, params, target, registry.MCPDialectMCPServersJSON, baseLogger)
+	if toolsErr != nil {
+		return domain.Session{}, toolsErr
+	}
+
+	mcpConfigPath := ""
+	if target.RemoteCommand == "" && tools.Configured() && !params.CredentialVerification {
+		var err error
+		mcpConfigPath, err = writeDerivedConfig(target.WorkspacePath, tools)
+		if err != nil {
+			_ = tools.Close()
+			return domain.Session{}, &domain.AgentError{
+				Kind:    domain.ErrResponseError,
+				Message: fmt.Sprintf("prepare MCP config: %v", err),
+				Err:     err,
+			}
+		}
+	}
+
 	state := &sessionState{
 		target:                 target,
 		copilotSessionID:       copilotSessionID,
 		passthrough:            pt,
 		agentConfig:            params.AgentConfig,
 		baseLogger:             baseLogger,
-		mcpConfigPath:          params.MCPConfigPath,
+		mcpConfigPath:          mcpConfigPath,
 		isContinuation:         params.ResumeSessionID != "",
 		credentialVerification: params.CredentialVerification,
 		usage:                  agentcore.NewTurnEndUsage(),
@@ -336,6 +380,8 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
+		Tools:         tools,
+		ToolPlacement: placeMCPConfig,
 		BuildArgs: func(turn int, prompt string) []string {
 			return buildArgs(state, turn, prompt, state.passthrough)
 		},
@@ -562,8 +608,9 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 
 	return domain.Session{
-		ID:       copilotSessionID,
-		Internal: state,
+		ID:            copilotSessionID,
+		Internal:      state,
+		NoToolChannel: tools.NoToolChannel(),
 	}, nil
 }
 

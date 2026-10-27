@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
+	"github.com/sortie-ai/sortie/internal/agent/toolrelay"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
@@ -54,11 +55,6 @@ type activeTurn struct {
 	cancelCh chan struct{}
 
 	awaitedID jsonrpc.ID
-
-	// capsSnapshot is the capability record as it stood when this turn began, so
-	// a lowering observed while the turn is in flight takes effect from the next
-	// turn onward.
-	capsSnapshot capabilityRecord
 
 	pendingEnd    turnEndKind
 	pendingDetail string
@@ -407,9 +403,6 @@ func (p *pumpState) applyHandshakeCapabilityLowering(facts *handshakeFacts) {
 	}
 	if !advertisesSessionContinuation(facts.caps) {
 		p.lowerCapability(&p.state.caps.sessionContinuation, capabilityLabelSessionContinuation)
-	}
-	if facts.toolServersWithheld {
-		p.lowerCapability(&p.state.caps.toolServers, capabilityLabelToolServers)
 	}
 }
 
@@ -829,9 +822,13 @@ func (p *pumpState) publishOrQueue(ev domain.AgentEvent) {
 	p.queued = append(p.queued, ev)
 }
 
-// publish returns an emit function that delivers into turn's sink, guarded by
-// turn's done channel so a publish can never block once the turn has ended.
 func (p *pumpState) publish(turn *activeTurn) func(domain.AgentEvent) {
+	return p.state.tools.Emit(deliverToTurn(turn), p.openingNotice)
+}
+
+// deliverToTurn is guarded by turn's done channel so a delivery never blocks
+// once the turn has ended.
+func deliverToTurn(turn *activeTurn) func(domain.AgentEvent) {
 	return func(ev domain.AgentEvent) {
 		select {
 		case turn.sink <- ev:
@@ -879,12 +876,11 @@ func (p *pumpState) handleStartTurn(ts *turnStart) {
 	}
 
 	p.flushAgentMessage()
-	turn := &activeTurn{sink: ts.sink, resultCh: ts.resultCh, done: ts.done, cancelCh: ts.cancelCh, capsSnapshot: *p.state.caps}
+	turn := &activeTurn{sink: ts.sink, resultCh: ts.resultCh, done: ts.done, cancelCh: ts.cancelCh}
 	p.activeTurn = turn
 	ts.reply <- turnVerdict{accepted: true}
 
 	agentcore.EmitSessionStarted(p.publish(turn), strconv.Itoa(p.state.pid), p.sessionID)
-	p.emitCapabilityGapNoticeOnce(turn)
 	p.flushQueued(turn)
 
 	if p.latchedHumanInput {
@@ -911,20 +907,17 @@ func (p *pumpState) handleStartTurn(ts *turnStart) {
 	turn.awaitedID = id
 }
 
-// emitCapabilityGapNoticeOnce emits the once-per-session notice listing turn's
-// gap entries, the first time any turn starts. It reads turn's snapshot rather
-// than the pump's live record, so the notice reports what the first turn saw.
-func (p *pumpState) emitCapabilityGapNoticeOnce(turn *activeTurn) {
-	if p.capabilityNoticeSent {
-		return
+// openingNotice lowers the tool-server gap into the capability record first, so
+// the notice lists it beside every other gap.
+func (p *pumpState) openingNotice(emit func(domain.AgentEvent), toolServersGap bool) {
+	if toolServersGap {
+		p.lowerCapability(&p.state.caps.toolServers, toolrelay.ToolServersLabel)
 	}
 	p.capabilityNoticeSent = true
 
-	message, hasGap := turn.capsSnapshot.gapNotice()
-	if !hasGap {
-		return
+	if message, hasGap := p.state.caps.gapNotice(); hasGap {
+		agentcore.EmitNotification(emit, message)
 	}
-	agentcore.EmitNotification(p.publish(turn), message)
 }
 
 // finalizeTurn ends the active turn on the disposition [activeTurn.disposition]

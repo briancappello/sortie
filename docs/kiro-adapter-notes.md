@@ -16,11 +16,11 @@ Read the flags off `kiro-cli chat --help` and `kiro-cli acp --help`. Read the ac
 
 This CLI is a distribution of Amazon Q Developer CLI, so `aws/amazon-q-developer-cli` is the source of record for CLI behavior. The public Kiro tracker is for product feature requests. Search upstream for a CLI bug, not the IDE tracker.
 
-The runtime keeps its own log at `kiro-log/kiro-chat.log` under its runtime directory. Some failures below are explained only there.
+The runtime keeps its own log at `kiro-log/kiro-chat.log` under its runtime directory. Some failures below are explained only there. At its debug log level the runtime writes the `Authorization` value of an HTTP tool server to that log, which is the per-session bearer of Sortie's tool server; the bearer is useless once its session ends.
 
 ## Entry points
 
-The generic `agent-client-protocol` kind drives `kiro-cli acp`. It delivers session continuation and, on a local launch and subject to the credential constraint below, Sortie's own tool servers.
+The generic `agent-client-protocol` kind drives `kiro-cli acp`. It delivers session continuation and, on every launch over HTTP and subject to the credential constraint below, Sortie's own tool servers.
 
 The `acp` subcommand is missing from `kiro-cli --help` and listed only under `--help-all`.
 

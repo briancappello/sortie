@@ -41,7 +41,7 @@ func init() {
 		RequiresCommand:        true,
 		DefaultCommand:         defaultCommand,
 		ValidateAgentConfig:    validateConfig,
-		MCPInjection:           registry.MCPInjectionSupported,
+		MCPDialect:             registry.MCPDialectMCPServersJSONAlwaysLoad,
 		SessionResumeBlockedBy: sessionResumeBlockedBy,
 		UsageArrival:           registry.UsageArrivalIncremental,
 		UsageAttribution:       registry.UsageAttributionPerModel,
@@ -84,7 +84,7 @@ type sessionState struct {
 	agentConfig     domain.AgentConfig
 	baseLogger      *slog.Logger
 
-	// mcpConfigPath is the worker-generated MCP config file path.
+	// mcpConfigPath is the derived MCP config file; empty on a remote launch.
 	mcpConfigPath string
 
 	credentialVerification bool
@@ -238,7 +238,7 @@ const detailAnswerToQuestion = "an answer to a question"
 // StartSession parses the session's settings, validates the workspace path,
 // resolves the claude binary, and initializes per-session state. No
 // subprocess is spawned; that happens in [ClaudeCodeAdapter.RunTurn].
-func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartSessionParams) (domain.Session, error) {
+func (a *ClaudeCodeAdapter) StartSession(ctx context.Context, params domain.StartSessionParams) (domain.Session, error) {
 	pt, fault := parsePassthroughConfig(params.Settings)
 	if fault != nil {
 		return domain.Session{}, agentcore.SettingsError(fault.Error(), fault)
@@ -275,17 +275,25 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		resumeFromByModel = params.ResumeUsageByModel
 	}
 
-	mcpConfigPath := params.MCPConfigPath
-	if mcpConfigPath != "" && target.RemoteCommand == "" && !params.CredentialVerification {
-		alwaysLoadPath, err := alwaysLoadToolServer(mcpConfigPath)
+	baseLogger := slog.Default().With(slog.String("component", "claude-adapter"))
+
+	tools, toolsErr := agentcore.ResolveToolDelivery(ctx, params, target, registry.MCPDialectMCPServersJSONAlwaysLoad, baseLogger)
+	if toolsErr != nil {
+		return domain.Session{}, toolsErr
+	}
+
+	mcpConfigPath := ""
+	if target.RemoteCommand == "" && tools.Configured() && !params.CredentialVerification {
+		var err error
+		mcpConfigPath, err = writeDerivedConfig(target.WorkspacePath, tools)
 		if err != nil {
+			_ = tools.Close()
 			return domain.Session{}, &domain.AgentError{
 				Kind:    domain.ErrResponseError,
 				Message: fmt.Sprintf("prepare MCP config: %v", err),
 				Err:     err,
 			}
 		}
-		mcpConfigPath = alwaysLoadPath
 	}
 
 	state := &sessionState{
@@ -294,7 +302,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		isContinuation:         isContinuation,
 		passthrough:            pt,
 		agentConfig:            params.AgentConfig,
-		baseLogger:             slog.Default().With(slog.String("component", "claude-adapter")),
+		baseLogger:             baseLogger,
 		mcpConfigPath:          mcpConfigPath,
 		credentialVerification: params.CredentialVerification,
 		acc:                    agentcore.NewRunUsage(),
@@ -304,6 +312,8 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
+		Tools:         tools,
+		ToolPlacement: placeMCPConfig,
 		BuildArgs: func(turn int, prompt string) []string {
 			return buildArgs(state, turn, prompt, state.passthrough)
 		},
@@ -520,8 +530,9 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 
 	return domain.Session{
-		ID:       sessionUUID,
-		Internal: state,
+		ID:            sessionUUID,
+		Internal:      state,
+		NoToolChannel: tools.NoToolChannel(),
 	}, nil
 }
 

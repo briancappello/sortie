@@ -230,6 +230,10 @@ type Session struct {
 	// adapters.
 	AgentPID string
 
+	// NoToolChannel reports that the runtime cannot reach Sortie's tool
+	// server, so the worker withholds the tool advertisement.
+	NoToolChannel bool
+
 	// Internal holds adapter-specific state the orchestrator must not
 	// read or modify.
 	Internal any

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -286,6 +287,37 @@ func TestStartSession_DefaultCommand(t *testing.T) {
 	}
 	if agentErr.Kind != domain.ErrAgentNotFound {
 		t.Errorf("Kind = %q, want %q", agentErr.Kind, domain.ErrAgentNotFound)
+	}
+}
+
+func TestStartSession_SSHModeCarriesNoHostMCPConfigPath(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh not available on PATH")
+	}
+	workspace := t.TempDir()
+	hostPath := agenttest.WriteSeededMCPConfig(t, workspace)
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{
+		WorkspacePath: workspace,
+		AgentConfig:   domain.AgentConfig{Command: "claude"},
+		SSHHost:       "dev-host.example.com",
+		MCPConfigPath: hostPath,
+		Settings:      map[string]any{"mcp_config": "/op/mcp.json"},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() (SSH mode) error = %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.StopSession(t.Context(), session) })
+	state := session.Internal.(*sessionState)
+
+	args := buildArgs(state, 1, "do work", state.passthrough)
+
+	for _, hostFile := range []string{hostPath, "/op/mcp.json"} {
+		if i := slices.IndexFunc(args, func(arg string) bool { return strings.Contains(arg, hostFile) }); i >= 0 {
+			t.Errorf("buildArgs() (SSH mode) carries host path %q in argument %q, want none: [%s]", hostFile, args[i], strings.Join(args, " "))
+		}
 	}
 }
 

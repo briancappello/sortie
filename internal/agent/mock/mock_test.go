@@ -149,28 +149,6 @@ func TestNewMockAdapter_FloatTokenValues(t *testing.T) {
 	}
 }
 
-func TestRegistration(t *testing.T) {
-	t.Parallel()
-
-	ctor, err := registry.Agents.Get("mock")
-	if err != nil {
-		t.Fatalf("registry.Agents.Get(\"mock\") error = %v", err)
-	}
-
-	adapter, err := ctor()
-	if err != nil {
-		t.Fatalf("constructor() error = %v", err)
-	}
-	if adapter == nil {
-		t.Fatal("constructor() returned nil adapter")
-	}
-}
-
-// TestMCPInjectionConformance proves mock's declared disposition pins
-// its true behavior: it launches no process, so its launch surface is
-// empty. The call stays in place even though mock builds no launch
-// surface, because a kind with no call is a kind whose declaration
-// nothing checks.
 func TestMCPInjectionConformance(t *testing.T) {
 	t.Parallel()
 
@@ -179,7 +157,14 @@ func TestMCPInjectionConformance(t *testing.T) {
 		t.Fatal(`registry.Agents.Meta("mock") reported not registered`)
 	}
 
-	agenttest.AssertMCPInjection(t, declared.MCPInjection, "/ws/.sortie/mcp.json", agenttest.MCPLaunchSurface{})
+	if declared.MCPDialect != registry.MCPDialectNone {
+		t.Errorf("MCPDialect = %q, want %q", declared.MCPDialect, registry.MCPDialectNone)
+	}
+	if declared.MCPDialectNoneReason == "" {
+		t.Error("MCPDialectNoneReason is empty, want the reason mock delivers no tool server")
+	}
+
+	agenttest.AssertMCPInjection(t, declared.MCPDialect, "/ws/.sortie/mcp.json", agenttest.MCPLaunchSurface{})
 }
 
 func TestStartSession(t *testing.T) {

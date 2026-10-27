@@ -1,6 +1,7 @@
 package adaptertest
 
 import (
+	"cmp"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -139,6 +140,8 @@ const (
 	ruleUSAGESUM    contractRule = "USAGESUM"
 
 	ruleGROUPSIGNAL contractRule = "GROUPSIGNAL"
+
+	ruleMCPMODEL contractRule = "MCPMODEL"
 )
 
 // contractWorkspacekitImportPath is resolved per file so an aliased or
@@ -192,6 +195,7 @@ var contractSharedFamilyPackages = map[string]contractSharedPackage{
 	"github.com/sortie-ai/sortie/internal/agent/agentcore":                 {reason: "shared agent session, event, and disposition core; registers no kind and holds no adapter", coreImportable: true},
 	"github.com/sortie-ai/sortie/internal/agent/mcpconfig":                 {reason: "shared MCP configuration parsing; registers no kind and holds no adapter", coreImportable: true},
 	"github.com/sortie-ai/sortie/internal/agent/sshutil":                   {reason: "shared SSH invocation helpers; registers no kind and holds no adapter", coreImportable: true},
+	"github.com/sortie-ai/sortie/internal/agent/toolrelay":                 {reason: "shared HTTP tool-server relay lifecycle and delivery decision; registers no kind and holds no adapter", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc":                   {reason: "shared newline-delimited JSON-RPC framing and message delivery; registers no kind and holds no adapter", coreImportable: true},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest":                 {reason: "shared agent-adapter test support; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest": {reason: "shared turn-disposition conformance assertion, keyed separately because keys match exactly; registers no kind and holds no adapter; its non-test files import testing, so production code must not reach it", coreImportable: false},
@@ -232,7 +236,8 @@ var contractAllowlist = map[string]map[contractRule]string{
 		ruleUSAGESUM:    "owns AddUsage, the one place the counters are summed",
 	},
 	"agenttest": {
-		ruleCAPTURE: "test-support package that cmd/sortie does not link",
+		ruleCAPTURE:  "test-support package that cmd/sortie does not link",
+		ruleMCPMODEL: "test-support package that cmd/sortie does not link",
 	},
 	"fakemodel": {
 		ruleCAPTURE: "test-support package that cmd/sortie does not link",
@@ -2949,7 +2954,10 @@ var contractAnchorSortieDirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "RunWorkerAttempt", reason: "exported summary path"},
 	{importPath: "github.com/sortie-ai/sortie/tools/qualify/probe", name: "writeToolServerMCPConfig", reason: "fixture path"},
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "NewSortieTools", reason: "returned path"},
-	{importPath: "github.com/sortie-ai/sortie/internal/agent/claude", name: "alwaysLoadToolServer", reason: "location check and returned path"},
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/claude", name: "writeDerivedConfig", reason: "returned path"},
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/copilot", name: "writeDerivedConfig", reason: "returned path"},
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "WriteSeededMCPConfig", reason: "returned path"},
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "assertMalformedMCPConfigRejected", reason: "fixture path"},
 }
 
 // contractWorkdirSites pairs each exec.Cmd.Dir assignment rule WORKDIR
@@ -7159,5 +7167,537 @@ func init() {
 	}
 	if !contractPackageRegistersKind([]*ast.File{file}) {
 		t.Error("contractPackageRegistersKind() = false for a package that registers only a retired kind, want true")
+	}
+}
+
+const (
+	contractMCPConfigImportPath = contractAgentFamilyPath + "/mcpconfig"
+	contractToolrelayImportPath = contractAgentFamilyPath + "/toolrelay"
+	contractAgentcoreImportPath = contractAgentFamilyPath + "/agentcore"
+	contractMCPConfigPathField  = "MCPConfigPath"
+	contractToolSessionReason   = "owns ToolSession"
+)
+
+type contractMCPModelSurface struct {
+	importPath   string
+	allowedNames []string
+	allowConsts  bool
+	exports      map[string]token.Token
+}
+
+func (s contractMCPModelSurface) base() string { return path.Base(s.importPath) }
+
+func (s contractMCPModelSurface) allows(name string) bool {
+	return slices.Contains(s.allowedNames, name) || (s.allowConsts && s.exports[name] == token.CONST)
+}
+
+var contractMCPModelGoverned = []contractMCPModelSurface{
+	{
+		importPath:   contractMCPConfigImportPath,
+		allowedNames: []string{"Delivery", "StdioLaunch", "Endpoint", "ErrUnknownDialect"},
+		allowConsts:  true,
+	},
+	{
+		importPath:   contractToolrelayImportPath,
+		allowedNames: []string{"GapNoticeStem", "ToolServersLabel"},
+	},
+}
+
+// contractMCPModelGrants widens the allowlist for one directory by
+// "<package>.<name>"; "<package>.*" grants every export. It lifts only the
+// use arm: an exported signature stays bound by the base allowlist.
+var contractMCPModelGrants = map[string]map[string]string{
+	"agentcore": {
+		"mcpconfig.Load":        contractToolSessionReason,
+		"mcpconfig.Config":      contractToolSessionReason,
+		"mcpconfig.RenderInput": contractToolSessionReason,
+		"toolrelay.*":           contractToolSessionReason,
+	},
+}
+
+func contractMCPModelGranted(grants map[string]string, s contractMCPModelSurface, name string) bool {
+	_, named := grants[s.base()+"."+name]
+	_, all := grants[s.base()+".*"]
+	return named || all
+}
+
+func contractMCPModelExports(files []*ast.File) map[string]token.Token {
+	exports := map[string]token.Token{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil && d.Name.IsExported() {
+					exports[d.Name.Name] = token.FUNC
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.TypeSpec:
+						if s.Name.IsExported() {
+							exports[s.Name.Name] = token.TYPE
+						}
+					case *ast.ValueSpec:
+						for _, name := range s.Names {
+							if name.IsExported() {
+								exports[name.Name] = d.Tok
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return exports
+}
+
+func contractMCPModelSurfaces(walked []contractWalkedPackage) []contractMCPModelSurface {
+	surfaces := slices.Clone(contractMCPModelGoverned)
+	for i := range surfaces {
+		for _, w := range walked {
+			if w.pkg.importPath == surfaces[i].importPath {
+				surfaces[i].exports = contractMCPModelExports(w.pkg.files)
+			}
+		}
+	}
+	return surfaces
+}
+
+func contractMCPModelWalkType(node ast.Node, onSel func(*ast.SelectorExpr), onIdent func(*ast.Ident)) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Field:
+			contractMCPModelWalkType(x.Type, onSel, onIdent)
+			return false
+		case *ast.SelectorExpr:
+			onSel(x)
+			return false
+		case *ast.Ident:
+			if onIdent != nil {
+				onIdent(x)
+			}
+		}
+		return true
+	})
+}
+
+func contractMCPModelExportedTypeNodes(expr ast.Expr) []ast.Node {
+	var fields *ast.FieldList
+	switch t := expr.(type) {
+	case *ast.StructType:
+		fields = t.Fields
+	case *ast.InterfaceType:
+		fields = t.Methods
+	default:
+		return []ast.Node{expr}
+	}
+	var nodes []ast.Node
+	for _, f := range fields.List {
+		if len(f.Names) == 0 || slices.ContainsFunc(f.Names, (*ast.Ident).IsExported) {
+			nodes = append(nodes, f.Type)
+		}
+	}
+	return nodes
+}
+
+func contractMCPModelSignatureNodes(decl ast.Decl, typeFilter func(name string) bool) []ast.Node {
+	var nodes []ast.Node
+	switch d := decl.(type) {
+	case *ast.FuncDecl:
+		base := contractReceiverBaseType(d)
+		switch {
+		case !d.Name.IsExported():
+		case d.Recv == nil && typeFilter == nil:
+			nodes = append(nodes, d.Type)
+		case d.Recv != nil && ast.IsExported(base) && (typeFilter == nil || typeFilter(base)):
+			nodes = append(nodes, d.Type)
+		}
+	case *ast.GenDecl:
+		for _, spec := range d.Specs {
+			switch s := spec.(type) {
+			case *ast.TypeSpec:
+				if s.Name.IsExported() && (typeFilter == nil || typeFilter(s.Name.Name)) {
+					nodes = append(nodes, contractMCPModelExportedTypeNodes(s.Type)...)
+				}
+			case *ast.ValueSpec:
+				if typeFilter == nil && s.Type != nil && slices.ContainsFunc(s.Names, (*ast.Ident).IsExported) {
+					nodes = append(nodes, s.Type)
+				}
+			}
+		}
+	}
+	return nodes
+}
+
+func checkContractMCPModelFile(fset *token.FileSet, file *ast.File, importPath string, surfaces []contractMCPModelSurface, grants map[string]string) []contractViolation {
+	var violations []contractViolation
+	reported := map[token.Pos]bool{}
+	report := func(pos token.Pos, text string) {
+		if reported[pos] {
+			return
+		}
+		reported[pos] = true
+		violations = append(violations, contractViolation{pos: fset.Position(pos), text: text})
+	}
+
+	locals := map[string]contractMCPModelSurface{}
+	self := -1
+	for i, s := range surfaces {
+		if s.importPath == importPath {
+			self = i
+			continue
+		}
+		switch name := resolveContractImportName(file, s.importPath); name {
+		case "", "_":
+		case ".":
+			report(importPos(file, s.importPath), "dot-imports "+s.importPath+"; a reference reached through it evades rule "+string(ruleMCPMODEL))
+		default:
+			locals[name] = s
+		}
+	}
+	governedSelector := func(sel *ast.SelectorExpr) (contractMCPModelSurface, bool) {
+		ident, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return contractMCPModelSurface{}, false
+		}
+		s, ok := locals[ident.Name]
+		return s, ok
+	}
+	namesBeyondAllowlist := func(sel *ast.SelectorExpr) {
+		if s, ok := governedSelector(sel); ok && !s.allows(sel.Sel.Name) {
+			report(sel.Pos(), "exported API names "+s.base()+"."+sel.Sel.Name+" in its type; only the allowlisted surface may appear in one")
+		}
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if s, ok := governedSelector(sel); ok && !s.allows(sel.Sel.Name) && !contractMCPModelGranted(grants, s, sel.Sel.Name) {
+			report(sel.Pos(), "uses "+s.base()+"."+sel.Sel.Name+", beyond the surface outside code may use; the session owner reaches it")
+		}
+		return true
+	})
+
+	for _, decl := range file.Decls {
+		for _, node := range contractMCPModelSignatureNodes(decl, nil) {
+			contractMCPModelWalkType(node, namesBeyondAllowlist, nil)
+		}
+	}
+
+	if self >= 0 {
+		own := surfaces[self]
+		isAllowlistedType := func(name string) bool { return slices.Contains(own.allowedNames, name) }
+		for _, decl := range file.Decls {
+			for _, node := range contractMCPModelSignatureNodes(decl, isAllowlistedType) {
+				contractMCPModelWalkType(node, namesBeyondAllowlist, func(id *ast.Ident) {
+					if _, exported := own.exports[id.Name]; exported && !own.allows(id.Name) {
+						report(id.Pos(), "allowlisted type names "+own.base()+"."+id.Name+" in an exported field or method; only the allowlisted surface may appear there")
+					}
+				})
+			}
+		}
+	}
+
+	if contractPathIsUnder(importPath, contractAgentFamilyPath) && !contractPathIsUnder(importPath, contractAgentcoreImportPath) {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == contractMCPConfigPathField {
+				report(sel.Pos(), "selects "+contractMCPConfigPathField+"; only agentcore reads the generated config path")
+			}
+			return true
+		})
+	}
+
+	return violations
+}
+
+func checkContractMCPModelPackage(fset *token.FileSet, pkg contractPackage, surfaces []contractMCPModelSurface) []contractViolation {
+	if contractExempt(pkg.dirName, ruleMCPMODEL) {
+		return nil
+	}
+	var violations []contractViolation
+	for _, file := range pkg.files {
+		violations = append(violations, checkContractMCPModelFile(fset, file, pkg.importPath, surfaces, contractMCPModelGrants[pkg.dirName])...)
+	}
+	return violations
+}
+
+func contractDomainDeclaresField(walked []contractWalkedPackage, typeName, field string) bool {
+	for _, w := range walked {
+		if w.pkg.importPath != contractDomainImportPath {
+			continue
+		}
+		for _, file := range w.pkg.files {
+			for _, decl := range file.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok {
+					continue
+				}
+				for _, spec := range gen.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok || ts.Name.Name != typeName {
+						continue
+					}
+					st, isStruct := ts.Type.(*ast.StructType)
+					if !isStruct {
+						continue
+					}
+					for _, f := range st.Fields.List {
+						if slices.ContainsFunc(f.Names, func(n *ast.Ident) bool { return n.Name == field }) {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func contractCheckMCPModelCurrent(r contractIdentityReporter, surfaces []contractMCPModelSurface, grants map[string]map[string]string, found map[string]bool) {
+	for _, s := range surfaces {
+		if len(s.exports) == 0 {
+			r.Errorf("rule %s governs %s, but the walk found no exported declaration in it", ruleMCPMODEL, s.importPath)
+		}
+		for _, name := range s.allowedNames {
+			if _, ok := s.exports[name]; !ok {
+				r.Errorf("rule %s allowlists %s.%s, which names no declaration", ruleMCPMODEL, s.base(), name)
+			}
+		}
+	}
+	for dirName, entries := range grants {
+		if !found[dirName] {
+			r.Errorf("contractMCPModelGrants[%q] names a directory the walk did not find", dirName)
+		}
+		for entry := range entries {
+			pkgName, name, _ := strings.Cut(entry, ".")
+			idx := slices.IndexFunc(surfaces, func(s contractMCPModelSurface) bool { return s.base() == pkgName })
+			if idx < 0 {
+				r.Errorf("contractMCPModelGrants[%q] grants %q, but no governed package is named %q", dirName, entry, pkgName)
+				continue
+			}
+			if _, ok := surfaces[idx].exports[name]; !ok && name != "*" {
+				r.Errorf("contractMCPModelGrants[%q] grants %q, which names no declaration", dirName, entry)
+			}
+		}
+	}
+	contractCheckWideRuleAllowlist(r, ruleMCPMODEL, found)
+}
+
+func TestContractMCPModel(t *testing.T) {
+	fset := token.NewFileSet()
+	walked := contractWalkCaptureAndTeardown(t, fset)
+	surfaces := contractMCPModelSurfaces(walked)
+
+	found := map[string]bool{}
+	for _, w := range walked {
+		found[w.pkg.dirName] = true
+	}
+
+	contractCheckMCPModelCurrent(t, surfaces, contractMCPModelGrants, found)
+	if !contractDomainDeclaresField(walked, "StartSessionParams", contractMCPConfigPathField) {
+		t.Errorf("domain.StartSessionParams declares no %s field, which rule %s keeps agent adapters from reading", contractMCPConfigPathField, ruleMCPMODEL)
+	}
+
+	for _, w := range walked {
+		for _, v := range checkContractMCPModelPackage(fset, w.pkg, surfaces) {
+			t.Errorf("%s: %s", v.pos, v.text)
+		}
+	}
+}
+
+const contractMCPModelFixtureMCPConfig = `package mcpconfig
+
+const ToolServerName = "sortie-tools"
+
+type Delivery struct{ Document []byte }
+type StdioLaunch struct{ Command string }
+type Endpoint struct{ URL string }
+type Config struct{}
+type RenderInput struct{}
+
+var ErrUnknownDialect error
+
+func Load(path string) (Config, error) { return Config{}, nil }
+`
+
+const contractMCPModelFixtureToolrelay = `package toolrelay
+
+const (
+	GapNoticeStem    = "stem"
+	ToolServersLabel = "label"
+)
+`
+
+func mustParseMCPModelFile(t *testing.T, fset *token.FileSet, src string) *ast.File {
+	t.Helper()
+
+	file, err := parser.ParseFile(fset, "fixture.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parser.ParseFile: %v", err)
+	}
+	return file
+}
+
+func mustMCPModelSurfaces(t *testing.T, fset *token.FileSet, mcpconfigSrc string) []contractMCPModelSurface {
+	t.Helper()
+
+	return contractMCPModelSurfaces([]contractWalkedPackage{
+		{pkg: contractPackage{importPath: contractMCPConfigImportPath, files: []*ast.File{mustParseMCPModelFile(t, fset, mcpconfigSrc)}}},
+		{pkg: contractPackage{importPath: contractToolrelayImportPath, files: []*ast.File{mustParseMCPModelFile(t, fset, contractMCPModelFixtureToolrelay)}}},
+	})
+}
+
+func TestCheckContractMCPModel_DetectsViolations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		dirName      string
+		mcpconfigSrc string
+		src          string
+		wantCount    int
+		wantSubstr   string
+	}{
+		{
+			name: "an adapter loading the server model and rendering it",
+			src: `package fixture
+
+import "github.com/sortie-ai/sortie/internal/agent/mcpconfig"
+
+func place(p string) {
+	c, _ := mcpconfig.Load(p)
+	c.Render("", mcpconfig.RenderInput{})
+}
+`,
+			wantCount:  2,
+			wantSubstr: "mcpconfig.Load",
+		},
+		{
+			name: "an adapter reading MCPConfigPath",
+			src: `package fixture
+
+import (
+	"os"
+
+	"github.com/sortie-ai/sortie/internal/domain"
+)
+
+func read(params domain.StartSessionParams) { _, _ = os.ReadFile(params.MCPConfigPath) }
+`,
+			wantCount:  1,
+			wantSubstr: contractMCPConfigPathField,
+		},
+		{
+			name:         "an adapter using a renamed export",
+			mcpconfigSrc: "package mcpconfig\n\ntype Dispatch struct{}\n",
+			src: `package fixture
+
+import "github.com/sortie-ai/sortie/internal/agent/mcpconfig"
+
+var _ mcpconfig.Dispatch
+`,
+			wantCount:  1,
+			wantSubstr: "mcpconfig.Dispatch",
+		},
+		{
+			name:    "a granted package exporting a banned model type in a signature",
+			dirName: "agentcore",
+			src: `package fixture
+
+import "github.com/sortie-ai/sortie/internal/agent/mcpconfig"
+
+func Open() mcpconfig.Config { return mcpconfig.Config{} }
+`,
+			wantCount:  1,
+			wantSubstr: "mcpconfig.Config",
+		},
+		{
+			name: "an adapter using only the allowlisted surface",
+			src: `package fixture
+
+import (
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
+	"github.com/sortie-ai/sortie/internal/agent/toolrelay"
+)
+
+var (
+	_ mcpconfig.Delivery
+	_ = mcpconfig.ErrUnknownDialect
+	_ = toolrelay.GapNoticeStem
+)
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fset := token.NewFileSet()
+			surfaces := mustMCPModelSurfaces(t, fset, cmp.Or(tt.mcpconfigSrc, contractMCPModelFixtureMCPConfig))
+			pkg := contractPackage{
+				dirName:    cmp.Or(tt.dirName, "fixture"),
+				importPath: contractAgentFamilyPath + "/fixture",
+				files:      []*ast.File{mustParseMCPModelFile(t, fset, tt.src)},
+			}
+
+			got := checkContractMCPModelPackage(fset, pkg, surfaces)
+
+			if len(got) != tt.wantCount {
+				t.Fatalf("checkContractMCPModelPackage(%s) = %+v, want %d violations", tt.name, got, tt.wantCount)
+			}
+			if tt.wantSubstr != "" && !slices.ContainsFunc(got, func(v contractViolation) bool {
+				return strings.Contains(v.text, tt.wantSubstr)
+			}) {
+				t.Errorf("checkContractMCPModelPackage(%s) = %+v, want one containing %q", tt.name, got, tt.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestContractMCPModel_StalenessGuardCatchesRealBreaks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		mcpconfigSrc string
+		grants       map[string]map[string]string
+		wantErrors   bool
+	}{
+		{
+			name:         "the fixture surfaces and the real grants",
+			mcpconfigSrc: contractMCPModelFixtureMCPConfig,
+			grants:       contractMCPModelGrants,
+		},
+		{
+			name:         "an allowlisted export was renamed",
+			mcpconfigSrc: strings.Replace(contractMCPModelFixtureMCPConfig, "type Delivery ", "type Dispatch ", 1),
+			grants:       contractMCPModelGrants,
+			wantErrors:   true,
+		},
+		{
+			name:         "a grant names no declaration",
+			mcpconfigSrc: contractMCPModelFixtureMCPConfig,
+			grants:       map[string]map[string]string{"agentcore": {"mcpconfig.Gone": "stale"}},
+			wantErrors:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			surfaces := mustMCPModelSurfaces(t, token.NewFileSet(), tt.mcpconfigSrc)
+			found := map[string]bool{"agentcore": true, "agenttest": true}
+
+			reporter := &contractStalenessFakeReporter{}
+			contractCheckMCPModelCurrent(reporter, surfaces, tt.grants, found)
+
+			if got := len(reporter.errors) > 0; got != tt.wantErrors {
+				t.Errorf("contractCheckMCPModelCurrent(%s) reported %v, want errors = %v", tt.name, reporter.errors, tt.wantErrors)
+			}
+		})
 	}
 }

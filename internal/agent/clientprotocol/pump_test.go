@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -346,7 +345,7 @@ func TestToolDeliveryReportSkippedDuringWindDownAndTeardown(t *testing.T) {
 		inPr, _ := io.Pipe()
 		var buf bytes.Buffer
 		state := &sessionState{
-			caps:   newCapabilityRecord(false, false),
+			caps:   newCapabilityRecord(false),
 			stopCh: make(chan struct{}),
 			logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		}
@@ -417,6 +416,22 @@ func TestHandshakeToolServersDeliveredReachesPump(t *testing.T) {
 // before the burst ends.
 const stalledConsumerBurstCount = 4096
 
+const stalledConsumerChunkAlphabet = "!#$%&*+/:;<=>?@^~|"
+
+// A chunk avoids every character a registered secret can start with: tool
+// relays in parallel tests register hex bearers process-wide, and truncating an
+// aggregate drops a trailing fragment that is a prefix of a registered value.
+func stalledConsumerChunkText(i int) string {
+	var text strings.Builder
+	base := len(stalledConsumerChunkAlphabet)
+	for n := i; ; n /= base {
+		text.WriteByte(stalledConsumerChunkAlphabet[n%base])
+		if n < base {
+			return text.String()
+		}
+	}
+}
+
 func TestRunTurn_StalledConsumerDoesNotParkPump(t *testing.T) {
 	t.Parallel()
 
@@ -444,9 +459,12 @@ func TestRunTurn_StalledConsumerDoesNotParkPump(t *testing.T) {
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 
 	var wantText strings.Builder
+	chunkTexts := make(map[string]struct{}, stalledConsumerBurstCount)
 	for i := range stalledConsumerBurstCount {
-		line := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%d"}}}}`, i)
-		wantText.WriteString(strconv.Itoa(i))
+		chunkText := stalledConsumerChunkText(i)
+		line := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":%q}}}}`, chunkText)
+		wantText.WriteString(chunkText)
+		chunkTexts[chunkText] = struct{}{}
 		errCh := make(chan error, 1)
 		go func() {
 			_, writeErr := fmt.Fprintln(inPw, line)
@@ -481,7 +499,7 @@ func TestRunTurn_StalledConsumerDoesNotParkPump(t *testing.T) {
 		case wantMessage:
 			completeMessages++
 		default:
-			if _, err := strconv.Atoi(e.Message); err == nil {
+			if _, isChunk := chunkTexts[e.Message]; isChunk {
 				partialChunks++
 			}
 		}
@@ -616,7 +634,7 @@ func newTestSessionWithRelease(t *testing.T, grace time.Duration, reaped <-chan 
 	inPr, inPw := io.Pipe()
 
 	state := &sessionState{
-		caps:     newCapabilityRecord(false, false),
+		caps:     newCapabilityRecord(false),
 		usage:    agentcore.NewTurnEndUsage(),
 		stopCh:   make(chan struct{}),
 		pumpDone: make(chan struct{}),
@@ -743,7 +761,7 @@ func TestHandleStartTurnRefusedOnceReleaseAbandonedBeforePumpHandlesIt(t *testin
 
 	p := &pumpState{
 		state: &sessionState{
-			caps:    newCapabilityRecord(false, false),
+			caps:    newCapabilityRecord(false),
 			logger:  discardLogger(),
 			usage:   agentcore.NewTurnEndUsage(),
 			release: buildAbandonedRelease(t),

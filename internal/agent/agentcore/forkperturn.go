@@ -22,8 +22,8 @@ import (
 // ForkPerTurnHooks provides the adapter-specific behavior points plugged into
 // [ForkPerTurnSession]. BuildArgs, ParseLine, GetUsage, GetSessionID, and
 // OnFinalize are required. EmitSessionStartID, PromptOnStdin,
-// FirstEventTimeout, SettleUsage, and TurnEnv are optional, and each zero
-// value keeps the default turn behavior.
+// FirstEventTimeout, SettleUsage, TurnEnv, Tools, and ToolPlacement
+// are optional, and each zero value keeps the default turn behavior.
 type ForkPerTurnHooks struct {
 	// BuildArgs is called once per RunTurn before the subprocess starts.
 	// turn is the prospective 1-based turn number for this session
@@ -146,6 +146,14 @@ type ForkPerTurnHooks struct {
 	// an SSH launch carries. Nil keeps the host environment and no
 	// settings.
 	TurnEnv func() (environ []string, sshEnv []sshutil.EnvVar)
+
+	// Tools is the session's tool-server delivery; Stop closes it. Nil
+	// delivers no tool servers.
+	Tools *ToolSession
+
+	// ToolPlacement is required when Tools is non-nil and the target is
+	// remote.
+	ToolPlacement PlaceFunc
 }
 
 // endTurnError is the ParseLine error that ends the turn.
@@ -253,6 +261,9 @@ func NewForkPerTurnSession(
 	if logger == nil {
 		panic("agentcore: ForkPerTurnSession logger must be non-nil")
 	}
+	if hooks.Tools != nil && target.RemoteCommand != "" && hooks.ToolPlacement == nil {
+		panic("agentcore: ForkPerTurnHooks.ToolPlacement must be non-nil when Tools is set on a remote launch")
+	}
 	return &ForkPerTurnSession{
 		target:     target,
 		hooks:      hooks,
@@ -293,6 +304,9 @@ func (s *ForkPerTurnSession) RunTurn(
 ) (domain.TurnResult, error) {
 	if emit == nil {
 		panic("agentcore: ForkPerTurnSession.RunTurn: emit must be non-nil")
+	}
+	if s.hooks.Tools != nil {
+		emit = s.hooks.Tools.Emit(emit, nil)
 	}
 
 	var spend TurnSpend
@@ -337,15 +351,23 @@ func (s *ForkPerTurnSession) RunTurn(
 	if s.hooks.TurnEnv != nil {
 		environ, sshEnv = s.hooks.TurnEnv()
 	}
+	if s.hooks.Tools != nil && s.target.RemoteCommand == "" {
+		environ = append(slices.Clip(environ), s.hooks.Tools.LocalEnv()...)
+	}
 
 	var cmd *exec.Cmd
+	var launch sshutil.SSHLaunch
 	if s.target.RemoteCommand != "" {
-		launch := sshutil.BuildSSHLaunch(
+		opts := s.target.SSHOptions(sshEnv...)
+		if s.hooks.Tools != nil {
+			opts.Forward = s.hooks.Tools.Forward(s.hooks.ToolPlacement)
+		}
+		launch = sshutil.BuildSSHLaunch(
 			s.target.SSHHost,
 			s.target.WorkspacePath,
 			s.target.RemoteCommand,
 			cmdArgs,
-			s.target.SSHOptions(sshEnv...),
+			opts,
 		)
 		cmd = exec.CommandContext(cmdCtx, s.target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 		cmd.Stdin = s.turnStdin(launch.StdinReader(), prompt)
@@ -452,7 +474,9 @@ func (s *ForkPerTurnSession) RunTurn(
 		EmitSessionStarted(emit, pidStr, s.hooks.EmitSessionStartID())
 	}
 
-	stderrCollector := procutil.NewStderrCollector(pipes.Stderr, logger)
+	// A forwarded launch holds its standard input until the collector reads
+	// the forward's outcome from standard error.
+	stderrCollector := procutil.NewStderrCollector(launch.WatchStderr(pipes.Stderr), logger)
 	reader := procutil.NewStdoutReader(pipes.Stdout, logger)
 	reaper := procutil.StartReaper(cmd, logger)
 
@@ -697,7 +721,7 @@ func (s *ForkPerTurnSession) turnStdin(preamble io.Reader, prompt string) io.Rea
 // be reaped and its process group cleaned up, which RunTurn's wait sequence
 // reports as soon as the reap completes rather than at the end of its own
 // stdout drain. If no subprocess is running, Stop returns immediately with
-// nil.
+// nil. Every return closes [ForkPerTurnHooks.Tools] after the teardown.
 //
 // Shutdown sequence:
 //  1. SIGTERM to process group ([procutil.Group.SignalGraceful])
@@ -705,6 +729,10 @@ func (s *ForkPerTurnSession) turnStdin(preamble io.Reader, prompt string) io.Rea
 //  3. If the grace elapses: SIGKILL to process group
 //  4. If ctx is cancelled before waitCh closes: SIGKILL and return ctx.Err()
 func (s *ForkPerTurnSession) Stop(ctx context.Context) error {
+	if s.hooks.Tools != nil {
+		defer s.hooks.Tools.Close() //nolint:errcheck // Stop reports the runtime's own teardown, and Relay.Close logs a forced termination itself
+	}
+
 	s.mu.Lock()
 	group := s.group
 	waitCh := s.waitCh

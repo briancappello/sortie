@@ -228,11 +228,10 @@ type WorkerResult struct {
 // SessionToolRegistryFunc builds the first-turn tool advertisement.
 type SessionToolRegistryFunc func(ctx context.Context, issueID, workspacePath string) (*domain.ToolRegistry, error)
 
-// AgentToolChannelFunc reports whether a session of the given kind, in the
-// given mode, can execute the registry's tools. remote is true for SSH. A
-// nil [WorkerDeps.AgentToolChannelFunc] means the answer is unknown, not
-// that no channel exists.
-type AgentToolChannelFunc func(kind string, remote bool) bool
+// AgentToolChannelFunc reports whether a session of the given kind can
+// execute the registry's tools. A nil [WorkerDeps.AgentToolChannelFunc]
+// means the answer is unknown, not that no channel exists.
+type AgentToolChannelFunc func(kind string) bool
 
 // SSHEnvNamesFunc returns the env var names to carry into a remote session
 // of the given kind: the kind's declared credential names plus the
@@ -381,8 +380,8 @@ type WorkerDeps struct {
 	// worker falls back to ToolRegistry. Optional.
 	SessionToolRegistryFunc SessionToolRegistryFunc
 
-	// AgentToolChannelFunc reports whether the session's kind and mode can
-	// reach the tools the advertisement would name. Nil means unknown, and
+	// AgentToolChannelFunc reports whether the session's kind can reach
+	// the tools the advertisement would name. Nil means unknown, and
 	// the worker withholds the advertisement rather than name uncallable
 	// tools. Optional.
 	AgentToolChannelFunc AgentToolChannelFunc
@@ -1417,14 +1416,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		}
 
 		if turnNumber == 1 {
-			remote := strings.TrimSpace(deps.SSHHost) != ""
 			switch {
 			case deps.AgentToolChannelFunc == nil:
 				logger.Warn("tool channel unknown for agent kind, withholding tool advertisement",
 					slog.String("agent_kind", agentKind))
-			case !deps.AgentToolChannelFunc(agentKind, remote):
+			case !deps.AgentToolChannelFunc(agentKind) || session.NoToolChannel:
 				logger.Info("no tool execution channel for this session, withholding tool advertisement",
-					slog.String("agent_kind", agentKind), slog.Bool("remote", remote))
+					slog.String("agent_kind", agentKind))
 			default:
 				if deps.SessionToolRegistryFunc != nil {
 					sessionReg, err := deps.SessionToolRegistryFunc(ctx, issue.ID, wsResult.Path)

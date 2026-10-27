@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
@@ -34,19 +35,26 @@ func newTestSession(t *testing.T, agentConfig domain.AgentConfig, maxLineBytes i
 func withUsageReader(reader usageReader) func(*sessionState) {
 	return func(state *sessionState) {
 		state.inbox.Put(pumpItem{control: &pumpControl{handshake: &handshakeFacts{reader: reader}}})
-		state.caps = newCapabilityRecord(false, true)
+		state.caps = newCapabilityRecord(true)
 	}
 }
 
 func newTestSessionWithLogger(t *testing.T, agentConfig domain.AgentConfig, maxLineBytes int, logger *slog.Logger) (*sessionState, *io.PipeReader, *io.PipeWriter) {
 	t.Helper()
 
+	tools, agentErr := agentcore.ResolveToolDelivery(t.Context(), domain.StartSessionParams{}, agentcore.LaunchTarget{}, registry.MCPDialectACPSession, logger)
+	if agentErr != nil {
+		t.Fatalf("ResolveToolDelivery() = %v, want nil", agentErr)
+	}
+	t.Cleanup(func() { _ = tools.Close() })
+
 	outPr, outPw := io.Pipe()
 	inPr, inPw := io.Pipe()
 
 	state := &sessionState{
+		tools:       tools,
 		agentConfig: agentConfig,
-		caps:        newCapabilityRecord(false, false),
+		caps:        newCapabilityRecord(false),
 		usage:       agentcore.NewTurnEndUsage(),
 		stopCh:      make(chan struct{}),
 		pumpDone:    make(chan struct{}),

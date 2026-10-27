@@ -19,6 +19,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest"
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/waittest"
@@ -322,7 +323,6 @@ func TestStartSession_DefaultCommand(t *testing.T) {
 func TestStartSession_SSHMode(t *testing.T) {
 	t.Parallel()
 
-	// SSH mode requires ssh on PATH; skip otherwise.
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		t.Skip("ssh not available on PATH")
@@ -330,14 +330,18 @@ func TestStartSession_SSHMode(t *testing.T) {
 
 	adapter, _ := NewCopilotAdapter()
 	workspace := t.TempDir()
+	hostPath := agenttest.WriteSeededMCPConfig(t, workspace)
 	session, lookupErr := adapter.StartSession(context.Background(), domain.StartSessionParams{
 		WorkspacePath: workspace,
 		AgentConfig:   domain.AgentConfig{Command: "copilot"},
 		SSHHost:       "dev-host.example.com",
+		MCPConfigPath: hostPath,
+		Settings:      map[string]any{"mcp_config": "/op/mcp.json"},
 	})
 	if lookupErr != nil {
 		t.Fatalf("StartSession() (SSH mode) error = %v", lookupErr)
 	}
+	t.Cleanup(func() { _ = adapter.StopSession(t.Context(), session) })
 
 	state := session.Internal.(*sessionState)
 	if state.target.SSHHost != "dev-host.example.com" {
@@ -348,6 +352,38 @@ func TestStartSession_SSHMode(t *testing.T) {
 	}
 	if state.target.Command != sshPath {
 		t.Errorf("state.target.Command = %q, want %q (ssh binary)", state.target.Command, sshPath)
+	}
+
+	args := buildArgs(state, 1, "do work", state.passthrough)
+
+	for _, hostFile := range []string{hostPath, "/op/mcp.json"} {
+		if i := slices.IndexFunc(args, func(arg string) bool { return strings.Contains(arg, hostFile) }); i >= 0 {
+			t.Errorf("buildArgs() (SSH mode) carries host path %q in argument %q, want none: [%s]", hostFile, args[i], strings.Join(args, " "))
+		}
+	}
+}
+
+func TestPlaceMCPConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		document string
+		want     []string
+	}{
+		{"document becomes the inline flag value", `{"mcpServers":{}}`, []string{"--additional-mcp-config", `{"mcpServers":{}}`}},
+		{"no document places nothing", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			late := placeMCPConfig(mcpconfig.Delivery{Document: []byte(tt.document)})
+
+			if !slices.Equal(late.Args, tt.want) || len(late.Env) != 0 {
+				t.Errorf("placeMCPConfig(%q) = %+v, want args %q and no env", tt.document, late, tt.want)
+			}
+		})
 	}
 }
 

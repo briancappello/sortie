@@ -1858,7 +1858,7 @@ func TestRunWorkerAttempt(t *testing.T) {
 			OnExit:                 ec.onExit,
 			Logger:                 discardLogger(),
 			ToolRegistry:           reg,
-			AgentToolChannelFunc:   func(string, bool) bool { return true },
+			AgentToolChannelFunc:   func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -1914,7 +1914,7 @@ func TestRunWorkerAttempt(t *testing.T) {
 			OnExit:                 ec.onExit,
 			Logger:                 discardLogger(),
 			ToolRegistry:           reg,
-			AgentToolChannelFunc:   func(string, bool) bool { return true },
+			AgentToolChannelFunc:   func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -2130,165 +2130,71 @@ func TestRunWorkerAttempt(t *testing.T) {
 		}
 	})
 
-	t.Run("resolver reporting no channel withholds advertisement and logs info", func(t *testing.T) {
+	t.Run("a session without a tool channel withholds advertisement and logs info", func(t *testing.T) {
 		t.Parallel()
 
-		tmpDir := t.TempDir()
-		cfg := defaultWorkerConfig(tmpDir)
-		cfg.Agent.MaxTurns = 1
-
-		ec := newExitCapture()
-		var capturedPrompt string
-		var mu sync.Mutex
-		var logs bytes.Buffer
-		logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-		reg := domain.NewToolRegistry()
-		reg.Register(&stubAgentTool{toolName: "tracker_api", desc: "Query issues"})
-
-		deps := WorkerDeps{
-			TrackerAdapter: &mockTrackerAdapter{},
-			AgentAdapter: &mockAgentAdapter{
-				runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
-					mu.Lock()
-					capturedPrompt = params.Prompt
-					mu.Unlock()
-					return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
-				},
-			},
-			ConfigFunc:             func() config.ServiceConfig { return cfg },
-			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "do work on {{ .issue.title }}") },
-			OnEvent:                func(_ string, _ domain.AgentEvent) {},
-			OnExit:                 ec.onExit,
-			Logger:                 logger,
-			ToolRegistry:           reg,
-			AgentToolChannelFunc:   func(string, bool) bool { return false },
+		tests := []struct {
+			name             string
+			resolverChannel  bool
+			sessionNoChannel bool
+		}{
+			{"resolver reports no channel", false, false},
+			{"session reports no tool channel", true, true},
 		}
 
-		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 
-		result := ec.waitResult(t)
-		if result.ExitKind != WorkerExitNormal {
-			t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
-		}
+				tmpDir := t.TempDir()
+				cfg := defaultWorkerConfig(tmpDir)
+				cfg.Agent.MaxTurns = 1
 
-		mu.Lock()
-		p := capturedPrompt
-		mu.Unlock()
+				ec := newExitCapture()
+				var capturedPrompt string
+				var mu sync.Mutex
 
-		if strings.Contains(p, "Available Sortie tools") {
-			t.Errorf("prompt should not contain tool advertisement when resolver reports no channel:\n%s", p)
-		}
+				reg := domain.NewToolRegistry()
+				reg.Register(&stubAgentTool{toolName: "tracker_api", desc: "Query issues"})
 
-		logOutput := logs.String()
-		if !strings.Contains(logOutput, "level=INFO") || !strings.Contains(logOutput, "no tool execution channel for this session") {
-			t.Errorf("log output = %q, want an INFO log containing %q", logOutput, "no tool execution channel for this session")
-		}
-	})
-
-	t.Run("resolver withholds advertisement for a remote session and appends for a local one", func(t *testing.T) {
-		t.Parallel()
-
-		tmpDir := t.TempDir()
-		cfg := defaultWorkerConfig(tmpDir)
-		cfg.Agent.MaxTurns = 1
-		cfg.Tracker.Project = "TESTPROJ"
-
-		reg := domain.NewToolRegistry()
-		reg.Register(&stubAgentTool{toolName: "tracker_api", desc: "Query issues"})
-
-		newDeps := func(sshHost string, capturedPrompt *string, mu *sync.Mutex, ec *exitCapture) WorkerDeps {
-			return WorkerDeps{
-				TrackerAdapter: &mockTrackerAdapter{},
-				AgentAdapter: &mockAgentAdapter{
-					runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
-						mu.Lock()
-						*capturedPrompt = params.Prompt
-						mu.Unlock()
-						return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
+				deps := WorkerDeps{
+					TrackerAdapter: &mockTrackerAdapter{},
+					AgentAdapter: &mockAgentAdapter{
+						startSessionFn: func(_ context.Context, _ domain.StartSessionParams) (domain.Session, error) {
+							return domain.Session{ID: "sess-1", NoToolChannel: tt.sessionNoChannel}, nil
+						},
+						runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+							mu.Lock()
+							capturedPrompt = params.Prompt
+							mu.Unlock()
+							return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
+						},
 					},
-				},
-				ConfigFunc:             func() config.ServiceConfig { return cfg },
-				PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "do work on {{ .issue.title }}") },
-				OnEvent:                func(_ string, _ domain.AgentEvent) {},
-				OnExit:                 ec.onExit,
-				Logger:                 discardLogger(),
-				ToolRegistry:           reg,
-				AgentToolChannelFunc: func(_ string, remote bool) bool {
-					return !remote
-				},
-				SSHHost: sshHost,
-			}
+					ConfigFunc:             func() config.ServiceConfig { return cfg },
+					PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "do work on {{ .issue.title }}") },
+					OnEvent:                func(_ string, _ domain.AgentEvent) {},
+					OnExit:                 ec.onExit,
+					Logger:                 discardLogger(),
+					ToolRegistry:           reg,
+					AgentToolChannelFunc:   func(string) bool { return tt.resolverChannel },
+				}
+
+				RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
+
+				result := ec.waitResult(t)
+				if result.ExitKind != WorkerExitNormal {
+					t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
+				}
+
+				mu.Lock()
+				p := capturedPrompt
+				mu.Unlock()
+
+				if strings.Contains(p, "Available Sortie tools") {
+					t.Errorf("turn 1 prompt contains the tool advertisement, want none:\n%s", p)
+				}
+			})
 		}
-
-		t.Run("remote session withholds", func(t *testing.T) {
-			t.Parallel()
-
-			var capturedPrompt string
-			var mu sync.Mutex
-			ec := newExitCapture()
-
-			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, newDeps("example.invalid", &capturedPrompt, &mu, ec))
-
-			result := ec.waitResult(t)
-			if result.ExitKind != WorkerExitNormal {
-				t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
-			}
-
-			mu.Lock()
-			p := capturedPrompt
-			mu.Unlock()
-
-			if strings.Contains(p, "Available Sortie tools") {
-				t.Errorf("remote session prompt should not contain tool advertisement:\n%s", p)
-			}
-		})
-
-		t.Run("local session appends", func(t *testing.T) {
-			t.Parallel()
-
-			var capturedPrompt string
-			var mu sync.Mutex
-			ec := newExitCapture()
-
-			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, newDeps("", &capturedPrompt, &mu, ec))
-
-			result := ec.waitResult(t)
-			if result.ExitKind != WorkerExitNormal {
-				t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
-			}
-
-			mu.Lock()
-			p := capturedPrompt
-			mu.Unlock()
-
-			if !strings.Contains(p, "Available Sortie tools") {
-				t.Errorf("local session prompt should contain tool advertisement:\n%s", p)
-			}
-		})
-
-		t.Run("whitespace-only SSH host is still a local launch", func(t *testing.T) {
-			t.Parallel()
-
-			var capturedPrompt string
-			var mu sync.Mutex
-			ec := newExitCapture()
-
-			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, newDeps("   ", &capturedPrompt, &mu, ec))
-
-			result := ec.waitResult(t)
-			if result.ExitKind != WorkerExitNormal {
-				t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
-			}
-
-			mu.Lock()
-			p := capturedPrompt
-			mu.Unlock()
-
-			if !strings.Contains(p, "Available Sortie tools") {
-				t.Errorf("whitespace-only SSHHost session prompt should contain tool advertisement (still counts as local):\n%s", p)
-			}
-		})
 	})
 }
 
@@ -6054,7 +5960,7 @@ func TestRuntimeStatusSuffixInjection(t *testing.T) {
 			OnExit:                 ec.onExit,
 			Logger:                 discardLogger(),
 			ToolRegistry:           reg,
-			AgentToolChannelFunc:   func(string, bool) bool { return true },
+			AgentToolChannelFunc:   func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -6341,7 +6247,7 @@ func TestRunWorkerAttempt_SessionToolRegistryFunc(t *testing.T) {
 			SessionToolRegistryFunc: func(_ context.Context, _, _ string) (*domain.ToolRegistry, error) {
 				return fakeAllToolsRegistry(), nil
 			},
-			AgentToolChannelFunc: func(string, bool) bool { return true },
+			AgentToolChannelFunc: func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -6403,7 +6309,7 @@ func TestRunWorkerAttempt_SessionToolRegistryFunc(t *testing.T) {
 			SessionToolRegistryFunc: func(_ context.Context, _, _ string) (*domain.ToolRegistry, error) {
 				return fakeAllToolsRegistry(), nil
 			},
-			AgentToolChannelFunc: func(string, bool) bool { return true },
+			AgentToolChannelFunc: func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -6456,7 +6362,7 @@ func TestRunWorkerAttempt_SessionToolRegistryFunc(t *testing.T) {
 			SessionToolRegistryFunc: func(_ context.Context, _, _ string) (*domain.ToolRegistry, error) {
 				return fakeAllToolsRegistry(), nil
 			},
-			AgentToolChannelFunc: func(string, bool) bool { return true },
+			AgentToolChannelFunc: func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -6518,7 +6424,7 @@ func TestRunWorkerAttempt_SessionToolRegistryFunc(t *testing.T) {
 			SessionToolRegistryFunc: func(_ context.Context, _, _ string) (*domain.ToolRegistry, error) {
 				return nil, errors.New("simulated builder failure")
 			},
-			AgentToolChannelFunc: func(string, bool) bool { return true },
+			AgentToolChannelFunc: func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
@@ -6578,7 +6484,7 @@ func TestRunWorkerAttempt_SessionToolRegistryFunc(t *testing.T) {
 			Logger:                  discardLogger(),
 			ToolRegistry:            reg,
 			SessionToolRegistryFunc: nil,
-			AgentToolChannelFunc:    func(string, bool) bool { return true },
+			AgentToolChannelFunc:    func(string) bool { return true },
 		}
 
 		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)

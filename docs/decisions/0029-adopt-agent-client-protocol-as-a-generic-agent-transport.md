@@ -150,6 +150,8 @@ Neither condition is a date, deliberately. A date would be a prediction, and the
 
 Two related choices follow from the same evidence. The client is written against the wire rather than against a published language binding, because the wire held still for a year while the bindings around it did not, and every measured migration in that window was a binding migration. And remote transports stay out of scope: the protocol's own normative transport page lists the remote mechanism and leaves its section empty, so there is nothing an independent implementer can build against and expect to interoperate with, whatever first-party code ships alongside.
 
+Tool-server delivery over a remote worker connection does not wait on a remote transport. The protocol re-expresses tool servers inside the session-creation request, and it describes a stdio server's launch command as an absolute path to an executable that the runtime resolves on its own host, so a stdio entry cannot reach a remote worker. Sortie's tool server stays on the orchestrator host, and the session-creation request declares it as an HTTP entry whose URL is the loopback end of an `ssh -R` reverse forward and whose `Authorization` header carries a per-session bearer token. The entry is sent only to a runtime that advertises `mcpCapabilities.http`, and a runtime that does not open its session with the gap declared and no tool advertisement. Every measured runtime that advertised HTTP support connected with the bearer through the forward. A local runtime that accepts only HTTP entries reaches the same server directly on loopback, with its own per-session bearer and no forward.
+
 ### Where the protocol types come from
 
 They are generated here from the pinned schema artifact, and the framing beneath them stays this project's own. No third-party language binding is taken. The choice is recorded before the first protocol type exists, because once those types exist everything else is built on them and the choice is close to irreversible.
@@ -190,8 +192,6 @@ This is not tolerance for its own sake. The published schema carries a marker re
 The cost is named in the negatives below: a change that keeps every field and changes what a value means passes through unnoticed.
 
 ### What this decision does not settle
-
-**Tool-server delivery over a remote worker connection.** Under the protocol, tool servers are re-expressed inside the session-creation request rather than handed over as a file path, and the protocol describes a server's launch command as an absolute path to an executable, which a remote worker resolves on the far side. One runtime today delivers tool servers over a remote connection under the pass-through model, and the protocol path reclassifies that delivery as translated. Whether the delivery survives is unknown. It is settled by one measurement of a protocol session on a remote worker with at least one server configured, and because tool-server delivery is load-bearing, that measurement gates moving that runtime rather than following it.
 
 **Runtimes reachable only through a bridge.** Two are, and no bridge was ever run. They are out of scope until one is, and the question they raise is about installing and updating a third process rather than about the transport. The condition that settles it is a measured turn through a bridge covering the load-bearing rows, in particular whether the bridge forwards token counts at all.
 
