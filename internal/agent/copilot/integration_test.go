@@ -9,9 +9,9 @@
 //	SORTIE_COPILOT_COMMAND         override the default "copilot" binary
 //	SORTIE_COPILOT_MODEL           override the default "gpt-5-mini" model
 //
-// Authentication: the live cases need at least one of COPILOT_GITHUB_TOKEN,
-// GH_TOKEN, or GITHUB_TOKEN, or an authenticated gh CLI. The scripted-model
-// case reads no credential and needs only SORTIE_COPILOT_TEST=1.
+// Authentication: the live cases need one of COPILOT_GITHUB_TOKEN, GH_TOKEN or
+// GITHUB_TOKEN, or an authenticated gh CLI; the scripted-model case needs only
+// the gate.
 //
 // Run:
 //

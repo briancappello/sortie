@@ -1,76 +1,64 @@
-// Integration tests for the Agent Client Protocol transport, driven
-// against a real, locally installed protocol-speaking binary.
+// Integration tests for the Agent Client Protocol transport against a locally
+// installed protocol-speaking binary.
 //
 // Required environment variables:
 //
 //	SORTIE_CLIENTPROTOCOL_TEST=1     enable this suite
-//	SORTIE_CLIENTPROTOCOL_COMMAND    the protocol-speaking binary's launch
-//	                                  command, including whatever flag
-//	                                  puts it into Agent Client Protocol
-//	                                  mode
+//	SORTIE_CLIENTPROTOCOL_COMMAND    the binary's launch command, including the
+//	                                 flag that puts it into Agent Client
+//	                                 Protocol mode
 //
-// This suite names no default binary: the kind is generic, with no
-// runtime of its own, and naming one would make a single vendor the
-// implicit reference for it. Without SORTIE_CLIENTPROTOCOL_TEST=1, or
-// without SORTIE_CLIENTPROTOCOL_COMMAND, every test in this file skips
-// rather than failing.
+// The suite names no default binary, so no single vendor becomes the implicit
+// reference for the generic kind. Without both variables every test skips.
+// The runtime must complete a turn, answer it with stop reason end_turn,
+// stream at least one text message chunk, and report agentInfo in its
+// initialize response.
 //
-// The runtime SORTIE_CLIENTPROTOCOL_COMMAND names must complete a turn,
-// answer it with a stop reason of end_turn, stream at least one text
-// message chunk, and report agentInfo in its initialize response. The
-// example commands above illustrate command shape only; neither is
-// known to satisfy that contract, since both were driven through the
-// handshake alone.
-//
-// The scripted-model cases launch the same runtime against a loopback
-// scripted model endpoint, replace every named credential with a
-// sentinel, spend no quota, and skip when either coordinate is unset.
-// They also resume a session the runtime created, so the runtime must
-// continue it through session/load or session/resume; a runtime that
-// cannot gets no scripted case:
+// The scripted-model cases launch the same runtime against a loopback scripted
+// model endpoint, replace every named credential with a sentinel, spend no
+// quota, and skip unless the model endpoint and the credential names are
+// given. They also resume a session the runtime created, so the runtime must
+// continue it through session/load or session/resume; a runtime that cannot
+// gets no scripted case:
 //
 //	SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV
-//	                                  the name of the environment variable
-//	                                  through which the runtime takes its
-//	                                  model base address
+//	                                  name of the environment variable through
+//	                                  which the runtime takes its model base
+//	                                  address
 //	SORTIE_CLIENTPROTOCOL_CREDENTIAL_ENV
-//	                                  comma-separated names of the
-//	                                  environment variables the runtime
-//	                                  reads its credential from
+//	                                  comma-separated names of the environment
+//	                                  variables the runtime reads its
+//	                                  credential from
 //	SORTIE_CLIENTPROTOCOL_ASKING_COMMAND
-//	                                  the same runtime's launch command
-//	                                  in a posture that asks before
-//	                                  running a tool; unset skips the
-//	                                  refusal case with a logged reason
+//	                                  the launch command in a posture that asks
+//	                                  before running a tool; unset skips the
+//	                                  refusal case
 //	SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS
-//	                                  the path of the runtime's user-level
-//	                                  instruction file relative to the
-//	                                  scenario home, for a runtime whose
-//	                                  verification request keeps no user
-//	                                  instructions
+//	                                  path of the user-level instruction file
+//	                                  relative to the scenario home, for a
+//	                                  runtime whose verification request keeps
+//	                                  no user instructions
 //	SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT
-//	                                  a provider document for a runtime that
+//	                                  provider document for a runtime that
 //	                                  takes its model endpoint from a file;
 //	                                  {url} stands for the endpoint, and the
 //	                                  path of the file written from it goes to
-//	                                  the variable the model base address
-//	                                  names
+//	                                  the model base address variable
 //	SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH
-//	                                  the path, relative to the scenario
-//	                                  home, where the model document is
-//	                                  written for a runtime that reads its
-//	                                  endpoint from a fixed location; it
-//	                                  replaces the model base address
-//	                                  variable
+//	                                  path relative to the scenario home where
+//	                                  the model document is written, for a
+//	                                  runtime that reads its endpoint from a
+//	                                  fixed location; it replaces the model
+//	                                  base address variable
 //	SORTIE_CLIENTPROTOCOL_HTTP_TOOLS  1 when the runtime advertises
 //	                                  mcpCapabilities.http: the local tool-server
 //	                                  case must then reach the relay over
 //	                                  loopback HTTP, and the SSH cases run
-//	SORTIE_CLIENTPROTOCOL_SSH_COMMAND the runtime's launch command on the SSH
-//	                                  lab host, which has only what
+//	SORTIE_CLIENTPROTOCOL_SSH_COMMAND the launch command on the SSH lab host,
+//	                                  which has only what
 //	                                  SORTIE_CLIENTPROTOCOL_SSH_INSTALL
 //	                                  installs; the SSH cases skip without it
-//	SORTIE_CLIENTPROTOCOL_SSH_INSTALL a POSIX shell script that installs the
+//	SORTIE_CLIENTPROTOCOL_SSH_INSTALL POSIX shell script that installs the
 //	                                  runtime into the lab image as root, for
 //	                                  instance with npm install -g
 //
@@ -109,12 +97,6 @@ type liveProtocolCapture struct {
 	events     func() []domain.AgentEvent // nil for expectHandshakeOnly
 }
 
-// skipUnlessClientProtocolIntegration skips the current test unless
-// SORTIE_CLIENTPROTOCOL_TEST=1 is set and SORTIE_CLIENTPROTOCOL_COMMAND
-// names a launch command. The command variable is a fixture coordinate
-// rather than a second gate: its own absence skips exactly like an
-// absent credential does in the sibling agent packages' suites, never
-// failing.
 func skipUnlessClientProtocolIntegration(t *testing.T) {
 	t.Helper()
 	if os.Getenv("SORTIE_CLIENTPROTOCOL_TEST") != "1" {
@@ -125,9 +107,6 @@ func skipUnlessClientProtocolIntegration(t *testing.T) {
 	}
 }
 
-// integrationAgentConfig returns the [domain.AgentConfig] every test in
-// this suite launches with. Timeouts are deliberately generous to
-// accommodate a real model's latency.
 func integrationAgentConfig(t *testing.T, expect captureExpectation, events func() []domain.AgentEvent) domain.AgentConfig {
 	t.Helper()
 	config, _ := captureAgentConfig(t, os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND"), expect, events)
@@ -152,7 +131,8 @@ func captureAgentConfig(t *testing.T, command string, expect captureExpectation,
 	t.Cleanup(func() { assertLiveProtocolConformance(t, capture) })
 
 	return domain.AgentConfig{
-		Command:       wrapperPath + " " + command,
+		Command: wrapperPath + " " + command,
+		// Generous for a real model's latency.
 		TurnTimeoutMS: 300000,
 		ReadTimeoutMS: 30000,
 	}, capture
@@ -279,9 +259,6 @@ func assertLiveProtocolConformance(t *testing.T, capture liveProtocolCapture) {
 	t.Logf("live shape observation: %+v", observed)
 }
 
-// logCapturedFrames logs every frame one side of the capture recorded, and
-// when that side last wrote relative to started, so a failed handshake shows
-// which request went unanswered and how long the runtime had been silent.
 func logCapturedFrames(t *testing.T, side, path string, started time.Time) {
 	t.Helper()
 	if info, err := os.Stat(path); err == nil {
@@ -301,12 +278,9 @@ func logCapturedFrames(t *testing.T, side, path string, started time.Time) {
 	}
 }
 
-// gitInitWorkspace creates a temp directory and runs git init inside
-// it, matching the sibling agent packages' own integration fixture:
-// several protocol-speaking runtimes expect a git repository by
-// default.
 func gitInitWorkspace(t *testing.T) string {
 	t.Helper()
+	// Several protocol-speaking runtimes expect a git repository by default.
 	dir := t.TempDir()
 	cmd := exec.CommandContext(context.Background(), "git", "-C", dir, "init")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -324,9 +298,6 @@ func mustNewClientProtocolAdapter(t *testing.T) *ClientProtocolAdapter {
 	return a.(*ClientProtocolAdapter)
 }
 
-// mustStartClientProtocolSession calls StartSession with the standard
-// integration config and registers a StopSession cleanup. It fails the
-// test immediately on error.
 func mustStartClientProtocolSession(t *testing.T, ctx context.Context, adapter *ClientProtocolAdapter, workspace string, expect captureExpectation, events func() []domain.AgentEvent) domain.Session {
 	t.Helper()
 	session, err := adapter.StartSession(ctx, domain.StartSessionParams{
@@ -340,9 +311,6 @@ func mustStartClientProtocolSession(t *testing.T, ctx context.Context, adapter *
 	return session
 }
 
-// makeEventCollector returns an OnEvent callback and a snapshot
-// function. The snapshot function returns a copy of every event
-// collected so far and is safe to call from any goroutine.
 func makeEventCollector(t *testing.T) (onEvent func(domain.AgentEvent), collected func() []domain.AgentEvent) {
 	t.Helper()
 	var mu sync.Mutex
@@ -405,9 +373,6 @@ func TestIntegration_StartSession(t *testing.T) {
 	}
 }
 
-// TestIntegration_StopSession verifies that StopSession terminates the
-// subprocess cleanly when called after a successful StartSession but
-// before any RunTurn, and that a second call is idempotent.
 func TestIntegration_StopSession(t *testing.T) {
 	skipUnlessClientProtocolIntegration(t)
 

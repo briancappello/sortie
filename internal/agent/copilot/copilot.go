@@ -51,9 +51,8 @@ func placeMCPConfig(d mcpconfig.Delivery) sshutil.LatePreamble {
 	return sshutil.LatePreamble{Args: []string{"--additional-mcp-config", string(d.Document)}}
 }
 
-// sessionIDPattern matches the safe path-segment character set a
-// copilot session id must satisfy before it is joined into a
-// session-state path.
+// sessionIDPattern is the safe path-segment character set a session id must
+// match before it is joined into a session-state path.
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // copilotToolDeniedCode is the tool.execution_complete error code the CLI
@@ -61,7 +60,6 @@ var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // call and the session continues.
 const copilotToolDeniedCode = "denied"
 
-// defaultCommand is what a session launches when it is given no command.
 const defaultCommand = "copilot"
 
 func init() {
@@ -88,7 +86,6 @@ func init() {
 	})
 }
 
-// Compile-time interface satisfaction check.
 var _ domain.AgentAdapter = (*CopilotAdapter)(nil)
 
 // CopilotAdapter satisfies [domain.AgentAdapter] by managing Copilot
@@ -97,9 +94,6 @@ var _ domain.AgentAdapter = (*CopilotAdapter)(nil)
 // [domain.Session] Internal field.
 type CopilotAdapter struct{}
 
-// sessionState is adapter-internal state stored in [domain.Session]
-// Internal. It tracks the Copilot CLI session ID and per-turn scan
-// state across turns.
 type sessionState struct {
 	target           agentcore.LaunchTarget
 	copilotSessionID string
@@ -117,11 +111,9 @@ type sessionState struct {
 
 	reducedVerificationContext bool
 
-	// forkSession owns the subprocess lifecycle for this session.
 	forkSession *agentcore.ForkPerTurnSession
 
-	// usage holds the session's usage report. Constructed once in
-	// StartSession and never reset between turns.
+	// usage is built once in StartSession and never reset between turns.
 	usage *agentcore.TurnEndUsage
 
 	// resume separates this run's spend from the usage the session held
@@ -132,43 +124,31 @@ type sessionState struct {
 	// Warn on every turn of a run whose session id never becomes valid.
 	sessionIDRejectionLogged bool
 
-	// Per-turn scan state owned by the ParseLine and OnFinalize hook
-	// closures. Reset at the top of each RunTurn call before delegating
-	// to forkSession.
+	// Per-turn scan state, owned by the ParseLine and OnFinalize hooks and
+	// reset at the top of each RunTurn.
 	inFlight *agentcore.ToolTracker
 	work     *agentcore.WorkObserver
 
-	// turnCompletionSeen is true once a session.task_complete event has
-	// arrived this turn.
 	turnCompletionSeen bool
 
-	// turnCompletionSuccess is false only when a session.task_complete
-	// payload parsed this turn and its success field was explicitly
-	// false.
+	// turnCompletionSuccess is false only when a session.task_complete payload
+	// carried an explicit false success field.
 	turnCompletionSuccess bool
 
-	// turnCompletionSummary is the session.task_complete report's
-	// summary, empty when the report never arrived or its payload was
-	// unreadable.
 	turnCompletionSummary string
 
-	// turnErrorMessage is the trimmed message of the turn's last
-	// session.error event, empty when none arrived or its payload was
-	// unreadable. It is the failure reason when the result event reports a
+	// turnErrorMessage is the failure reason when the result event reports a
 	// failed exit.
 	turnErrorMessage string
 
-	// turnContinuations counts the user.message events this turn whose
-	// payload marked them as autopilot continuations. Diagnostic only;
-	// never consulted by the turn disposition.
+	// turnContinuations is diagnostic only; the turn disposition never reads
+	// it.
 	turnContinuations int
 
-	// turnResultSeen is true once the turn's result event has arrived.
 	turnResultSeen bool
 
-	// turnResume and turnResumeByModel are the session's own usage the
-	// turn's journal read left for hand-over to a later run; nil when the
-	// read produced none.
+	// turnResume and turnResumeByModel are the session's own usage handed
+	// over to a later run; nil when the journal read produced none.
 	turnResume        *domain.TokenUsage
 	turnResumeByModel map[string]domain.TokenUsage
 }
@@ -301,7 +281,6 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 		return domain.Session{}, agentErr
 	}
 
-	// The canary check is local-mode only.
 	if target.RemoteCommand == "" {
 		if _, canaryErr := agentcore.QueryRuntimeVersion(ctx, target, params.AgentConfig, nil, nil); canaryErr != nil {
 			return domain.Session{}, canaryErr
@@ -605,9 +584,8 @@ func (a *CopilotAdapter) RunTurn(ctx context.Context, session domain.Session, pa
 		return domain.TurnResult{}, fmt.Errorf("unexpected session internal type %T", session.Internal)
 	}
 
-	// Reset per-turn scan state before delegation. state.usage is
-	// constructed once in StartSession and carries the run-cumulative
-	// snapshot across turns, so it is not reset here.
+	// state.usage carries the run-cumulative snapshot across turns, so it is
+	// not reset here.
 	state.inFlight = agentcore.NewToolTracker()
 	state.work = agentcore.NewWorkObserver(agentcore.WorkSignals{AssistantOutput: true, ToolActivity: true})
 	state.turnCompletionSeen = false

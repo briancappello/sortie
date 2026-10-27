@@ -234,8 +234,6 @@ type teardown struct {
 // records, so only a sortie_status result can carry it back to the model.
 const sortieStatusTurn = 731948265
 
-// serverCallStep is the script entry of the tool-server scenario's server
-// call, after the preamble read.
 const serverCallStep = 1
 
 // AssertConformance drives b's installed runtime through its adapter against a
@@ -470,8 +468,7 @@ type remoteLaunch struct {
 	refused bool
 }
 
-// attach starts the lab and returns the ssh destination and the variable names
-// the SSH launch carries from the process. NO_PROXY keeps the loopback model
+// attach carries NO_PROXY to the remote run: it keeps the loopback model
 // endpoint off a proxy the runtime honors (claude-code sets HTTPS_PROXY for its
 // connection warm-up).
 func (r remoteLaunch) attach(t *testing.T, b Binding, d drive, env Environment, launch *Launch) (host string, envNames []string) {
@@ -812,13 +809,12 @@ const (
 	roleResumed sessionRole = "resumed"
 )
 
-// continuedTurn is one driven turn of the continuation scenario.
 type continuedTurn struct {
 	role   sessionRole
 	prompt string // the marker the turn's prompt carries
 	answer string // the marker the turn's scripted answer carries
 	result domain.TurnResult
-	events []domain.AgentEvent // the events RunTurn delivered for this turn
+	events []domain.AgentEvent
 }
 
 // The script entries of the continuation scenario that its checks single out.
@@ -908,8 +904,7 @@ func runContinuation(t *testing.T, b Binding) {
 	})
 }
 
-// drive runs turns in order on one session, recording each turn's result and
-// events in turns, and returns the session with every event it delivered.
+// drive records each turn's result and events in turns.
 func (c continuation) drive(t *testing.T, role sessionRole, resumeID string, resumeUsage *domain.TokenUsage, turns []continuedTurn) (domain.Session, []domain.AgentEvent) {
 	t.Helper()
 
@@ -1969,8 +1964,6 @@ func runtimeGoneViolations(run Run, remaining func(pid int) string, td teardown)
 	return v.items
 }
 
-// reportedProcessIDs lists each distinct non-empty process id the session and
-// its delivered events name, in first-seen order.
 func reportedProcessIDs(run Run) []string {
 	var ids []string
 	add := func(id string) {

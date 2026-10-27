@@ -1715,7 +1715,7 @@ func TestConformanceFatalArms(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestConformanceFatalArmChild$", "-test.v") //nolint:gosec // re-executes this test binary
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestConformanceFatalArmChild$", "-test.v") //nolint:gosec // os.Args[0] is this test binary, not external input
 			cmd.Env = append(os.Environ(), conformanceArmEnv+"="+tt.arm)
 
 			out, err := cmd.CombinedOutput()

@@ -197,8 +197,6 @@ func (r *lineRecorder) Write(p []byte) (int, error) {
 	}
 }
 
-// relayHTTP serves a listener in front of the target's until the target's
-// output closes.
 func relayHTTP(serverOut io.Reader, rec *recorder) error {
 	out := bufio.NewReader(serverOut)
 	first, err := out.ReadBytes('\n')

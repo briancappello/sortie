@@ -3,9 +3,8 @@
 // Required environment variables:
 //
 //	SORTIE_CODEX_TEST=1     enable this suite
-//	CODEX_API_KEY           Codex API key for authentication; the live cases
-//	                        need it, the scripted-model case reads no
-//	                        credential and needs only the gate
+//	CODEX_API_KEY           Codex API key; the live cases need it, the
+//	                        scripted-model case needs only the gate
 //
 // Optional environment variables:
 //
@@ -76,9 +75,9 @@ func integrationAgentConfig() domain.AgentConfig {
 	}
 }
 
-// The Codex app-server requires a git repository by default.
 func gitInitWorkspace(t *testing.T) string {
 	t.Helper()
+	// The Codex app-server requires a git repository by default.
 	dir := t.TempDir()
 	cmd := exec.CommandContext(context.Background(), "git", "-C", dir, "init")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -190,10 +189,10 @@ func TestIntegration_StartSession_InvalidCommand(t *testing.T) {
 	requireAgentErrorKind(t, err, domain.ErrAgentNotFound)
 }
 
-// The redirect rides in -c overrides because the runtime ignores
-// OPENAI_BASE_URL and a project-local config file; zero retry counts make a
-// refused request end the turn instead of being replayed.
 func scriptedProviderCommand(command, url string) string {
+	// The redirect rides in -c overrides because the runtime ignores
+	// OPENAI_BASE_URL and a project-local config file; zero retry counts make a
+	// refused request end the turn instead of being replayed.
 	pairs := []string{
 		"model_provider=\"scripted\"",
 		"model_providers.scripted.name=\"scripted\"",

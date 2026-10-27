@@ -19,8 +19,6 @@ func skipUnlessIntegration(t *testing.T) {
 	}
 }
 
-// Session persistence is off so repeated runs leave nothing in ~/.claude,
-// which makes a session started with this config impossible to resume.
 func singleTurnIntegrationConfig(t *testing.T) map[string]any {
 	t.Helper()
 	model := os.Getenv("SORTIE_CLAUDE_MODEL")
@@ -28,6 +26,8 @@ func singleTurnIntegrationConfig(t *testing.T) map[string]any {
 		model = "claude-haiku-4-5"
 	}
 	return map[string]any{
+		// Off so repeated runs leave nothing in ~/.claude; such a session
+		// cannot be resumed.
 		"session_persistence": false,
 		"model":               model,
 	}
