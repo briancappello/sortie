@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,7 +123,7 @@ func TestIntegration_StartSession_InvalidCommand(t *testing.T) {
 func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessIntegration(t)
 
-	fakemodel.AssertConformance(t, fakemodel.Binding{
+	binding := fakemodel.Binding{
 		Kind: "claude-code",
 		// Persistence stays on: the continuation scenario resumes a session the
 		// runtime stored, and the files stay in the test's temporary home.
@@ -168,6 +169,42 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 				t.Error("state.work.Observed() = false after a scripted turn, want true")
 			}
 		},
+	}
+
+	fakemodel.AssertConformance(t, binding)
+
+	t.Run("subscription rate limits", func(t *testing.T) {
+		const oauthSentinel = "sortie-scripted-oauth-token-731948265"
+		subscription := binding
+		subscription.Launch = func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
+			launch := binding.Launch(t, env)
+			launch.Env["ANTHROPIC_API_KEY"] = ""
+			launch.Env["ANTHROPIC_AUTH_TOKEN"] = ""
+			return launch
+		}
+
+		run := fakemodel.RunCustomTurn(t, subscription, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{{
+				Text: "ok",
+				Header: http.Header{
+					"Anthropic-Ratelimit-Unified-Status":               {"allowed_warning"},
+					"Anthropic-Ratelimit-Unified-Reset":                {"4102444800"},
+					"Anthropic-Ratelimit-Unified-Representative-Claim": {"five_hour"},
+				},
+			}},
+			Prompt:   "Reply with the word ok.",
+			Sentinel: oauthSentinel,
+		})
+
+		if run.Result.ExitReason != domain.EventTurnCompleted {
+			t.Fatalf("TurnResult.ExitReason = %q, want %q (err %v)", run.Result.ExitReason, domain.EventTurnCompleted, run.Err)
+		}
+		for _, ex := range run.Exchanges {
+			if got, want := ex.Header.Get("Authorization"), "Bearer "+oauthSentinel; ex.Kind == fakemodel.ExchangeTurn && got != want {
+				t.Errorf("turn exchange %d Authorization = %q, want %q", ex.Seq, got, want)
+			}
+		}
+		fakemodel.AssertContainment(t, run)
 	})
 }
 

@@ -105,6 +105,7 @@ jobs:
             clientprotocol_command: "gemini --acp --skip-trust --approval-mode yolo"
             clientprotocol_asking_command: "gemini --acp"
             clientprotocol_model_base_url_env: GOOGLE_GEMINI_BASE_URL
+            clientprotocol_profile: tools/qualify/profiles/gemini-cli.json
 
           - name: GitHub Copilot CLI - ACP
             adapter: acp-copilot
@@ -502,7 +503,7 @@ jobs:
             guard: SORTIE_CLIENTPROTOCOL_TEST
             credential_env: GEMINI_API_KEY
             run_filter: Integration
-            skip_filter: ^TestIntegration_ScriptedModel$
+            skip_filter: ^(TestIntegration_ScriptedModel|TestIntegration_ToolForcingTurn)$
             tier: live
             test_path: ./internal/agent/clientprotocol/...
             timeout: 900s

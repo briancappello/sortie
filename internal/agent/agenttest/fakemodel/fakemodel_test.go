@@ -33,6 +33,7 @@ var (
 
 type httpReply struct {
 	status int
+	header http.Header
 	body   []byte
 }
 
@@ -53,7 +54,7 @@ func trySend(t testing.TB, base, method, target string, headers map[string]strin
 	defer func() { _ = resp.Body.Close() }()
 
 	data, err := io.ReadAll(resp.Body)
-	return httpReply{status: resp.StatusCode, body: data}, err
+	return httpReply{status: resp.StatusCode, header: resp.Header, body: data}, err
 }
 
 func send(t testing.TB, base, method, target string, headers map[string]string, body []byte) httpReply {
@@ -238,10 +239,7 @@ var testWires = []testWire{
 		envelope: func(_ int, message string) map[string]any {
 			return map[string]any{"error": map[string]any{"message": message, "type": "invalid_request_error", "param": nil, "code": nil}}
 		},
-		normalize: func(u fakemodel.Usage) fakemodel.Usage {
-			u.CacheWrite = 0
-			return u
-		},
+		normalize:     func(u fakemodel.Usage) fakemodel.Usage { return u },
 		credentialsOf: func(_, _, bearer string) []string { return []string{bearer} },
 	},
 }
@@ -655,6 +653,7 @@ func TestStartInvalidScript(t *testing.T) {
 		{"hold and text", []fakemodel.Response{{Hold: true, Text: "ok"}}, 0},
 		{"hold and call", []fakemodel.Response{{Hold: true, Call: choice}}, 0},
 		{"hold with usage", []fakemodel.Response{{Hold: true, Usage: fakemodel.Usage{Prompt: 1}}}, 0},
+		{"hold with header", []fakemodel.Response{{Hold: true, Header: http.Header{"X-Scripted": {"1"}}}}, 0},
 		{"negative Prompt", []fakemodel.Response{{Text: "ok", Usage: fakemodel.Usage{Prompt: -1}}}, 0},
 		{"negative Candidates", []fakemodel.Response{{Text: "ok", Usage: fakemodel.Usage{Prompt: 10, Candidates: -1}}}, 0},
 		{"negative Thoughts", []fakemodel.Response{{Text: "ok", Usage: fakemodel.Usage{Prompt: 10, Thoughts: -1}}}, 0},
@@ -747,6 +746,43 @@ func TestServerAuxiliaryAnswersOutsideTheScript(t *testing.T) {
 				t.Errorf("turn after the auxiliary Exchange (Kind, Step, status) = (%q, %d, %d), want (%q, 0, 200)", second.Kind, second.Step, turn.status, fakemodel.ExchangeTurn)
 			}
 		})
+	}
+}
+
+func TestServerBackgroundClaimsNoStep(t *testing.T) {
+	t.Parallel()
+
+	const marker = "X-Background"
+	w := testWires[1]
+	classify := func(ex fakemodel.Exchange) bool { return ex.Header.Get(marker) != "" }
+	srv := fakemodel.Start(t, []fakemodel.Response{{Text: "one"}, {Text: "two"}}, fakemodel.Background(classify))
+
+	for _, headers := range []map[string]string{nil, {marker: "1"}, nil} {
+		send(t, srv.URL(), http.MethodPost, w.path, headers, []byte(w.turnBody))
+	}
+
+	wantSteps := []int{0, -1, 1}
+	for i, ex := range srv.Exchanges() {
+		if isAuxiliary := ex.Kind == fakemodel.ExchangeAuxiliary; ex.Step != wantSteps[i] || isAuxiliary != (i == 1) {
+			t.Errorf("Exchanges()[%d] (Kind, Step) = (%q, %d), want auxiliary only at index 1 and steps %v", i, ex.Kind, ex.Step, wantSteps)
+		}
+	}
+}
+
+func TestServerScriptedHeader(t *testing.T) {
+	t.Parallel()
+
+	w := testWires[1]
+	scripted := http.Header{"X-Rate-Limit-Status": {"allowed_warning"}, "Content-Type": {"text/plain"}}
+	srv := fakemodel.Start(t, []fakemodel.Response{{Text: "scripted", Header: scripted}})
+
+	got := w.post(t, srv, w.turnBody)
+
+	if status := got.header.Get("X-Rate-Limit-Status"); status != "allowed_warning" {
+		t.Errorf("response header X-Rate-Limit-Status = %q, want %q", status, "allowed_warning")
+	}
+	if types := got.header.Values("Content-Type"); !slices.Equal(types, []string{"text/event-stream"}) {
+		t.Errorf("response header Content-Type = %q, want the wire's %q", types, []string{"text/event-stream"})
 	}
 }
 
@@ -2058,7 +2094,8 @@ func TestResponsesAnswerStream(t *testing.T) {
 					Usage  struct {
 						InputTokens        int64 `json:"input_tokens"`
 						InputTokensDetails struct {
-							CachedTokens int64 `json:"cached_tokens"`
+							CachedTokens     int64 `json:"cached_tokens"`
+							CacheWriteTokens int64 `json:"cache_write_tokens"`
 						} `json:"input_tokens_details"`
 						OutputTokens        int64 `json:"output_tokens"`
 						OutputTokensDetails struct {
@@ -2070,13 +2107,13 @@ func TestResponsesAnswerStream(t *testing.T) {
 			}
 			unmarshal(t, eventData(t, events, "response.completed"), &completed)
 			usage := completed.Response.Usage
-			if usage.InputTokens != 500 || usage.InputTokensDetails.CachedTokens != 100 || usage.OutputTokens != 52 || usage.OutputTokensDetails.ReasoningTokens != 12 || usage.TotalTokens != 552 {
-				t.Errorf("response.completed usage = %+v, want input 500, cached 100, output 52, reasoning 12, total 552", usage)
+			if usage.InputTokens != 500 || usage.InputTokensDetails.CachedTokens != 100 || usage.InputTokensDetails.CacheWriteTokens != 30 || usage.OutputTokens != 52 || usage.OutputTokensDetails.ReasoningTokens != 12 || usage.TotalTokens != 552 {
+				t.Errorf("response.completed usage = %+v, want input 500, cached 100, cache write 30, output 52, reasoning 12, total 552", usage)
 			}
 			if completed.Response.ID != "resp_scripted_1" || completed.Response.Status != "completed" {
 				t.Errorf("response.completed (id, status) = (%q, %q), want (%q, %q)", completed.Response.ID, completed.Response.Status, "resp_scripted_1", "completed")
 			}
-			wantUsage := fakemodel.Usage{Prompt: 500, Candidates: 40, Thoughts: 12, CachedContent: 100}
+			wantUsage := fakemodel.Usage{Prompt: 500, Candidates: 40, Thoughts: 12, CachedContent: 100, CacheWrite: 30}
 			if ex.Answer.Usage != wantUsage {
 				t.Errorf("Exchange.Answer.Usage = %+v, want %+v", ex.Answer.Usage, wantUsage)
 			}

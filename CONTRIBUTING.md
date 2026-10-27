@@ -82,6 +82,16 @@ SORTIE_CLAUDE_TEST=1 ANTHROPIC_API_KEY="sk-..." \
 
 GitHub integration tests also accept an optional `SORTIE_GITHUB_ISSUE_ID` variable (a valid issue number in the configured repo) to enable `FetchIssueByID` and `FetchIssueStatesByIDs` test cases.
 
+The agent adapters' scripted-model suites also run an SSH variant against a throwaway sshd container. It needs `docker`, `ssh`, and `ssh-keygen` on `PATH` and skips with a reason naming the missing tool otherwise.
+
+To probe a runtime over SSH by hand, start a lab and keep it running until you interrupt it:
+
+```bash
+make ssh-lab INSTALL='npm install -g <package>@<version>'
+```
+
+Omit `INSTALL` for a base image with no runtime. The command prints the `ssh` command that connects and the name of the container. Each distinct install command builds and keeps its own image, so every runtime version leaves one behind; `make ssh-lab-clean` removes every lab container and image from the local Docker cache.
+
 You do not need access to Jira, GitHub, or Claude to contribute. The unit test suite covers the vast majority of the codebase.
 
 ## Making a change

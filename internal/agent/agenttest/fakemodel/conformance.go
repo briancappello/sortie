@@ -116,6 +116,14 @@ type Binding struct {
 	// LocalToolsOverHTTP marks a runtime that advertises HTTP tool-server
 	// support, so the local scenario must reach the relay over loopback HTTP.
 	LocalToolsOverHTTP bool
+
+	// CacheWriteUnreported marks a runtime that reports no cache-write count;
+	// its input count still holds those tokens.
+	CacheWriteUnreported bool
+
+	// ReportedModelPrefix precedes a served model's name in the name the
+	// runtime reports. Empty when the runtime reports the served name.
+	ReportedModelPrefix string
 }
 
 // SSHVariant is a binding's fixture for the SSH variant of the tool-server
@@ -180,6 +188,8 @@ type Run struct {
 	Err         error
 	Events      []domain.AgentEvent
 	Exchanges   []Exchange
+	Settings    map[string]any // the settings block the session ran under
+	Streams     []string       // Launch.Streams of the run
 }
 
 // The turn answers carry counts that differ from each other and from every
@@ -237,6 +247,17 @@ const sortieStatusTurn = 731948265
 
 const serverCallStep = 1
 
+// CustomTurn is one turn a test outside this package scripts.
+type CustomTurn struct {
+	Script    []Response
+	Options   []Option
+	Prompt    string         // required
+	Settings  map[string]any // nil hands Binding.Passthrough
+	Workspace string         // a git work tree; empty creates one
+	Remote    bool           // launches in the SSH lab through Binding.SSH
+	Sentinel  string         // the credential substituted for every credential variable; empty generates one
+}
+
 // AssertConformance drives b's installed runtime through its adapter against a
 // scripted model endpoint and fails t when the runtime breaks the adapter
 // contract: a turn that does not complete, usage that differs from what the
@@ -270,6 +291,49 @@ func AssertConformance(t *testing.T, b Binding) {
 	t.Run("session stop", func(t *testing.T) { runInterruption(t, b, ScenarioStop, nil) })
 	t.Run("session continuation", func(t *testing.T) { runContinuation(t, b) })
 	t.Run("credential verification context", func(t *testing.T) { runVerificationContext(t, b) })
+}
+
+// RunCustomTurn runs one turn of b's runtime against a scripted endpoint and
+// returns the run, asserting nothing about it.
+//
+// It fails t when turn.Prompt is empty, or when turn.Remote is set and b.SSH is
+// nil, and skips a remote turn where the SSH variant would skip. The session
+// starts with Environment.Scenario zero and no Sortie tool server. It sets
+// environment variables for the rest of the test, so it must not be called from
+// a test that uses t.Parallel.
+func RunCustomTurn(t *testing.T, b Binding, turn CustomTurn) Run {
+	t.Helper()
+
+	requireValidBinding(t, b)
+	if turn.Prompt == "" {
+		t.Fatalf("CustomTurn.Prompt is empty, want the turn's prompt")
+	}
+	var remote *remoteLaunch
+	if turn.Remote {
+		if b.SSH == nil {
+			t.Fatalf("CustomTurn.Remote is set, but Binding.SSH is nil, want an SSH variant")
+		}
+		skipUnlessSSHVariant(t, b)
+		remote = &remoteLaunch{variant: b.SSH}
+	}
+	settings := turn.Settings
+	if settings == nil {
+		settings = b.Passthrough
+	}
+	workspace := turn.Workspace
+	if workspace == "" {
+		workspace = newWorkspace(t)
+	}
+	d := drive{
+		server:    Start(t, turn.Script, turn.Options...),
+		workspace: workspace,
+		settings:  settings,
+		prompt:    turn.Prompt,
+		remote:    remote,
+		sentinel:  turn.Sentinel,
+	}
+	run, _ := driveTurn(t, b, d)
+	return run
 }
 
 func requireValidBinding(t *testing.T, b Binding) {
@@ -330,7 +394,7 @@ func runScenario(t *testing.T, b Binding, scenario Scenario) {
 	}
 	server := Start(reporter, script)
 
-	run, launch, timedOut := driveTurn(t, b, drive{
+	run, timedOut := driveTurn(t, b, drive{
 		scenario:  scenario,
 		server:    server,
 		workspace: workspace,
@@ -340,7 +404,7 @@ func runScenario(t *testing.T, b Binding, scenario Scenario) {
 
 	if scenario == ScenarioExhaustion {
 		failures := recorded.snapshot()
-		reportViolations(t, exhaustionViolations(run, nonce, timedOut, failures))
+		reportViolations(t, exhaustionViolations(run, b, nonce, timedOut, failures))
 		if exhausted := exchangesOfKind(run.Exchanges, ExchangeExhausted); len(exhausted) > 0 && oneFailurePerRequest(failures, exhausted) {
 			recorded.discard()
 		}
@@ -350,18 +414,17 @@ func runScenario(t *testing.T, b Binding, scenario Scenario) {
 		return
 	}
 
-	streams := readStreams(launch.Streams)
 	t.Run("turn outcome", func(t *testing.T) {
 		reportViolations(t, turnOutcomeViolations(run, len(script)))
 	})
 	t.Run("exact usage", func(t *testing.T) {
-		assertExactUsage(t, b, run)
+		AssertExactUsage(t, b, run)
 	})
 	t.Run("deterministic tool path", func(t *testing.T) {
 		reportViolations(t, toolPathViolations(run, nonce))
 	})
 	t.Run("credential containment", func(t *testing.T) {
-		reportViolations(t, containmentViolations(run, streams))
+		AssertContainment(t, run)
 	})
 	if b.Inspect != nil {
 		t.Run("adapter", func(t *testing.T) { b.Inspect(t, run) })
@@ -389,7 +452,7 @@ func runToolServer(t *testing.T, b Binding) {
 	if settings == nil {
 		settings = b.Passthrough
 	}
-	run, _, _ := driveTurn(t, b, drive{
+	run, _ := driveTurn(t, b, drive{
 		scenario:      ScenarioToolServer,
 		server:        Start(t, script),
 		workspace:     workspace,
@@ -446,7 +509,7 @@ func runSSHToolServer(t *testing.T, b Binding, refused bool) {
 	if settings == nil {
 		settings = b.Passthrough
 	}
-	run, _, _ := driveTurn(t, b, drive{
+	run, _ := driveTurn(t, b, drive{
 		scenario:      ScenarioToolServer,
 		server:        Start(t, script),
 		workspace:     workspace,
@@ -465,6 +528,9 @@ func runSSHToolServer(t *testing.T, b Binding, refused bool) {
 	if refused {
 		return
 	}
+	t.Run("exact usage", func(t *testing.T) {
+		AssertExactUsage(t, b, run)
+	})
 	t.Run("tool server", func(t *testing.T) {
 		reportViolations(t, toolServerViolations(run, strconv.Itoa(sortieStatusTurn)))
 		tools.Relay.AssertToolCallSucceeded(t, agenttest.SortieStatusTool, tools.Identity)
@@ -540,6 +606,7 @@ type drive struct {
 	settings      map[string]any
 	prompt        string
 	remote        *remoteLaunch // nil launches the runtime locally
+	sentinel      string        // empty generates one
 }
 
 type preparedSession struct {
@@ -556,7 +623,10 @@ func prepareSession(t *testing.T, b Binding, d drive) preparedSession {
 	t.Helper()
 
 	home := t.TempDir()
-	sentinel := "sortie-scripted-credential-" + randomHex(t, 16)
+	sentinel := d.sentinel
+	if sentinel == "" {
+		sentinel = "sortie-scripted-credential-" + randomHex(t, 16)
+	}
 	isolateEnvironment(t, b, home, sentinel)
 
 	events := &eventCollector{}
@@ -591,7 +661,7 @@ func prepareSession(t *testing.T, b Binding, d drive) preparedSession {
 	return preparedSession{environment: environment, launch: launch, events: events, adapter: adapter, sshHost: sshHost, sshEnvNames: sshEnvNames, lab: lab}
 }
 
-func driveTurn(t *testing.T, b Binding, d drive) (run Run, launch Launch, timedOut bool) {
+func driveTurn(t *testing.T, b Binding, d drive) (run Run, timedOut bool) {
 	t.Helper()
 
 	p := prepareSession(t, b, d)
@@ -629,8 +699,10 @@ func driveTurn(t *testing.T, b Binding, d drive) (run Run, launch Launch, timedO
 		Err:         runErr,
 		Events:      events.snapshot(),
 		Exchanges:   d.server.Exchanges(),
+		Settings:    d.settings,
+		Streams:     p.launch.Streams,
 	}
-	return run, p.launch, timedOut
+	return run, timedOut
 }
 
 func runPermissionRefusal(t *testing.T, b Binding) {
@@ -653,7 +725,7 @@ func runPermissionRefusal(t *testing.T, b Binding) {
 	if settings == nil {
 		settings = b.Passthrough
 	}
-	run, _, _ := driveTurn(t, b, drive{
+	run, _ := driveTurn(t, b, drive{
 		scenario:  ScenarioPermissionRefusal,
 		server:    Start(t, script),
 		workspace: workspace,
@@ -808,6 +880,8 @@ func runInterruption(t *testing.T, b Binding, scenario Scenario, remote *remoteL
 		Err:         turn.err,
 		Events:      p.events.snapshot(),
 		Exchanges:   server.Exchanges(),
+		Settings:    d.settings,
+		Streams:     p.launch.Streams,
 	}
 	t.Run("interrupted turn", func(t *testing.T) {
 		reportViolations(t, interruptedTurnViolations(run, in))
@@ -899,6 +973,7 @@ func runContinuation(t *testing.T, b Binding) {
 		Result:    turns[resumedEntry].result,
 		Events:    slices.Concat(originEvents, controlEvents, resumedEvents),
 		Exchanges: c.server.Exchanges(),
+		Settings:  b.Passthrough,
 	}
 	t.Run("turn outcome", func(t *testing.T) {
 		reportViolations(t, turnOutcomeViolations(run, len(script)))
@@ -917,7 +992,7 @@ func runContinuation(t *testing.T, b Binding) {
 		if !resumedResult.UsageMeasured {
 			return
 		}
-		if want := expectedUsage(run.Exchanges[resumedFrom:]); resumedResult.Usage != want {
+		if want := served(run.Exchanges[resumedFrom:], turnAndAuxiliary, b); resumedResult.Usage != want {
 			t.Errorf("resumed turn Result.Usage = %+v, want %+v, the sum of every answer served to the resumed session", resumedResult.Usage, want)
 		}
 		if turns[continuedEntry].result.ResumeUsage != nil && resumedResult.SpendUnaccounted {
@@ -1422,20 +1497,46 @@ func readStreams(paths []string) []streamFile {
 	return streams
 }
 
-func expectedUsage(exchanges []Exchange) domain.TokenUsage {
+var turnAndAuxiliary = []ExchangeKind{ExchangeTurn, ExchangeAuxiliary}
+
+// served sums the usage the endpoint reported in the exchanges of the given
+// kinds, as the binding's runtime reports it: a runtime that reports no cache
+// write keeps those tokens in its input count and carries zero writes.
+func served(exchanges []Exchange, kinds []ExchangeKind, b Binding) domain.TokenUsage {
 	var total domain.TokenUsage
 	for _, ex := range exchanges {
-		if ex.Kind != ExchangeTurn && ex.Kind != ExchangeAuxiliary {
-			continue
+		if slices.Contains(kinds, ex.Kind) {
+			total = agentcore.AddUsage(total, reportedUsage(ex, b))
 		}
-		u := ex.Answer.Usage
-		total.InputTokens += u.Prompt
-		total.OutputTokens += u.Candidates + u.Thoughts
-		total.CacheReadTokens += u.CachedContent
-		total.CacheWriteTokens += u.CacheWrite
 	}
-	total.TotalTokens = total.InputTokens + total.OutputTokens
 	return total
+}
+
+// servedByModel sums the exchanges served does per model, under the name the
+// binding's runtime reports for it.
+func servedByModel(exchanges []Exchange, kinds []ExchangeKind, b Binding) map[string]domain.TokenUsage {
+	byModel := make(map[string]domain.TokenUsage)
+	for _, ex := range exchanges {
+		if slices.Contains(kinds, ex.Kind) {
+			name := b.ReportedModelPrefix + ex.Model
+			byModel[name] = agentcore.AddUsage(byModel[name], reportedUsage(ex, b))
+		}
+	}
+	return byModel
+}
+
+func reportedUsage(ex Exchange, b Binding) domain.TokenUsage {
+	u := ex.Answer.Usage
+	usage := domain.TokenUsage{
+		InputTokens:      u.Prompt,
+		OutputTokens:     u.Candidates + u.Thoughts,
+		CacheReadTokens:  u.CachedContent,
+		CacheWriteTokens: u.CacheWrite,
+	}
+	if b.CacheWriteUnreported {
+		usage.CacheWriteTokens = 0
+	}
+	return usage
 }
 
 func exchangesOfKind(exchanges []Exchange, kind ExchangeKind) []Exchange {
@@ -1727,29 +1828,43 @@ func answersCall(answer Answer, result ToolResult) bool {
 	return result.Name == answer.Call.Name
 }
 
-func assertExactUsage(t *testing.T, b Binding, run Run) {
+// AssertExactUsage fails t unless the run's usage figure equals, per class and
+// exactly, the usage the endpoint served in its turn and auxiliary answers, and
+// its per-model split matches the usage served per model, under the usage the
+// kind's registered disposition declares for the run's settings and host. A
+// disposition that reports no usage must produce none.
+func AssertExactUsage(t *testing.T, b Binding, run Run) {
 	t.Helper()
 
-	reportViolations(t, usageViolations(run, usageArrival(b)))
+	meta, _ := registry.Agents.Meta(b.Kind)
+	arrival, attribution := meta.UsageDisposition(run.Settings, run.Environment.Remote)
+	if arrival == registry.UsageArrivalNone {
+		agenttest.AssertMeasurementAbsent(t, run.Events, run.Result)
+		return
+	}
+	reportViolations(t, exactUsage(run, arrival, attribution,
+		served(run.Exchanges, turnAndAuxiliary, b), servedByModel(run.Exchanges, turnAndAuxiliary, b)))
 	agenttest.AssertUsageContract(t, run.Events)
 	agenttest.AssertUsageReportingCase(t, b.Kind, agenttest.UsageReportingCase{
 		Name:        "scripted turn",
-		Passthrough: b.Passthrough,
+		Passthrough: run.Settings,
+		Remote:      run.Environment.Remote,
 		Events:      run.Events,
 		Result:      run.Result,
 	})
 }
 
-func usageArrival(b Binding) registry.UsageArrival {
-	meta, _ := registry.Agents.Meta(b.Kind)
-	arrival, _ := meta.UsageDisposition(b.Passthrough, false)
-	return arrival
-}
-
-func usageViolations(run Run, arrival registry.UsageArrival) []string {
+// exactUsage returns the violations of the usage property: a measured figure
+// equal to want, carried by the last usage event, arriving as the disposition
+// declares, and split per model as wantByModel when the disposition declares
+// per-model attribution. A disposition that reports no usage has none to check
+// here.
+func exactUsage(run Run, arrival registry.UsageArrival, attribution registry.UsageAttribution, want domain.TokenUsage, wantByModel map[string]domain.TokenUsage) []string {
 	v := &findings{property: "exact usage"}
+	if arrival == registry.UsageArrivalNone {
+		return v.items
+	}
 
-	want := expectedUsage(run.Exchanges)
 	if !run.Result.UsageMeasured {
 		v.add("Result.UsageMeasured is false, want a measured figure")
 	}
@@ -1761,7 +1876,8 @@ func usageViolations(run Run, arrival registry.UsageArrival) []string {
 		v.add("Result.Usage = %+v, want %+v, the sum of every answer the endpoint served%s", run.Result.Usage, want, auxiliary.String())
 	}
 
-	if last, ok := lastUsageEvent(run.Events); ok && last.Usage != run.Result.Usage {
+	last, found := lastUsageEvent(run.Events)
+	if found && last.Usage != run.Result.Usage {
 		v.add("the last event carrying usage reports %+v, want Result.Usage %+v", last.Usage, run.Result.Usage)
 	}
 	if arrival == registry.UsageArrivalTurnEnd {
@@ -1779,7 +1895,48 @@ func usageViolations(run Run, arrival registry.UsageArrival) []string {
 			v.add("declared turn_end, the turn reported no token_usage event")
 		}
 	}
+	if attribution == registry.UsageAttributionPerModel && found {
+		split, exceedsTotals := effectiveSplit(last, reportedModel(run.Events))
+		if exceedsTotals {
+			v.add("the last event carrying usage splits %+v per model, more than its total %+v", last.UsageByModel, last.Usage)
+		}
+		if !maps.Equal(split, wantByModel) {
+			v.add("the last event carrying usage splits %+v per model, want %+v, the usage served per model", split, wantByModel)
+		}
+	}
 	return v.items
+}
+
+// effectiveSplit is the per-model split an event states once its unattributed
+// rest is credited to the event's model, or to runModel when the event names
+// none, and whether the stated split exceeds the event's total in any class.
+func effectiveSplit(event domain.AgentEvent, runModel string) (split map[string]domain.TokenUsage, exceedsTotals bool) {
+	model := event.Model
+	if model == "" {
+		model = runModel
+	}
+	split = agentcore.NormalizeUsageByModel(event.UsageByModel)
+	if len(split) == 0 {
+		return map[string]domain.TokenUsage{model: event.Usage}, false
+	}
+	stated := agentcore.SumUsage(split)
+	exceedsTotals = event.Usage.InputTokens < stated.InputTokens || event.Usage.OutputTokens < stated.OutputTokens ||
+		event.Usage.CacheReadTokens < stated.CacheReadTokens || event.Usage.CacheWriteTokens < stated.CacheWriteTokens
+	if rest := agentcore.SubtractUsage(event.Usage, stated); rest != (domain.TokenUsage{}) {
+		split[model] = agentcore.AddUsage(split[model], rest)
+	}
+	return split, exceedsTotals
+}
+
+// reportedModel is the model the latest token_usage event naming one reports,
+// which the orchestrator credits to an event that names none.
+func reportedModel(events []domain.AgentEvent) string {
+	for _, event := range slices.Backward(events) {
+		if event.Type == domain.EventTokenUsage && event.Model != "" {
+			return event.Model
+		}
+	}
+	return ""
 }
 
 func lastUsageEvent(events []domain.AgentEvent) (domain.AgentEvent, bool) {
@@ -1789,6 +1946,16 @@ func lastUsageEvent(events []domain.AgentEvent) (domain.AgentEvent, bool) {
 		}
 	}
 	return domain.AgentEvent{}, false
+}
+
+// AssertContainment fails t unless the run's credential stayed in the header it
+// belongs in: no request body, event or stream file the run's Streams name
+// carries the run's sentinel, and every turn request carried it as a credential
+// and none carried another.
+func AssertContainment(t *testing.T, run Run) {
+	t.Helper()
+
+	reportViolations(t, containmentViolations(run, readStreams(run.Streams)))
 }
 
 func containmentViolations(run Run, streams []streamFile) []string {
@@ -1835,7 +2002,7 @@ func containmentViolations(run Run, streams []streamFile) []string {
 	return v.items
 }
 
-func exhaustionViolations(run Run, nonce string, timedOut bool, failures []string) []string {
+func exhaustionViolations(run Run, b Binding, nonce string, timedOut bool, failures []string) []string {
 	v := &findings{property: "script exhaustion"}
 
 	if timedOut {
@@ -1863,7 +2030,7 @@ func exhaustionViolations(run Run, nonce string, timedOut bool, failures []strin
 	if !run.Result.UsageMeasured {
 		v.add("Result.UsageMeasured is false, want a measured figure")
 	}
-	if want := expectedUsage(run.Exchanges); run.Result.Usage != want {
+	if want := served(run.Exchanges, turnAndAuxiliary, b); run.Result.Usage != want {
 		v.add("Result.Usage = %+v, want %+v, the sum of every answer the endpoint served", run.Result.Usage, want)
 	}
 	return v.items

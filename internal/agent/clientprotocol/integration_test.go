@@ -580,7 +580,8 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		t.Fatalf("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH = %q, want a path inside the scenario home and a non-empty SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT", documentPath)
 	}
 
-	fakemodel.AssertConformance(t, fakemodel.Binding{
+	turnExpect := expectScriptedToolTurn
+	binding := fakemodel.Binding{
 		Kind:                "agent-client-protocol",
 		LocalToolsOverHTTP:  os.Getenv("SORTIE_CLIENTPROTOCOL_HTTP_TOOLS") == "1",
 		SSH:                 sshVariant(),
@@ -596,7 +597,7 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		},
 		Launch: func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
 			command := os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND")
-			expect := expectScriptedToolTurn
+			expect := turnExpect
 			switch env.Scenario {
 			case fakemodel.ScenarioExhaustion, fakemodel.ScenarioCancellation, fakemodel.ScenarioCancellationAfterOutput, fakemodel.ScenarioStop:
 				expect = expectHandshakeOnly
@@ -627,5 +628,33 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 				Streams: []string{capture.clientPath, capture.agentPath},
 			}
 		},
+	}
+
+	fakemodel.AssertConformance(t, binding)
+
+	t.Run("tool-forcing turn", func(t *testing.T) {
+		turnExpect = expectToolForcingTurn
+		workspace := gitInitWorkspace(t)
+		target := filepath.Join(workspace, "greeting.txt")
+		usage := fakemodel.Usage{Prompt: 101, Candidates: 7}
+
+		run := fakemodel.RunCustomTurn(t, binding, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{
+				{Call: fakemodel.WriteFile(target, "hello from sortie"), Usage: usage},
+				{Call: fakemodel.ReadFile(target), Usage: usage},
+				{Text: "The file holds: hello from sortie", Usage: usage},
+			},
+			Prompt:    "Create a file at " + target + " containing exactly the text: hello from sortie. After writing it, read the file back and report exactly what it contains.",
+			Workspace: workspace,
+		})
+
+		assertCapabilityGapLabelsMatchProfile(t, run.Events, run.Result)
+		if run.Result.SessionID != run.Session.ID {
+			t.Errorf("TurnResult.SessionID = %q, want %q", run.Result.SessionID, run.Session.ID)
+		}
+		if run.Result.ExitReason != domain.EventTurnCompleted {
+			t.Errorf("TurnResult.ExitReason = %q, want %q", run.Result.ExitReason, domain.EventTurnCompleted)
+		}
+		assertContainsEventType(t, run.Events, domain.EventSessionStarted)
 	})
 }

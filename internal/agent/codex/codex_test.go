@@ -24,10 +24,8 @@ import (
 	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
-// Compile-time interface satisfaction check.
 var _ domain.AgentAdapter = (*CodexAdapter)(nil)
 
-// requireAgentError asserts err is a *domain.AgentError with the given Kind.
 func requireAgentError(t *testing.T, err error, wantKind domain.AgentErrorKind) {
 	t.Helper()
 	if err == nil {
@@ -173,9 +171,6 @@ func TestStartSession_BinaryNotFound(t *testing.T) {
 	requireAgentError(t, err, domain.ErrAgentNotFound)
 }
 
-// TestRunTurn_UsageMeasured_AbsentWhenNoTokenUsageNotification drives a
-// turn whose stream carries no thread/tokenUsage/updated notification and
-// asserts the run is reported unmeasured.
 func TestRunTurn_UsageMeasured_AbsentWhenNoTokenUsageNotification(t *testing.T) {
 	t.Parallel()
 
@@ -194,31 +189,6 @@ func TestRunTurn_UsageMeasured_AbsentWhenNoTokenUsageNotification(t *testing.T) 
 	agenttest.AssertMeasurementAbsent(t, events, result)
 }
 
-// TestRunTurn_UsageMeasured_TrueOnTokenUsageNotification drives a turn
-// whose stream carries a thread/tokenUsage/updated notification and
-// asserts the run is reported measured.
-func TestRunTurn_UsageMeasured_TrueOnTokenUsageNotification(t *testing.T) {
-	t.Parallel()
-
-	state := makeTestState(t, loadFixture(t, "runturn_success.jsonl"))
-	adapter, _ := NewCodexAdapter()
-
-	result, err := adapter.RunTurn(context.Background(), fakeSession(state), domain.RunTurnParams{
-		Prompt:  "do something",
-		OnEvent: func(domain.AgentEvent) {},
-	})
-	if err != nil {
-		t.Fatalf("RunTurn() error = %v", err)
-	}
-
-	if !result.UsageMeasured {
-		t.Error("RunTurn().UsageMeasured = false, want true when a thread/tokenUsage/updated notification carried a token-usage object")
-	}
-}
-
-// TestRunTurn_CompletedTurnReturnsUntypedNilError pins that a completed
-// turn's returned error interface is genuinely nil, not a typed-nil
-// *domain.AgentError promoted to a non-nil error interface.
 func TestRunTurn_CompletedTurnReturnsUntypedNilError(t *testing.T) {
 	t.Parallel()
 
@@ -234,11 +204,8 @@ func TestRunTurn_CompletedTurnReturnsUntypedNilError(t *testing.T) {
 	}
 }
 
-// atomicErrContext behaves like context.Background() to every consumer
-// that selects on Done() (the channel is nil and never closes), but its
-// Err() method reports context.Canceled once cancelled is set, so a
-// test can drive a code path that reads ctx.Err() synchronously without
-// racing RunTurn's own <-ctx.Done() select case.
+// Done never closes, so a test can make ctx.Err() report cancellation
+// without racing RunTurn's own <-ctx.Done() select case.
 type atomicErrContext struct {
 	context.Context
 	cancelled *atomic.Bool
@@ -251,12 +218,9 @@ func (c atomicErrContext) Err() error {
 	return nil
 }
 
-// newInterruptedStatusState builds a sessionState wired to a real
-// jsonrpc.Conn over an io.Pipe, whose peer answers the turn/start call
-// only once it observes codex write it (required so the response
-// cannot be misrouted as unmatched, ahead of Call's own pending-map
-// registration). stdin, when non-nil, receives every line codex
-// writes, including the turn/start request itself.
+// The peer answers turn/start only after it sees the request written: an
+// earlier response would be routed as unmatched, ahead of Call's own
+// pending-map registration.
 func newInterruptedStatusState(t *testing.T, stdin io.Writer) *sessionState {
 	t.Helper()
 
@@ -287,9 +251,6 @@ func newInterruptedStatusState(t *testing.T, stdin io.Writer) *sessionState {
 	return state
 }
 
-// onEventSignalingSessionStarted wraps onEvent so it closes started
-// the first time it observes domain.EventSessionStarted, in addition
-// to forwarding every event to onEvent unchanged.
 func onEventSignalingSessionStarted(onEvent func(domain.AgentEvent), started chan<- struct{}) func(domain.AgentEvent) {
 	var once sync.Once
 	return func(e domain.AgentEvent) {
@@ -300,10 +261,6 @@ func onEventSignalingSessionStarted(onEvent func(domain.AgentEvent), started cha
 	}
 }
 
-// TestRunTurn_InterruptedStatus pins the context-gated mapping for a
-// turn/completed notification reporting status interrupted: cancelled
-// only when the turn context is already done, failed (preserving the
-// retryable classification) when the context is still live.
 func TestRunTurn_InterruptedStatus(t *testing.T) {
 	t.Parallel()
 

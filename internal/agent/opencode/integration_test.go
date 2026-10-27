@@ -121,10 +121,11 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 	}
 
 	fakemodel.AssertConformance(t, fakemodel.Binding{
-		Kind:          "opencode",
-		Passthrough:   scriptedSettings(true),
-		CredentialEnv: []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
-		Read:          fakemodel.ReadFile,
+		Kind:                "opencode",
+		Passthrough:         scriptedSettings(true),
+		CredentialEnv:       []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
+		Read:                fakemodel.ReadFile,
+		ReportedModelPrefix: "scripted/",
 		SSH: &fakemodel.SSHVariant{
 			Package:       "@opencode/cli",
 			HostCommand:   integrationCommand(),
