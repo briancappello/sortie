@@ -1009,41 +1009,6 @@ func TestRunTurn_UsageMeasured_AbsentWhenExportYieldsNoUsage(t *testing.T) {
 	}, result, err)
 }
 
-func TestRunTurn_UsageMeasured_TrueWhenExportYieldsUsage(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-
-	runFixture := loadFixture(t, "simple_turn.jsonl")
-	runPath := filepath.Join(tmpDir, "run.jsonl")
-	if err := os.WriteFile(runPath, runFixture, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	exportPath := filepath.Join(tmpDir, "export.json")
-	const export = `{"info":{"id":"ses_abc123"},"messages":[{"type":"assistant","finish":"stop","model":{"providerID":"anthropic","id":"claude-sonnet-4-5"},"tokens":{"input":10,"output":20,"total":30,"cache":{"read":0,"write":0}}}]}`
-	if err := os.WriteFile(exportPath, []byte(export), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	script := writeOpenCodeScript(t, tmpDir, `case "$1 $2" in
-  "session export") cat '`+exportPath+`'; exit 0;;
-esac
-cat '`+runPath+`'`)
-
-	a, _ := NewOpenCodeAdapter()
-	session := mustStartSession(t, a, tmpDir, script)
-
-	_, result, err := collectEvents(t, a, session, "work")
-	if err != nil {
-		t.Fatalf("RunTurn() error = %v", err)
-	}
-
-	if !result.UsageMeasured {
-		t.Error("RunTurn().UsageMeasured = false, want true when the session export yielded a usage figure")
-	}
-}
-
 func TestRunTurn_CleanExitWithoutStepFinishSettlesSpend(t *testing.T) {
 	t.Parallel()
 

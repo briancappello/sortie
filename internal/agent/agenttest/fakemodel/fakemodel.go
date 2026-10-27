@@ -39,10 +39,11 @@ type Usage struct {
 // false, a function call when Call is set, and a held request when Hold is
 // true.
 type Response struct {
-	Text  string
-	Call  ToolChoice
-	Hold  bool // keeps the request open and answers nothing until the client disconnects
-	Usage Usage
+	Text   string
+	Call   ToolChoice
+	Hold   bool // keeps the request open and answers nothing until the client disconnects
+	Usage  Usage
+	Header http.Header // headers the answer carries beside the wire's own; nil adds none
 }
 
 // Tool is one function tool a model request declares.
@@ -78,7 +79,7 @@ type ExchangeKind string
 
 const (
 	ExchangeTurn        ExchangeKind = "turn"        // answered from the script
-	ExchangeAuxiliary   ExchangeKind = "auxiliary"   // answered outside the script
+	ExchangeAuxiliary   ExchangeKind = "auxiliary"   // answered outside the script: a request with no tool, or one a Background classifier claims
 	ExchangeExhausted   ExchangeKind = "exhausted"   // a turn request after the last script entry
 	ExchangeUnmatched   ExchangeKind = "unmatched"   // the entry's ToolChoice matched no declared tool
 	ExchangeUnrouted    ExchangeKind = "unrouted"    // no wire routes the method and path
@@ -213,9 +214,10 @@ var unroutedCredentialHeaders = []string{"x-goog-api-key", "x-api-key", "Authori
 
 // Server is a running scripted model endpoint.
 type Server struct {
-	t      testing.TB
-	script []Response
-	http   *httptest.Server
+	t       testing.TB
+	script  []Response
+	options serverOptions
+	http    *httptest.Server
 
 	holdingOnce sync.Once
 	holdingCh   chan struct{} // closed when the first held request is held
@@ -228,16 +230,34 @@ type Server struct {
 	open   map[int]bool // guarded by mu; Seq of every held request still open
 }
 
+// Option configures a [Server] at [Start].
+type Option func(*serverOptions)
+
+type serverOptions struct {
+	background []func(Exchange) bool
+}
+
+// Background returns an [Option] that answers outside the script every
+// tool-declaring request classify reports true for, with the auxiliary
+// answer and usage and without claiming a script entry. classify receives
+// the request as decoded so far, once per tool-declaring request, on the
+// handler goroutine, before a step is claimed, so it must be safe for
+// concurrent calls.
+func Background(classify func(Exchange) bool) Option {
+	return func(o *serverOptions) { o.background = append(o.background, classify) }
+}
+
 // Start serves script on 127.0.0.1 with an OS-assigned port and closes the
 // server through t.Cleanup.
 //
 // Start fails t with Fatalf, naming the first invalid index, unless each
 // entry has exactly one of a non-empty Text, a non-nil Call and a true Hold,
 // no negative count, and CachedContent plus CacheWrite no greater than Prompt.
-// A held entry reports no usage. At cleanup it ends every held request and
-// reports every entry no request was served from. It must be called on the
-// test goroutine.
-func Start(t testing.TB, script []Response) *Server {
+// A held entry reports no usage and carries no Header. A request that
+// declares no tool is answered outside the script, as is one a [Background]
+// option claims. At cleanup it ends every held request and reports every entry
+// no request was served from. It must be called on the test goroutine.
+func Start(t testing.TB, script []Response, opts ...Option) *Server {
 	t.Helper()
 
 	for i, entry := range script {
@@ -245,15 +265,20 @@ func Start(t testing.TB, script []Response) *Server {
 			t.Fatalf("scripted model: script response %d %s", i, rule)
 		}
 	}
+	var options serverOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("scripted model: listen on 127.0.0.1: %v", err)
 	}
 
 	s := &Server{
-		t:      t,
-		script: slices.Clone(script),
-		served: make([]bool, len(script)),
+		t:       t,
+		script:  slices.Clone(script),
+		options: options,
+		served:  make([]bool, len(script)),
 
 		holdingCh: make(chan struct{}),
 		released:  make(chan struct{}),
@@ -273,8 +298,8 @@ func invalidScriptRule(r Response) string {
 	switch {
 	case !exactlyOne(r.Text != "", r.Call != nil, r.Hold):
 		return "must hold exactly one of Text, Call and Hold"
-	case r.Hold && u != (Usage{}):
-		return "holds a request but reports usage"
+	case r.Hold && (u != (Usage{}) || r.Header != nil):
+		return "holds a request but reports usage or a header"
 	case min(u.Prompt, u.Candidates, u.Thoughts, u.CachedContent, u.CacheWrite) < 0:
 		return "reports a negative usage count"
 	case u.CachedContent+u.CacheWrite > u.Prompt:
@@ -403,6 +428,15 @@ func (s *Server) record(ex Exchange) {
 	s.log[ex.Seq-1] = ex.clone()
 }
 
+func (s *Server) isBackground(ex Exchange) bool {
+	for _, classify := range s.options.background {
+		if classify(ex.clone()) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) claimStep() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -430,7 +464,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.t.Errorf("%s", failure)
 	}
 
-	w.Header().Set("Content-Type", contentType)
+	s.writeHeader(w, ex, contentType)
 	w.WriteHeader(ex.Answer.Status)
 	_, _ = w.Write(ex.Answer.Body)
 }
@@ -469,7 +503,7 @@ func (s *Server) respond(ex *Exchange, r *http.Request) (contentType, failure st
 		return failWire(ex, c, ExchangeUnsupported,
 			label+" asks for a "+dec.unsupported+" this server does not answer", "")
 	}
-	if len(dec.tools) == 0 {
+	if len(dec.tools) == 0 || s.isBackground(*ex) {
 		text := auxiliaryText(dec.schema)
 		return answerWire(ex, c, ExchangeAuxiliary, reply{seq: ex.Seq, model: dec.model, streaming: dec.streaming, operation: dec.operation, text: text, usage: auxiliaryUsage})
 	}
@@ -506,6 +540,19 @@ const jsonContentType = "application/json"
 
 func failureLabel(ex Exchange) string {
 	return fmt.Sprintf("scripted model: request %d (%s %s)", ex.Seq, ex.Method, ex.Path)
+}
+
+// writeHeader sets the headers of an answer: those its script entry carries,
+// then the wire's own Content-Type, which replaces a scripted one.
+func (s *Server) writeHeader(w http.ResponseWriter, ex Exchange, contentType string) {
+	if ex.Kind == ExchangeTurn {
+		for name, values := range s.script[ex.Step].Header {
+			for _, value := range values {
+				w.Header().Add(name, value)
+			}
+		}
+	}
+	w.Header().Set("Content-Type", contentType)
 }
 
 // hold keeps a claimed held request open without writing, so the runtime

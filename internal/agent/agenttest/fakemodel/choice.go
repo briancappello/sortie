@@ -10,17 +10,38 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 )
 
+// pathPropertyNames are the normalized names a tool's file path property may
+// carry.
+var pathPropertyNames = []string{"filepath", "path", "absolutepath"}
+
 // ReadFile returns a [ToolChoice] that reads path through the first declared
 // tool requiring exactly one string property named file_path, filePath, path
 // or absolute_path, in declaration order. The arguments carry path under that
 // property's own name.
 func ReadFile(path string) ToolChoice {
 	return func(declared []Tool) (FunctionCall, error) {
-		tool, property, ok := findSingleStringTool(declared, "filepath", "path", "absolutepath")
+		tool, property, ok := findSingleStringTool(declared, pathPropertyNames...)
 		if !ok {
 			return FunctionCall{}, errors.New("no declared tool requires exactly one string property named file_path, filePath, path or absolute_path")
 		}
 		return newCall(tool, property, path), nil
+	}
+}
+
+// WriteFile returns a [ToolChoice] that writes content to path through the
+// first declared tool requiring exactly two string properties, one named
+// file_path, filePath, path or absolute_path and one named content, in
+// declaration order. The arguments carry path and content under those
+// properties' own names.
+func WriteFile(path, content string) ToolChoice {
+	return func(declared []Tool) (FunctionCall, error) {
+		for _, tool := range declared {
+			pathProperty, contentProperty, ok := pathAndContentProperties(tool.Parameters)
+			if ok {
+				return FunctionCall{Name: tool.Name, Arguments: encodeJSON(map[string]string{pathProperty: path, contentProperty: content})}, nil
+			}
+		}
+		return FunctionCall{}, errors.New("no declared tool requires exactly two string properties, one named file_path, filePath, path or absolute_path and one named content")
 	}
 }
 
@@ -71,18 +92,46 @@ func findSingleStringTool(declared []Tool, names ...string) (Tool, string, bool)
 	return Tool{}, "", false
 }
 
+type requiredProperties struct {
+	Required   []string `json:"required"`
+	Properties map[string]struct {
+		Type string `json:"type"`
+	} `json:"properties"`
+}
+
+func (p requiredProperties) isString(property string) bool {
+	return strings.EqualFold(p.Properties[property].Type, "string")
+}
+
 func singleRequiredString(parameters json.RawMessage) (string, bool) {
-	var schema struct {
-		Required   []string `json:"required"`
-		Properties map[string]struct {
-			Type string `json:"type"`
-		} `json:"properties"`
-	}
+	var schema requiredProperties
 	if json.Unmarshal(parameters, &schema) != nil || len(schema.Required) != 1 {
 		return "", false
 	}
 	property := schema.Required[0]
-	return property, strings.EqualFold(schema.Properties[property].Type, "string")
+	return property, schema.isString(property)
+}
+
+// pathAndContentProperties returns the names of the file path property and
+// the content property of a schema requiring exactly those two string
+// properties.
+func pathAndContentProperties(parameters json.RawMessage) (pathProperty, contentProperty string, ok bool) {
+	var schema requiredProperties
+	if json.Unmarshal(parameters, &schema) != nil || len(schema.Required) != 2 {
+		return "", "", false
+	}
+	for _, property := range schema.Required {
+		if !schema.isString(property) {
+			return "", "", false
+		}
+		switch name := normalizePropertyName(property); {
+		case name == "content":
+			contentProperty = property
+		case slices.Contains(pathPropertyNames, name):
+			pathProperty = property
+		}
+	}
+	return pathProperty, contentProperty, pathProperty != "" && contentProperty != ""
 }
 
 func normalizePropertyName(name string) string {

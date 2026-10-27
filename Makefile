@@ -86,6 +86,22 @@ test-darwin: ## Run the darwin-only tests on a macOS host; fails on a skipped te
 	passed=$$(cat "$$tmp"/run*.json | grep -cE '"Action":"pass".*"Test":"[^"]'); \
 	printf '$(GREEN)test-darwin: %s darwin-only tests executed$(RESET)\n' "$$passed"
 
+.PHONY: ssh-lab
+ssh-lab: ## Start an SSH lab and keep it running until interrupted (INSTALL='npm install -g <package>@<version>')
+	SORTIE_SSHLAB_KEEP=1 SORTIE_SSHLAB_INSTALL='$(subst ','\'',$(INSTALL))' $(GO) test -count=1 -timeout 0 -v -run '^TestSSHLabKeep$$' ./internal/agent/agenttest/
+
+.PHONY: ssh-lab-clean
+ssh-lab-clean: ## Remove every SSH lab container and image from the local Docker cache
+	@set -eu; \
+	containers=$$(docker ps -a --filter name=sortie-sshlab- --format '{{.Names}}'); \
+	for name in $$containers; do \
+		case "$$name" in sortie-sshlab-*) docker rm -f "$$name" >/dev/null ;; esac; \
+	done; \
+	images=$$(docker images --format '{{.Repository}}:{{.Tag}}' sortie-agenttest-sshlab); \
+	for image in $$images; do \
+		docker rmi "$$image" >/dev/null; \
+	done
+
 ##@ Quality
 
 .PHONY: fmt
@@ -293,6 +309,7 @@ endif
 	@printf '  $(CYAN)%-24s$(RESET) %s\n' \
 		'PKG'      ' Package filter for test targets (default: ./...)' \
 		'RUN'      ' Test name filter, passed to -run' \
+		'INSTALL'  ' Runtime install command for ssh-lab (default: none)' \
 		'LINT_GOOS' ' GOOS values the lint targets iterate' \
 		'VERSION'  ' Override version string (default: git describe)' \
 		'NO_COLOR' ' Disable color output (https://no-color.org/)'

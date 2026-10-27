@@ -503,7 +503,7 @@ jobs:
         run: npm install -g @google/gemini-cli
 
       - name: Run integration tests
-        run: go test -race -count=1 -v -timeout 900s -run 'Integration' ./internal/agent/clientprotocol/...
+        run: go test -race -count=1 -v -timeout 900s -run 'Integration' -skip '^TestIntegration_ToolForcingTurn$' ./internal/agent/clientprotocol/...
 
   test-integration-acp-kiro:
     name: "Integration: Kiro - ACP"

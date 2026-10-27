@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,8 +73,9 @@ type conformanceCase[S any] struct {
 }
 
 type conformanceUsageState struct {
-	run     Run
-	arrival registry.UsageArrival
+	run         Run
+	arrival     registry.UsageArrival
+	attribution registry.UsageAttribution
 }
 
 type conformanceContainmentState struct {
@@ -231,6 +233,21 @@ func conformanceRunCases[S any](t *testing.T, property string, cases []conforman
 
 			conformanceAssertViolations(t, property, got, tt.want, tt.also)
 		})
+	}
+}
+
+func conformanceTokens(input, output, cacheRead, cacheWrite int64) domain.TokenUsage {
+	return domain.TokenUsage{InputTokens: input, OutputTokens: output, TotalTokens: input + output, CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite}
+}
+
+func conformancePerModel(s *conformanceUsageState) {
+	s.attribution = registry.UsageAttributionPerModel
+	s.run.Exchanges[conformanceAuxiliaryAt].Model = "model-a"
+	s.run.Exchanges[conformanceFirstTurnAt].Model = "model-a"
+	s.run.Exchanges[conformanceSecondTurnAt].Model = "model-b"
+	s.run.Events[conformanceEventUsageAt].UsageByModel = map[string]domain.TokenUsage{
+		"model-a": conformanceTokens(218, 23, 53, 19),
+		"model-b": conformanceTokens(307, 24, 61, 23),
 	}
 }
 
@@ -425,7 +442,7 @@ func TestConformanceClosingResponse(t *testing.T) {
 	}
 }
 
-func TestConformanceExpectedUsage(t *testing.T) {
+func TestConformanceServed(t *testing.T) {
 	t.Parallel()
 
 	turnOne := domain.TokenUsage{InputTokens: 211, OutputTokens: 18, TotalTokens: 229, CacheReadTokens: 53, CacheWriteTokens: 19}
@@ -435,10 +452,17 @@ func TestConformanceExpectedUsage(t *testing.T) {
 	}
 	tests := []struct {
 		name      string
+		binding   Binding
 		exchanges []Exchange
 		want      domain.TokenUsage
 	}{
 		{name: "no exchanges", want: domain.TokenUsage{}},
+		{
+			name:      "a runtime reporting no cache write keeps those tokens in input and carries zero writes",
+			binding:   Binding{CacheWriteUnreported: true},
+			exchanges: []Exchange{conformanceExchange(ExchangeTurn, conformanceFirstUsage)},
+			want:      domain.TokenUsage{InputTokens: 211, OutputTokens: 18, TotalTokens: 229, CacheReadTokens: 53},
+		},
 		{
 			name:      "one turn sums thoughts into output and keeps cache counts out of input",
 			exchanges: []Exchange{conformanceExchange(ExchangeTurn, conformanceFirstUsage)},
@@ -469,10 +493,47 @@ func TestConformanceExpectedUsage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := expectedUsage(tt.exchanges)
+			got := served(tt.exchanges, turnAndAuxiliary, tt.binding)
 
 			if got != tt.want {
-				t.Errorf("expectedUsage(%d exchanges) = %+v, want %+v", len(tt.exchanges), got, tt.want)
+				t.Errorf("served(%d exchanges) = %+v, want %+v", len(tt.exchanges), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConformanceEffectiveSplit(t *testing.T) {
+	t.Parallel()
+
+	total := conformanceTokens(100, 10, 20, 5)
+	stated := conformanceTokens(60, 6, 12, 3)
+	rest := conformanceTokens(40, 4, 8, 2)
+	over := conformanceTokens(100, 10, 20, 6)
+	named := func(model string, usage domain.TokenUsage) map[string]domain.TokenUsage {
+		return map[string]domain.TokenUsage{model: usage}
+	}
+
+	tests := []struct {
+		name       string
+		event      domain.AgentEvent
+		runModel   string
+		want       map[string]domain.TokenUsage
+		wantExceed bool
+	}{
+		{"no split credits the total to the event's model", domain.AgentEvent{Usage: total, Model: "model-a"}, "", named("model-a", total), false},
+		{"rest goes to the event's model", domain.AgentEvent{Usage: total, Model: "model-b", UsageByModel: named("model-a", stated)}, "", map[string]domain.TokenUsage{"model-a": stated, "model-b": rest}, false},
+		{"rest goes to the run's reported model when the event names none", domain.AgentEvent{Usage: total, UsageByModel: named("model-a", stated)}, "model-r", map[string]domain.TokenUsage{"model-a": stated, "model-r": rest}, false},
+		{"a split above the total in one class", domain.AgentEvent{Usage: total, Model: "model-b", UsageByModel: named("model-a", over)}, "", named("model-a", over), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, exceeds := effectiveSplit(tt.event, tt.runModel)
+
+			if !maps.Equal(got, tt.want) || exceeds != tt.wantExceed {
+				t.Errorf("effectiveSplit(%+v, %q) = (%+v, %t), want (%+v, %t)", tt.event, tt.runModel, got, exceeds, tt.want, tt.wantExceed)
 			}
 		})
 	}
@@ -495,9 +556,9 @@ func TestConformancePropertyCleanRuns(t *testing.T) {
 		"turn outcome":                   turnOutcomeViolations(run, 2),
 		"deterministic tool path":        toolPathViolations(run, conformanceNonce),
 		"tool server":                    toolServerViolations(toolServer, conformanceServerTurn),
-		"exact usage":                    usageViolations(run, registry.UsageArrivalTurnEnd),
+		"exact usage":                    exactUsage(run, registry.UsageArrivalTurnEnd, registry.UsageAttributionNone, served(run.Exchanges, turnAndAuxiliary, Binding{}), nil),
 		"credential containment":         containmentViolations(run, streams),
-		"script exhaustion":              exhaustionViolations(exhaustion.run, conformanceNonce, false, exhaustion.failures),
+		"script exhaustion":              exhaustionViolations(exhaustion.run, Binding{}, conformanceNonce, false, exhaustion.failures),
 		"refused call":                   refusedCallViolations(conformanceRefusedRun(), conformanceNonce, conformanceNotice),
 	}
 
@@ -1111,6 +1172,23 @@ func TestConformancePropertyExactUsage(t *testing.T) {
 	}
 	cases := []conformanceCase[conformanceUsageState]{
 		{name: "clean turn_end run"},
+		{name: "clean per-model split", mutate: conformancePerModel},
+		{
+			name: "split attributes a model's usage to another model",
+			mutate: func(s *conformanceUsageState) {
+				conformancePerModel(s)
+				split := s.run.Events[conformanceEventUsageAt].UsageByModel
+				split["model-a"], split["model-b"] = split["model-b"], split["model-a"]
+			},
+			want: []string{"per model, want"},
+		},
+		{
+			name: "arrival none checks no figure",
+			mutate: func(s *conformanceUsageState) {
+				s.arrival = registry.UsageArrivalNone
+				conformanceReport(&s.run, func(u *domain.TokenUsage) { u.InputTokens++ })
+			},
+		},
 		{
 			name: "measured usage is not reported",
 			mutate: func(s *conformanceUsageState) {
@@ -1188,7 +1266,10 @@ func TestConformancePropertyExactUsage(t *testing.T) {
 		func() conformanceUsageState {
 			return conformanceUsageState{run: conformanceTurnRun(), arrival: registry.UsageArrivalTurnEnd}
 		},
-		func(s conformanceUsageState) []string { return usageViolations(s.run, s.arrival) },
+		func(s conformanceUsageState) []string {
+			return exactUsage(s.run, s.arrival, s.attribution,
+				served(s.run.Exchanges, turnAndAuxiliary, Binding{}), servedByModel(s.run.Exchanges, turnAndAuxiliary, Binding{}))
+		},
 	)
 }
 
@@ -1432,7 +1513,7 @@ func TestConformancePropertyExhaustion(t *testing.T) {
 	conformanceRunCases(t, "script exhaustion", cases,
 		conformanceNewExhaustion,
 		func(s conformanceExhaustionState) []string {
-			return exhaustionViolations(s.run, s.nonce, s.timedOut, s.failures)
+			return exhaustionViolations(s.run, Binding{}, s.nonce, s.timedOut, s.failures)
 		},
 	)
 }

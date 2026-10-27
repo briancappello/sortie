@@ -128,6 +128,51 @@ func TestReadFileRejectsIneligibleTools(t *testing.T) {
 	}
 }
 
+func TestWriteFile(t *testing.T) {
+	t.Parallel()
+
+	const (
+		path        = "/workspace/nonce.txt"
+		content     = "hello from sortie"
+		wantMessage = "no declared tool requires exactly two string properties, one named file_path, filePath, path or absolute_path and one named content"
+	)
+	write := func(first, second, secondType string) []fakemodel.Tool {
+		schema := fmt.Sprintf(`{"type":"object","properties":{%q:{"type":"string"},%q:{"type":%s}},"required":[%q,%q]}`, first, second, secondType, first, second)
+		return []fakemodel.Tool{{Name: "write", Parameters: json.RawMessage(schema)}}
+	}
+
+	tests := []struct {
+		name     string
+		declared []fakemodel.Tool
+		want     map[string]string
+	}{
+		{"file_path and content", write("file_path", "content", `"string"`), map[string]string{"file_path": path, "content": content}},
+		{"path alone", []fakemodel.Tool{{Name: "read", Parameters: singleRequired("path", `"string"`)}}, nil},
+		{"content is not a string", write("path", "content", `"array"`), nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			call, err := fakemodel.WriteFile(path, content)(tt.declared)
+
+			if tt.want == nil {
+				if err == nil || err.Error() != wantMessage {
+					t.Errorf("WriteFile(%q, %q)(%s) = (%+v, %v), want error %q", path, content, tt.name, call, err, wantMessage)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WriteFile(%q, %q)(%s) error = %v, want nil", path, content, tt.name, err)
+			}
+			if got := decodeArguments(t, call); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("WriteFile(%q, %q)(%s).Arguments = %v, want %v", path, content, tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCatFile(t *testing.T) {
 	t.Parallel()
 
