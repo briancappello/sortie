@@ -9,7 +9,6 @@
 package copilot
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -17,7 +16,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -25,7 +23,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
-	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
@@ -306,28 +303,9 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 	// The canary check is local-mode only.
 	if target.RemoteCommand == "" {
-		stopGrace := procutil.StopGrace(params.AgentConfig.StopGraceMS)
-
-		canaryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(canaryCtx, target.Command, "--version") //nolint:gosec // target.Command from LookPath
-		var combined bytes.Buffer
-		result, startErr := procutil.RunCapture(canaryCtx, cmd, stopGrace, procutil.CaptureParams{Stdout: &combined, Stderr: &combined})
-		if startErr != nil || result.WaitErr != nil {
-			if cancelled := agentcore.SessionStartCancelledError(ctx, startErr); cancelled != nil {
-				return domain.Session{}, cancelled
-			}
-			canaryErr := startErr
-			if canaryErr == nil {
-				canaryErr = result.WaitErr
-			}
-			return domain.Session{}, &domain.AgentError{
-				Kind:    domain.ErrAgentNotFound,
-				Message: "copilot binary found but not functional; ensure Node.js 22+ is available",
-				Err:     canaryErr,
-			}
+		if _, canaryErr := agentcore.QueryRuntimeVersion(ctx, target, params.AgentConfig, nil, nil); canaryErr != nil {
+			return domain.Session{}, canaryErr
 		}
-		slog.Debug("copilot version check passed", slog.String("version", strings.TrimSpace(combined.String())))
 	}
 
 	copilotSessionID := params.ResumeSessionID

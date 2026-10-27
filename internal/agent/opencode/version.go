@@ -6,84 +6,36 @@ import (
 	"os"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
-	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
-// checkRuntimeVersion launches the configured command with --version,
-// bounded by [agentcore.AuxiliaryTimeout], and refuses a command that
-// reports no readable version or a major other than 2. It re-verifies the
-// workspace through the same [agentcore.LaunchTarget.AuxiliaryCommand]
-// path every other auxiliary launch uses, so a session start on a
-// removed workspace fails here rather than at the first turn.
+// checkRuntimeVersion refuses a command that reports no readable version or
+// a major other than 2. The query re-verifies the workspace, so a session
+// start on a removed workspace fails here rather than at the first turn.
 func checkRuntimeVersion(ctx context.Context, state *sessionState) *domain.AgentError {
-	queryCtx, cancel := context.WithTimeout(ctx, agentcore.AuxiliaryTimeout(state.agentConfig))
-	defer cancel()
-
-	stdout := procutil.NewTailBuffer(agentcore.EarlyExitCaptureBytes)
-	stderr := procutil.NewTailBuffer(agentcore.EarlyExitCaptureBytes)
-
-	cmd, agentErr := state.target.AuxiliaryCommand(queryCtx, []string{"--version"}, nil, versionQueryEnv(os.Environ()),
+	reported, agentErr := agentcore.QueryRuntimeVersion(ctx, state.target, state.agentConfig, state.logger(), versionQueryEnv(os.Environ()),
 		sshutil.EnvVar{Name: "OPENCODE_DISABLE_AUTOUPDATE", Value: "true"})
 	if agentErr != nil {
 		return agentErr
 	}
-
-	result, startErr := procutil.RunCapture(queryCtx, cmd, procutil.StopGrace(state.agentConfig.StopGraceMS), procutil.CaptureParams{
-		Stdout: stdout,
-		Stderr: stderr,
-		Logger: state.logger(),
-	})
-
-	switch {
-	case startErr != nil:
-		if cancelled := agentcore.SessionStartCancelledError(ctx, startErr); cancelled != nil {
-			return cancelled
-		}
-		return &domain.AgentError{
-			Kind:    domain.ErrResponseError,
-			Message: "could not start the agent runtime to read its version",
-			Err:     startErr,
-		}
-	case ctx.Err() != nil:
-		return &domain.AgentError{
-			Kind:    domain.ErrResponseError,
-			Message: "the session start ended while the agent runtime was reporting its version",
-			Err:     ctx.Err(),
-		}
-	case queryCtx.Err() != nil:
-		return &domain.AgentError{
-			Kind: domain.ErrResponseTimeout,
-			Message: fmt.Sprintf("the agent runtime did not report its version within %d ms",
-				agentcore.AuxiliaryTimeout(state.agentConfig).Milliseconds()),
-		}
-	case result.WaitErr != nil:
-		if state.target.RemoteCommand != "" && sshutil.ConnectionFailed(procutil.ExtractExitCode(result.WaitErr)) {
-			return agentcore.ConnectionFailedError()
-		}
-		return agentcore.ExitedEarly(state.target, result).Report(stderr.Collector(state.logger()))
-	}
-
-	version, major, ok := agentcore.ParseRuntimeVersion(stdout.Bytes())
-	if !ok || stdout.Truncated() {
+	if reported.Version == "" {
 		message := "no output"
-		if line := agentcore.FirstReadableLine(stdout.Bytes()); line != "" {
-			message = redact.Truncate(line, 200)
+		if reported.Line != "" {
+			message = redact.Truncate(reported.Line, 200)
 		}
 		return &domain.AgentError{
 			Kind:    domain.ErrAgentNotFound,
 			Message: "the configured OpenCode command reported no version Sortie can read: " + message,
 		}
 	}
-	if major != 2 {
+	if reported.Major != 2 {
 		return &domain.AgentError{
 			Kind:    domain.ErrAgentNotFound,
-			Message: fmt.Sprintf("OpenCode %s is not supported; install OpenCode 2.x, published on npm as @opencode/cli", version),
+			Message: fmt.Sprintf("OpenCode %s is not supported; install OpenCode 2.x, published on npm as @opencode/cli", reported.Version),
 		}
 	}
-
 	return nil
 }
 
