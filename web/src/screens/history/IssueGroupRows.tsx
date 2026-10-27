@@ -27,9 +27,9 @@ import {
   totalsCostText,
   totalsTokensText,
 } from "@/lib/figures";
-import { fmtCount, fmtDuration, fmtStamp, parseInstant, plural } from "@/lib/format";
+import { fmtCount, fmtDuration, fmtStamp, parseInstant, plural, upperFirst } from "@/lib/format";
 import { issueLinkOf } from "@/lib/issue-link";
-import { ruleLabel } from "@/lib/labels";
+import { hopLabel, ruleLabel } from "@/lib/labels";
 import { issueAwaitsApproval } from "@/lib/active-rows";
 import { issueStanding } from "@/lib/lane";
 import { agentStatement, runOutcome } from "@/lib/run-status";
@@ -89,9 +89,7 @@ function hopText(run: RunResponse): string | undefined {
   if (!run.stage_target) {
     return undefined;
   }
-  return run.stage_result
-    ? `Hop to ${run.stage_target}: ${run.stage_result}`
-    : `Hop to ${run.stage_target}`;
+  return upperFirst(hopLabel(run.stage_target, run.stage_result));
 }
 
 function tokensPart(text: string): string {
@@ -171,7 +169,7 @@ function RunRow({ run, columns }: RunRowProps) {
 
   return (
     <TableRow look="link" onClick={() => void navigate(link.to, { state: link.state })}>
-      <TableCell title={statement === null ? undefined : `\u201C${statement}\u201D`}>
+      <TableCell title={statement === null ? run.error || undefined : `\u201C${statement}\u201D`}>
         <Link
           to={link.to}
           state={link.state}

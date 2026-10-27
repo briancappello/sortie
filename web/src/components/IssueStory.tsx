@@ -6,6 +6,7 @@ import { useHistoryRunsQuery, useStateQuery } from "@/api/queries";
 import { useNow } from "@/app/live";
 import { AgentStatement } from "@/components/AgentStatement";
 import { ServedText } from "@/components/ServedText";
+import { Parts } from "@/components/Parts";
 import { StatusMark } from "@/components/StatusMark";
 import { Button, buttonStyles } from "@/components/ui/button";
 import { hasRateSource } from "@/lib/budget";
@@ -21,7 +22,7 @@ import {
 import { closingClock } from "@/lib/ended";
 import { fmtClock, fmtDuration, lowerFirst, parseInstant, plural, pluralVerb } from "@/lib/format";
 import { sessionLinkOf } from "@/lib/issue-link";
-import { agentLabel, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
+import { agentLabel, hopLabel, hopReason, modelLabel, ruleLabel, startLabel } from "@/lib/labels";
 import { numberedRunsOf } from "@/lib/run-number";
 import { agentStatement, runOutcome } from "@/lib/run-status";
 
@@ -37,8 +38,6 @@ import type { StagePosition, StageProgress } from "@/lib/lane";
 import type { Mark } from "@/lib/run-status";
 
 const PULL_REQUEST_KEY = "pull_request";
-
-const SEP = " · ";
 
 type StoryRun =
   | { kind: "run"; run: RunResponse; number: number }
@@ -110,9 +109,9 @@ function chaptersOf(items: readonly StoryRun[]): Chapter[] {
   return chapters;
 }
 
-function agentLineOf(item: StoryRun | undefined): string | undefined {
+function agentPartsOf(item: StoryRun | undefined): string[] {
   if (item === undefined) {
-    return undefined;
+    return [];
   }
   const kind = item.kind === "live" ? item.running.agent_kind : item.run.agent_kind;
   const model =
@@ -120,38 +119,34 @@ function agentLineOf(item: StoryRun | undefined): string | undefined {
       ? item.running.model_name || item.running.configured_model
       : item.run.model_name || item.run.configured_model;
   if (!kind) {
-    return undefined;
+    return [];
   }
-  return model ? `${agentLabel(kind)}${SEP}${modelLabel(model)}` : agentLabel(kind);
+  return model ? [agentLabel(kind), modelLabel(model)] : [agentLabel(kind)];
 }
 
 function chapterHeadOf(
   chapter: Chapter,
   position: StagePosition | null,
   pullRequest: number | undefined,
-): { title: string; sub: string | undefined } {
+): { title: string; sub: string[] } {
   if (chapter.key === PULL_REQUEST_KEY) {
     return {
       title: pullRequest === undefined ? "Pull request" : `Pull request #${pullRequest}`,
-      sub: undefined,
+      sub: [],
     };
   }
-  const agent = agentLineOf(chapter.items[0]);
+  const agent = agentPartsOf(chapter.items[0]);
   if (position !== null && position.chain.includes(chapter.key)) {
     const stage = `Stage ${position.chain.indexOf(chapter.key) + 1} of ${position.chain.length}`;
     return {
       title: `${ruleLabel(chapter.key)}${chapter.isAgain ? ", again" : ""}`,
-      sub: agent === undefined ? stage : `${stage}${SEP}${agent}`,
+      sub: [stage, ...agent],
     };
   }
   if (chapter.key === "") {
     return { title: "Work", sub: agent };
   }
-  const rule = `Rule ${ruleLabel(chapter.key)}`;
-  return {
-    title: "Work",
-    sub: agent === undefined ? rule : `${rule}${SEP}${agent}`,
-  };
+  return { title: "Work", sub: [`Rule ${ruleLabel(chapter.key)}`, ...agent] };
 }
 
 function endWordOf(last: StoryRun): string {
@@ -159,24 +154,21 @@ function endWordOf(last: StoryRun): string {
     return "running";
   }
   const { stage_result: result, stage_target: target } = last.run;
-  if (target && (result === "advanced" || result === "partial")) {
-    return `moved to ${ruleLabel(target)}`;
+  if (target && result) {
+    return hopLabel(target, result);
   }
-  if (target && (result === "failed" || result === "ceiling")) {
-    return `hop to ${ruleLabel(target)} not made: ${result}`;
-  }
-  return runOutcome(last.run).word.toLowerCase();
+  return lowerFirst(runOutcome(last.run).word);
 }
 
-function foldedLineOf(chapter: Chapter): string {
+function foldedPartsOf(chapter: Chapter): string[] {
   const first = chapter.items[0];
   const last = chapter.items.at(-1);
   if (first === undefined || last === undefined) {
-    return "";
+    return [];
   }
   const end = endOf(last);
   const span = `${fmtClock(startOf(first))} to ${end === null ? "now" : fmtClock(end)}`;
-  return [plural(chapter.items.length, "run", "runs"), span, endWordOf(last)].join(SEP);
+  return [plural(chapter.items.length, "run", "runs"), span, endWordOf(last)];
 }
 
 function originOf(item: StoryRun): string | undefined {
@@ -188,6 +180,7 @@ function originOf(item: StoryRun): string | undefined {
   return trigger === "error" ||
     trigger === "stall" ||
     trigger === "continuation" ||
+    trigger === "usage_limit" ||
     trigger === "ci_fix"
     ? startLabel(trigger, "trigger")
     : undefined;
@@ -235,18 +228,24 @@ function RunCard({ item, identifier, now, hasEstimates }: RunCardProps) {
         {origin === undefined ? undefined : (
           <span className="text-body-sm text-ink-muted">{lowerFirst(origin)}</span>
         )}
-        <span className="ml-auto text-body-sm whitespace-nowrap text-ink-muted tabular-nums">
-          {`${fmtClock(startOf(item))} to ${end === null ? "now" : fmtClock(end)}${SEP}${duration}`}
-        </span>
+        <Parts
+          parts={[
+            `${fmtClock(startOf(item))} to ${end === null ? "now" : fmtClock(end)}`,
+            duration,
+          ]}
+          className="ml-auto text-body-sm whitespace-nowrap text-ink-muted tabular-nums"
+        />
       </div>
       {error ? <p className="text-body-md text-ink-body">{error}</p> : undefined}
       {statement === null ? undefined : (
         <AgentStatement text={statement} className="text-body-md" />
       )}
       <p className="mt-xxs flex flex-wrap gap-x-md gap-y-xxs text-body-sm text-ink-muted">
-        <span>
-          Turns <b className="font-medium text-ink-body tabular-nums">{turns}</b>
-        </span>
+        {turns > 0 ? (
+          <span>
+            Turns <b className="font-medium text-ink-body tabular-nums">{turns}</b>
+          </span>
+        ) : undefined}
         <span>
           Tokens{" "}
           <b className="font-medium text-ink-body tabular-nums">
@@ -354,7 +353,7 @@ function StageSummary({ position, progress, chapters }: StageSummaryProps) {
         label={
           <>
             <b className="font-bold text-ink">hop to {ruleLabel(focus.target)} not made</b>:{" "}
-            {focus.result}
+            {hopReason(focus.result)}
           </>
         }
       />,
@@ -371,14 +370,7 @@ function StageSummary({ position, progress, chapters }: StageSummaryProps) {
       className="mb-lg rounded-xl border border-line px-md py-sm"
     >
       <div className="flex flex-wrap items-center justify-between gap-md text-body-md text-ink-body">
-        <span className="inline-flex flex-wrap items-baseline gap-xs">
-          {parts.map((part, index) => (
-            <span key={index} className="inline-flex items-baseline gap-xs">
-              {index > 0 ? <span className="text-ink-muted">·</span> : undefined}
-              {part}
-            </span>
-          ))}
-        </span>
+        <Parts parts={parts} className="gap-x-md" />
         <Collapsible.Trigger className={buttonStyles("secondary")}>
           {isOpen ? "Hide stages" : "All stages"}
         </Collapsible.Trigger>
@@ -430,15 +422,21 @@ interface ChapterBodyProps {
 function ChapterBeats({ chapter, identifier, now, hasEstimates, nowLine }: ChapterBodyProps) {
   return (
     <Beats>
-      {chapter.items.map((item) => (
-        <Beat
-          key={item.kind === "live" ? "live" : item.run.run_id}
-          time={fmtClock(startOf(item))}
-          node={item.kind === "live" ? "now" : "solid"}
-        >
-          <RunCard item={item} identifier={identifier} now={now} hasEstimates={hasEstimates} />
-        </Beat>
-      ))}
+      {chapter.items.map((item) =>
+        item.kind === "run" && item.run.status === "ci_failed" ? (
+          <Beat key={item.run.run_id} time={fmtClock(item.run.completed_at)} node="solid">
+            <StatusMark mark="failed" label="CI checks failed" />
+          </Beat>
+        ) : (
+          <Beat
+            key={item.kind === "live" ? "live" : item.run.run_id}
+            time={fmtClock(startOf(item))}
+            node={item.kind === "live" ? "now" : "solid"}
+          >
+            <RunCard item={item} identifier={identifier} now={now} hasEstimates={hasEstimates} />
+          </Beat>
+        ),
+      )}
       {nowLine === undefined ? undefined : (
         <Beat time={nowLine.time} node={nowLine.needsAttention ? "attention" : "now"}>
           <p className="text-ink">
@@ -566,11 +564,13 @@ export function IssueStory({ detail, position, progress, needsAttention }: Issue
                     −
                   </span>
                   <span className="font-mono text-body-md font-bold text-ink">{head.title}</span>
-                  <span className="text-body-sm text-ink-muted">{foldedLineOf(chapter)}</span>
+                  <Parts parts={foldedPartsOf(chapter)} className="text-body-sm text-ink-muted" />
                 </Collapsible.Trigger>
                 <Collapsible.Panel>
-                  {head.sub === undefined ? undefined : (
-                    <p className="mb-sm text-body-sm text-ink-muted">{head.sub}</p>
+                  {head.sub.length === 0 ? undefined : (
+                    <p className="mb-sm text-body-sm text-ink-muted">
+                      <Parts parts={head.sub} />
+                    </p>
                   )}
                   <ChapterBeats
                     chapter={chapter}
@@ -585,8 +585,10 @@ export function IssueStory({ detail, position, progress, needsAttention }: Issue
           return (
             <section key={chapter.id} className={cn("mb-xl", index > 0 && "mt-lg")}>
               <h2 className="font-heading text-h6 font-semibold text-ink">{head.title}</h2>
-              {head.sub === undefined ? undefined : (
-                <p className="mb-sm text-body-sm text-ink-muted">{head.sub}</p>
+              {head.sub.length === 0 ? undefined : (
+                <p className="mb-sm text-body-sm text-ink-muted">
+                  <Parts parts={head.sub} />
+                </p>
               )}
               <ChapterBeats
                 chapter={chapter}

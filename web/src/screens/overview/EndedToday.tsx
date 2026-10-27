@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 
 import { StandingMark } from "@/components/Lane";
+import { Parts } from "@/components/Parts";
 import { cn } from "@/lib/cn";
 import { endingWord } from "@/lib/ended";
 import { fmtClock } from "@/lib/format";
@@ -52,7 +53,7 @@ export function EndedToday({
       <div className="flex flex-wrap items-baseline gap-x-sm">
         <h2 className="font-heading text-h7 font-semibold text-ink">Ended today</h2>
         {tally === undefined ? undefined : (
-          <span className="text-body-md text-ink-muted wrap-anywhere">{tally.text}</span>
+          <Parts parts={tally.parts} className="text-body-md text-ink-muted wrap-anywhere" />
         )}
         {tally?.cost === undefined ? undefined : (
           <span title={tallyTitle} className="text-body-md text-ink-muted wrap-anywhere">
@@ -99,9 +100,9 @@ interface EndedRowProps {
 function EndedRow({ issue, isUnread, isSelected, showSelection, onOpen }: EndedRowProps) {
   const isLook = isSelected && showSelection;
   const marker = endingMarker(issue.outcome.kind);
-  const meta = [issue.title === null ? null : issue.displayKey, issue.rule, issue.agentKind]
-    .filter((part) => part !== null)
-    .join(" · ");
+  const meta = [issue.title === null ? null : issue.displayKey, issue.rule, issue.agentKind].filter(
+    (part) => part !== null,
+  );
 
   return (
     <li
@@ -119,8 +120,10 @@ function EndedRow({ issue, isUnread, isSelected, showSelection, onOpen }: EndedR
         <p className={cn("text-body-md text-ink", isUnread ? "font-bold" : "font-medium")}>
           {issue.title ?? issue.displayKey}
         </p>
-        {meta === "" ? undefined : (
-          <p className={cn("text-body-sm tabular-nums", secondLineColor(isLook))}>{meta}</p>
+        {meta.length === 0 ? undefined : (
+          <p className={cn("text-body-sm tabular-nums", secondLineColor(isLook))}>
+            <Parts parts={meta} />
+          </p>
         )}
       </div>
       <p className="text-body-md text-ink-body max-md:col-start-2">{endingWord(issue.outcome)}</p>

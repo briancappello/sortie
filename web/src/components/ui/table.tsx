@@ -12,6 +12,8 @@ export interface TableProps extends Omit<ComponentProps<"table">, "title"> {
   title?: ReactNode;
   /** Keeps the table from narrowing below a width that fits its columns, so it scrolls sideways instead. */
   isWide?: boolean;
+  /** Narrows the side padding of every cell, for a table in a narrow column. */
+  isCompact?: boolean;
 }
 
 /**
@@ -19,7 +21,13 @@ export interface TableProps extends Omit<ComponentProps<"table">, "title"> {
  * sideways-scrolling `<table>`. Every other prop reaches the `<table>`. A look a table needs
  * that the parts below lack is added to them, never drawn on a screen.
  */
-export function Table({ title, isWide = false, className, ...props }: TableProps) {
+export function Table({
+  title,
+  isWide = false,
+  isCompact = false,
+  className,
+  ...props
+}: TableProps) {
   return (
     <Card title={title}>
       <div className="overflow-x-auto">
@@ -27,6 +35,7 @@ export function Table({ title, isWide = false, className, ...props }: TableProps
           className={cn(
             "w-full text-left text-body-md text-ink-body",
             isWide && "min-w-4xl",
+            isCompact && "[&_td]:px-xs [&_th]:px-xs",
             className,
           )}
           {...props}

@@ -8,6 +8,7 @@ import { ExternalLinkIcon } from "@/components/icons";
 import { IssueMargin, NextOutcomes } from "@/components/IssueMargin";
 import { IssueStory, storyRunsOf } from "@/components/IssueStory";
 import { Lane } from "@/components/Lane";
+import { Parts } from "@/components/Parts";
 import { ServedText } from "@/components/ServedText";
 import { StallNotice } from "@/components/StallNotice";
 import { StateBadge } from "@/components/StateBadge";
@@ -18,9 +19,9 @@ import { budgetOf, moneyBudgetText } from "@/lib/budget";
 import { cn } from "@/lib/cn";
 import { costText, costTitle, NOT_MEASURED, runningTokensText } from "@/lib/figures";
 import { closingClock } from "@/lib/ended";
-import { fmtClock, fmtTokens, plural } from "@/lib/format";
+import { fmtClock, fmtTokens, lowerFirst, plural, upperFirst } from "@/lib/format";
 import { issueLinkOf, latestSessionOf, sessionLinkOf } from "@/lib/issue-link";
-import { agentLabel, modelLabel, ruleLabel } from "@/lib/labels";
+import { agentLabel, hopLabel, modelLabel, ruleLabel } from "@/lib/labels";
 import {
   decidingOf,
   laneOf,
@@ -45,7 +46,6 @@ import type {
 } from "@/api/types.gen";
 import type { LaneStation, StagePosition, StageProgress } from "@/lib/lane";
 
-const SEP = " · ";
 const PEEK_RUNS = 4;
 
 /** What a list already knows of an issue; shown until the issue's own response arrives. */
@@ -215,16 +215,16 @@ function Kicker({ detail }: KickerProps) {
   );
 }
 
-function agentText(detail: IssueDetailResponse): string | undefined {
+function agentParts(detail: IssueDetailResponse): string[] {
   const { running } = detail;
   const last = detail.history?.runs?.[0];
   const kind = running?.agent_kind ?? last?.agent_kind;
   const model =
     running?.model_name || running?.configured_model || last?.model_name || last?.configured_model;
   if (!kind) {
-    return undefined;
+    return [];
   }
-  return model ? `${agentLabel(kind)}${SEP}${modelLabel(model)}` : agentLabel(kind);
+  return model ? [agentLabel(kind), modelLabel(model)] : [agentLabel(kind)];
 }
 
 interface PeekFactsProps {
@@ -240,14 +240,20 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
   const moneyText = moneyBudgetText(figures);
   const { running } = detail;
   const pullRequest = pullRequestOf(detail);
-  const agent = agentText(detail);
+  const agent = agentParts(detail);
   const facts: [string, ReactNode][] = [];
   if (position !== null) {
     const k = position.chain.indexOf(position.current) + 1;
-    facts.push(["Route", `${ruleLabel(position.current)}${SEP}${k} of ${position.chain.length}`]);
+    facts.push([
+      "Route",
+      <Parts
+        key="route"
+        parts={[ruleLabel(position.current), `${k} of ${position.chain.length}`]}
+      />,
+    ]);
   }
-  if (agent !== undefined) {
-    facts.push(["Agent", agent]);
+  if (agent.length > 0) {
+    facts.push(["Agent", <Parts key="agent" parts={agent} />]);
   }
   if (running !== null) {
     const tokensText = runningTokensText(running);
@@ -260,17 +266,19 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
     ];
     facts.push([
       "This session",
-      <>
-        {parts.join(SEP)}
-        {cost === null || sessionCost === NOT_MEASURED ? undefined : (
-          <>
-            {SEP}
-            <span title={costTitle(running.cost_status, running.estimated_cost_usd)}>
-              {`${sessionCost} est.`}
-            </span>
-          </>
-        )}
-      </>,
+      <Parts
+        key="session"
+        parts={[
+          ...parts,
+          ...(cost === null || sessionCost === NOT_MEASURED
+            ? []
+            : [
+                <span key="cost" title={costTitle(running.cost_status, running.estimated_cost_usd)}>
+                  {`${sessionCost} est.`}
+                </span>,
+              ]),
+        ]}
+      />,
     ]);
   }
   facts.push([
@@ -303,11 +311,15 @@ function PeekFacts({ detail, state, position }: PeekFactsProps) {
     facts.push([
       "Pull request",
       pullRequest.branch ? (
-        <>
-          #{pullRequest.number}
-          {SEP}
-          <span className="font-mono">{pullRequest.branch}</span>
-        </>
+        <Parts
+          key="pull-request"
+          parts={[
+            `#${pullRequest.number}`,
+            <span key="branch" className="font-mono">
+              {pullRequest.branch}
+            </span>,
+          ]}
+        />
       ) : (
         `#${pullRequest.number}`
       ),
@@ -355,10 +367,16 @@ function PeekRuns({ detail, now }: PeekRunsProps) {
           </span>
           <span aria-hidden="true" className={cn(node, "border-ink-body bg-ink-body")} />
           <span className="text-ink-body">
-            {`Run ${number}${run.rule_name ? `${SEP}${ruleLabel(run.rule_name)}` : ""}${SEP}${runOutcome(run).word.toLowerCase()} at ${fmtClock(run.completed_at)}`}
-            {run.stage_result ? (
+            <Parts
+              parts={[
+                `Run ${number}`,
+                ...(run.rule_name ? [ruleLabel(run.rule_name)] : []),
+                `${lowerFirst(runOutcome(run).word)} at ${fmtClock(run.completed_at)}`,
+              ]}
+            />
+            {run.stage_target && run.stage_result ? (
               <span className="block text-body-sm text-ink-muted">
-                stage result: {run.stage_result}
+                {upperFirst(hopLabel(run.stage_target, run.stage_result))}
               </span>
             ) : undefined}
           </span>

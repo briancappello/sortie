@@ -113,12 +113,8 @@ function lede(clauses: Segment[][], lead: string): Segment[] {
 
 function firstRunLede(state: StateResponse): string {
   const { subject } = pluralVerb(state.counts.running, ["issue", "issues"], ["is", "are"]);
-  const parts = [
-    state.started_at === null ? undefined : `Started at ${fmtClock(state.started_at)}`,
-    `${subject} picked up`,
-    "no finished runs yet",
-  ].filter((part) => part !== undefined);
-  return `${parts.join(" · ")}.`;
+  const started = state.started_at === null ? "" : `Started at ${fmtClock(state.started_at)}. `;
+  return `${started}${subject} picked up, with no finished runs yet.`;
 }
 
 /**

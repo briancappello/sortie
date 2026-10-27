@@ -14,7 +14,7 @@ function segmentsOf(summary: Summary): Segment[] {
   return [
     { label: "Succeeded", count: summary.succeeded, fill: "bg-outcome-ok" },
     {
-      label: "Stopped for a person, budget or usage limit",
+      label: "Stopped",
       count: summary.stopped,
       fill: "bg-outcome-stopped",
     },

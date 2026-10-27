@@ -45,9 +45,9 @@ const RUN_STATUSES: Record<string, { word: string; mark: Mark | null }> = {
   succeeded: { word: "Succeeded", mark: "succeeded" },
   failed: { word: "Failed", mark: "failed" },
   ci_failed: { word: "CI failed", mark: "failed" },
-  needs_person: { word: "Stopped for a person", mark: "stopped" },
+  needs_person: { word: "Needed input", mark: "stopped" },
   budget_stopped: { word: "Stopped at a budget", mark: "stopped" },
-  usage_limited: { word: "Stopped at a usage limit", mark: "stopped" },
+  usage_limited: { word: "Usage limit reached", mark: "stopped" },
   cancelled: { word: "Cancelled", mark: null },
 };
 
@@ -64,7 +64,7 @@ export function runStatus(status: string): { word: string; mark: Mark | null } {
 }
 
 const DECLARED_OUTCOMES: Record<string, { word: string; mark: Mark }> = {
-  blocked: { word: "Stopped to ask", mark: "stopped" },
+  blocked: { word: "Action required", mark: "stopped" },
   "needs-human-review": { word: "Ready for human review", mark: "handed" },
   "no-change-needed": { word: "No change needed", mark: "succeeded" },
 };
