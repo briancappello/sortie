@@ -70,6 +70,7 @@ func TestRunError(t *testing.T) {
 		{name: "inactive without a state name", stored: "issue left the active states", want: "Sortie stopped the run because the issue is no longer in an active state."},
 		{name: "stems and a restating detail are dropped", stored: orchestrator.WorkerExitedErrorPrefix + "agent turn 1: agent: usage_limit: you've hit your usage limit", want: "The agent provider refused the run because the account's usage limit is reached."},
 		{name: "stems inside a detail are dropped", stored: "worker panic: agent turn 1: agent: usage_limit: you've hit your usage limit", want: "Sortie hit an internal error while running the agent: you've hit your usage limit."},
+		{name: "detail in another script is kept", stored: "agent turn 1: agent: usage_limit: 已达到使用上限", want: "The agent provider refused the run because the account's usage limit is reached: 已达到使用上限."},
 		{name: "detail with a reset time is kept", stored: orchestrator.WorkerExitedErrorPrefix + "agent turn 1: agent: usage_limit: you've hit your usage limit, resets 3pm", want: "The agent provider refused the run because the account's usage limit is reached: you've hit your usage limit, resets 3pm."},
 		{
 			name:   "unprefixed error",

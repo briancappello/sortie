@@ -30,7 +30,7 @@ var (
 	ciFailure    = regexp.MustCompile(`^CI checks failed on ref (.+)$`)
 	moneyCeiling = regexp.MustCompile(`^money ceiling reached: used (\S+) of (\S+)$`)
 	tokenCeiling = regexp.MustCompile(`^token ceiling reached: used (\d+) of (\d+) tokens$`)
-	nonWord      = regexp.MustCompile(`[^a-z0-9]+`)
+	nonWord      = regexp.MustCompile(`[^\pL\pN]+`)
 )
 
 // fillerWords carry no information of their own when a detail is compared
