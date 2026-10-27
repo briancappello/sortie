@@ -17,7 +17,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
-	"github.com/sortie-ai/sortie/internal/tool/mcpserver"
 )
 
 // webhookBackend returns a NotificationBackend pointing at a live httptest
@@ -70,29 +69,9 @@ func toolNamesFromResult(result SessionToolRegistry) []string {
 	return names
 }
 
-// toolNamesFromMCPServer sends tools/list to an mcpserver.Server built from
-// result.Registry and returns the reported tool names.
 func toolNamesFromMCPServer(t *testing.T, result SessionToolRegistry) []string {
 	t.Helper()
-	req := buildMCPRequest(t, "tools/list", 1, nil)
-	logger := slog.New(slog.DiscardHandler)
-	var outBuf bytes.Buffer
-	srv := mcpserver.NewServer(result.Registry, strings.NewReader(req), &outBuf, logger, "test")
-	if err := srv.Serve(context.Background()); err != nil {
-		t.Fatalf("toolNamesFromMCPServer: Serve: %v", err)
-	}
-	resps := parseMCPResponses(t, outBuf.Bytes())
-	if len(resps) == 0 {
-		t.Fatal("toolNamesFromMCPServer: no response from MCP server")
-	}
-	if resps[0]["error"] != nil {
-		t.Fatalf("toolNamesFromMCPServer: JSON-RPC error: %v", resps[0]["error"])
-	}
-	rmap, ok := resps[0]["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("toolNamesFromMCPServer: result is not an object: %v", resps[0]["result"])
-	}
-	tools, _ := rmap["tools"].([]any)
+	tools, _ := serveMCP(t, result.Registry, "tools/list", nil)["tools"].([]any)
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		if m, ok := tool.(map[string]any); ok {

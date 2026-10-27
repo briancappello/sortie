@@ -149,8 +149,10 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 	} else {
 		if state.mcpConfigPath != "" {
 			args = append(args, "--additional-mcp-config", "@"+state.mcpConfigPath)
-		} else if v := formatMCPConfigValue(pt.MCPConfig); v != "" {
-			args = append(args, "--additional-mcp-config", v)
+		} else if state.target.RemoteCommand == "" {
+			if v := formatMCPConfigValue(pt.MCPConfig); v != "" {
+				args = append(args, "--additional-mcp-config", v)
+			}
 		}
 		if pt.DisableBuiltinMCPs {
 			args = append(args, "--disable-builtin-mcps")

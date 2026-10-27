@@ -309,14 +309,14 @@ func TestStartSession_MCPConfigContent(t *testing.T) {
 	const withServer = `{"mcpServers":{"sortie-tools":{"command":"/usr/local/bin/sortie","args":["mcp-server"]}}}`
 
 	tests := []struct {
-		name    string
-		content string
-		sshHost string
-		wantMCP bool
+		name       string
+		content    string
+		sshHost    string
+		wantServer bool
 	}{
-		{name: "local launch carries the document", content: withServer, wantMCP: true},
-		{name: "remote launch stores the agent member alone", content: withServer, sshHost: "build-host"},
-		{name: "no declared server stores the agent member alone", content: `{"mcpServers":{}}`},
+		{name: "local launch carries the tool server", content: withServer, wantServer: true},
+		{name: "remote launch without a relay carries an empty mcp member", content: withServer, sshHost: "build-host"},
+		{name: "no declared server carries an empty mcp member", content: `{"mcpServers":{}}`},
 	}
 
 	for _, tt := range tests {
@@ -355,8 +355,9 @@ func TestStartSession_MCPConfigContent(t *testing.T) {
 			doc := decodeConfigDocument(t, state.turnConfigContent)
 
 			assertTitleAgentDisabled(t, doc)
-			if _, ok := doc["mcp"]; ok != tt.wantMCP {
-				t.Errorf("StartSession() stored mcp present = %v, want %v (content %q)", ok, tt.wantMCP, state.turnConfigContent)
+			mcp, ok := doc["mcp"]
+			if !ok || strings.Contains(string(mcp), "sortie-tools") != tt.wantServer {
+				t.Errorf("StartSession() stored mcp = %s (present %v), want a member naming sortie-tools = %v", mcp, ok, tt.wantServer)
 			}
 		})
 	}

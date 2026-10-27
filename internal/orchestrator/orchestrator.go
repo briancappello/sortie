@@ -1597,9 +1597,9 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			Logger:                  logger,
 			ToolRegistry:            o.toolRegistry,
 			SessionToolRegistryFunc: o.sessionToolRegistryFunc,
-			AgentToolChannelFunc: func(kind string, remote bool) bool {
+			AgentToolChannelFunc: func(kind string) bool {
 				meta, _ := o.preflightParams.AgentRegistry.Meta(kind)
-				return meta.MCPInjection.DeliversTools(remote)
+				return meta.MCPDialect.DeliversTools()
 			},
 			SSHHost:                  sshHost,
 			SSHStrictHostKeyChecking: strictHostKeyChecking,

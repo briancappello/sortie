@@ -269,10 +269,9 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 			}
 		}
 
-		// A kind whose declared disposition delivers no channel on a
-		// local launch can neither call nor be told about Sortie's
-		// tools for any of its sessions.
-		if registered && !agentMeta.MCPInjection.DeliversTools(false) {
+		// A kind that delivers no tool channel can neither call nor be told
+		// about Sortie's tools.
+		if registered && !agentMeta.MCPDialect.DeliversTools() {
 			warns = append(warns, PreflightWarning{
 				Check:   "agent.kind.no_tool_channel",
 				Message: "agent kind " + strconv.Quote(ref.Kind) + " has no tool execution channel: Sortie's tools are neither advertised nor callable for it",

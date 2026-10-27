@@ -184,10 +184,13 @@ type AgentMeta struct {
 	// means no adapter-specific validation.
 	ValidateAgentConfig func(fields AgentConfigFields) []ValidationDiag
 
-	// MCPInjection declares what this adapter does with the
-	// worker-generated MCP config path today, not what the underlying
-	// CLI is capable of. The empty value means undeclared.
-	MCPInjection MCPInjection
+	// MCPDialect declares the tool-server configuration syntax this kind's
+	// runtime reads. Required.
+	MCPDialect MCPDialect
+
+	// MCPDialectNoneReason is required with MCPDialectNone and empty
+	// otherwise.
+	MCPDialectNoneReason string
 
 	// SessionResumeBlockedBy reports which of this adapter's own
 	// operator-visible config keys, under the given passthrough,
@@ -445,48 +448,43 @@ func (t UsageAttribution) NamesModel() bool {
 	return t == UsageAttributionPerModel
 }
 
-// MCPInjection declares what an agent adapter does with the
-// worker-generated MCP config path. The value describes what the
-// adapter does with the path today, not what the underlying CLI is
-// capable of, and the empty value means undeclared.
-type MCPInjection string
+// MCPDialect names the tool-server configuration syntax the shared delivery
+// renders for a kind's runtime. The empty value means undeclared.
+type MCPDialect string
 
 const (
-	// MCPInjectionUndeclared is the zero value: the adapter has not
-	// declared a disposition toward the generated MCP config path.
-	MCPInjectionUndeclared MCPInjection = ""
+	// MCPDialectUndeclared is the zero value.
+	MCPDialectUndeclared MCPDialect = ""
 
-	// MCPInjectionSupported declares that the adapter hands the
-	// generated MCP config path to the agent process.
-	MCPInjectionSupported MCPInjection = "supported"
+	// MCPDialectNone declares that the kind's runtime receives no tool server.
+	MCPDialectNone MCPDialect = "none"
 
-	// MCPInjectionTranslated declares that the adapter re-expresses
-	// the servers declared in the generated configuration in the
-	// form its runtime parses, and delivers that to the agent
-	// process.
-	MCPInjectionTranslated MCPInjection = "translated"
+	// MCPDialectMCPServersJSON is an {"mcpServers":{...}} document with ${VAR}
+	// header references.
+	MCPDialectMCPServersJSON MCPDialect = "mcp_servers_json"
 
-	// MCPInjectionUnsupported declares that the adapter never hands
-	// the generated MCP config path to the agent process.
-	MCPInjectionUnsupported MCPInjection = "unsupported"
+	// MCPDialectMCPServersJSONAlwaysLoad is mcp_servers_json with Sortie's own
+	// member marked "alwaysLoad".
+	MCPDialectMCPServersJSONAlwaysLoad MCPDialect = "mcp_servers_json_always_load"
+
+	// MCPDialectMCPServersTOML is one "-c mcp_servers.<name>=<inline table>"
+	// argument pair per server.
+	MCPDialectMCPServersTOML MCPDialect = "mcp_servers_toml"
+
+	// MCPDialectMCPMemberJSON is the "mcp" member of the runtime's inline JSON
+	// configuration, with {env:VAR} header references.
+	MCPDialectMCPMemberJSON MCPDialect = "mcp_member_json"
+
+	// MCPDialectACPSession is one Agent Client Protocol McpServer object per
+	// server, sent in the session-creation request.
+	MCPDialectACPSession MCPDialect = "acp_session"
 )
 
-// DeliversTools reports whether a session of this disposition,
-// launched in the given mode, can reach the servers declared in the
-// generated configuration. remote is true when the session runs over
-// SSH. It is total over the value set: true for
-// MCPInjectionSupported; true for MCPInjectionTranslated only when
-// remote is false; false for every other value, including a value
-// outside the declared set.
-func (m MCPInjection) DeliversTools(remote bool) bool {
-	switch m {
-	case MCPInjectionSupported:
-		return true
-	case MCPInjectionTranslated:
-		return !remote
-	default:
-		return false
-	}
+// DeliversTools reports whether a kind declaring this dialect can reach
+// Sortie's tool server. It is true for every dialect but MCPDialectUndeclared
+// and MCPDialectNone, including a value outside the declared set.
+func (d MCPDialect) DeliversTools() bool {
+	return d != MCPDialectUndeclared && d != MCPDialectNone
 }
 
 // AgentConfigFields holds the config values passed to agent adapter

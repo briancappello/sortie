@@ -23,7 +23,6 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
-	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -40,7 +39,7 @@ func init() {
 		RequiresCommand:     true,
 		DefaultCommand:      defaultCommand,
 		ValidateAgentConfig: validateConfig,
-		MCPInjection:        registry.MCPInjectionTranslated,
+		MCPDialect:          registry.MCPDialectMCPServersTOML,
 		UsageArrival:        registry.UsageArrivalIncremental,
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv(),
@@ -73,7 +72,11 @@ type CodexAdapter struct {
 // Internal. It tracks the persistent app-server subprocess, thread
 // ID, and turn state across the session lifetime.
 type sessionState struct {
-	target      agentcore.LaunchTarget
+	target agentcore.LaunchTarget
+
+	// tools is closed by StopSession after the process teardown.
+	tools *agentcore.ToolSession
+
 	agentConfig domain.AgentConfig
 	turnCount   int
 
@@ -402,28 +405,29 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 		return domain.Session{}, agentErr
 	}
 
-	if params.MCPConfigPath != "" && target.RemoteCommand == "" {
-		servers, parseErr := mcpconfig.Parse(params.MCPConfigPath)
-		if parseErr != nil {
-			return domain.Session{}, &domain.AgentError{
-				Kind:    domain.ErrResponseError,
-				Message: fmt.Sprintf("parse MCP config: %v", parseErr),
-				Err:     parseErr,
-			}
+	logger := slog.Default().With(slog.String("component", "codex-adapter"))
+
+	tools, agentErr := agentcore.ResolveToolDelivery(ctx, params, target, registry.MCPDialectMCPServersTOML, logger)
+	if agentErr != nil {
+		return domain.Session{}, agentErr
+	}
+	started := false
+	defer func() {
+		if !started {
+			tools.Close() //nolint:errcheck,gosec // best-effort; the start failure is what the caller needs
 		}
-		overrideArgs, renderErr := renderMCPServerOverrides(servers, os.Environ())
-		if renderErr != nil {
-			return domain.Session{}, &domain.AgentError{
-				Kind:    domain.ErrResponseError,
-				Message: fmt.Sprintf("render MCP server overrides: %v", renderErr),
-				Err:     renderErr,
-			}
-		}
-		target.Args = append(target.Args, overrideArgs...)
+	}()
+
+	var localEnv []string
+	if target.RemoteCommand == "" {
+		delivery := tools.Delivery(sshutil.ForwardOutcome{})
+		target.Args = append(target.Args, delivery.Args...)
+		localEnv = append(tools.LocalEnv(), delivery.Env...)
 	}
 
 	state := &sessionState{
 		target:                 target,
+		tools:                  tools,
 		agentConfig:            params.AgentConfig,
 		passthrough:            pt,
 		acc:                    agentcore.NewRunUsage(),
@@ -435,14 +439,16 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 	var cmd *exec.Cmd
 	var launch sshutil.SSHLaunch
 	if target.RemoteCommand != "" {
-		launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, target.SSHOptions())
+		sshOpts := target.SSHOptions()
+		sshOpts.Forward = tools.Forward(placeToolServers)
+		launch = sshutil.BuildSSHLaunch(target.SSHHost, target.WorkspacePath, target.RemoteCommand, nil, sshOpts)
 		cmd = exec.CommandContext(ctx, target.Command, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	} else {
 		cmd = exec.CommandContext(ctx, target.Command, target.Args...) //nolint:gosec // args are constructed programmatically
 	}
 	grace := procutil.StopGrace(state.agentConfig.StopGraceMS)
 	procutil.SetGroupCancel(cmd, grace)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), localEnv...)
 	if bindErr := target.BindWorkspace(cmd); bindErr != nil {
 		return domain.Session{}, bindErr
 	}
@@ -457,7 +463,6 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 	}
 	prefixedStdin := launch.PrefixStdin(stdinPipe)
 
-	logger := slog.Default().With(slog.String("component", "codex-adapter"))
 	pipes, group, err := procutil.StartWithOwnedPipes(ctx, cmd, logger)
 	if err != nil {
 		if cancelled := agentcore.SessionStartCancelledError(ctx, err); cancelled != nil {
@@ -506,7 +511,7 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 	if state.drainGrace <= 0 {
 		state.drainGrace = procutil.DefaultDrainGrace
 	}
-	state.stderrCollector = procutil.NewStderrCollector(pipes.Stderr, logger)
+	state.stderrCollector = procutil.NewStderrCollector(launch.WatchStderr(pipes.Stderr), logger)
 
 	reaper := procutil.StartReaper(cmd, logger)
 	state.waitCh = reaper.Done()
@@ -662,15 +667,23 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 		model = startedModel
 	}
 
+	if awaitErr := tools.AwaitConnection(ctx); awaitErr != nil {
+		state.closeConn()
+		killOnError()
+		return domain.Session{}, awaitErr
+	}
+
 	state.threadID = threadID
 	state.model = model
 	state.resume = *agentcore.NewResumeBaseline(resumeUsage, nil)
 	drainHandshakeMessages(state, logger)
 
+	started = true
 	return domain.Session{
-		ID:       threadID,
-		AgentPID: strconv.Itoa(cmd.Process.Pid),
-		Internal: state,
+		ID:            threadID,
+		AgentPID:      strconv.Itoa(cmd.Process.Pid),
+		Internal:      state,
+		NoToolChannel: tools.NoToolChannel(),
 	}, nil
 }
 
@@ -717,6 +730,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 		slog.Default().With(slog.String("component", "codex-adapter")),
 		state.threadID,
 	)
+	emit := state.tools.Emit(params.OnEvent, nil)
 
 	state.turnCount++
 
@@ -762,7 +776,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 			TerminalMessage:   fmt.Sprintf("turn/start error: %s", resp.Error.Message),
 		}
 		meta := agentcore.TurnMeta{SessionID: state.threadID, UsageMeasured: state.usageMeasured, ResumeUsage: state.resumeUsage()}
-		result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, agentcore.TurnSpend{})
+		result, agentErr := agentcore.FinalizeTurn(emit, logger, ev, meta, agentcore.TurnSpend{})
 		if agentErr != nil {
 			return result, agentErr
 		}
@@ -813,7 +827,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				UsageMeasured: state.usageMeasured,
 				ResumeUsage:   state.resumeUsage(),
 			}
-			result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
+			result, agentErr := agentcore.FinalizeTurn(emit, logger, ev, meta, spend)
 			if agentErr != nil {
 				return result, agentErr
 			}
@@ -842,7 +856,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					UsageMeasured: state.usageMeasured,
 					ResumeUsage:   state.resumeUsage(),
 				}
-				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
+				result, agentErr := agentcore.FinalizeTurn(emit, logger, ev, meta, spend)
 				if agentErr != nil {
 					return result, agentErr
 				}
@@ -870,7 +884,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					UsageMeasured: state.usageMeasured,
 					ResumeUsage:   state.resumeUsage(),
 				}
-				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
+				result, agentErr := agentcore.FinalizeTurn(emit, logger, ev, meta, spend)
 				if agentErr != nil {
 					return result, agentErr
 				}
@@ -890,9 +904,9 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 			switch method {
 			case "turn/started":
 				if state.turnCount == 1 {
-					agentcore.EmitSessionStarted(params.OnEvent, session.AgentPID, state.threadID)
+					agentcore.EmitSessionStarted(emit, session.AgentPID, state.threadID)
 				} else {
-					agentcore.EmitNotification(params.OnEvent, "")
+					agentcore.EmitNotification(emit, "")
 				}
 
 			case "thread/tokenUsage/updated":
@@ -928,7 +942,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					spend.MarkEstimated()
 				}
 				snapshot := state.acc.SetRunCumulative(run, nil)
-				params.OnEvent(domain.AgentEvent{
+				emit(domain.AgentEvent{
 					Type:      domain.EventTokenUsage,
 					Timestamp: now,
 					Usage:     snapshot,
@@ -989,7 +1003,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					ResumeUsage:   state.resumeUsage(),
 				}
 
-				result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
+				result, agentErr := agentcore.FinalizeTurn(emit, logger, ev, meta, spend)
 				if agentErr != nil {
 					return result, agentErr
 				}
@@ -1008,7 +1022,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				} else if item.Type == "reasoning" {
 					spend.MarkModelReached()
 				}
-				agentcore.EmitNotification(params.OnEvent, "")
+				agentcore.EmitNotification(emit, "")
 
 			case "item/completed":
 				var ip itemParams
@@ -1018,7 +1032,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				}
 				item := ip.Item
 				if call, durationMS, ok := inFlight.End(item.ID); ok {
-					params.OnEvent(domain.AgentEvent{
+					emit(domain.AgentEvent{
 						Type:           domain.EventToolResult,
 						Timestamp:      now,
 						ToolName:       call.Name,
@@ -1032,15 +1046,15 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 					spend.MarkModelReached()
 				}
 				if item.Type == "agentMessage" && item.Text != "" {
-					agentcore.EmitNotification(params.OnEvent, redact.Truncate(item.Text, 200))
+					agentcore.EmitNotification(emit, redact.Truncate(item.Text, 200))
 				}
 
 			case "item/agentMessage/delta":
 				spend.MarkModelReached()
-				agentcore.EmitNotification(params.OnEvent, "")
+				agentcore.EmitNotification(emit, "")
 
 			case "item/commandExecution/outputDelta":
-				agentcore.EmitNotification(params.OnEvent, "")
+				agentcore.EmitNotification(emit, "")
 
 			case "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
 				"applyPatchApproval", "execCommandApproval",
@@ -1054,7 +1068,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				// side effect of the shared framing learning the form.
 				if !requestID.Present() || requestID.IsNull() {
 					logger.Debug("codex request without id ignored", slog.String("method", method))
-					agentcore.EmitNotification(params.OnEvent, "")
+					agentcore.EmitNotification(emit, "")
 					break
 				}
 
@@ -1070,7 +1084,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						UsageMeasured: state.usageMeasured,
 						ResumeUsage:   state.resumeUsage(),
 					}
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, ev, meta, spend)
+					result, agentErr := agentcore.FinalizeTurn(emit, logger, ev, meta, spend)
 					return result, agentErr
 				}
 
@@ -1078,7 +1092,7 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
 					posture := agentcore.DecideHumanRequest(agentcore.ClassPermission, true, agentcore.AnswerPending)
 					state.conn.Respond(requestID, map[string]any{"decision": "decline"}) //nolint:errcheck,gosec // best-effort refusal
-					agentcore.EmitNotification(params.OnEvent, posture.NoticeWithDetail(""))
+					agentcore.EmitNotification(emit, posture.NoticeWithDetail(""))
 
 				case "applyPatchApproval", "execCommandApproval":
 					posture := agentcore.DecideHumanRequest(agentcore.ClassPermission, true, agentcore.AnswerPending)
@@ -1087,12 +1101,12 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 							"denied": map[string]any{"rejection": codexRefusalMessage},
 						},
 					})
-					agentcore.EmitNotification(params.OnEvent, posture.NoticeWithDetail(""))
+					agentcore.EmitNotification(emit, posture.NoticeWithDetail(""))
 
 				case "mcpServer/elicitation/request":
 					posture := agentcore.DecideHumanRequest(agentcore.ClassHumanInput, true, agentcore.AnswerPending)
 					answerElicitationRequest(state, requestID)
-					agentcore.EmitNotification(params.OnEvent, posture.NoticeWithDetail(detailAnswerToQuestion))
+					agentcore.EmitNotification(emit, posture.NoticeWithDetail(detailAnswerToQuestion))
 
 					meta := agentcore.TurnMeta{
 						SessionID:     state.threadID,
@@ -1102,13 +1116,13 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ResumeUsage:   state.resumeUsage(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailAnswerToQuestion)
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta, spend)
+					result, agentErr := agentcore.FinalizeTurn(emit, logger, evidence, meta, spend)
 					return result, agentErr
 
 				case "item/permissions/requestApproval":
 					posture := agentcore.DecideHumanRequest(agentcore.ClassHumanInput, true, agentcore.AnswerPending)
 					state.conn.RespondError(requestID, codexRefusalErrorCode, codexRefusalMessage) //nolint:errcheck,gosec // best-effort refusal
-					agentcore.EmitNotification(params.OnEvent, posture.NoticeWithDetail(detailWiderAccess))
+					agentcore.EmitNotification(emit, posture.NoticeWithDetail(detailWiderAccess))
 
 					meta := agentcore.TurnMeta{
 						SessionID:     state.threadID,
@@ -1118,13 +1132,13 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ResumeUsage:   state.resumeUsage(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailWiderAccess)
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta, spend)
+					result, agentErr := agentcore.FinalizeTurn(emit, logger, evidence, meta, spend)
 					return result, agentErr
 
 				case "item/tool/requestUserInput":
 					posture := agentcore.DecideHumanRequest(agentcore.ClassHumanInput, true, agentcore.AnswerPending)
 					state.conn.RespondError(requestID, codexRefusalErrorCode, codexRefusalMessage) //nolint:errcheck,gosec // best-effort refusal
-					agentcore.EmitNotification(params.OnEvent, posture.NoticeWithDetail(detailAnswerToQuestion))
+					agentcore.EmitNotification(emit, posture.NoticeWithDetail(detailAnswerToQuestion))
 
 					meta := agentcore.TurnMeta{
 						SessionID:     state.threadID,
@@ -1134,12 +1148,12 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 						ResumeUsage:   state.resumeUsage(),
 					}
 					evidence := agentcore.HumanInputEvidence(detailAnswerToQuestion)
-					result, agentErr := agentcore.FinalizeTurn(params.OnEvent, logger, evidence, meta, spend)
+					result, agentErr := agentcore.FinalizeTurn(emit, logger, evidence, meta, spend)
 					return result, agentErr
 				}
 
 			case "turn/plan/updated":
-				agentcore.EmitNotification(params.OnEvent, "")
+				agentcore.EmitNotification(emit, "")
 
 			case "turn/diff/updated":
 				logger.Debug("diff updated")
@@ -1151,20 +1165,20 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				p, parseErr := parseModelRerouted(msg.Params)
 				if parseErr != nil {
 					logger.Debug("model/rerouted unmarshal failed", slog.Any("error", parseErr))
-					agentcore.EmitNotification(params.OnEvent, reroutedMessage(""))
+					agentcore.EmitNotification(emit, reroutedMessage(""))
 					continue
 				}
 				if p.ToModel != "" {
 					state.model = p.ToModel
 				}
-				agentcore.EmitNotification(params.OnEvent, reroutedMessage(p.ToModel))
+				agentcore.EmitNotification(emit, reroutedMessage(p.ToModel))
 
 			default:
 				if msg.Kind == jsonrpc.KindRequest && msg.ID.Present() && !msg.ID.IsNull() {
 					answerUnrecognizedRequest(state, msg.ID)
 				}
 				logger.Debug("codex message logged only", slog.String("method", method))
-				agentcore.EmitNotification(params.OnEvent, "")
+				agentcore.EmitNotification(emit, "")
 			}
 		}
 	}
@@ -1311,6 +1325,11 @@ func (a *CodexAdapter) StopSession(ctx context.Context, session domain.Session) 
 		collector.FinishAndCollect(grace)
 	}
 
+	if state.tools != nil {
+		if closeErr := state.tools.Close(); closeErr != nil && stopErr == nil {
+			stopErr = closeErr
+		}
+	}
 	return stopErr
 }
 

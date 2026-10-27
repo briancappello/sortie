@@ -10,18 +10,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Overview now lists, under 'Not dispatched', the issues in an active state that Sortie holds back from dispatch, each with why it waits and what releases it: an open blocker with its key and state, a blocker read that failed or waits for a later poll, a full agent slot limit with its usage, no free SSH host, or the spend ceiling until it resets. An issue between stages shows its hold on its Active row. The state API serves them as `held`, and a between-stages row carries its hold as `hold`. ([#1387](https://github.com/sortie-ai/sortie/issues/1387))
 - After a person releases a parked issue, its next run continues the agent's earlier session where the agent supports it, and prompt templates can hand the agent its own stop reason and the person's reply through the new `park` variable. ([#1394](https://github.com/sortie-ai/sortie/issues/1394))
+- Agents running on an SSH worker host can now use Sortie's tools and the HTTP tool servers configured under `mcp_config`. Tracker credentials never leave the machine running Sortie. If the worker host forbids SSH port forwarding, the session runs without Sortie's tools, and the log and session events say so. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 
 ### Changed
 
 - Sortie now checks an agent's credential only when it has not proved the same agent setup in the last 15 minutes. Every successful turn renews the proof, and a failed check, a run whose turns all failed, or a credential the agent refused drops it, so the next run checks again. A run that skips the check pays for no request and logs `agent credential verification skipped`. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
 - The credential check now leaves out the agent's instructions, tools, and skills wherever the runtime lets a single launch drop them without changing its credential, model, provider, or endpoint, local `agent-client-protocol` launches of Gemini CLI, Copilot CLI, OpenCode, and Kiro CLI included (Kiro CLI only when its command sets `--model`). A runtime build too old for one of the switches is checked once more with its full context, after a warning in the log. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
 - The credential check's request is counted in the run's token usage, API request count, and cost estimate when the run performs it, and the workflow reference now says so and lists what the request still carries for each agent. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+- Header values of tool servers configured under `mcp_config` now reach Claude Code, Copilot CLI, Codex, and OpenCode through an environment variable instead of being written into their configuration, so they no longer show up on the command line or in config files. A header value also no longer stops a Codex session from starting. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- Codex now receives a tool server's environment values through its environment instead of its command line, so they no longer show up in the process list. If Sortie's own environment or another server already sets that variable to a different value, it stays on the command line and Sortie logs a warning. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- A tool server marked disabled is now left out for every agent. Before, some agents still received it. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- On SSH worker hosts, tool servers that run as a local program (stdio) are no longer sent to the agent, and the session reports that they are unavailable. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- Sortie's tool server now supports MCP 2026-07-28, the newest protocol version, as well as earlier ones. Agents that open with the newest version connect directly instead of falling back. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 
 ### Fixed
 
 - The OpenCode credential check no longer calls tools, so it makes one model request instead of several and writes nothing into the issue workspace. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
 - A credential that Claude Code, Codex, or an `agent-client-protocol` runtime refuses during a turn is now reported as `credential_unverified` with the runtime's own message, as it is at session start, instead of as a generic turn failure. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
 - A Codex turn that fails on a connection error now keeps its error message in the run's failure. ([#1514](https://github.com/sortie-ai/sortie/issues/1514))
+- Copilot CLI on an SSH worker host exited at startup on every turn unless the workspace was on storage shared with the worker host. It now starts. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- Claude Code on an SSH worker host exited at startup on every turn unless the workspace was on storage shared with the worker host. It now starts. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- Copilot CLI launched locally through the Agent Client Protocol (ACP) silently ignored Sortie's tools while the agent was told they existed. It can now use them, and so can other ACP agents that accept only HTTP tool servers. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 
 ## [1.30.0] - 2026-10-23
 

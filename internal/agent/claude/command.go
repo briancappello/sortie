@@ -136,7 +136,7 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 	} else {
 		if state.mcpConfigPath != "" {
 			args = append(args, "--mcp-config", state.mcpConfigPath)
-		} else if pt.MCPConfig != "" {
+		} else if pt.MCPConfig != "" && state.target.RemoteCommand == "" {
 			args = append(args, "--mcp-config", pt.MCPConfig)
 		}
 		if !pt.SessionPersistence {

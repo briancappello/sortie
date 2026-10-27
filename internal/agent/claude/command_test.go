@@ -11,8 +11,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
-// assertHasArgPair fails if flag and value do not appear as consecutive
-// elements in args.
 func assertHasArgPair(t *testing.T, args []string, flag, value string) {
 	t.Helper()
 	for i := 0; i < len(args)-1; i++ {
@@ -23,7 +21,6 @@ func assertHasArgPair(t *testing.T, args []string, flag, value string) {
 	t.Errorf("buildArgs() missing %q %q in [%s]", flag, value, strings.Join(args, " "))
 }
 
-// assertNoFlag fails if flag appears anywhere in args.
 func assertNoFlag(t *testing.T, args []string, flag string) {
 	t.Helper()
 	if slices.Contains(args, flag) {
@@ -32,7 +29,6 @@ func assertNoFlag(t *testing.T, args []string, flag string) {
 	}
 }
 
-// newFirstTurnState returns a sessionState suitable for a first-turn invocation.
 func newFirstTurnState(mcpConfigPath string) *sessionState {
 	return &sessionState{
 		claudeSessionID: "test-session-id",
@@ -41,11 +37,6 @@ func newFirstTurnState(mcpConfigPath string) *sessionState {
 	}
 }
 
-// TestParsePassthroughConfig_TypeFault covers the funnel's fault path for
-// a wrong-typed string field: it returns the zero passthroughConfig and a
-// fault whose rendering names the key and the type found. Every string
-// key the funnel reads gets its own case, so a key whose fault arm was
-// never wired shows up as a gap here rather than at runtime.
 func TestParsePassthroughConfig_TypeFault(t *testing.T) {
 	t.Parallel()
 
@@ -83,9 +74,6 @@ func TestParsePassthroughConfig_TypeFault(t *testing.T) {
 	}
 }
 
-// TestMCPInjectionConformance proves claude-code's real buildArgs
-// output carries the generated MCP config path, matching its declared
-// disposition.
 func TestMCPInjectionConformance(t *testing.T) {
 	t.Parallel()
 
@@ -93,12 +81,43 @@ func TestMCPInjectionConformance(t *testing.T) {
 	if !ok {
 		t.Fatal(`registry.Agents.Meta("claude-code") reported not registered`)
 	}
+	workspace := t.TempDir()
+	params := domain.StartSessionParams{
+		WorkspacePath: workspace,
+		AgentConfig:   domain.AgentConfig{Command: agenttest.FakeRuntime(t, t.TempDir(), "fake-claude", agenttest.OutputScenario, agenttest.Output{})},
+		MCPConfigPath: agenttest.WriteSeededMCPConfig(t, workspace),
+	}
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(t.Context(), params)
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.StopSession(t.Context(), session) })
+	state := session.Internal.(*sessionState)
+	tools, agentErr := agentcore.ResolveToolDelivery(t.Context(), params, agentcore.LaunchTarget{}, declared.MCPDialect, nil)
+	if agentErr != nil {
+		t.Fatalf("ResolveToolDelivery() error = %v", agentErr)
+	}
 
-	const mcpConfigPath = "/ws/.sortie/mcp.json"
-	state := newFirstTurnState(mcpConfigPath)
-	args := buildArgs(state, 1, "do work", passthroughConfig{SessionPersistence: true})
+	args := buildArgs(state, 1, "do work", state.passthrough)
 
-	agenttest.AssertMCPInjection(t, declared.MCPInjection, mcpConfigPath, agenttest.MCPLaunchSurface{Args: args})
+	agenttest.AssertMCPInjection(t, declared.MCPDialect, params.MCPConfigPath, agenttest.MCPLaunchSurface{Args: args, Env: tools.LocalEnv(), File: state.mcpConfigPath})
+}
+
+func TestStartSession_MalformedMCPConfigRejected(t *testing.T) {
+	t.Parallel()
+
+	command := agenttest.FakeRuntime(t, t.TempDir(), "fake-claude", agenttest.OutputScenario, agenttest.Output{})
+	adapter, _ := NewClaudeCodeAdapter()
+
+	agenttest.AssertMalformedMCPConfigRejected(t, func(mcpConfigPath string) error {
+		_, err := adapter.StartSession(t.Context(), domain.StartSessionParams{
+			WorkspacePath: t.TempDir(),
+			AgentConfig:   domain.AgentConfig{Command: command},
+			MCPConfigPath: mcpConfigPath,
+		})
+		return err
+	})
 }
 
 func TestBuildArgs_MCPConfig(t *testing.T) {
@@ -108,57 +127,24 @@ func TestBuildArgs_MCPConfig(t *testing.T) {
 		name          string
 		mcpConfigPath string
 		ptMCPConfig   string
-		checkArgs     func(t *testing.T, args []string)
+		want          string
 	}{
-		{
-			// Worker-generated config takes priority over operator config.
-			name:          "worker path takes priority over operator",
-			mcpConfigPath: "/ws/.sortie/mcp.json",
-			ptMCPConfig:   "/op/mcp.json",
-			checkArgs: func(t *testing.T, args []string) {
-				t.Helper()
-				assertHasArgPair(t, args, "--mcp-config", "/ws/.sortie/mcp.json")
-			},
-		},
-		{
-			// Operator config is used when no worker config is present.
-			name:          "operator config used when worker path absent",
-			mcpConfigPath: "",
-			ptMCPConfig:   "/op/mcp.json",
-			checkArgs: func(t *testing.T, args []string) {
-				t.Helper()
-				assertHasArgPair(t, args, "--mcp-config", "/op/mcp.json")
-			},
-		},
-		{
-			// Neither set: no --mcp-config flag emitted.
-			name:          "neither set produces no mcp config flag",
-			mcpConfigPath: "",
-			ptMCPConfig:   "",
-			checkArgs: func(t *testing.T, args []string) {
-				t.Helper()
-				assertNoFlag(t, args, "--mcp-config")
-			},
-		},
-		{
-			// Only worker path set, no operator config.
-			name:          "worker path used when operator config absent",
-			mcpConfigPath: "/ws/.sortie/mcp.json",
-			ptMCPConfig:   "",
-			checkArgs: func(t *testing.T, args []string) {
-				t.Helper()
-				assertHasArgPair(t, args, "--mcp-config", "/ws/.sortie/mcp.json")
-			},
-		},
+		{name: "worker path takes priority over operator", mcpConfigPath: "/ws/.sortie/mcp.json", ptMCPConfig: "/op/mcp.json", want: "/ws/.sortie/mcp.json"},
+		{name: "operator config used when worker path absent", ptMCPConfig: "/op/mcp.json", want: "/op/mcp.json"},
+		{name: "neither set produces no mcp config flag"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			state := newFirstTurnState(tt.mcpConfigPath)
-			pt := passthroughConfig{MCPConfig: tt.ptMCPConfig, SessionPersistence: true}
-			args := buildArgs(state, 1, "do work", pt)
-			tt.checkArgs(t, args)
+
+			args := buildArgs(newFirstTurnState(tt.mcpConfigPath), 1, "do work", passthroughConfig{MCPConfig: tt.ptMCPConfig, SessionPersistence: true})
+
+			if tt.want == "" {
+				assertNoFlag(t, args, "--mcp-config")
+				return
+			}
+			assertHasArgPair(t, args, "--mcp-config", tt.want)
 		})
 	}
 }

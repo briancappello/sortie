@@ -21,7 +21,7 @@ func init() {
 	registry.Agents.RegisterWithMeta("agent-client-protocol", NewClientProtocolAdapter, registry.AgentMeta{
 		RequiresCommand:     true,
 		ValidateAgentConfig: validateConfig,
-		MCPInjection:        registry.MCPInjectionTranslated,
+		MCPDialect:          registry.MCPDialectACPSession,
 		UsageArrival:        registry.UsageArrivalTurnEnd,
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv(),
@@ -71,8 +71,7 @@ type ClientProtocolAdapter struct {
 
 // NewClientProtocolAdapter constructs a [ClientProtocolAdapter]. The kind's
 // settings arrive per session; the only one it reads is mcp_config, and only
-// to check its type: the path a session uses arrives through
-// StartSessionParams.MCPConfigPath.
+// to check its type: the shared tool delivery owns the path a session uses.
 func NewClientProtocolAdapter() (domain.AgentAdapter, error) {
 	return &ClientProtocolAdapter{}, nil
 }

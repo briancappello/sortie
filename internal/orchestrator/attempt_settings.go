@@ -63,7 +63,7 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 	var warns []PreflightWarning
 	kind := settings.Kind
 
-	if meta.MCPInjection == registry.MCPInjectionUnsupported && settings.MCPConfigPath != "" {
+	if meta.MCPDialect == registry.MCPDialectNone && settings.MCPConfigPath != "" {
 		warns = append(warns, PreflightWarning{
 			Check:   "agent.mcp_config",
 			Message: "mcp_config in the " + strconv.Quote(kind) + " block cannot reach the agent: this agent kind receives no MCP configuration",

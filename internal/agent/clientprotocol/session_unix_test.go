@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -73,12 +74,14 @@ func TestStartSessionMCPInjectionWire(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	mcpConfigPath := writeMCPConfig(t)
+	workspace := t.TempDir()
+	mcpConfigPath := agenttest.WriteSeededMCPConfig(t, workspace)
+	replaceInMCPConfig(t, mcpConfigPath, `"sortie-tools":{"command":"/usr/bin/sortie","args":["mcp-server"]},`, "")
 	capturePath := filepath.Join(dir, "session_new.jsonl")
 	scriptPath := agenttest.WriteScript(t, dir, "agent.sh", mcpHandshakeScript(capturePath))
 
 	params := domain.StartSessionParams{
-		WorkspacePath: t.TempDir(),
+		WorkspacePath: workspace,
 		AgentConfig:   domain.AgentConfig{Command: scriptPath},
 		MCPConfigPath: mcpConfigPath,
 	}
@@ -103,8 +106,301 @@ func TestStartSessionMCPInjectionWire(t *testing.T) {
 		t.Fatal(`registry.Agents.Meta("agent-client-protocol") ok = false, want true`)
 	}
 
-	agenttest.AssertMCPInjection(t, declared.MCPInjection, mcpConfigPath, agenttest.MCPLaunchSurface{
+	agenttest.AssertMCPInjection(t, declared.MCPDialect, mcpConfigPath, agenttest.MCPLaunchSurface{
 		Wire: []string{strings.TrimSpace(string(captured))},
+	})
+}
+
+const (
+	toolServerChildScenario          = "clientprotocol.tool-server-child"
+	connectedToolServerChildScenario = "clientprotocol.tool-server-child-connected"
+)
+
+func init() {
+	fakeRuntimeScenarios[toolServerChildScenario] = func([]string, json.RawMessage) int {
+		fmt.Println(`{"listening":"127.0.0.1:45678"}`)
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		return 0
+	}
+	fakeRuntimeScenarios[connectedToolServerChildScenario] = func([]string, json.RawMessage) int {
+		fmt.Println(`{"listening":"127.0.0.1:45678"}`)
+		fmt.Println(`{"connected":true}`)
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		return 0
+	}
+}
+
+func replaceInMCPConfig(t *testing.T, path, old, replacement string) {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(raw), old) {
+		t.Fatalf("%s does not contain %q", path, old)
+	}
+	patched := strings.Replace(string(raw), old, replacement, 1)
+	if err := os.WriteFile(path, []byte(patched), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func seedRunnableToolServer(t *testing.T, workspace, childScenario string) string {
+	t.Helper()
+
+	mcpConfigPath := agenttest.WriteSeededMCPConfig(t, workspace)
+	child := agenttest.FakeRuntime(t, t.TempDir(), "toolserver", childScenario, nil)
+	replaceInMCPConfig(t, mcpConfigPath, "/usr/bin/sortie", child)
+	return mcpConfigPath
+}
+
+func sessionNewServers(t *testing.T, capturePath string) []mcpServer {
+	t.Helper()
+
+	lines := readCapturedLines(t, capturePath)
+	if len(lines) != 1 {
+		t.Fatalf("captured %d session/new requests, want 1", len(lines))
+	}
+	var request struct {
+		Params newSessionRequest `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &request); err != nil {
+		t.Fatalf("decode session/new request: %v", err)
+	}
+	return request.Params.MCPServers
+}
+
+func sortieToolsEntries(t *testing.T, capturePath string) []mcpServer {
+	t.Helper()
+
+	var entries []mcpServer
+	for _, server := range sessionNewServers(t, capturePath) {
+		switch {
+		case server.HTTP != nil && server.HTTP.Name == "sortie-tools":
+			entries = append(entries, server)
+		case server.Stdio != nil && server.Stdio.Name == "sortie-tools":
+			entries = append(entries, server)
+		}
+	}
+	return entries
+}
+
+func TestStartSessionLocalRelayDelivery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		advertiseHTTP bool
+		wantHTTP      bool
+	}{
+		{name: "runtime advertising http gets the loopback relay", advertiseHTTP: true, wantHTTP: true},
+		{name: "runtime without http gets the stdio entry", advertiseHTTP: false, wantHTTP: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			workspace := t.TempDir()
+			capturePath := filepath.Join(dir, "session_new.jsonl")
+			agentPath := agenttest.FakeRuntime(t, dir, "agent", scenarioProtocolAgent, protocolAgentParams{
+				Handshake:              true,
+				IncludeMCPCapabilities: tt.advertiseHTTP,
+				CaptureSessionNewPath:  capturePath,
+			})
+
+			session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, domain.StartSessionParams{
+				WorkspacePath: workspace,
+				AgentConfig:   domain.AgentConfig{Command: agentPath},
+				MCPConfigPath: seedRunnableToolServer(t, workspace, connectedToolServerChildScenario),
+			})
+			if err != nil {
+				t.Fatalf("startSession() error = %v", err)
+			}
+			t.Cleanup(func() {
+				if err := stopSession(context.Background(), session); err != nil {
+					t.Errorf("stopSession() error = %v", err)
+				}
+			})
+
+			entries := sortieToolsEntries(t, capturePath)
+
+			if len(entries) != 1 {
+				t.Fatalf("session/new carries %d sortie-tools entries, want 1", len(entries))
+			}
+			entry := entries[0]
+			if !tt.wantHTTP {
+				if entry.Stdio == nil {
+					t.Errorf("sortie-tools entry = %+v, want the stdio entry", entry)
+				}
+				return
+			}
+			if entry.Stdio != nil {
+				t.Fatalf("session/new carries the stdio sortie-tools entry %+v, want only the http entry", entry.Stdio)
+			}
+			if !strings.HasPrefix(entry.HTTP.URL, "http://127.0.0.1:") || !strings.HasSuffix(entry.HTTP.URL, "/mcp") {
+				t.Errorf("sortie-tools url = %q, want http://127.0.0.1:<port>/mcp", entry.HTTP.URL)
+			}
+			var authorization string
+			for _, header := range entry.HTTP.Headers {
+				if header.Name == "Authorization" {
+					authorization = header.Value
+				}
+			}
+			if !strings.HasPrefix(authorization, "Bearer ") || len(authorization) == len("Bearer ") {
+				t.Errorf("sortie-tools Authorization header is not a non-empty bearer value")
+			}
+		})
+	}
+}
+
+func TestStartSessionRemoteRuntimeWithoutHTTPDeclaresToolServersGap(t *testing.T) {
+	// Not parallel: sets PATH via t.Setenv.
+	dir := t.TempDir()
+	sshDir := t.TempDir()
+	workspace := t.TempDir()
+
+	agenttest.NewSSHStandIn(t, sshDir, agenttest.SSHStandIn{
+		PATH:    sshStandInEnvPath(t, true),
+		Forward: agenttest.SSHForwardAllocated,
+	})
+	t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	capturePath := filepath.Join(dir, "session_new.jsonl")
+	agentPath := agenttest.FakeRuntime(t, dir, "agent", scenarioProtocolAgent, protocolAgentParams{
+		Handshake:             true,
+		CaptureSessionNewPath: capturePath,
+	})
+
+	session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, domain.StartSessionParams{
+		WorkspacePath: workspace,
+		AgentConfig:   domain.AgentConfig{Command: agentPath},
+		MCPConfigPath: seedRunnableToolServer(t, workspace, toolServerChildScenario),
+		SSHHost:       "user@stand-in-host",
+	})
+	if err != nil {
+		t.Fatalf("startSession() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stopSession(context.Background(), session); err != nil {
+			t.Errorf("stopSession() error = %v", err)
+		}
+	})
+
+	servers := sessionNewServers(t, capturePath)
+
+	if len(servers) != 0 {
+		t.Errorf("session/new carries %d servers, want none: a remote runtime without HTTP gets no entry", len(servers))
+	}
+	if !session.NoToolChannel {
+		t.Errorf("session.NoToolChannel = false, want true: the withheld tool server is a declared gap")
+	}
+}
+
+func recordSSHLaunch(t *testing.T, standIn string) (command string, wire func() (argv []string, stdin string)) {
+	t.Helper()
+
+	dir := t.TempDir()
+	argvLog, stdinLog := filepath.Join(dir, "argv"), filepath.Join(dir, "stdin")
+	command = agenttest.WriteScript(t, t.TempDir(), "ssh", fmt.Sprintf(
+		"printf '%%s\\0' \"$@\" >> '%s'\ntee -a '%s' | '%s' \"$@\"\n", argvLog, stdinLog, standIn))
+	return command, func() ([]string, string) {
+		argv, err := os.ReadFile(argvLog)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", argvLog, err)
+		}
+		stdin, err := os.ReadFile(stdinLog)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", stdinLog, err)
+		}
+		return strings.Split(strings.TrimSuffix(string(argv), "\x00"), "\x00"), string(stdin)
+	}
+}
+
+func TestStartSessionRemoteHTTPRuntimeKeepsOrchestratorSecretsOffArgvAndStdin(t *testing.T) {
+	// Not parallel: sets PATH via t.Setenv.
+	const envBlockSecret = "seeded-env-block-secret"
+
+	dir := t.TempDir()
+	sshDir := t.TempDir()
+	workspace := t.TempDir()
+
+	standIn := agenttest.NewSSHStandIn(t, t.TempDir(), agenttest.SSHStandIn{
+		PATH:    sshStandInEnvPath(t, true),
+		Forward: agenttest.SSHForwardAllocated,
+	})
+	command, wire := recordSSHLaunch(t, standIn)
+	if err := os.Symlink(command, filepath.Join(sshDir, "ssh")); err != nil {
+		t.Fatalf("Symlink(ssh): %v", err)
+	}
+	t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mcpConfigPath := seedRunnableToolServer(t, workspace, connectedToolServerChildScenario)
+	replaceInMCPConfig(t, mcpConfigPath, `"args":["mcp-server"]`, `"args":["mcp-server"],"env":{"SORTIE_TEST_CREDENTIAL":"`+envBlockSecret+`"}`)
+	capturePath := filepath.Join(dir, "session_new.jsonl")
+	agentPath := agenttest.FakeRuntime(t, dir, "agent", scenarioProtocolAgent, protocolAgentParams{
+		Handshake:              true,
+		IncludeMCPCapabilities: true,
+		CaptureSessionNewPath:  capturePath,
+	})
+
+	session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, domain.StartSessionParams{
+		WorkspacePath: workspace,
+		AgentConfig:   domain.AgentConfig{Command: agentPath},
+		MCPConfigPath: mcpConfigPath,
+		SSHHost:       "user@stand-in-host",
+	})
+	if err != nil {
+		t.Fatalf("startSession() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stopSession(context.Background(), session); err != nil {
+			t.Errorf("stopSession() error = %v", err)
+		}
+	})
+
+	entries := sortieToolsEntries(t, capturePath)
+	if len(entries) != 1 || entries[0].HTTP == nil {
+		t.Fatalf("session/new sortie-tools entries = %+v, want the one http entry", entries)
+	}
+	var bearer string
+	for _, header := range entries[0].HTTP.Headers {
+		if header.Name == "Authorization" {
+			bearer = strings.TrimPrefix(header.Value, "Bearer ")
+		}
+	}
+	argv, stdin := wire()
+
+	agenttest.AssertRemoteMCPSurface(t, mcpConfigPath, bearer, agenttest.RemoteLaunchSurface{
+		Argv:       argv,
+		Stdin:      stdin,
+		SessionNew: readCapturedLines(t, capturePath),
+	})
+	if slices.ContainsFunc(argv, func(arg string) bool { return strings.Contains(arg, envBlockSecret) }) {
+		t.Errorf("ssh argv = %q, want no env-block credential", argv)
+	}
+	if strings.Contains(stdin, envBlockSecret) {
+		t.Errorf("ssh stdin = %q, want no env-block credential", stdin)
+	}
+}
+
+func TestStartSessionRejectsMalformedMCPConfig(t *testing.T) {
+	t.Parallel()
+
+	scriptPath := agenttest.WriteScript(t, t.TempDir(), "agent.sh", mcpHandshakeScript(filepath.Join(t.TempDir(), "unused")))
+
+	agenttest.AssertMalformedMCPConfigRejected(t, func(mcpConfigPath string) error {
+		session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, domain.StartSessionParams{
+			WorkspacePath: t.TempDir(),
+			AgentConfig:   domain.AgentConfig{Command: scriptPath},
+			MCPConfigPath: mcpConfigPath,
+		})
+		if err == nil {
+			_ = stopSession(context.Background(), session)
+		}
+		return err
 	})
 }
 
@@ -118,7 +414,7 @@ func mcpHandshakeThenGracefulExitScript(evidencePath, delaySeconds string) strin
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
       ;;
     *'"method":"session/new"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}'
@@ -251,7 +547,7 @@ func mcpHandshakeWithChildScript(launcher, pidFile string) string {
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
       ;;
     *'"method":"session/new"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}'
@@ -270,7 +566,7 @@ func initThenStderrExitScript(marker string) string {
 	return `while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
       printf '%s\n' '` + marker + `' 1>&2
       exit 1
       ;;
@@ -449,7 +745,7 @@ func handshakeThenExitWithDetachedHolderScript(pidFile string) string {
 	return `while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
       ;;
     *'"method":"session/new"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}'
@@ -511,7 +807,7 @@ func promptThenExitWithDetachedHolderScript(pidFile string) string {
 	return `while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
       ;;
     *'"method":"session/new"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}'
@@ -727,7 +1023,7 @@ while IFS= read -r line; do
   fi
   case "$line" in
     *'"method":"initialize"'*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
       ;;
     *'"method":"session/new"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}'

@@ -3,10 +3,10 @@
 // normalizes stdout envelopes into domain events, and recovers final token
 // usage with `opencode session export --standalone --sanitize`.
 //
-// The CLI accepts no MCP configuration path as an argument, so on a local
-// launch the adapter translates the file named by
-// [domain.StartSessionParams] MCPConfigPath into OpenCode's own
-// configuration form and delivers it in the turn's environment.
+// The CLI accepts no MCP configuration path, so the adapter places the
+// session's tool-server delivery as the "mcp" member of the inline
+// configuration document in the turn's environment; a remote launch with a
+// tool relay carries it as a late SSH preamble entry.
 package opencode
 
 import (
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -34,7 +35,7 @@ func init() {
 		RequiresCommand:     true,
 		DefaultCommand:      defaultCommand,
 		ValidateAgentConfig: validateConfig,
-		MCPInjection:        registry.MCPInjectionTranslated,
+		MCPDialect:          registry.MCPDialectMCPMemberJSON,
 		UsageArrival:        registry.UsageArrivalTurnEnd,
 		UsageAttribution:    registry.UsageAttributionPerModel,
 		CredentialEnv:       registry.DeclareCredentialEnv(),
@@ -58,6 +59,7 @@ type sessionState struct {
 	sessionID      string
 	sessionOpened  bool
 	baseLogger     *slog.Logger
+	tools          *agentcore.ToolSession
 	createdSession bool
 	runStartedAtMS int64
 	usage          *agentcore.TurnEndUsage
@@ -109,13 +111,10 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 		return domain.Session{}, agentErr
 	}
 
-	servers, translateErr := translateMCPServers(params.MCPConfigPath, target.RemoteCommand != "")
-	if translateErr != nil {
-		return domain.Session{}, &domain.AgentError{
-			Kind:    domain.ErrResponseError,
-			Message: fmt.Sprintf("translate MCP config: %v", translateErr),
-			Err:     translateErr,
-		}
+	baseLogger := slog.Default().With(slog.String("component", "opencode-adapter"))
+	tools, toolsErr := agentcore.ResolveToolDelivery(ctx, params, target, registry.MCPDialectMCPMemberJSON, baseLogger)
+	if toolsErr != nil {
+		return domain.Session{}, toolsErr
 	}
 
 	state := &sessionState{
@@ -123,7 +122,8 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 		agentConfig:            params.AgentConfig,
 		passthrough:            pt,
 		sessionID:              params.ResumeSessionID,
-		baseLogger:             slog.Default().With(slog.String("component", "opencode-adapter")),
+		baseLogger:             baseLogger,
+		tools:                  tools,
 		createdSession:         params.ResumeSessionID == "",
 		runStartedAtMS:         time.Now().UnixMilli(),
 		usage:                  agentcore.NewTurnEndUsage(),
@@ -133,15 +133,17 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 	}
 
 	if versionErr := checkRuntimeVersion(ctx, state); versionErr != nil {
+		_ = tools.Close()
 		return domain.Session{}, versionErr
 	}
 
-	buildConfig := buildInlineConfig
-	if state.reducedVerificationContext {
-		buildConfig = buildVerificationInlineConfig
+	var mcp []byte
+	if tools.Configured() {
+		mcp = tools.Delivery(sshutil.ForwardOutcome{}).Document
 	}
-	turnConfigContent, buildErr := buildConfig(state.passthrough, servers)
+	turnConfigContent, buildErr := buildTurnConfig(state.passthrough, state.reducedVerificationContext, mcp)
 	if buildErr != nil {
+		_ = tools.Close()
 		return domain.Session{}, &domain.AgentError{
 			Kind:    domain.ErrResponseError,
 			Message: "build opencode environment",
@@ -152,9 +154,10 @@ func (a *OpenCodeAdapter) StartSession(ctx context.Context, params domain.StartS
 	state.fork = newForkSession(state)
 
 	return domain.Session{
-		ID:       state.sessionID,
-		AgentPID: "",
-		Internal: state,
+		ID:            state.sessionID,
+		AgentPID:      "",
+		Internal:      state,
+		NoToolChannel: tools.NoToolChannel(),
 	}, nil
 }
 
@@ -221,16 +224,40 @@ func newForkSession(state *sessionState) *agentcore.ForkPerTurnSession {
 		FirstEventTimeout: agentcore.FirstResponseTimeout(state.agentConfig),
 		SettleUsage:       state.settleUsage,
 		TurnEnv:           state.turnEnv,
+		Tools:             state.tools,
+		ToolPlacement:     state.placeTools,
 	}
 	return agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 }
 
 // turnEnv returns the environment every turn runs with and the settings an
-// SSH launch carries: the managed variables and the inline configuration.
+// SSH launch carries. A launch that places the inline configuration late
+// omits it here.
 func (s *sessionState) turnEnv() ([]string, []sshutil.EnvVar) {
 	managedEnv := buildManagedEnv()
-	managedEnv["OPENCODE_CONFIG_CONTENT"] = s.turnConfigContent
+	if !s.declaresLate() {
+		managedEnv["OPENCODE_CONFIG_CONTENT"] = s.turnConfigContent
+	}
 	return buildTurnEnv(s), sortedEnvVars(managedEnv)
+}
+
+// declaresLate reports whether the skeleton places a late entry: a remote
+// launch whose relay announced a listener. Without one the document must travel
+// with the static settings or the runtime would start without its tool policy.
+func (s *sessionState) declaresLate() bool {
+	return s.tools != nil && s.target.RemoteCommand != "" && s.tools.Forward(nil) != nil
+}
+
+// placeTools carries the whole inline configuration as a late entry, because
+// its tool-server entry names a remote port known only once the forward is
+// allocated.
+func (s *sessionState) placeTools(d mcpconfig.Delivery) sshutil.LatePreamble {
+	document, err := buildTurnConfig(s.passthrough, s.reducedVerificationContext, d.Document)
+	if err != nil {
+		s.logger().Error("failed to render late opencode configuration", slog.Any("error", err))
+		return sshutil.LatePreamble{}
+	}
+	return sshutil.LatePreamble{Env: []sshutil.EnvVar{{Name: "OPENCODE_CONFIG_CONTENT", Value: document}}}
 }
 
 // deleteVerificationSession only logs a failure, exit 1 for an unknown

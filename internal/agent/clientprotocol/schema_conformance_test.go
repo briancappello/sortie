@@ -928,11 +928,7 @@ func TestSchemaConformance(t *testing.T) {
 		respondLine(t, inPw, initID, initializeResponse{ProtocolVersion: protocolVersion(pinnedProtocolVersion)})
 		<-initDone
 
-		parsed, agentErr := parseMCPServers("", false)
-		if agentErr != nil {
-			t.Fatalf("parseMCPServers: %v", agentErr)
-		}
-		servers, _ := parsed.wireServers(false)
+		servers := []mcpServer{}
 
 		newSessDone := make(chan struct{})
 		go func() {
