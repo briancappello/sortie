@@ -140,6 +140,10 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		CredentialEnv:    []string{"COPILOT_PROVIDER_API_KEY"},
 		UserInstructions: filepath.Join(".copilot", "copilot-instructions.md"),
 		Read:             fakemodel.ReadFile,
+		SSH: &fakemodel.SSHVariant{
+			Install:       "npm install -g @github/copilot@1.0.103",
+			RemoteCommand: func(fakemodel.Environment) string { return "copilot" },
+		},
 		Finish: func(text string) fakemodel.ToolChoice {
 			summary, _ := json.Marshal(map[string]string{"summary": text})
 			return fakemodel.Named("task_complete", summary)

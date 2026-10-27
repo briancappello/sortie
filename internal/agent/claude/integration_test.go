@@ -130,6 +130,10 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		UserInstructions:    filepath.Join(".claude", "CLAUDE.md"),
 		ProjectInstructions: "CLAUDE.md",
 		Read:                fakemodel.ReadFile,
+		SSH: &fakemodel.SSHVariant{
+			Install:       "npm install -g @anthropic-ai/claude-code@2.1.311",
+			RemoteCommand: func(fakemodel.Environment) string { return "claude" },
+		},
 		Launch: func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
 			return fakemodel.Launch{
 				Config: domain.AgentConfig{

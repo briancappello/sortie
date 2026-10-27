@@ -62,6 +62,17 @@
 //	                                  endpoint from a fixed location; it
 //	                                  replaces the model base address
 //	                                  variable
+//	SORTIE_CLIENTPROTOCOL_HTTP_TOOLS  1 when the runtime advertises
+//	                                  mcpCapabilities.http: the local tool-server
+//	                                  case must then reach the relay over
+//	                                  loopback HTTP, and the SSH cases run
+//	SORTIE_CLIENTPROTOCOL_SSH_COMMAND the runtime's launch command on the SSH
+//	                                  lab host, which has only what
+//	                                  SORTIE_CLIENTPROTOCOL_SSH_INSTALL
+//	                                  installs; the SSH cases skip without it
+//	SORTIE_CLIENTPROTOCOL_SSH_INSTALL a POSIX shell script that installs the
+//	                                  runtime into the lab image as root, for
+//	                                  instance with npm install -g
 //
 // Run:
 //
@@ -561,6 +572,22 @@ func writeModelDocument(t *testing.T, path, template, url string) string {
 	return path
 }
 
+func sshVariant() *fakemodel.SSHVariant {
+	variant := &fakemodel.SSHVariant{
+		Install: os.Getenv("SORTIE_CLIENTPROTOCOL_SSH_INSTALL"),
+		RemoteCommand: func(fakemodel.Environment) string {
+			return os.Getenv("SORTIE_CLIENTPROTOCOL_SSH_COMMAND")
+		},
+	}
+	switch {
+	case os.Getenv("SORTIE_CLIENTPROTOCOL_HTTP_TOOLS") != "1":
+		variant.Skip = "set SORTIE_CLIENTPROTOCOL_HTTP_TOOLS=1 when the runtime advertises mcpCapabilities.http; without the advertisement Sortie declares a tool-server gap and delivers nothing"
+	case os.Getenv("SORTIE_CLIENTPROTOCOL_SSH_COMMAND") == "":
+		variant.Skip = "the runtime's launch command on the lab host is unset: set SORTIE_CLIENTPROTOCOL_SSH_COMMAND"
+	}
+	return variant
+}
+
 func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessClientProtocolIntegration(t)
 
@@ -590,6 +617,8 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 
 	fakemodel.AssertConformance(t, fakemodel.Binding{
 		Kind:                "agent-client-protocol",
+		LocalToolsOverHTTP:  os.Getenv("SORTIE_CLIENTPROTOCOL_HTTP_TOOLS") == "1",
+		SSH:                 sshVariant(),
 		Passthrough:         map[string]any{},
 		CredentialEnv:       credentialNames,
 		UserInstructions:    os.Getenv("SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS"),
@@ -611,7 +640,6 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			case fakemodel.ScenarioPermissionRefusal:
 				command = askingCommand
 			}
-			config, capture := captureAgentConfig(t, command, expect, env.Events)
 			launchEnv := map[string]string{}
 			switch {
 			case documentPath != "":
@@ -621,6 +649,13 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			default:
 				launchEnv[baseURLEnv] = env.URL
 			}
+			if env.Remote {
+				return fakemodel.Launch{
+					Config: domain.AgentConfig{TurnTimeoutMS: 300000, ReadTimeoutMS: 30000},
+					Env:    launchEnv,
+				}
+			}
+			config, capture := captureAgentConfig(t, command, expect, env.Events)
 			return fakemodel.Launch{
 				Config:  config,
 				Env:     launchEnv,

@@ -22,6 +22,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
+	"github.com/sortie-ai/sortie/internal/agent/toolrelay"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
@@ -107,6 +108,28 @@ type Binding struct {
 	// VerificationContext overrides the kind's declaration for this binding's
 	// launch, as a protocol runtime's addition does. Zero uses the kind's.
 	VerificationContext registry.VerificationContext
+
+	// SSH declares the binding's SSH variant of the tool-server scenario, run
+	// against the Docker sshd lab; nil runs no variant.
+	SSH *SSHVariant
+
+	// LocalToolsOverHTTP marks a runtime that advertises HTTP tool-server
+	// support, so the local scenario must reach the relay over loopback HTTP.
+	LocalToolsOverHTTP bool
+}
+
+// SSHVariant is a binding's fixture for the SSH variant of the tool-server
+// scenario.
+type SSHVariant struct {
+	// Install is the [agenttest.SSHLabParams].Install script.
+	Install string
+
+	// RemoteCommand returns the remote shell's command line in place of the
+	// one Launch returns, which may name host paths. Nil keeps Launch's.
+	RemoteCommand func(env Environment) string
+
+	// Skip, when not empty, skips the variant with this reason.
+	Skip string
 }
 
 // PermissionRefusal is a binding's fixture for the permission refusal
@@ -126,6 +149,10 @@ type Environment struct {
 	Workspace string // a git work tree
 	Sentinel  string
 	Events    func() []domain.AgentEvent // a copy of the events delivered so far
+
+	// Remote marks a run in the SSH lab: Launch must name no host path, because
+	// the container shares nothing with the host.
+	Remote bool
 }
 
 // Launch is how a binding starts its runtime.
@@ -220,6 +247,10 @@ func AssertConformance(t *testing.T, b Binding) {
 	t.Run("scripted turn", func(t *testing.T) { runScenario(t, b, ScenarioTurn) })
 	t.Run("script exhaustion", func(t *testing.T) { runScenario(t, b, ScenarioExhaustion) })
 	t.Run("tool server", func(t *testing.T) { runToolServer(t, b) })
+	if b.SSH != nil {
+		t.Run("tool server over ssh", func(t *testing.T) { runSSHToolServer(t, b, false) })
+		t.Run("tool server over ssh with forwarding refused", func(t *testing.T) { runSSHToolServer(t, b, true) })
+	}
 	if b.PermissionRefusal != nil {
 		t.Run("permission refusal", func(t *testing.T) { runPermissionRefusal(t, b) })
 	}
@@ -362,10 +393,101 @@ func runToolServer(t *testing.T, b Binding) {
 	t.Run("tool server", func(t *testing.T) {
 		reportViolations(t, toolServerViolations(run, strconv.Itoa(sortieStatusTurn)))
 		tools.Relay.AssertToolCallSucceeded(t, agenttest.SortieStatusTool, tools.Identity)
+		if b.LocalToolsOverHTTP {
+			tools.Relay.AssertAcceptNamesBothMedia(t, b.Kind)
+		}
 	})
 	if b.Inspect != nil {
 		t.Run("adapter", func(t *testing.T) { b.Inspect(t, run) })
 	}
+}
+
+func runSSHToolServer(t *testing.T, b Binding, refused bool) {
+	t.Helper()
+
+	if b.SSH.Skip != "" {
+		t.Skipf("%s: %s", b.Kind, b.SSH.Skip)
+	}
+	if reason := agenttest.SSHLabSkipReason(); reason != "" {
+		t.Skip(reason)
+	}
+
+	workspace := newWorkspace(t)
+	_, file := writeScriptedFile(t, workspace)
+	tools := agenttest.NewSortieTools(t, workspace)
+	writeSortieState(t, workspace)
+
+	script := []Response{
+		{Call: afterToolsListed(tools.Relay, b.Read(file)), Usage: firstTurnUsage},
+		{Call: sortieStatusCall(b), Usage: sortieToolUsage},
+		closingResponse(b),
+	}
+	if refused {
+		script = []Response{{Call: b.Read(file), Usage: firstTurnUsage}, closingResponse(b)}
+	}
+	settings := b.ToolServerPassthrough
+	if settings == nil {
+		settings = b.Passthrough
+	}
+	run, _, _ := driveTurn(t, b, drive{
+		scenario:      ScenarioToolServer,
+		server:        Start(t, script),
+		workspace:     workspace,
+		mcpConfigPath: tools.ConfigPath,
+		settings:      settings,
+		prompt:        "Read the file " + file + " and report its contents.",
+		remote:        &remoteLaunch{variant: b.SSH, refused: refused},
+	})
+
+	t.Run("turn outcome", func(t *testing.T) {
+		reportViolations(t, turnOutcomeViolations(run, len(script)))
+	})
+	t.Run("delivery", func(t *testing.T) {
+		reportViolations(t, sshDeliveryViolations(run, refused))
+	})
+	if refused {
+		return
+	}
+	t.Run("tool server", func(t *testing.T) {
+		reportViolations(t, toolServerViolations(run, strconv.Itoa(sortieStatusTurn)))
+		tools.Relay.AssertToolCallSucceeded(t, agenttest.SortieStatusTool, tools.Identity)
+		tools.Relay.AssertAcceptNamesBothMedia(t, b.Kind)
+	})
+}
+
+type remoteLaunch struct {
+	variant *SSHVariant
+	refused bool
+}
+
+// attach starts the lab and returns the ssh destination and the variable names
+// the SSH launch carries from the process. NO_PROXY keeps the loopback model
+// endpoint off a proxy the runtime honors (claude-code sets HTTPS_PROXY for its
+// connection warm-up).
+func (r remoteLaunch) attach(t *testing.T, b Binding, d drive, env Environment, launch *Launch) (host string, envNames []string) {
+	t.Helper()
+
+	lab := agenttest.StartSSHLab(t, agenttest.SSHLabParams{
+		Install: r.variant.Install,
+		Dirs:    []string{d.workspace},
+		Seed:    []string{env.Home},
+	})
+	if r.variant.RemoteCommand != nil {
+		launch.Config.Command = r.variant.RemoteCommand(env)
+		launch.Config.CommandArgv = nil
+	}
+	if launch.Config.Command != "" {
+		launch.Config.Command = "git init -q && " + launch.Config.Command
+	}
+
+	meta, _ := registry.Agents.Meta(b.Kind)
+	names := slices.Concat(slices.Collect(maps.Keys(launch.Env)), meta.CredentialEnv.Names(), b.CredentialEnv, []string{"NO_PROXY", "no_proxy"})
+	slices.Sort(names)
+	names = slices.Compact(names)
+	if r.refused {
+		return lab.RefusedHost, names
+	}
+	return lab.Host, names
 }
 
 type drive struct {
@@ -375,6 +497,7 @@ type drive struct {
 	mcpConfigPath string
 	settings      map[string]any
 	prompt        string
+	remote        *remoteLaunch // nil launches the runtime locally
 }
 
 type preparedSession struct {
@@ -382,6 +505,8 @@ type preparedSession struct {
 	launch      Launch
 	events      *eventCollector
 	adapter     domain.AgentAdapter
+	sshHost     string
+	sshEnvNames []string
 }
 
 func prepareSession(t *testing.T, b Binding, d drive) preparedSession {
@@ -399,8 +524,14 @@ func prepareSession(t *testing.T, b Binding, d drive) preparedSession {
 		Workspace: d.workspace,
 		Sentinel:  sentinel,
 		Events:    events.snapshot,
+		Remote:    d.remote != nil,
 	}
 	launch := b.Launch(t, environment)
+	var sshHost string
+	var sshEnvNames []string
+	if d.remote != nil {
+		sshHost, sshEnvNames = d.remote.attach(t, b, d, environment, &launch)
+	}
 	for _, key := range slices.Sorted(maps.Keys(launch.Env)) {
 		t.Setenv(key, launch.Env[key])
 	}
@@ -413,7 +544,7 @@ func prepareSession(t *testing.T, b Binding, d drive) preparedSession {
 	if err != nil {
 		t.Fatalf("construct %q adapter error = %v", b.Kind, err)
 	}
-	return preparedSession{environment: environment, launch: launch, events: events, adapter: adapter}
+	return preparedSession{environment: environment, launch: launch, events: events, adapter: adapter, sshHost: sshHost, sshEnvNames: sshEnvNames}
 }
 
 func driveTurn(t *testing.T, b Binding, d drive) (run Run, launch Launch, timedOut bool) {
@@ -429,6 +560,8 @@ func driveTurn(t *testing.T, b Binding, d drive) (run Run, launch Launch, timedO
 		AgentConfig:   p.launch.Config,
 		MCPConfigPath: d.mcpConfigPath,
 		Settings:      d.settings,
+		SSHHost:       p.sshHost,
+		SSHEnvNames:   p.sshEnvNames,
 	})
 	if err != nil {
 		t.Fatalf("StartSession() error = %v%s", err, exchangeLines(d.server.Exchanges()))
@@ -1257,6 +1390,39 @@ type findings struct {
 
 func (v *findings) add(format string, args ...any) {
 	v.items = append(v.items, v.property+": "+fmt.Sprintf(format, args...))
+}
+
+func sshDeliveryViolations(run Run, refused bool) []string {
+	v := &findings{property: "ssh tool delivery"}
+
+	var notices []string
+	for _, event := range run.Events {
+		if event.Type == domain.EventNotification && strings.Contains(event.Message, toolrelay.GapNoticeStem) {
+			notices = append(notices, event.Message)
+		}
+	}
+	if refused {
+		switch {
+		case len(notices) != 1:
+			v.add("%d opening notices, want one", len(notices))
+		case !strings.Contains(notices[0], toolrelay.ToolServersLabel):
+			v.add("opening notice %q does not name %q", notices[0], toolrelay.ToolServersLabel)
+		}
+		if !run.Session.NoToolChannel {
+			v.add("Session.NoToolChannel = false after a refused forward, want true")
+		}
+		return v.items
+	}
+
+	for _, notice := range notices {
+		if strings.Contains(notice, toolrelay.ToolServersLabel) {
+			v.add("opening notice %q after a delivered forward, want none", notice)
+		}
+	}
+	if run.Session.NoToolChannel {
+		v.add("Session.NoToolChannel = true after a delivered forward, want false")
+	}
+	return v.items
 }
 
 func turnOutcomeViolations(run Run, entries int) []string {

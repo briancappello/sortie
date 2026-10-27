@@ -193,7 +193,7 @@ func TestIntegration_StartSession_InvalidCommand(t *testing.T) {
 // The redirect rides in -c overrides because the runtime ignores
 // OPENAI_BASE_URL and a project-local config file; zero retry counts make a
 // refused request end the turn instead of being replayed.
-func scriptedProviderCommand(url string) string {
+func scriptedProviderCommand(command, url string) string {
 	pairs := []string{
 		"model_provider=\"scripted\"",
 		"model_providers.scripted.name=\"scripted\"",
@@ -204,7 +204,7 @@ func scriptedProviderCommand(url string) string {
 		"model_providers.scripted.stream_max_retries=0",
 		"model_providers.scripted.supports_websockets=false",
 	}
-	args := []string{integrationCommand()}
+	args := []string{command}
 	for _, pair := range pairs {
 		args = append(args, "-c", pair)
 	}
@@ -236,10 +236,16 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		},
 		CredentialEnv: []string{"CODEX_API_KEY"},
 		Read:          fakemodel.CatFile,
+		SSH: &fakemodel.SSHVariant{
+			Install: "npm install -g @openai/codex@0.164.0",
+			RemoteCommand: func(env fakemodel.Environment) string {
+				return scriptedProviderCommand("codex app-server", env.URL)
+			},
+		},
 		Launch: func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
 			return fakemodel.Launch{
 				Config: domain.AgentConfig{
-					Command:       scriptedProviderCommand(env.URL),
+					Command:       scriptedProviderCommand(integrationCommand(), env.URL),
 					TurnTimeoutMS: 300000,
 					ReadTimeoutMS: 30000,
 				},
