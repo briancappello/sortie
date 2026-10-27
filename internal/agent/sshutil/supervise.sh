@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # sshd sends no signal to a command it runs without a terminal when the
 # connection ends, so the agent is stopped once the shell's parent, the sshd
 # session process, is gone.
