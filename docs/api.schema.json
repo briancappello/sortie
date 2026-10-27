@@ -1248,6 +1248,9 @@
     },
     "HoldResponse": {
       "properties": {
+        "agent_kind": {
+          "type": "string"
+        },
         "blockers": {
           "anyOf": [
             {
@@ -1264,6 +1267,12 @@
         "held_since": {
           "format": "date-time",
           "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_only": {
+          "type": "boolean"
         },
         "reason": {
           "enum": [

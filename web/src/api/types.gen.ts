@@ -288,6 +288,9 @@ export interface HoldResponse {
   blockers: HoldBlockerResponse[] | null;
   slot: HoldSlotResponse | null;
   resets_at: string | null;
+  agent_kind?: string;
+  model_only?: boolean;
+  model?: string;
   reason_text: string;
   release_text: string;
 }

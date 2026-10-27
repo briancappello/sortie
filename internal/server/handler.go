@@ -255,7 +255,8 @@ type holdSlotResponse struct {
 // holdResponse is the JSON wire format for why a candidate is held back.
 // Reason is one of the values of [orchestrator.HoldReasons]. Blockers is
 // non-null exactly for a blocked_by hold, Slot exactly for an agent_slots_full
-// hold, and ResetsAt exactly for a spend ceiling hold or a usage_limit hold. A
+// hold, and ResetsAt exactly for a spend ceiling hold or a usage_limit hold.
+// AgentKind, ModelOnly, and Model are served for a usage_limit hold only. A
 // client MUST tolerate a Reason it does not know and show the served texts.
 // Used by GET /api/v1/state and GET /api/v1/{identifier}.
 type holdResponse struct {
@@ -264,6 +265,9 @@ type holdResponse struct {
 	Blockers    []holdBlockerResponse `json:"blockers"`
 	Slot        *holdSlotResponse     `json:"slot"`
 	ResetsAt    *time.Time            `json:"resets_at"`
+	AgentKind   string                `json:"agent_kind,omitempty"`
+	ModelOnly   bool                  `json:"model_only,omitempty"`
+	Model       string                `json:"model,omitempty"`
 	ReasonText  string                `json:"reason_text"`
 	ReleaseText string                `json:"release_text"`
 }
@@ -813,6 +817,9 @@ func toHoldResponse(h *orchestrator.SnapshotHold, words sentence.Context) *holdR
 		Reason:    string(h.Reason),
 		HeldSince: h.Since.UTC(),
 		ResetsAt:  utcOrNil(h.ResetsAt),
+		AgentKind: h.AgentKind,
+		ModelOnly: h.ModelOnly,
+		Model:     h.Model,
 	}
 	if h.Blockers != nil {
 		resp.Blockers = make([]holdBlockerResponse, 0, len(h.Blockers))

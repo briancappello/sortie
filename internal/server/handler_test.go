@@ -1158,6 +1158,20 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 			want: map[string]any{"held_since": "2026-03-24T09:00:00Z", "resets_at": "2026-03-24T09:00:00Z", "blockers": nil, "slot": nil},
 		},
 		{
+			name: "hold by a usage limit serves its reset and the model scope it covers",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipUsageLimit, Since: passAt, ResetsAt: passAt,
+				AgentKind: "claude-code", ModelOnly: true, Model: "opus",
+			}, sentence.Context{}),
+			want: map[string]any{"reason": "usage_limit", "resets_at": "2026-03-24T09:00:00Z", "agent_kind": "claude-code", "model_only": true, "model": "opus"},
+		},
+		{
+			name:   "hold by a kind-wide usage limit omits the model scope",
+			body:   toHoldResponse(&orchestrator.SnapshotHold{Reason: orchestrator.SkipUsageLimit, Since: passAt, ResetsAt: passAt, AgentKind: "codex"}, sentence.Context{}),
+			want:   map[string]any{"agent_kind": "codex"},
+			absent: []string{"model_only", "model"},
+		},
+		{
 			name: "held issue without labels serves an empty list",
 			body: toHeldIssueResponse(orchestrator.SnapshotHeldEntry{
 				IssueID: "id-8", Identifier: "PROJ-8", IssueLabels: []string{},
