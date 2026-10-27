@@ -283,6 +283,9 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 
 	if target.RemoteCommand == "" {
 		if _, canaryErr := agentcore.QueryRuntimeVersion(ctx, target, params.AgentConfig, nil, nil); canaryErr != nil {
+			if canaryErr.Kind == domain.ErrPortExit {
+				canaryErr.Message = "copilot binary found but not functional; ensure Node.js 22+ is available: " + canaryErr.Message
+			}
 			return domain.Session{}, canaryErr
 		}
 	}

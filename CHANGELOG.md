@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A tool server marked disabled is now left out for every agent. Before, some agents still received it. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 - On SSH worker hosts, tool servers that run as a local program (stdio) are no longer sent to the agent, and the session reports that they are unavailable. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 - Sortie's tool server now supports MCP 2026-07-28, the newest protocol version, as well as earlier ones. Agents that open with the newest version connect directly instead of falling back. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
-- When Copilot CLI fails its startup check, the error now shows the runtime's own error output, as it does for other agents, and the check waits up to twice `agent.read_timeout_ms`, at most 30 seconds, as OpenCode's does, instead of a fixed five seconds. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
+- When Copilot CLI fails its startup check, the error now adds the runtime's own error output to the Node.js 22+ hint, and the issue is retried with backoff, as for any agent whose runtime exits at startup, instead of being released at once. The check also waits up to twice `agent.read_timeout_ms`, at most 30 seconds, as OpenCode's does, instead of a fixed five seconds. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 
 ### Fixed
 
