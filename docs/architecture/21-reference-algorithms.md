@@ -62,7 +62,7 @@ function event_loop(state, once):
 
     if event is retry_timer(issue_id):
       identifier = state.retry_attempts[issue_id].identifier or ""   // read before the handler pops the entry
-      state, released = on_retry_timer(issue_id, state, release_spend_held=(once != null))
+      state, released = on_retry_timer(issue_id, state, release_held=(once != null))
       if released and issue_id not in once.outcomes:
         once.outcomes[issue_id] = (identifier, stopped)
     else if event is worker_exit(issue_id, reason, worker_result):
@@ -169,6 +169,17 @@ on_tick(state, once):
         if once != null:
           once.drop(issue.id)                            // the run does not wait for the window to reset
           once.outcomes[issue.id] = (issue.identifier, stopped)
+        continue
+      # Right after rule resolution and before the adapter lookup.
+      # The model is the one the dispatch is configured with, not the runtime's
+      # default when the settings name none.
+      (agent_kind, template_id, rule_name) = resolve_rule(issue, state.dispatch_cfg, hop_route_of(state, issue.id), state.default_agent_kind, state.default_template_id)
+      model = configured_model(state.cfg, (agent_kind, rule_name))
+      held, hold = usage_limit_gate(state, agent_kind, model, own_retry=false, grace=state.poll_interval_ms, now())
+      if held:
+        record_candidate_hold(state, issue, usage_limit, hold)   // the candidate takes no slot; later candidates are still evaluated
+        if once != null:
+          once.drop(issue.id)                            // the run does not wait for the reset
         continue
       issue, dispatchable = hold_for_stage_hop(issue, state)   // Section 16.4
       if not dispatchable:
@@ -967,6 +978,16 @@ on_worker_exit(issue_id, reason, worker_result, state):
       run_error = money_ceiling_stop_error(issue_cost(running_entry), running_entry.ceiling_stop_request.budget_usd)
     report_ceiling_stop(log, metrics, running_entry.ceiling_stop_request)
 
+  # A provider usage-limit refusal. The status is usage_limited
+  # only for an accepted reset on a run whose token figure is measured with
+  # zero output tokens, so the agent did nothing. Every other refusal records
+  # the status above and counts toward agent.max_sessions.
+  refused = reason == error and run_error is a usage_limit error
+  reset, limit, waits = usage_limit_reset(run_error, now()) if refused else (none, none, false)   // accepts an instant after now, capped at 7 days; the only validation of an agent-reported instant
+  no_work = running_entry.token_figure_measured and running_entry.agent_output_tokens == 0
+  if waits and no_work:
+    status = "usage_limited"
+
   handoff_path = false
   evidence_withheld = false
   evidence_work_observed = false
@@ -1050,6 +1071,13 @@ on_worker_exit(issue_id, reason, worker_result, state):
     log_warn("failed to persist run events")
     hold_events_for_retry(running_entry.dispatch_id, running_entry.events)
   release_event_buffer(state, running_entry.dispatch_id)   // after the write, whatever it returned
+
+  # A run of kind K on model M that exits normally proves the window open: it
+  # clears the kind-wide hold of K and the hold of K on M, each only when the
+  # run started after the hold began. A failed store write is logged and the
+  # clear stands in memory.
+  if reason == normal:
+    clear_usage_limit_holds(state, running_entry)
 
   # The absence sequence is reconstructed from run_history rather than
   # from a verdict column (Section 19.2), so both steps below follow the
@@ -1270,10 +1298,31 @@ on_worker_exit(issue_id, reason, worker_result, state):
             issue_id, identifier, display_id, attempt, kind
           }
   else:
-    if retry_slot_incumbent(state, issue_id) is nil:
+    # session.failed is published as for any failed exit, except that a
+    # refused exit of a run dispatched with usage_limit_notified publishes
+    # none. The first refusal of an episode publishes; a retry inside the
+    # episode publishes no session.started either.
+    if waits:
+      key = (running_entry.agent_kind, limit.model_only, running_entry.configured_model if limit.model_only else "")
+      hold = record_usage_limit_hold(state, key, reset, now())   // saved when it changed
+      if once != null:
+        state.claimed.remove(issue_id)                 // the next run meets the persisted hold
+        log_warn("worker run refused by usage limit, releasing claim", reset)
+      elif retry_slot_incumbent(state, issue_id) is nil:
+        attempt = next_attempt_from(running_entry)
+        state = schedule_retry(state, issue_id, attempt, {
+          identifier: running_entry.identifier,
+          error: format("worker exited: %reason"),
+          due_at: max(hold.resets_at, now() + backoff_delay(attempt)),
+          trigger: "usage_limit",
+          usage_limit_notified: true
+        })
+      # else: an incumbent retry takes usage_limit_notified: true
+    elif retry_slot_incumbent(state, issue_id) is nil:
       state = schedule_retry(state, issue_id, next_attempt_from(running_entry), {
         identifier: running_entry.identifier,
-        error: format("worker exited: %reason")
+        error: format("worker exited: %reason"),
+        usage_limit_notified: refused                  // a refusal with no usable reset keeps the ordinary backoff
       })
     # else: the retry slot (Section 7.5) is occupied, so this exit defers
     # to the incumbent instead of scheduling a backoff retry.
@@ -1354,8 +1403,8 @@ function report_stage_hop(state, entry, run_id, hop):
 The hop leaves the issue in its active tracker state with the target's stage label added and the source's label removed, does not increment `sortie_handoff_transitions_total`, and writes no state; the next dispatch performs the in-progress transition like any dispatch. A run that never reaches the handoff arm (a blocked soft stop, a terminal exit, a withheld verdict, an abnormal exit, a label-command dispatch, or an unset handoff state) never reaches `advance_stage`.
 
 ```text
-on_retry_timer(issue_id, state, release_spend_held=false):
-  // reports true as a second result only where it released a retry the spend ceiling held; every other return reports false
+on_retry_timer(issue_id, state, release_held=false):
+  // reports true as a second result only where it released a retry the spend ceiling or a usage-limit hold held; every other return reports false
   // every schedule_retry here records the trigger "timer"
   // a fire an operator request brought forward puts the retry back at retry_entry.attempt and the due time the request replaced (§8.4), in place of the attempt number and delay each put-back below sets
   retry_entry = state.retry_attempts.pop(issue_id)
@@ -1367,12 +1416,12 @@ on_retry_timer(issue_id, state, release_spend_held=false):
   # keeps the attempt number, error, and continuation fields.
   spend_hold = evaluate_spend_ceiling(state, now())
   if spend_hold != none:
-    if release_spend_held:                             // --once: the run does not wait for the window to reset
+    if release_held:                             // --once: the run does not wait for the window to reset
       state.claimed.remove(issue_id)                   // the persisted retry entry stays as it is for the next process
       log_warn("retry held by spend ceiling, releasing claim", reason=spend_hold, attempt=retry_entry.attempt)
       return state, true
     log_debug("retry held by spend ceiling, rechecking")
-    return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, spend_held=true)
+    return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, hold_rearmed=true)
 
   issue, err = tracker.fetch_issue_by_id(issue_id)
   if err:
@@ -1402,8 +1451,8 @@ on_retry_timer(issue_id, state, release_spend_held=false):
     })
 
   if available_slots(state) == 0:
-    if retry_entry.spend_held:                         // a held retry keeps its attempt number until a slot frees; the same holds when no SSH host is free
-      return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, spend_held=true)
+    if retry_entry.hold_rearmed:                         // a held retry keeps its attempt number until a slot frees; the same holds when no SSH host is free
+      return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, hold_rearmed=true)
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
       identifier: issue.identifier,
       error: "no available orchestrator slots",
@@ -1414,6 +1463,23 @@ on_retry_timer(issue_id, state, release_spend_held=false):
   selection = retry_selection(state.cfg, template_held, frozen, issue, hop_route_of(state, issue_id))
   if selection != frozen:
     log_info("retry dispatching on the selection the configuration in force gives it")
+
+  # After the selection settles the agent kind and before the adapter lookup.
+  # A fire an operator request brought forward is not gated here; the spend
+  # gate above still holds it. The gate runs on the configured model of the
+  # selection, so a retry routed to another model of a held kind passes a
+  # model hold.
+  if retry_entry.due_before_request is empty:
+    model = configured_model(state.cfg, selection)
+    held, hold, release_at = usage_limit_gate(state, selection.agent_kind, model,
+      own_retry=(retry_entry.origin_trigger == "usage_limit"), grace=state.poll_interval_ms, now())
+    if held:
+      release_host(issue_id)
+      if release_held:                                 // --once: the run does not wait for the reset
+        state.claimed.remove(issue_id)                 // the persisted retry entry stays as it is for the next process
+        return state, true
+      log_debug("retry held by usage limit, rechecking at release")
+      return rearm_retry(state, issue_id, retry_entry.attempt, release_at, retry_entry, hold_rearmed=true)
   lineage = retry_entry.stage_lineage
   if selection.rule_name != frozen.rule_name:
     lineage = fresh_lineage(state, issue_id, selection.rule_name)
@@ -1450,7 +1516,7 @@ on_retry_timer(issue_id, state, release_spend_held=false):
 
 A changed settings result never clears `resume_session_id`; only a changed kind or template does.
 
-`rearm_retry` arms the retry timer for the entry's own fields one poll interval ahead, with the attempt number and error the caller passes. It writes no persisted entry, deletes none, and counts no retry. While a spend window holds, a retry whose timer fires, a pull request reaction continuation included, therefore returns to the retry slot unchanged except for its due time, and the first fire after the hold ends dispatches with the attempt number the retry had. The entry carries `spend_held` only until a fire takes any other path.
+`rearm_retry` arms the retry timer for the entry's own fields at the instant the caller passes, one poll interval ahead for a spend hold and the hold's release instant for a usage-limit hold, with the attempt number and error the caller passes. It writes no persisted entry, deletes none, and counts no retry. While a spend window holds, a retry whose timer fires, a pull request reaction continuation included, therefore returns to the retry slot unchanged except for its due time, and the first fire after the hold ends dispatches with the attempt number the retry had. The entry carries `hold_rearmed` only until a fire takes any other path.
 
 `retry_selection` keeps the frozen triple, with a retired kind replaced by its replacement kind, while the kind is still reachable through `agent.kind`, `dispatch.default.agent`, or a rule and the template is still held, and otherwise returns `resolve_rule` over the configuration in force, passing the issue's hop route (§5.3.9, §8.4). A retry that finds its issue terminal or no longer active ends the issue's hop count. A retry that finds its issue in no state never touches the hop record.
 

@@ -110,7 +110,7 @@ A run whose spend is known only in vendor units, and a run with no figure at all
 
 | Ceiling | Run with a token figure | Run with spend only in vendor units | Run with no figure |
 | --- | --- | --- | --- |
-| `agent.max_sessions` | Applies | Applies | Applies |
+| `agent.max_sessions` | Applies, except to a run that a provider usage limit refused with a future reset time, when its figure records no output token | Applies | Applies |
 | `agent.max_turns` | Applies | Applies | Applies |
 | `agent.turn_timeout_ms` and `agent.stall_timeout_ms` | Apply | Apply | Apply |
 | `agent.max_consecutive_absences` | Applies | Applies | Applies |
@@ -198,3 +198,4 @@ The decision is satisfied when all of the following hold:
 9. A long-lived cache write is priced at the cache-write rate and does not mark its share `partial`.
 10. Every run record carries its token figure's sources, strategies, and completeness, and every priced share carries whether the price table or a reported amount priced it.
 11. Every kind that launches a runtime passes the conformance contract locally and in the SSH lab, with the exact scripted figure and the expected source and strategy, for completed, tool-calling, resumed, cancelled, and killed turns.
+12. A run that a provider usage limit refused with a future reset time, and whose token figure records no output token, does not count toward `agent.max_sessions`. Every other run a provider usage limit refused counts, including one whose spend is known only in vendor units and one with no figure.

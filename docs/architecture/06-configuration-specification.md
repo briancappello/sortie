@@ -182,7 +182,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `agent.max_sessions`: non-negative integer, default `0` (unlimited); the total per-issue session budget. The separate `agent.max_consecutive_absences` governs the consecutive-absence ceiling
+- `agent.max_sessions`: non-negative integer, default `0` (unlimited); the total per-issue session budget, which does not count a run a provider usage limit refused before it produced output. The separate `agent.max_consecutive_absences` governs the consecutive-absence ceiling
 - `agent.max_tokens`: integer, default `0` (unlimited)
 - `agent.max_cost_usd`: number, default `0` (unlimited); non-negative and finite; the per-issue ceiling on the issue's estimated cost in US dollars; `SORTIE_AGENT_MAX_COST_USD` overrides it; applies on reload
 - `agent.max_daily_cost_usd`: number, default `0` (unlimited); non-negative and finite; the instance ceiling on the estimated cost in US dollars of the current UTC calendar day, counting the runs that completed in it and the sessions running now; `SORTIE_AGENT_MAX_DAILY_COST_USD` overrides it; applies on reload, from the next poll tick or retry timer fire

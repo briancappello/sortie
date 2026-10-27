@@ -203,13 +203,14 @@ Fields:
 - `max_retry_backoff_ms` (integer or string integer)
   - Default: `300000` (5 minutes)
   - Changes should be re-applied at runtime and affect future retry scheduling.
+  - Caps the exponential backoff of a retry after an error. A refusal by a provider usage limit that reports a reset time in the future is the exception: the retry waits for the reset, past this cap, up to 7 days.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
   - An entry outside the range an integer setting accepts, positive or negative, is rejected when the configuration is parsed; other invalid entries (non-positive or non-numeric) are ignored.
 - `max_sessions` (integer)
   - Default: `0` (unlimited; no effort budget enforced).
-  - Maximum number of completed worker sessions for a single issue before the orchestrator stops re-dispatching it. Counted from `run_history` entries.
+  - Maximum number of completed worker sessions for a single issue before the orchestrator stops re-dispatching it. Counted from `run_history` entries, except a `usage_limited` entry: a run that a provider usage limit refused before it produced output does not count. A refusal after output, or on a run with no token figure, counts.
   - When the count reaches `max_sessions`, a warning is logged. The retry handler releases the claim it holds; the poll tick's own rebuild of the exhausted-issue set writes the candidate into that set instead, because a held candidate never held a claim to release.
   - `0` disables the budget (unlimited retries).
   - Changes are re-applied at runtime and affect future retry timer evaluations.
@@ -664,10 +665,10 @@ Per-entry fields:
 
 | Event type | Meaning |
 |---|---|
-| `session.started` | A session was dispatched on an issue whose dispatch drives issue state |
+| `session.started` | A session was dispatched on an issue whose dispatch drives issue state. A retry that follows a run refused by a provider usage limit publishes none |
 | `session.completed` | A worker exited normally |
 | `session.stopped` | A worker exited on a soft stop: `blocked`, `needs-human-review`, or `no-change-needed`; it carries the agent's reason when the agent wrote one (Section 21.1) |
-| `session.failed` | A worker exited with an error, or its handoff was withheld by the evidence verdict |
+| `session.failed` | A worker exited with an error, or its handoff was withheld by the evidence verdict. When a provider usage limit refuses an issue's runs one after another, only the first refusal publishes it |
 | `escalation.ci_failure`, `escalation.review_comments`, `escalation.bot_review`, `escalation.merge_conflicts`, `escalation.auto_merge`, `escalation.merge_completion` | The matching reaction (Section 5.3.8) handed its subject to a person, under any `escalation` value |
 | `auto_merge.merged` | The auto-merge reaction merged a pull request, or its merge call found the pull request already merged |
 | `budget.held` | An issue was held out of dispatch by `agent.max_sessions`, `agent.max_tokens`, or `agent.max_cost_usd` |
