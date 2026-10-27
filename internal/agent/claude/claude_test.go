@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -291,11 +290,9 @@ func TestStartSession_DefaultCommand(t *testing.T) {
 }
 
 func TestStartSession_SSHModeCarriesNoHostMCPConfigPath(t *testing.T) {
-	t.Parallel()
+	standIn := agenttest.NewSSHStandIn(t, t.TempDir(), agenttest.SSHStandIn{PATH: os.Getenv("PATH"), Forward: agenttest.SSHForwardAllocated})
+	t.Setenv("PATH", filepath.Dir(standIn)+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("ssh not available on PATH")
-	}
 	workspace := t.TempDir()
 	hostPath := agenttest.WriteSeededMCPConfig(t, workspace)
 	adapter, _ := NewClaudeCodeAdapter()

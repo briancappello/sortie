@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -321,12 +320,8 @@ func TestStartSession_DefaultCommand(t *testing.T) {
 }
 
 func TestStartSession_SSHMode(t *testing.T) {
-	t.Parallel()
-
-	sshPath, err := exec.LookPath("ssh")
-	if err != nil {
-		t.Skip("ssh not available on PATH")
-	}
+	sshPath := agenttest.NewSSHStandIn(t, t.TempDir(), agenttest.SSHStandIn{PATH: os.Getenv("PATH"), Forward: agenttest.SSHForwardAllocated})
+	t.Setenv("PATH", filepath.Dir(sshPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	adapter, _ := NewCopilotAdapter()
 	workspace := t.TempDir()
