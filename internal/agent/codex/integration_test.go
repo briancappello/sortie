@@ -237,7 +237,7 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		CredentialEnv: []string{"CODEX_API_KEY"},
 		Read:          fakemodel.CatFile,
 		SSH: &fakemodel.SSHVariant{
-			Package:     "@openai/codex",
+			Package: "@openai/codex",
 			// app-server rejects --version; the top-level command reports it.
 			HostCommand: strings.TrimSuffix(integrationCommand(), " app-server"),
 			RemoteCommand: func(env fakemodel.Environment) string {
