@@ -86,7 +86,9 @@ func (s *Server) ServeStreamableHTTP(ctx context.Context, ln net.Listener, opts 
 	select {
 	case <-ctx.Done():
 		_ = srv.Close()
-		<-serveErr
+		if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve streamable http: %w", err)
+		}
 		return nil
 	case err := <-serveErr:
 		_ = srv.Close()

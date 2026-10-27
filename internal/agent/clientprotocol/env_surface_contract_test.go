@@ -31,9 +31,6 @@ var envSurfaceOwnedNames = map[string]bool{
 	"SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS":   true,
 	"SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT":      true,
 	"SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH": true,
-	"SORTIE_CLIENTPROTOCOL_HTTP_TOOLS":          true,
-	"SORTIE_CLIENTPROTOCOL_SSH_COMMAND":         true,
-	"SORTIE_CLIENTPROTOCOL_SSH_INSTALL":         true,
 }
 
 // envSurfaceCallSelectors are the selector names an environment-access

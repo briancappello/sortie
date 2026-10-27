@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -260,6 +261,9 @@ func TestResolveToolDelivery_RemoteProbeDecision(t *testing.T) {
 
 func TestResolveToolDelivery_CancelledDuringProbe(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the ssh stand-in spawns sh")
+	}
 
 	ready := filepath.Join(t.TempDir(), "probe.ready")
 	command := agenttest.WriteScript(t, t.TempDir(), "ssh", fmt.Sprintf("echo up > '%s'\nexec cat\n", ready))
