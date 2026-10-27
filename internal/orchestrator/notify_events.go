@@ -225,8 +225,14 @@ func (o *Orchestrator) updateRouter(cfg config.ServiceConfig) {
 // ctx is live, so a slow operator endpoint never delays the agent's start;
 // the tracker comment is then posted on ctx, as the dispatch comment
 // always was. The tracker outcome is logged and counted before the caller
-// goes on.
+// goes on. A dispatch with [WorkerDeps.UsageLimitNotified] set publishes
+// nothing.
 func publishSessionStarted(ctx context.Context, issue domain.Issue, attempt *int, agentKind string, deps WorkerDeps, log *slog.Logger) {
+	// The refusal that began the episode already told the operator.
+	if deps.UsageLimitNotified {
+		return
+	}
+
 	event := sessionEvent{
 		IssueID:    issue.ID,
 		Identifier: issue.Identifier,

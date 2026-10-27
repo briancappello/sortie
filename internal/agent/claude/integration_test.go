@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel"
@@ -205,6 +206,31 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			}
 		}
 		fakemodel.AssertContainment(t, run)
+
+		refused := fakemodel.RunCustomTurn(t, subscription, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{{
+				Status: http.StatusTooManyRequests,
+				Header: http.Header{
+					"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+					"Anthropic-Ratelimit-Unified-Reset":                {"4102444800"},
+					"Anthropic-Ratelimit-Unified-Representative-Claim": {"five_hour"},
+					"Anthropic-Ratelimit-Unified-Overage-Status":       {"rejected"},
+				},
+			}},
+			Prompt:   "Reply with the word ok.",
+			Sentinel: oauthSentinel,
+		})
+
+		var agentErr *domain.AgentError
+		if !errors.As(refused.Err, &agentErr) {
+			t.Fatalf("refused turn error = %v, want *domain.AgentError", refused.Err)
+		}
+		if agentErr.Kind != domain.ErrUsageLimit || agentErr.UsageLimit == nil {
+			t.Fatalf("refused turn error kind = %q (UsageLimit %v), want %q with a UsageLimit", agentErr.Kind, agentErr.UsageLimit, domain.ErrUsageLimit)
+		}
+		if want := time.Unix(4102444800, 0); !agentErr.UsageLimit.ResetsAt.Equal(want) {
+			t.Errorf("UsageLimit.ResetsAt = %v, want %v", agentErr.UsageLimit.ResetsAt, want)
+		}
 	})
 }
 

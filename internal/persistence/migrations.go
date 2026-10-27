@@ -152,6 +152,9 @@ var migration046SQL string
 //go:embed sql/047_parked_issue_release_hand_over.sql
 var migration047SQL string
 
+//go:embed sql/048_usage_limit_holds.sql
+var migration048SQL string
+
 // reactionActivityMigration is the version of the migration that creates the
 // reaction_activity table.
 const reactionActivityMigration = 38
@@ -204,4 +207,5 @@ var migrations = []Migration{
 	{Version: 45, Description: "declared outcome and statement of a run", SQL: migration045SQL},
 	{Version: 46, Description: "skill calls of a run on run history", SQL: migration046SQL},
 	{Version: 47, Description: "release hand-over columns on parked issues", SQL: migration047SQL},
+	{Version: 48, Description: "usage-limit holds and the usage-limit notice flag on retry entries", SQL: migration048SQL},
 }

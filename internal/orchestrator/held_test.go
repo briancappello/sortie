@@ -22,9 +22,9 @@ func TestHeld(t *testing.T) {
 		run  func(t *testing.T)
 	}{
 		{"Since survives a later pass and a reason change", func(t *testing.T) {
-			first := newHeldPass(nil, t0, nil)
+			first := newHeldPass(nil, t0, nil, nil)
 			first.hold(issue, HeldEntry{Reason: SkipBlockersNotRead})
-			second := newHeldPass(first.entries(), t1, nil)
+			second := newHeldPass(first.entries(), t1, nil, nil)
 			second.hold(issue, HeldEntry{Reason: SkipBlockedBy})
 
 			got := second.entries()[issue.ID]
@@ -34,10 +34,10 @@ func TestHeld(t *testing.T) {
 			}
 		}},
 		{"Since restarts after a pass that did not hold the issue", func(t *testing.T) {
-			first := newHeldPass(nil, t0, nil)
+			first := newHeldPass(nil, t0, nil, nil)
 			first.hold(issue, HeldEntry{Reason: SkipBlockedBy})
-			gap := newHeldPass(first.entries(), t1, nil)
-			third := newHeldPass(gap.entries(), t2, nil)
+			gap := newHeldPass(first.entries(), t1, nil, nil)
+			third := newHeldPass(gap.entries(), t2, nil, nil)
 			third.hold(issue, HeldEntry{Reason: SkipBlockedBy})
 
 			got := third.entries()[issue.ID]
@@ -47,7 +47,7 @@ func TestHeld(t *testing.T) {
 			}
 		}},
 		{"a pass holds an issue ID once", func(t *testing.T) {
-			pass := newHeldPass(nil, t0, nil)
+			pass := newHeldPass(nil, t0, nil, nil)
 			pass.hold(issue, HeldEntry{Reason: SkipSSHHostsFull})
 			pass.hold(issue, HeldEntry{Reason: SkipBlockedBy})
 
@@ -102,7 +102,7 @@ func TestHeld(t *testing.T) {
 		{"a between-stages issue shows its hold on the row only", func(t *testing.T) {
 			state := NewState(1000, 1, 0, nil, AgentTotals{})
 			state.StageHops[issue.ID] = &StageHopEntry{Identifier: issue.Identifier}
-			pass := newHeldPass(nil, t0, nil)
+			pass := newHeldPass(nil, t0, nil, nil)
 			pass.hold(issue, HeldEntry{Reason: SkipStageHopUnconfirmed})
 			state.Held = pass.entries()
 
@@ -120,7 +120,7 @@ func TestHeld(t *testing.T) {
 			if got := snapshotHeld(state); got == nil {
 				t.Error("snapshotHeld(no records) = nil, want an empty slice")
 			}
-			pass := newHeldPass(nil, t0, nil)
+			pass := newHeldPass(nil, t0, nil, nil)
 			for _, held := range []domain.Issue{
 				{ID: "a", Identifier: "MT-2"},
 				{ID: "z", Identifier: "MT-1"},
@@ -145,7 +145,7 @@ func TestHeld(t *testing.T) {
 		{"a registered secret is masked in the title and in blocker and slot states", func(t *testing.T) {
 			secret := registeredSecret(t)
 			state := NewState(1000, 1, 0, nil, AgentTotals{})
-			pass := newHeldPass(nil, t0, nil)
+			pass := newHeldPass(nil, t0, nil, nil)
 			pass.hold(domain.Issue{ID: "id-b", Identifier: "MT-1", Title: "leaks " + secret}, HeldEntry{
 				Reason:   SkipBlockedBy,
 				Blockers: []domain.BlockerRef{{ID: "x", State: secret}},

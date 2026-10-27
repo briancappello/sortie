@@ -330,6 +330,7 @@ func reviewParams(store *reviewReconcileStore, scm domain.SCMAdapter, tracker do
 
 type fingerprintModelStore struct {
 	livePassLog
+	noUsageLimitHolds
 	reviewReconcileStore
 	fingerprints map[string]*modelFingerprint
 	rows         map[string]map[string]struct{}

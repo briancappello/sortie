@@ -64,15 +64,17 @@ const defaultCommand = "copilot"
 
 func init() {
 	registry.Agents.RegisterWithMeta("copilot-cli", NewCopilotAdapter, registry.AgentMeta{
-		RequiresCommand:     true,
-		DefaultCommand:      defaultCommand,
-		ValidateAgentConfig: validateConfig,
-		MCPDialect:          registry.MCPDialectMCPServersJSON,
-		UsageArrival:        registry.UsageArrivalTurnEnd,
-		UsageAttribution:    registry.UsageAttributionPerModel,
-		CredentialEnv:       registry.DeclareCredentialEnv("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
-		VerificationContext: registry.DeclareVerificationContext(registry.VerificationKeepsSomeTools, registry.VerificationKeepsSystemPrompt),
-		EffortForwarding:    registry.EffortForwarded,
+		RequiresCommand:               true,
+		DefaultCommand:                defaultCommand,
+		ValidateAgentConfig:           validateConfig,
+		MCPDialect:                    registry.MCPDialectMCPServersJSON,
+		UsageArrival:                  registry.UsageArrivalTurnEnd,
+		UsageAttribution:              registry.UsageAttributionPerModel,
+		CredentialEnv:                 registry.DeclareCredentialEnv("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
+		VerificationContext:           registry.DeclareVerificationContext(registry.VerificationKeepsSomeTools, registry.VerificationKeepsSystemPrompt),
+		EffortForwarding:              registry.EffortForwarded,
+		UsageLimitRecognition:         registry.UsageLimitNotRecognized,
+		UsageLimitNotRecognizedReason: "the adapter reads a session error as message text only",
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
 				// Mirrors sessionState.recoverUsage's own remote

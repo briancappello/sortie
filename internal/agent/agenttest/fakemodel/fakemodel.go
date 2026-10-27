@@ -37,13 +37,20 @@ type Usage struct {
 
 // Response is one scripted turn answer: Text when Call is nil and Hold is
 // false, a function call when Call is set, and a held request when Hold is
-// true.
+// true. A non-zero Status makes it a refusal instead.
 type Response struct {
 	Text   string
 	Call   ToolChoice
 	Hold   bool // keeps the request open and answers nothing until the client disconnects
 	Usage  Usage
 	Header http.Header // headers the answer carries beside the wire's own; nil adds none
+
+	// Status is the HTTP status of a refusal answer; zero answers 200
+	// with Text or Call.
+	Status int
+	// Body is the refusal body served verbatim; nil serves the wire's
+	// own error body for Status and Text.
+	Body []byte
 }
 
 // Tool is one function tool a model request declares.
@@ -253,7 +260,9 @@ func Background(classify func(Exchange) bool) Option {
 // Start fails t with Fatalf, naming the first invalid index, unless each
 // entry has exactly one of a non-empty Text, a non-nil Call and a true Hold,
 // no negative count, and CachedContent plus CacheWrite no greater than Prompt.
-// A held entry reports no usage and carries no Header. A request that
+// A held entry reports no usage and carries no Header. An entry with a
+// non-zero Status is a refusal: it carries no Call, no Hold and no Usage, and
+// the exactly-one rule does not apply to it. A request that
 // declares no tool is answered outside the script, as is one a [Background]
 // option claims. At cleanup it ends every held request and reports every entry
 // no request was served from. It must be called on the test goroutine.
@@ -296,6 +305,10 @@ func Start(t testing.TB, script []Response, opts ...Option) *Server {
 func invalidScriptRule(r Response) string {
 	u := r.Usage
 	switch {
+	case r.Status != 0 && (r.Call != nil || r.Hold || u != (Usage{})):
+		return "refuses with a Status but holds a Call, a Hold or usage"
+	case r.Status != 0:
+		return ""
 	case !exactlyOne(r.Text != "", r.Call != nil, r.Hold):
 		return "must hold exactly one of Text, Call and Hold"
 	case r.Hold && (u != (Usage{}) || r.Header != nil):
@@ -520,6 +533,9 @@ func (s *Server) respond(ex *Exchange, r *http.Request) (contentType, failure st
 		ex.Kind = ExchangeHeld
 		return "", ""
 	}
+	if entry.Status != 0 {
+		return refuse(ex, c, entry)
+	}
 	turn := reply{seq: ex.Seq, model: dec.model, streaming: dec.streaming, operation: dec.operation, text: entry.Text, usage: entry.Usage}
 	if entry.Call != nil {
 		call, err := entry.Call(dec.tools)
@@ -605,6 +621,16 @@ func fail(ex *Exchange, status int, kind ExchangeKind, message string, body []by
 	ex.Kind = kind
 	ex.Answer = Answer{Status: status, Text: message, Body: body}
 	return jsonContentType, message + suffix
+}
+
+func refuse(ex *Exchange, c codec, entry Response) (contentType, failure string) {
+	body := entry.Body
+	if body == nil {
+		body = c.errorBody(entry.Status, entry.Text)
+	}
+	ex.Kind = ExchangeTurn
+	ex.Answer = Answer{Status: entry.Status, Text: entry.Text, Body: slices.Clone(body)}
+	return jsonContentType, ""
 }
 
 func answerWire(ex *Exchange, c codec, kind ExchangeKind, r reply) (contentType, failure string) {

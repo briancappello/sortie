@@ -28,7 +28,7 @@ var agentErrorKinds = []domain.AgentErrorKind{
 	domain.ErrTurnTimeout, domain.ErrPortExit, domain.ErrResponseError, domain.ErrTurnFailed,
 	domain.ErrTurnCancelled, domain.ErrTurnInputRequired, domain.ErrTurnIncomplete,
 	domain.ErrTurnRefused, domain.ErrTurnOutcomeUnknown, domain.ErrTurnTokenLimit,
-	domain.ErrTurnRequestLimit, domain.ErrCredentialUnverified,
+	domain.ErrTurnRequestLimit, domain.ErrCredentialUnverified, domain.ErrUsageLimit,
 }
 
 // stagePrefixes maps the stage a worker named in front of an error to what

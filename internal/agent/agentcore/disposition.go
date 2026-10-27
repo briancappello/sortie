@@ -105,6 +105,11 @@ type TurnEvidence struct {
 	// other Terminal value. The zero value selects domain.ErrTurnFailed.
 	TerminalErrorKind domain.AgentErrorKind
 
+	// UsageLimit carries the refusal's reset instant and model scope. It
+	// is read only when TerminalErrorKind is domain.ErrUsageLimit; nil
+	// then means the runtime reported neither.
+	UsageLimit *domain.UsageLimit
+
 	// TerminalMessage describes the outcome in the runtime's own words, or
 	// in the adapter's when the adapter ended the turn. Carried onto both
 	// the emitted event and the returned error for a cancelled, failed,
@@ -465,11 +470,18 @@ func FinalizeTurn(
 	if disposition.Row == RowNonZeroExit {
 		cause = ev.WaitErr
 	}
-	return result, &domain.AgentError{
+	agentErr := &domain.AgentError{
 		Kind:    disposition.ErrorKind,
 		Message: disposition.ErrorMessage,
 		Err:     cause,
 	}
+	if disposition.ErrorKind == domain.ErrUsageLimit {
+		agentErr.UsageLimit = &domain.UsageLimit{}
+		if ev.UsageLimit != nil {
+			*agentErr.UsageLimit = *ev.UsageLimit
+		}
+	}
+	return result, agentErr
 }
 
 // CancelledOutcome reports whether a turn's result and error say the

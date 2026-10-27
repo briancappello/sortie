@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
@@ -45,6 +46,7 @@ func init() {
 		SessionResumeBlockedBy: sessionResumeBlockedBy,
 		UsageArrival:           registry.UsageArrivalIncremental,
 		UsageAttribution:       registry.UsageAttributionPerModel,
+		UsageLimitRecognition:  registry.UsageLimitRecognized,
 		CredentialEnv:          registry.DeclareCredentialEnv("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
 		VerificationContext:    registry.DeclareVerificationContext(),
 		EffortForwarding:       registry.EffortForwarded,
@@ -139,6 +141,11 @@ type sessionState struct {
 	// authRefused records an assistant event reporting a refused login,
 	// observed in ParseLine and applied in OnFinalize to a failed result.
 	authRefused bool
+
+	// rateLimit is the latest rate_limit_event of the turn, observed in
+	// ParseLine and read in OnFinalize to tell a subscription refusal from
+	// an API-key 429.
+	rateLimit *rawRateLimitInfo
 
 	// effortReported records that the session has already logged the
 	// runtime's report of an unrecognized effort value. Touched only from
@@ -440,6 +447,12 @@ func (a *ClaudeCodeAdapter) StartSession(ctx context.Context, params domain.Star
 				}
 				return &captured, nil
 
+			case "rate_limit_event":
+				if event.RateLimitInfo != nil {
+					state.rateLimit = event.RateLimitInfo
+				}
+				agentcore.EmitNotification(emit, "")
+
 			case "stream_event":
 				agentcore.EmitNotification(emit, "")
 
@@ -510,6 +523,9 @@ func (a *ClaudeCodeAdapter) StartSession(ctx context.Context, params domain.Star
 					if state.authRefused {
 						ev.TerminalErrorKind = domain.ErrCredentialUnverified
 						ev.TerminalMessage = agentcore.CredentialRefusedMessage(ev.TerminalMessage)
+					} else if limit := usageLimitOf(lastResult, state.rateLimit); limit != nil {
+						ev.TerminalErrorKind = domain.ErrUsageLimit
+						ev.UsageLimit = limit
 					}
 				}
 			}
@@ -567,8 +583,32 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 	state.humanInputEnds = false
 	state.humanInputDetail = ""
 	state.authRefused = false
+	state.rateLimit = nil
 
 	return state.forkSession.RunTurn(ctx, params.Prompt, params.OnEvent)
+}
+
+// usageLimitOf returns the refusal a failed result reports, or nil when the
+// result is not a subscription allowance refusal. An API-key 429 carries no
+// rejected rate_limit_event, and an overage that is not itself rejected means
+// the account can still spend, so neither counts.
+func usageLimitOf(result *rawEvent, info *rawRateLimitInfo) *domain.UsageLimit {
+	if !result.IsError || result.APIErrorStatus != http.StatusTooManyRequests {
+		return nil
+	}
+	if info == nil || info.Status != "rejected" {
+		return nil
+	}
+	if info.OverageStatus != "" && info.OverageStatus != "rejected" {
+		return nil
+	}
+	limit := &domain.UsageLimit{
+		ModelOnly: info.RateLimitType == "seven_day_opus" || info.RateLimitType == "seven_day_sonnet",
+	}
+	if info.ResetsAt > 0 {
+		limit.ResetsAt = time.Unix(info.ResetsAt, 0).UTC()
+	}
+	return limit
 }
 
 // StopSession terminates a running Claude Code subprocess gracefully by

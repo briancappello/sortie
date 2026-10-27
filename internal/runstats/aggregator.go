@@ -80,7 +80,7 @@ func outcomeOf(status string) outcome {
 	switch status {
 	case "succeeded":
 		return outcomeSucceeded
-	case "needs_person", "budget_stopped":
+	case "needs_person", "budget_stopped", "usage_limited":
 		return outcomeStopped
 	case "cancelled":
 		return outcomeCancelled

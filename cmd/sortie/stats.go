@@ -200,6 +200,7 @@ var noHopReasonWords = map[string]string{
 	"run_failed":       "failed run",
 	"needs_person":     "needs a person",
 	"budget_held":      "budget held",
+	"usage_limited":    "usage limit",
 	"operator_stopped": "stopped by an operator",
 	"verdict_withheld": "verdict withheld",
 }

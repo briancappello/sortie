@@ -33,7 +33,11 @@ const STATUS: Record<Mark, StatusEntry> = {
   retry: { Glyph: RotateCwIcon, word: "Retry scheduled", tone: "neutral" },
   held: { Glyph: CirclePauseIcon, word: "Held, acknowledged", tone: "neutral" },
   needs: { Glyph: CircleAlertFilledIcon, word: "Needs attention", tone: "attention" },
-  stopped: { Glyph: CirclePauseIcon, word: "Stopped for a person or budget", tone: "attention" },
+  stopped: {
+    Glyph: CirclePauseIcon,
+    word: "Stopped for a person, budget or usage limit",
+    tone: "attention",
+  },
   handed: { Glyph: ArrowRightIcon, word: "Handed off", tone: "neutral" },
   succeeded: { Glyph: CheckIcon, word: "Succeeded", tone: "success" },
   failed: { Glyph: XIcon, word: "Failed", tone: "error" },

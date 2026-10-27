@@ -283,7 +283,7 @@ export interface HoldBlockerResponse {
 }
 
 export interface HoldResponse {
-  reason: string;
+  reason: "agent_slots_full" | "ssh_hosts_full" | "blockers_not_read" | "blockers_unresolved" | "blockers_incomplete" | "blocked_by" | "daily_spend_ceiling" | "weekly_spend_ceiling" | "monthly_spend_ceiling" | "stage_hop_unconfirmed" | "usage_limit" | "park_comments_unread";
   held_since: string;
   blockers: HoldBlockerResponse[] | null;
   slot: HoldSlotResponse | null;

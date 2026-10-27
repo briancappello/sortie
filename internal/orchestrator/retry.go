@@ -72,10 +72,14 @@ type HandleRetryTimerParams struct {
 
 	MaxRetryBackoffMS int
 
-	// ReleaseSpendHeld releases a retry the instance spend ceiling holds
-	// instead of re-arming it, keeping its persisted entry for a later
-	// process.
-	ReleaseSpendHeld bool
+	// ReleaseHeld releases a retry the instance spend ceiling or a
+	// usage-limit hold holds instead of re-arming it, keeping its persisted
+	// entry for a later process.
+	ReleaseHeld bool
+
+	// ConfiguredModelOf returns the model a dispatch of the resolution is
+	// configured with. Nil reads the popped entry's ConfiguredModel.
+	ConfiguredModelOf func(DispatchResolution) string
 
 	// MakeWorkerFn constructs a [WorkerFunc]. The retry handler resolves
 	// the adapter and the attempt's settings before invoking it; the
@@ -138,8 +142,8 @@ type HandleRetryTimerParams struct {
 	// ceiling.
 	PollIntervalMS int
 
-	// NowFunc reads the clock for the spend ceiling evaluation. Nil reads
-	// [time.Now].
+	// NowFunc reads the clock for the spend ceiling and usage-limit hold
+	// evaluation. Nil reads [time.Now].
 	NowFunc func() time.Time
 
 	// Metrics records retry timer instrumentation. If nil, defaults to
@@ -170,8 +174,8 @@ func putBackSchedule(popped *RetryEntry, attempt int, maxRetryBackoffMS int) (in
 	return attempt, computeBackoffDelay(attempt, maxRetryBackoffMS)
 }
 
-// retryClock returns the instant the spend ceiling evaluation of a retry fire
-// reads.
+// retryClock returns the instant the spend ceiling and usage-limit hold
+// evaluation of a retry fire reads.
 func retryClock(params HandleRetryTimerParams) time.Time {
 	if params.NowFunc != nil {
 		return params.NowFunc()
@@ -182,9 +186,9 @@ func retryClock(params HandleRetryTimerParams) time.Time {
 // HandleRetryTimer processes a retry timer event for the given issue: it
 // removes the retry entry, re-fetches and validates the issue, checks slot
 // availability, and either dispatches, reschedules, or releases the claim.
-// It reports whether params.ReleaseSpendHeld released a held retry.
+// It reports whether params.ReleaseHeld released a held retry.
 // Must be called from the single-writer event loop.
-func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParams) (spendReleased bool) {
+func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParams) (heldReleased bool) {
 	log := params.Logger
 	if log == nil {
 		log = slog.Default()
@@ -224,7 +228,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 
 	log = logging.WithIssue(log, issueID, popped.Identifier)
 
-	rearm := func(attempt int, delayMS int64, retryErr string) {
+	rearm := func(attempt int, delayMS, dueAtMS int64, retryErr string) {
 		ScheduleRetry(state, ScheduleRetryParams{
 			IssueID:             issueID,
 			Identifier:          popped.Identifier,
@@ -232,6 +236,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			IssueIdentity:       popped.IssueIdentity,
 			Attempt:             attempt,
 			DelayMS:             delayMS,
+			DueAtMS:             dueAtMS,
 			Error:               retryErr,
 			LastSSHHost:         popped.LastSSHHost,
 			SessionID:           popped.SessionID,
@@ -247,11 +252,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			Logger:              log,
 			Trigger:             triggerTimer,
 			OriginTrigger:       popped.OriginTrigger,
+			UsageLimitNotified:  popped.UsageLimitNotified,
 		}, params.OnRetryFire)
 	}
 
 	reschedule := func(attempt int, delayMS int64, retryErr string) {
-		rearm(attempt, delayMS, retryErr)
+		rearm(attempt, delayMS, 0, retryErr)
 		if isKnownReactionKind(popped.ReactionKind) {
 			if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
 				log.Error("failed to delete persisted reaction retry entry",
@@ -264,12 +270,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		metrics.IncRetries(triggerTimer)
 	}
 
-	// rearmHeld re-arms the retry unchanged, one poll interval ahead, and
-	// marks the new entry so a later slot or host shortage keeps its attempt.
-	rearmHeld := func() {
-		rearm(popped.Attempt, int64(params.PollIntervalMS), popped.Error)
+	// rearmHeld re-arms the retry unchanged for dueAt and marks the new entry
+	// so a later slot or host shortage keeps its attempt.
+	rearmHeld := func(dueAt time.Time) {
+		rearm(popped.Attempt, 0, dueAt.UnixMilli(), popped.Error)
 		if entry, ok := state.RetryAttempts[issueID]; ok {
-			entry.spendHeld = true
+			entry.holdRearmed = true
 		}
 	}
 
@@ -405,7 +411,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		Now:      retryClock(params),
 		Logger:   params.Logger,
 	}); hold != SkipNone {
-		if params.ReleaseSpendHeld {
+		if params.ReleaseHeld {
 			delete(state.Claimed, issueID)
 			log.Warn("retry held by spend ceiling, releasing claim",
 				slog.String("reason", string(hold)),
@@ -413,7 +419,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 			)
 			return true
 		}
-		rearmHeld()
+		rearmHeld(time.Now().Add(time.Duration(params.PollIntervalMS) * time.Millisecond))
 		if entry, ok := state.RetryAttempts[issueID]; ok {
 			entry.noStateObserved = popped.noStateObserved
 		}
@@ -735,13 +741,13 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	}
 
 	if !HasAvailableSlots(state, issue.State) {
-		if popped.spendHeld {
+		if popped.holdRearmed {
 			log.Warn("no available orchestrator slots, rescheduling retry",
 				slog.String("issue_state", issue.State),
 				slog.Int("attempt", popped.Attempt),
 				slog.Int64("delay_ms", int64(params.PollIntervalMS)),
 			)
-			rearmHeld()
+			rearmHeld(time.Now().Add(time.Duration(params.PollIntervalMS) * time.Millisecond))
 			return
 		}
 
@@ -762,12 +768,12 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		var ok bool
 		host, ok = params.HostPool.AcquireHost(issueID, popped.LastSSHHost)
 		if !ok {
-			if popped.spendHeld {
+			if popped.holdRearmed {
 				log.Warn("no available SSH hosts, rescheduling retry",
 					slog.Int("attempt", popped.Attempt),
 					slog.Int64("delay_ms", int64(params.PollIntervalMS)),
 				)
-				rearmHeld()
+				rearmHeld(time.Now().Add(time.Duration(params.PollIntervalMS) * time.Millisecond))
 				return
 			}
 
@@ -822,6 +828,35 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		agentKind, templateID, ruleName = selection.AgentKind, selection.TemplateID, selection.RuleName
 	}
 
+	if popped.dueBeforeRequestMS == 0 {
+		configuredModel := popped.ConfiguredModel
+		if params.ConfiguredModelOf != nil {
+			configuredModel = params.ConfiguredModelOf(DispatchResolution{AgentKind: agentKind, TemplateID: templateID, RuleName: ruleName})
+		}
+		ownRetry := popped.OriginTrigger == triggerUsageLimit
+		grace := time.Duration(params.PollIntervalMS) * time.Millisecond
+		if _, _, release, held := usageLimitGate(state, agentKind, configuredModel, ownRetry, grace, retryClock(params)); held {
+			if params.HostPool != nil && host != "" {
+				params.HostPool.ReleaseHost(issueID)
+			}
+			if params.ReleaseHeld {
+				delete(state.Claimed, issueID)
+				log.Warn("retry held by usage limit, releasing claim",
+					slog.String("agent_kind", agentKind),
+					slog.Time("release_at", release),
+					slog.Int("attempt", popped.Attempt),
+				)
+				return true
+			}
+			rearmHeld(release)
+			log.Debug("retry held by usage limit, rechecking at release",
+				slog.String("agent_kind", agentKind),
+				slog.Time("release_at", release),
+			)
+			return
+		}
+	}
+
 	adapter, adapterErr := params.AgentAdapterByKind(agentKind)
 	if adapterErr != nil {
 		nextAttempt, delayMS := putBackSchedule(popped, popped.Attempt+1, params.MaxRetryBackoffMS)
@@ -874,6 +909,9 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 	if popped.ContinuationContext != nil {
 		dispatchCtx = WithContinuationContext(ctx, popped.ContinuationContext)
 	}
+	if popped.UsageLimitNotified {
+		dispatchCtx = withUsageLimitNotified(dispatchCtx)
+	}
 	lineage := popped.StageLineage
 	if ruleName != popped.RuleName {
 		lineage = freshLineage(state, issueID, ruleName)
@@ -899,6 +937,7 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		entry.ContinuationContext = popped.ContinuationContext
 		entry.ReactionKind = popped.ReactionKind
 		entry.Trigger = popped.OriginTrigger
+		entry.UsageLimitNotified = popped.UsageLimitNotified
 		entry.Continuation = popped.Continuation
 		entry.UsageArrival, entry.UsageAttribution = attemptSettings.UsageArrival, attemptSettings.UsageAttribution
 		freezeIssueTokenBaseline(ctx, state, issueID, params.Store, params.Logger)
@@ -969,6 +1008,7 @@ func retryEntryRow(entry *RetryEntry) persistence.RetryEntry {
 		Trigger:     entry.Trigger,
 
 		OriginTrigger:        entry.OriginTrigger,
+		UsageLimitNotified:   entry.UsageLimitNotified,
 		ConfiguredModel:      entry.ConfiguredModel,
 		StagePrevious:        entry.StageLineage.PreviousRule,
 		StagePreviousOutcome: entry.StageLineage.PreviousOutcome,

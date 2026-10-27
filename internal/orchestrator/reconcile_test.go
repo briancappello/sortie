@@ -49,6 +49,16 @@ func (unsupportedReactionObservationStore) CountWorkerRunsCompletedSince(context
 	return 0, errors.New("worker run count is unsupported by this test double")
 }
 
+type noUsageLimitHolds struct{}
+
+func (noUsageLimitHolds) SaveUsageLimitHold(context.Context, persistence.UsageLimitHold) error {
+	return nil
+}
+
+func (noUsageLimitHolds) DeleteUsageLimitHold(context.Context, string, bool, string) error {
+	return nil
+}
+
 type noEscalationRecords struct{}
 
 func (noEscalationRecords) GetReactionEscalation(context.Context, string, string) (persistence.ReactionEscalation, bool, error) {

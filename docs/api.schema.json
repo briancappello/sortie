@@ -1266,6 +1266,20 @@
           "type": "string"
         },
         "reason": {
+          "enum": [
+            "agent_slots_full",
+            "ssh_hosts_full",
+            "blockers_not_read",
+            "blockers_unresolved",
+            "blockers_incomplete",
+            "blocked_by",
+            "daily_spend_ceiling",
+            "weekly_spend_ceiling",
+            "monthly_spend_ceiling",
+            "stage_hop_unconfirmed",
+            "usage_limit",
+            "park_comments_unread"
+          ],
           "type": "string"
         },
         "reason_text": {

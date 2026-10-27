@@ -197,6 +197,7 @@ func TestMigrate_ColumnCorrectness(t *testing.T) {
 				{"issue_state", "TEXT", true, 0},
 				{"dispatched_at", "TEXT", true, 0},
 				{"origin_trigger", "TEXT", true, 0},
+				{"usage_limit_notified", "INTEGER", true, 0},
 			},
 		},
 		{
@@ -793,6 +794,9 @@ func TestMigrate_Migration028_OlderRowsKeepNoOrigin(t *testing.T) {
 	gotOrigin := map[string]string{}
 	for _, e := range retries {
 		gotOrigin[e.IssueID] = e.OriginTrigger
+		if e.UsageLimitNotified {
+			t.Errorf("UsageLimitNotified of retry %q written before the upgrade = true, want false", e.IssueID)
+		}
 	}
 	wantOrigin := map[string]string{"r-stall": "stall", "r-timer": "", "r-none": ""}
 	if !reflect.DeepEqual(gotOrigin, wantOrigin) {

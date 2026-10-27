@@ -29,6 +29,8 @@ import (
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workflow"
+
+	_ "github.com/sortie-ai/sortie/internal/agent/mock"
 )
 
 type stubWorkflowManager struct {
@@ -119,6 +121,7 @@ type stubStore struct {
 	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords
+	noUsageLimitHolds
 	unsupportedReactionObservationStore
 
 	mu              sync.Mutex
@@ -10387,6 +10390,8 @@ type runHarness struct {
 	metrics   domain.Metrics
 	meta      map[string]registry.AgentMeta
 
+	orchestratorStore OrchestratorStore
+
 	mu          sync.Mutex
 	unavailable map[string]bool
 
@@ -10450,6 +10455,10 @@ func (h *runHarness) build() {
 		},
 	}
 	cfg := h.wm.Config()
+	store := OrchestratorStore(h.store)
+	if h.orchestratorStore != nil {
+		store = h.orchestratorStore
+	}
 	h.o = NewOrchestrator(OrchestratorParams{
 		State:          h.state,
 		Logger:         slog.New(slog.NewJSONHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
@@ -10465,7 +10474,7 @@ func (h *runHarness) build() {
 			return recorder.adapter, nil
 		},
 		WorkflowManager: h.wm,
-		Store:           h.store,
+		Store:           store,
 		Metrics:         h.metrics,
 		PreflightParams: PreflightParams{
 			ReloadWorkflow:  func() error { return nil },
@@ -11458,5 +11467,94 @@ func TestApplyAgentEvent_WorkspaceReadyShortensLaterPaths(t *testing.T) {
 	events := entry.events.snapshot()
 	if len(events) != 1 || events[0].ToolArgument != "internal/foo.go" {
 		t.Fatalf("retained events = %+v, want one tool_result with ToolArgument %q", events, "internal/foo.go")
+	}
+}
+
+func backWithMockAdapter(t *testing.T, recorder *sessionRecorder) {
+	t.Helper()
+	construct, err := registry.Agents.Get("mock")
+	if err != nil {
+		t.Fatalf("registry.Agents.Get(mock) error = %v", err)
+	}
+	adapter, err := construct()
+	if err != nil {
+		t.Fatalf("mock constructor error = %v", err)
+	}
+	recorder.adapter.startSessionFn = adapter.StartSession
+	recorder.adapter.runTurnFn = adapter.RunTurn
+	recorder.adapter.stopSessionFn = adapter.StopSession
+}
+
+func TestRun_UsageLimitRefusalHoldsItsKindOnly(t *testing.T) {
+	t.Parallel()
+
+	resetsAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	raw := rawWithBackendRule(map[string]any{
+		"kind":                  "mock",
+		"command":               "mock-cmd",
+		"max_concurrent_agents": 1,
+		"max_sessions":          1,
+	}, "mock-b")
+	raw["mock"] = map[string]any{
+		"turn_outcomes":         []any{"usage_limit"},
+		"usage_limit_resets_at": resetsAt.Format(time.RFC3339),
+		"report_token_usage":    true,
+	}
+	cfg := runConfig(t, raw)
+	h := newRunHarness(t, cfg, "mock", "mock-b")
+	backWithMockAdapter(t, h.recorders["mock"])
+	backWithMockAdapter(t, h.recorders["mock-b"])
+	h.orchestratorStore = openParkStore(t)
+	h.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
+	h.tracker.candidates = []domain.Issue{
+		candidate("id-1", "A-1"),
+		candidate("id-2", "A-2"),
+		candidate("id-3", "B-1", "backend"),
+	}
+
+	h.run()
+	snapshot := h.o.SnapshotFunc()
+	var refused SnapshotRetryEntry
+	waittest.Until(t, func() error {
+		snap, err := snapshot()
+		if err != nil {
+			return err
+		}
+		for _, retry := range snap.Retrying {
+			if retry.Identifier == "A-1" {
+				refused = retry
+				return nil
+			}
+		}
+		return fmt.Errorf("no retry for A-1 yet; log: %s", h.logs.String())
+	})
+
+	if refused.DueAtMS != resetsAt.UnixMilli() || refused.Trigger != triggerUsageLimit {
+		t.Errorf("A-1 retry = {DueAtMS: %d, Trigger: %q}, want {%d, %q}", refused.DueAtMS, refused.Trigger, resetsAt.UnixMilli(), triggerUsageLimit)
+	}
+
+	h.o.RefreshFunc()()
+	var snap RuntimeSnapshotResult
+	waittest.Until(t, func() error {
+		var err error
+		snap, err = snapshot()
+		if err != nil {
+			return err
+		}
+		held := slices.IndexFunc(snap.Held, func(e SnapshotHeldEntry) bool {
+			return e.Identifier == "A-2" && e.Hold.Reason == SkipUsageLimit
+		})
+		if held < 0 || len(h.recorders["mock-b"].started()) == 0 {
+			return fmt.Errorf("held = %+v, mock-b sessions = %d, want A-2 held and B-1 started; log: %s", snap.Held, len(h.recorders["mock-b"].started()), h.logs.String())
+		}
+		return nil
+	})
+
+	held := snap.Held[slices.IndexFunc(snap.Held, func(e SnapshotHeldEntry) bool { return e.Identifier == "A-2" })]
+	if !held.Hold.ResetsAt.Equal(resetsAt) || held.Hold.AgentKind != "mock" || held.Hold.ModelOnly {
+		t.Errorf("A-2 hold = %+v, want resets_at %v on agent kind %q for every model", held.Hold, resetsAt, "mock")
+	}
+	if len(snap.BudgetExhausted) != 0 {
+		t.Errorf("budget_exhausted = %+v, want none after a refused run", snap.BudgetExhausted)
 	}
 }

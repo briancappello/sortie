@@ -236,7 +236,33 @@ type AgentMeta struct {
 	// kind's credential-verification request still carries. The zero
 	// value means undeclared.
 	VerificationContext VerificationContext
+
+	// UsageLimitRecognition declares whether the adapter recognizes a
+	// provider usage-limit refusal. Required.
+	UsageLimitRecognition UsageLimitRecognition
+
+	// UsageLimitNotRecognizedReason is required with
+	// UsageLimitNotRecognized and empty otherwise.
+	UsageLimitNotRecognizedReason string
 }
+
+// UsageLimitRecognition declares whether a kind's adapter returns
+// [domain.ErrUsageLimit] for a provider usage-limit refusal. The empty
+// value means undeclared.
+type UsageLimitRecognition string
+
+const (
+	// UsageLimitRecognitionUndeclared is the zero value.
+	UsageLimitRecognitionUndeclared UsageLimitRecognition = ""
+
+	// UsageLimitRecognized declares that the adapter returns
+	// [domain.ErrUsageLimit] for a provider usage-limit refusal.
+	UsageLimitRecognized UsageLimitRecognition = "recognized"
+
+	// UsageLimitNotRecognized declares that the adapter does not
+	// recognize the refusal and states why.
+	UsageLimitNotRecognized UsageLimitRecognition = "not_recognized"
+)
 
 // CredentialEnv declares the environment variable names an agent
 // kind's runtime reads as the credential for its default provider.

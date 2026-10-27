@@ -487,6 +487,52 @@ func TestRunTurn_FailedOrUnrecognizedStatus(t *testing.T) {
 	}
 }
 
+type replayAdapter struct {
+	*CodexAdapter
+	state *sessionState
+}
+
+func (r replayAdapter) StartSession(context.Context, domain.StartSessionParams) (domain.Session, error) {
+	return fakeSession(r.state), nil
+}
+
+func (replayAdapter) StopSession(context.Context, domain.Session) error { return nil }
+
+func recordedRefusalTurn(t *testing.T, mutate func(string) string) []byte {
+	t.Helper()
+
+	_, turn, ok := strings.Cut(string(loadFixture(t, "usage_limit_exceeded.jsonl")), `{"id":3,`)
+	if !ok {
+		t.Fatalf("usage_limit_exceeded.jsonl has no turn/start response")
+	}
+	return []byte(mutate(`{"id":1,` + turn))
+}
+
+func windowBelowLimit(t *testing.T) func(string) string {
+	t.Helper()
+	return func(recorded string) string {
+		const exhausted, open = `"usedPercent":100`, `"usedPercent":99`
+		if !strings.Contains(recorded, exhausted) {
+			t.Fatalf("recorded refusal has no %s window", exhausted)
+		}
+		return strings.Replace(recorded, exhausted, open, 1)
+	}
+}
+
+func TestRunTurn_UsageLimitRefusal(t *testing.T) {
+	t.Parallel()
+
+	replay := func(mutate func(string) string) *replayAdapter {
+		return &replayAdapter{CodexAdapter: &CodexAdapter{}, state: makeTestState(t, recordedRefusalTurn(t, mutate))}
+	}
+	cases := []agenttest.UsageLimitRefusalCase{
+		{Name: "recorded refusal", Adapter: replay(func(s string) string { return s }), WantResetsAt: time.Unix(4102444800, 0).UTC()},
+		{Name: "window below the limit", Adapter: replay(windowBelowLimit(t))},
+	}
+
+	agenttest.AssertUsageLimitRefusal(t, "codex", cases)
+}
+
 // TestRunTurn_EmptyTurnStatus pins both ways a turn/completed
 // notification can arrive without a status word: params that fail to
 // unmarshal into an object, and a turn object that omits the status

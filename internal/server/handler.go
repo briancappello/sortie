@@ -253,8 +253,9 @@ type holdSlotResponse struct {
 }
 
 // holdResponse is the JSON wire format for why a candidate is held back.
-// Blockers is non-null exactly for a blocked_by hold, Slot exactly for an
-// agent_slots_full hold, and ResetsAt exactly for a spend ceiling hold. A
+// Reason is one of the values of [orchestrator.HoldReasons]. Blockers is
+// non-null exactly for a blocked_by hold, Slot exactly for an agent_slots_full
+// hold, and ResetsAt exactly for a spend ceiling hold or a usage_limit hold. A
 // client MUST tolerate a Reason it does not know and show the served texts.
 // Used by GET /api/v1/state and GET /api/v1/{identifier}.
 type holdResponse struct {

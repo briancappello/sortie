@@ -33,6 +33,7 @@ const (
 	exitTypeSoftStop  = "soft_stop"
 
 	triggerError        = "error"
+	triggerUsageLimit   = "usage_limit"
 	triggerContinuation = "continuation"
 	triggerTimer        = "timer"
 	triggerStall        = "stall"
@@ -232,6 +233,10 @@ type RunningEntry struct {
 	// entry; empty for a poll-tick dispatch. Runtime-only.
 	Trigger string
 
+	// UsageLimitNotified is the UsageLimitNotified of the retry whose fire
+	// dispatched the entry; false for a poll-tick dispatch. Runtime-only.
+	UsageLimitNotified bool
+
 	// Continuation names the pull request and try of a reaction
 	// continuation; the zero value for every other dispatch. Runtime-only.
 	Continuation ContinuationTarget
@@ -394,6 +399,11 @@ type RetryEntry struct {
 	// put-back by the retry timer; empty when the retry never recorded it.
 	OriginTrigger string
 
+	// UsageLimitNotified reports that the run this retry follows ended in a
+	// provider usage-limit refusal, so the next run publishes no session.started
+	// event and, if refused, no session.failed event.
+	UsageLimitNotified bool
+
 	// RuleName is the dispatch rule of the run this retry follows.
 	RuleName string
 
@@ -426,10 +436,10 @@ type RetryEntry struct {
 	// paused. Runtime-only: never persisted, never on ScheduleRetryParams.
 	pausedSinceMS int64
 
-	// spendHeld is true when HandleRetryTimer re-armed this entry because an
-	// instance spend ceiling held, so a later slot or host shortage keeps
-	// Attempt. Runtime-only.
-	spendHeld bool
+	// holdRearmed is true when HandleRetryTimer re-armed this entry because a
+	// spend ceiling or a usage-limit hold held it, so a later slot or host
+	// shortage keeps Attempt. Runtime-only.
+	holdRearmed bool
 
 	// dueBeforeRequestMS is the DueAtMS the entry had before the first request
 	// that made it due now; zero when no request did. Runtime-only.
@@ -1496,6 +1506,11 @@ type State struct {
 	// Mutated only by the event loop.
 	Held map[string]*HeldEntry
 
+	// UsageLimitHolds maps each hold key to the provider usage limit that
+	// stops new sessions under it. Never nil. Restored from the store before
+	// the first tick and mutated only by the event loop.
+	UsageLimitHolds map[UsageLimitHoldKey]UsageLimitHold
+
 	// TokenBudgetIncomplete is the set of issue IDs whose per-issue token
 	// spend is below max_tokens but only a lower bound, so the ceiling could
 	// not be fully evaluated. Rebuilt wholesale each tick when the token
@@ -1583,6 +1598,7 @@ func NewState(pollIntervalMS, maxConcurrentAgents, maxTokens int, maxConcurrentB
 		Parked:                    make(map[string]*ParkedEntry),
 		ParkReleases:              make(map[string]*ParkedEntry),
 		AttentionAcknowledgements: make(map[string]time.Time),
+		UsageLimitHolds:           make(map[UsageLimitHoldKey]UsageLimitHold),
 		StageHops:                 make(map[string]*StageHopEntry),
 		ActiveOrder:               make(map[string]time.Time),
 		AgentTotals:               totals,
@@ -1665,14 +1681,18 @@ type SnapshotSlotHold struct {
 
 // SnapshotHold is a read-only view of the hold the latest dispatch pass gave
 // one candidate. Blockers is nil unless Reason is [SkipBlockedBy], Slot is nil
-// unless it is [SkipAgentSlotsFull], and ResetsAt is zero unless it is a
-// spend reason.
+// unless it is [SkipAgentSlotsFull], ResetsAt is zero unless it is a spend
+// reason or [SkipUsageLimit], and AgentKind, ModelOnly, and Model are set for
+// [SkipUsageLimit] only.
 type SnapshotHold struct {
-	Reason   SkipReason        `json:"reason"`
-	Since    time.Time         `json:"held_since"`
-	Blockers []SnapshotBlocker `json:"blockers"`
-	Slot     *SnapshotSlotHold `json:"slot"`
-	ResetsAt time.Time         `json:"resets_at"`
+	Reason    SkipReason        `json:"reason"`
+	Since     time.Time         `json:"held_since"`
+	Blockers  []SnapshotBlocker `json:"blockers"`
+	Slot      *SnapshotSlotHold `json:"slot"`
+	ResetsAt  time.Time         `json:"resets_at"`
+	AgentKind string            `json:"agent_kind,omitempty"`
+	ModelOnly bool              `json:"model_only,omitempty"`
+	Model     string            `json:"model,omitempty"`
 }
 
 // SnapshotHeldEntry is a read-only view of one held candidate. IssueTitle,

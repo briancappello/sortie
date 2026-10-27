@@ -45,6 +45,8 @@ type OrchestratorStore interface {
 	UpsertSessionMetadata(ctx context.Context, meta persistence.SessionMetadata) error
 	SaveRetryEntry(ctx context.Context, entry persistence.RetryEntry) error
 	DeleteRetryEntry(ctx context.Context, issueID string) error
+	SaveUsageLimitHold(ctx context.Context, hold persistence.UsageLimitHold) error
+	DeleteUsageLimitHold(ctx context.Context, agentKind string, modelOnly bool, model string) error
 	CountRunHistoryByIssue(ctx context.Context, issueID string) (int, error)
 	QueryConsecutiveHandoffAbsenceCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
 	ResetHandoffAbsenceSequence(ctx context.Context, issueID string) error
@@ -715,6 +717,7 @@ func (o *Orchestrator) handleWorkerExit(ctx context.Context, workerExit WorkerRe
 			Store:                             o.store,
 			RunEventRetry:                     o.runEventRetry,
 			MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
+			ReleaseHeld:                       o.once != nil,
 			MaxConsecutiveAbsences:            cfg.Agent.MaxConsecutiveAbsences,
 			HandoffParkingLabel:               o.handoffParkingLabel,
 			OnRetryFire:                       o.onRetryFire,
@@ -819,7 +822,7 @@ func (o *Orchestrator) Run(ctx context.Context) {
 			if entry, ok := o.state.RetryAttempts[issueID]; ok {
 				retryIdentifier = entry.Identifier
 			}
-			spendReleased := HandleRetryTimer(o.state, issueID, HandleRetryTimerParams{
+			heldReleased := HandleRetryTimer(o.state, issueID, HandleRetryTimerParams{
 				Store:                  o.store,
 				TrackerAdapter:         o.trackerAdapter,
 				Router:                 o.router,
@@ -847,9 +850,12 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				Metrics:                o.metrics,
 				HostPool:               o.hostPool,
 				WorkflowFile:           o.workflowFile(),
-				ReleaseSpendHeld:       o.once != nil,
+				ReleaseHeld:            o.once != nil,
+				ConfiguredModelOf: func(selection DispatchResolution) string {
+					return o.configuredModelOf(cfg, selection)
+				},
 			})
-			if spendReleased && !o.once.hasOutcome(issueID) {
+			if heldReleased && !o.once.hasOutcome(issueID) {
 				o.once.record(issueID, retryIdentifier, RunOutcomeStopped)
 			}
 			o.updateGauges(time.Now())
@@ -1194,7 +1200,16 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 	// Break only on exhausted global capacity; skip individual issues whose
 	// per-state limit is full so other states can still dispatch.
 	pass := &TickResolution{offset: o.state.BlockerReadOffset}
-	held := newHeldPass(o.state.Held, time.Now().UTC(), spendHoldEntry(spendHold, o.state.SpendCeilings))
+	passStart := time.Now().UTC()
+	usageGrace := time.Duration(cfg.Polling.IntervalMS) * time.Millisecond
+	var usageHold func(domain.Issue) *HeldEntry
+	if usageLimitHoldActive(o.state, usageGrace, passStart) {
+		usageHold = func(candidate domain.Issue) *HeldEntry {
+			resolution := ResolveRule(candidate, cfg.Dispatch, hopRouteOf(o.state, candidate.ID), cfg.Agent.Kind, "")
+			return usageLimitHeldEntry(o.state, resolution.AgentKind, o.configuredModelOf(cfg, resolution), usageGrace, passStart)
+		}
+	}
+	held := newHeldPass(o.state.Held, passStart, spendHoldEntry(spendHold, o.state.SpendCeilings), usageHold)
 
 	var dispatched, dispatchedByRule, dispatchedByDefault, dispatchedByFallback int
 	var heldByBlockers, blockersUnresolvedHeld, blockersNotReadHeld, blockersIncompleteHeld int
@@ -1261,6 +1276,13 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 		resolution := ResolveRule(issue, cfg.Dispatch, hopRouteOf(o.state, issue.ID), cfg.Agent.Kind, "")
 		warnSeveralStageLabels(o.logger, issue, cfg.Dispatch, resolution.RuleName)
+		if usageHold != nil {
+			if entry := usageLimitHeldEntry(o.state, resolution.AgentKind, o.configuredModelOf(cfg, resolution), usageGrace, passStart); entry != nil {
+				held.hold(issue, *entry)
+				o.once.declined(issue, SkipUsageLimit)
+				continue
+			}
+		}
 		adapter, adapterErr := o.agentAdapterByKind(resolution.AgentKind)
 		if adapterErr != nil {
 			o.logger.Error("agent kind unavailable",
@@ -1535,6 +1557,7 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			AgentKind:              agentKind,
 			UsageArrival:           attemptSettings.UsageArrival,
 			AgentSettings:          attemptSettings.Settings,
+			UsageLimitNotified:     usageLimitNotifiedFrom(ctx),
 			OnEvent: func(issueID string, event domain.AgentEvent) {
 				select {
 				case o.agentEventCh <- agentEventMsg{IssueID: issueID, Event: event}:
@@ -2358,8 +2381,14 @@ func (o *Orchestrator) ruleAgentOf(cfg config.ServiceConfig, rule config.Dispatc
 	resolution := ruleResolution(rule, cfg.Dispatch, cfg.Agent.Kind, "")
 	return RuleAgent{
 		AgentKind:       resolution.AgentKind,
-		ConfiguredModel: o.resolveAttemptSettings(cfg, resolution, "").Settings.Model,
+		ConfiguredModel: o.configuredModelOf(cfg, resolution),
 	}
+}
+
+// configuredModelOf returns the model a dispatch of resolution is configured
+// with under cfg.
+func (o *Orchestrator) configuredModelOf(cfg config.ServiceConfig, resolution DispatchResolution) string {
+	return o.resolveAttemptSettings(cfg, resolution, "").Settings.Model
 }
 
 // ruleAgents maps each named rule of cfg that carries a stage label, the rules
@@ -2503,6 +2532,7 @@ func (o *Orchestrator) drainRunningWorkers() {
 				Rates:                             rates,
 				Store:                             o.store,
 				MaxRetryBackoffMS:                 cfg.Agent.MaxRetryBackoffMS,
+				ReleaseHeld:                       o.once != nil,
 				MaxConsecutiveAbsences:            cfg.Agent.MaxConsecutiveAbsences,
 				OnRetryFire:                       func(string) {}, // no-op: prevent retry fire events from reaching the event loop during drain
 				Ctx:                               drainCtx,

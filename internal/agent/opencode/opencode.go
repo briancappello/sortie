@@ -32,14 +32,16 @@ const defaultCommand = "opencode"
 
 func init() {
 	registry.Agents.RegisterWithMeta("opencode", NewOpenCodeAdapter, registry.AgentMeta{
-		RequiresCommand:     true,
-		DefaultCommand:      defaultCommand,
-		ValidateAgentConfig: validateConfig,
-		MCPDialect:          registry.MCPDialectMCPMemberJSON,
-		UsageArrival:        registry.UsageArrivalTurnEnd,
-		UsageAttribution:    registry.UsageAttributionPerModel,
-		CredentialEnv:       registry.DeclareCredentialEnv(),
-		EffortForwarding:    registry.EffortForwarded,
+		RequiresCommand:               true,
+		DefaultCommand:                defaultCommand,
+		ValidateAgentConfig:           validateConfig,
+		MCPDialect:                    registry.MCPDialectMCPMemberJSON,
+		UsageArrival:                  registry.UsageArrivalTurnEnd,
+		UsageAttribution:              registry.UsageAttributionPerModel,
+		CredentialEnv:                 registry.DeclareCredentialEnv(),
+		EffortForwarding:              registry.EffortForwarded,
+		UsageLimitRecognition:         registry.UsageLimitNotRecognized,
+		UsageLimitNotRecognizedReason: "the runtime's run error carries no usage-limit form the adapter reads",
 		VerificationContext: registry.DeclareVerificationContext(
 			registry.VerificationKeepsProjectInstructions,
 			registry.VerificationKeepsUserInstructions,

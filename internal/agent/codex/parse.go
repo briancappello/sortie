@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -223,6 +224,82 @@ func parseModelRerouted(params json.RawMessage) (modelReroutedParams, error) {
 	return p, nil
 }
 
+// rateLimitWindow is one usage window of an account/rateLimits/updated
+// notification. ResetsAt is a pointer so a window without a reset
+// instant is distinguishable from one resetting at Unix zero.
+type rateLimitWindow struct {
+	UsedPercent int    `json:"usedPercent"`
+	ResetsAt    *int64 `json:"resetsAt"`
+}
+
+// rateLimitsUpdatedParams is the params payload of an
+// account/rateLimits/updated notification. A window the runtime does not
+// report is null on the wire and so nil here.
+type rateLimitsUpdatedParams struct {
+	RateLimits struct {
+		LimitID   string           `json:"limitId"`
+		Primary   *rateLimitWindow `json:"primary"`
+		Secondary *rateLimitWindow `json:"secondary"`
+	} `json:"rateLimits"`
+}
+
+// parseRateLimitsUpdated unmarshals the params payload of an
+// account/rateLimits/updated notification.
+func parseRateLimitsUpdated(params json.RawMessage) (rateLimitsUpdatedParams, error) {
+	var p rateLimitsUpdatedParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return rateLimitsUpdatedParams{}, fmt.Errorf("parse account/rateLimits/updated params: %w", err)
+	}
+	return p, nil
+}
+
+// rateLimitWindows holds the latest primary and secondary window
+// reported for one limit id.
+type rateLimitWindows struct {
+	primary, secondary *rateLimitWindow
+}
+
+// rateLimitStore keeps the latest windows per limit id for one session.
+// It is owned by the goroutine reading the session's stream and takes
+// no lock. The zero value is ready to use.
+type rateLimitStore map[string]rateLimitWindows
+
+// record merges a notification into the store: a reported window
+// replaces the stored one, an absent window keeps it, because the
+// runtime sends only the windows that changed.
+func (s *rateLimitStore) record(p rateLimitsUpdatedParams) {
+	if *s == nil {
+		*s = make(rateLimitStore)
+	}
+	id := p.RateLimits.LimitID
+	windows := (*s)[id]
+	if p.RateLimits.Primary != nil {
+		windows.primary = p.RateLimits.Primary
+	}
+	if p.RateLimits.Secondary != nil {
+		windows.secondary = p.RateLimits.Secondary
+	}
+	(*s)[id] = windows
+}
+
+// exhaustedResetsAt returns the latest reset instant among stored
+// windows used up to 100 percent or more, or the zero time when none
+// carries one.
+func (s rateLimitStore) exhaustedResetsAt() time.Time {
+	var latest int64
+	for _, windows := range s {
+		for _, w := range []*rateLimitWindow{windows.primary, windows.secondary} {
+			if w != nil && w.UsedPercent >= 100 && w.ResetsAt != nil && *w.ResetsAt > latest {
+				latest = *w.ResetsAt
+			}
+		}
+	}
+	if latest == 0 {
+		return time.Time{}
+	}
+	return time.Unix(latest, 0).UTC()
+}
+
 // mapCodexErrorInfo maps a codexErrorInfo variant name to a domain error
 // kind, comparing names case-insensitively. Retryable vs non-retryable
 // classification is encoded in the AgentErrorKind value.
@@ -232,7 +309,9 @@ func mapCodexErrorInfo(info string) domain.AgentErrorKind {
 		return domain.ErrCredentialUnverified
 	case "badrequest":
 		return domain.ErrResponseError
-	case "contextwindowexceeded", "usagelimitexceeded", "sandboxerror":
+	case "usagelimitexceeded":
+		return domain.ErrUsageLimit
+	case "contextwindowexceeded", "sandboxerror":
 		return domain.ErrTurnFailed
 	case "httpconnectionfailed", "responsestreamconnectionfailed",
 		"responsestreamdisconnected", "responsetoomanyfailedattempts",

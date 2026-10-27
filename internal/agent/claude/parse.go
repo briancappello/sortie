@@ -35,6 +35,13 @@ type rawEvent struct {
 	NumTurns    int    `json:"num_turns,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
 
+	// APIErrorStatus is the HTTP status of the API failure behind an
+	// error result, zero when the run met none.
+	APIErrorStatus int `json:"api_error_status,omitempty"`
+
+	// RateLimitInfo is present on rate_limit_event lines.
+	RateLimitInfo *rawRateLimitInfo `json:"rate_limit_info,omitempty"`
+
 	// Usage (present in result events).
 	Usage *rawUsage `json:"usage,omitempty"`
 
@@ -51,6 +58,15 @@ type rawEvent struct {
 	RetryDelayMS int    `json:"retry_delay_ms,omitempty"`
 	ErrorStatus  int    `json:"error_status,omitempty"`
 	ErrorField   string `json:"error,omitempty"`
+}
+
+// rawRateLimitInfo is the subscription allowance state a rate_limit_event
+// line reports. ResetsAt is Unix seconds.
+type rawRateLimitInfo struct {
+	Status        string `json:"status"`
+	ResetsAt      int64  `json:"resetsAt"`
+	RateLimitType string `json:"rateLimitType"`
+	OverageStatus string `json:"overageStatus"`
 }
 
 // rawUsage holds token counts from a Claude Code result event.

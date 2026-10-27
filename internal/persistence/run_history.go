@@ -89,7 +89,7 @@ type RunHistory struct {
 	Workspace      string
 	StartedAt      string
 	CompletedAt    string
-	Status         string // "succeeded", "failed", "cancelled", "ci_failed", "needs_person", or "budget_stopped".
+	Status         string // "succeeded", "failed", "cancelled", "ci_failed", "needs_person", "budget_stopped", or "usage_limited".
 	Error          *string
 	WorkflowFile   string // Base filename; empty for pre-migration rows.
 	TurnsCompleted int
@@ -927,11 +927,11 @@ func (s *Store) RecordRunStageResult(ctx context.Context, runID int64, targetRul
 }
 
 // CountRunHistoryByIssue returns the number of entries for the issue, or
-// (0, nil) when none exist.
+// (0, nil) when none exist. Rows with status "usage_limited" are not counted.
 func (s *Store) CountRunHistoryByIssue(ctx context.Context, issueID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM run_history WHERE issue_id = ?`, issueID,
+		`SELECT COUNT(*) FROM run_history WHERE issue_id = ? AND status <> 'usage_limited'`, issueID,
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count run history by issue %q: %w", issueID, err)
@@ -1042,8 +1042,9 @@ func (s *Store) ResetHandoffAbsenceSequence(ctx context.Context, issueID string)
 }
 
 // QueryBudgetExhaustedIssues returns, for each candidate whose entry count
-// meets or exceeds maxSessions, that count keyed by issue ID. Returns an
-// empty non-nil map when none qualify or candidateIDs is empty.
+// meets or exceeds maxSessions, that count keyed by issue ID. Rows with
+// status "usage_limited" are not counted. Returns an empty non-nil map when
+// none qualify or candidateIDs is empty.
 func (s *Store) QueryBudgetExhaustedIssues(ctx context.Context, candidateIDs []string, maxSessions int) (map[string]int, error) {
 	if len(candidateIDs) == 0 {
 		return map[string]int{}, nil
@@ -1059,7 +1060,7 @@ func (s *Store) QueryBudgetExhaustedIssues(ctx context.Context, candidateIDs []s
 	args = append(args, maxSessions)
 
 	query := fmt.Sprintf( //nolint:gosec // placeholders is "?,?,..." built from len(candidateIDs); no user data in format string
-		`SELECT issue_id, COUNT(*) FROM run_history WHERE issue_id IN (%s) GROUP BY issue_id HAVING COUNT(*) >= ?`,
+		`SELECT issue_id, COUNT(*) FROM run_history WHERE issue_id IN (%s) AND status <> 'usage_limited' GROUP BY issue_id HAVING COUNT(*) >= ?`,
 		placeholders,
 	)
 

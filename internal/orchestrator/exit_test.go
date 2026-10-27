@@ -34,6 +34,7 @@ type mockExitStore struct {
 	livePassLog
 	noopOutcomeRecorder
 	noEscalationRecords
+	noUsageLimitHolds
 	runHistories    []persistence.RunHistory
 	metrics         []persistence.AggregateMetrics
 	sessionMetadata []persistence.SessionMetadata
@@ -1148,6 +1149,195 @@ func TestHandleWorkerExit_RetryableReactionErrorPreservesContext(t *testing.T) {
 	}
 	if len(store.retryEntries) != 0 {
 		t.Errorf("SaveRetryEntry called %d times, want 0 (reaction retry is runtime-only)", len(store.retryEntries))
+	}
+}
+
+type holdRecordingExitStore struct {
+	*mockExitStore
+	saved   []persistence.UsageLimitHold
+	deleted []UsageLimitHoldKey
+}
+
+func (s *holdRecordingExitStore) SaveUsageLimitHold(_ context.Context, hold persistence.UsageLimitHold) error {
+	s.saved = append(s.saved, hold)
+	return nil
+}
+
+func (s *holdRecordingExitStore) DeleteUsageLimitHold(_ context.Context, agentKind string, modelOnly bool, model string) error {
+	s.deleted = append(s.deleted, UsageLimitHoldKey{AgentKind: agentKind, ModelOnly: modelOnly, Model: model})
+	return nil
+}
+
+func usageRefusal(resetsAt time.Time, modelOnly bool) error {
+	return &domain.AgentError{Kind: domain.ErrUsageLimit, UsageLimit: &domain.UsageLimit{ResetsAt: resetsAt, ModelOnly: modelOnly}}
+}
+
+func TestHandleWorkerExit_UsageLimit(t *testing.T) {
+	t.Parallel()
+
+	const issueID = "UL-1"
+	now := baseTime.Add(60 * time.Second)
+	reset := now.Add(time.Hour)
+	kindKey := UsageLimitHoldKey{AgentKind: "mock"}
+	modelKey := UsageLimitHoldKey{AgentKind: "mock", ModelOnly: true, Model: "opus"}
+	turnFailed := &domain.AgentError{Kind: domain.ErrTurnFailed}
+
+	tests := []struct {
+		name         string
+		err          error
+		normal       bool
+		measured     bool
+		outputTokens int64
+		notified     bool
+		prior        *UsageLimitHold
+
+		wantStatus  string
+		wantDue     time.Time
+		wantKey     UsageLimitHoldKey
+		wantHold    UsageLimitHold
+		wantSaves   int
+		wantDeletes int
+		wantSilent  bool
+	}{
+		{
+			name: "token figure with zero output waits for the reset", err: usageRefusal(reset, false), measured: true,
+			wantStatus: "usage_limited", wantDue: reset, wantKey: kindKey, wantHold: UsageLimitHold{ResetsAt: reset, Since: now}, wantSaves: 1,
+		},
+		{
+			name: "output tokens keep the failed status", err: usageRefusal(reset, false), measured: true, outputTokens: 5,
+			wantStatus: "failed", wantDue: reset, wantKey: kindKey, wantHold: UsageLimitHold{ResetsAt: reset, Since: now}, wantSaves: 1,
+		},
+		{
+			name: "no token figure keeps the failed status", err: usageRefusal(reset, false),
+			wantStatus: "failed", wantDue: reset, wantKey: kindKey, wantHold: UsageLimitHold{ResetsAt: reset, Since: now}, wantSaves: 1,
+		},
+		{
+			name: "instant beyond seven days is capped", err: usageRefusal(now.Add(30*24*time.Hour), false), measured: true,
+			wantStatus: "usage_limited", wantDue: now.Add(7 * 24 * time.Hour), wantKey: kindKey,
+			wantHold: UsageLimitHold{ResetsAt: now.Add(7 * 24 * time.Hour), Since: now}, wantSaves: 1,
+		},
+		{
+			name: "model-only refusal holds the configured model", err: usageRefusal(reset, true), measured: true,
+			wantStatus: "usage_limited", wantDue: reset, wantKey: modelKey, wantHold: UsageLimitHold{ResetsAt: reset, Since: now}, wantSaves: 1,
+		},
+		{
+			name: "later instant extends an active hold and keeps Since", err: usageRefusal(reset.Add(time.Hour), false), measured: true,
+			prior:      &UsageLimitHold{ResetsAt: reset, Since: now.Add(-5 * time.Minute)},
+			wantStatus: "usage_limited", wantDue: reset.Add(time.Hour), wantKey: kindKey,
+			wantHold: UsageLimitHold{ResetsAt: reset.Add(time.Hour), Since: now.Add(-5 * time.Minute)}, wantSaves: 1,
+		},
+		{
+			name: "normal exit of a run started after Since clears the hold", normal: true,
+			prior:   &UsageLimitHold{ResetsAt: reset, Since: baseTime.Add(-time.Minute)},
+			wantKey: kindKey, wantDeletes: 1,
+		},
+		{
+			name: "normal exit of a run started before Since keeps the hold", normal: true,
+			prior:   &UsageLimitHold{ResetsAt: reset, Since: baseTime.Add(10 * time.Second)},
+			wantKey: kindKey, wantHold: UsageLimitHold{ResetsAt: reset, Since: baseTime.Add(10 * time.Second)},
+		},
+		{
+			name: "refusal with no instant retries like turn_failed and holds nothing", err: usageRefusal(time.Time{}, false), measured: true,
+			wantStatus: "failed", wantKey: kindKey,
+		},
+		{
+			name: "refusal inside a notified episode routes nothing", err: usageRefusal(reset, false), measured: true, notified: true,
+			wantStatus: "usage_limited", wantDue: reset, wantKey: kindKey, wantHold: UsageLimitHold{ResetsAt: reset, Since: now}, wantSaves: 1, wantSilent: true,
+		},
+		{
+			name: "refusal with no instant inside a notified episode routes nothing", err: usageRefusal(time.Time{}, false), measured: true, notified: true,
+			wantStatus: "failed", wantKey: kindKey, wantSilent: true,
+		},
+		{
+			name: "turn_failed ends a notified episode and routes", err: turnFailed, notified: true,
+			wantStatus: "failed", wantKey: kindKey,
+		},
+		{
+			name: "turn_failed outside an episode routes", err: turnFailed,
+			wantStatus: "failed", wantKey: kindKey,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &holdRecordingExitStore{mockExitStore: &mockExitStore{}}
+			state := exitState(t, issueID, nil)
+			entry := state.Running[issueID]
+			entry.AgentKind, entry.ConfiguredModel = "mock", "opus"
+			entry.UsageMeasured, entry.AgentOutputTokens = tt.measured, tt.outputTokens
+			entry.UsageLimitNotified = tt.notified
+			if tt.prior != nil {
+				state.UsageLimitHolds[tt.wantKey] = *tt.prior
+			}
+			t.Cleanup(func() { stopRetryTimer(state, issueID) })
+
+			tracker := &mockTrackerAdapter{}
+			slack := &notifierSpy{}
+			params := defaultExitParams(t, store.mockExitStore)
+			params.Store = store
+			params.TrackerAdapter = tracker
+			params.Router = mustRouter(t, tracker, spyLookup(slack), route.Inputs{
+				Entries: []config.NotificationBackend{subscribe("slack", domain.EventSessionFailed)},
+			})
+			result := WorkerResult{IssueID: issueID, Identifier: issueID + "-ident", ExitKind: WorkerExitError, Error: tt.err, AgentAdapter: "mock"}
+			if tt.normal {
+				result.ExitKind, result.Error = WorkerExitNormal, nil
+			}
+
+			HandleWorkerExit(state, result, params)
+			state.TrackerOpsWg.Wait()
+
+			if tt.wantStatus != "" {
+				if got := store.runHistories[0].Status; got != tt.wantStatus {
+					t.Errorf("RunHistory.Status = %q, want %q", got, tt.wantStatus)
+				}
+			}
+			if !tt.normal {
+				retry, ok := state.RetryAttempts[issueID]
+				if !ok {
+					t.Fatal("retry not scheduled")
+				}
+				if tt.wantDue.IsZero() {
+					if want := computeBackoffDelay(1, params.MaxRetryBackoffMS); retry.scheduledDelayMS != want {
+						t.Errorf("retry delay = %d ms, want %d ms", retry.scheduledDelayMS, want)
+					}
+				} else if retry.DueAtMS != tt.wantDue.UnixMilli() {
+					t.Errorf("RetryEntry.DueAtMS = %d, want %d", retry.DueAtMS, tt.wantDue.UnixMilli())
+				}
+				if refused := tt.err != turnFailed; retry.UsageLimitNotified != refused {
+					t.Errorf("RetryEntry.UsageLimitNotified = %v, want %v", retry.UsageLimitNotified, refused)
+				}
+			}
+
+			hold, held := state.UsageLimitHolds[tt.wantKey]
+			if wantHeld := !tt.wantHold.ResetsAt.IsZero(); held != wantHeld ||
+				!hold.ResetsAt.Equal(tt.wantHold.ResetsAt) || !hold.Since.Equal(tt.wantHold.Since) {
+				t.Errorf("UsageLimitHolds[%+v] = %+v (present %v), want %+v", tt.wantKey, hold, held, tt.wantHold)
+			}
+			if len(store.saved) != tt.wantSaves {
+				t.Fatalf("SaveUsageLimitHold called %d times, want %d", len(store.saved), tt.wantSaves)
+			}
+			if tt.wantSaves > 0 {
+				got := store.saved[0]
+				if gotKey := (UsageLimitHoldKey{AgentKind: got.AgentKind, ModelOnly: got.ModelOnly, Model: got.Model}); gotKey != tt.wantKey ||
+					got.ResetsAtMs != tt.wantHold.ResetsAt.UnixMilli() || got.HeldSinceMs != tt.wantHold.Since.UnixMilli() {
+					t.Errorf("saved hold = %+v, want key %+v hold %+v", got, tt.wantKey, tt.wantHold)
+				}
+			}
+			if len(store.deleted) != tt.wantDeletes {
+				t.Errorf("DeleteUsageLimitHold called %d times, want %d", len(store.deleted), tt.wantDeletes)
+			}
+
+			wantFailed := 1
+			if tt.wantSilent || tt.normal {
+				wantFailed = 0
+			}
+			if got := len(slack.notifications()); got != wantFailed {
+				t.Errorf("session.failed routed %d times, want %d", got, wantFailed)
+			}
+		})
 	}
 }
 

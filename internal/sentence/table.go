@@ -421,6 +421,11 @@ var table = map[string]parts{
 		long:   "The monthly spend ceiling is reached, so Sortie starts no agent session for any issue until the UTC month ends.",
 		clears: "Released once the UTC month ends, or after `agent.max_monthly_cost_usd` is raised above the month's spend or removed.",
 	},
+	"hold_usage_limit": {
+		short:  "Usage limit reached for {{if .ModelOnly}}{{or .Model \"the default model\"}} on {{end}}{{.AgentKind}}" + resetsIn,
+		long:   "The agent provider refused a {{.AgentKind}} session because the account's usage limit{{if .ModelOnly}} for {{or .Model \"the default model\"}}{{end}} is reached. Sortie starts no {{.AgentKind}} session{{if .ModelOnly}} on that model{{end}} until the limit resets, and issues routed to other agents{{if .ModelOnly}} or models{{end}} keep dispatching.",
+		clears: "Released once the usage limit resets.",
+	},
 	"hold_stage_hop": {
 		short:  "Waiting to confirm the stage move",
 		long:   "Sortie dispatches the next stage once a read of the issue confirms the stage move, and the latest read did not. A later poll reads the issue again.",
@@ -535,6 +540,7 @@ var table = map[string]parts{
 	"run_error_turn_outcome_unknown":  {text: "The agent ended {{.Turn}} with an outcome Sortie could not read" + errorDetail},
 	"run_error_turn_token_limit":      {text: "The agent ended {{.Turn}} because a token limit was reached" + errorDetail},
 	"run_error_turn_request_limit":    {text: "The agent ended {{.Turn}} because it used up its request limit" + errorDetail},
+	"run_error_usage_limit":           {text: "The agent provider refused the run because the account's usage limit is reached" + errorDetail},
 	"run_error_credential_unverified": {text: "The agent's credential was refused or could not be confirmed" + errorDetail},
 	"run_error_agent_other":           {text: "The agent reported an error" + errorDetail},
 	"run_error_turn_ended":            {text: "The agent ended {{.Turn}} early{{if .Detail}} ({{.Detail}}){{end}}."},
