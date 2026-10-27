@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
+	"github.com/sortie-ai/sortie/internal/agent/toolrelay"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
@@ -814,6 +815,63 @@ func TestConformancePropertyToolServer(t *testing.T) {
 		conformanceToolServerRun,
 		func(run Run) []string { return toolServerViolations(run, conformanceServerTurn) },
 	)
+}
+
+func TestConformancePropertySSHDelivery(t *testing.T) {
+	t.Parallel()
+
+	notice := domain.AgentEvent{Type: domain.EventNotification, Message: toolrelay.GapNotice}
+	otherNotification := domain.AgentEvent{Type: domain.EventNotification, Message: "tool call refused by the session policy"}
+
+	t.Run("delivered", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []conformanceCase[Run]{
+			{name: "no notice and a tool channel", mutate: func(run *Run) { run.Events = append(run.Events, otherNotification) }},
+			{
+				name:   "opening notice",
+				mutate: func(run *Run) { run.Events = append(run.Events, notice) },
+				want:   []string{"opening notice"},
+			},
+			{
+				name:   "no tool channel",
+				mutate: func(run *Run) { run.Session.NoToolChannel = true },
+				want:   []string{"NoToolChannel = true"},
+			},
+		}
+
+		conformanceRunCases(t, "ssh tool delivery", cases, conformanceToolServerRun,
+			func(run Run) []string { return sshDeliveryViolations(run, false) })
+	})
+
+	t.Run("refused", func(t *testing.T) {
+		t.Parallel()
+
+		refusedRun := func() Run {
+			run := conformanceToolServerRun()
+			run.Events = append(run.Events, notice)
+			run.Session.NoToolChannel = true
+			return run
+		}
+		cases := []conformanceCase[Run]{
+			{name: "notice and no tool channel"},
+			{
+				name: "no notice",
+				mutate: func(run *Run) {
+					run.Events = slices.DeleteFunc(run.Events, func(e domain.AgentEvent) bool { return e.Type == domain.EventNotification })
+				},
+				want: []string{"0 opening notices"},
+			},
+			{
+				name:   "tool channel kept",
+				mutate: func(run *Run) { run.Session.NoToolChannel = false },
+				want:   []string{"NoToolChannel = false"},
+			},
+		}
+
+		conformanceRunCases(t, "ssh tool delivery", cases, refusedRun,
+			func(run Run) []string { return sshDeliveryViolations(run, true) })
+	})
 }
 
 func TestConformancePropertyInterruptedTurn(t *testing.T) {
@@ -1657,7 +1715,7 @@ func TestConformanceFatalArms(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestConformanceFatalArmChild$", "-test.v") //nolint:gosec // re-executes this test binary
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestConformanceFatalArmChild$", "-test.v") //nolint:gosec // os.Args[0] is this test binary, not external input
 			cmd.Env = append(os.Environ(), conformanceArmEnv+"="+tt.arm)
 
 			out, err := cmd.CombinedOutput()

@@ -103,9 +103,9 @@ func collectAllEvents(t *testing.T, a domain.AgentAdapter, session domain.Sessio
 	return events, result
 }
 
-// The key is an {env:} reference because opencode 2.x does not read the
-// provider's key variable on its own.
 func scriptedProviderDocument(url string) string {
+	// The key is an {env:} reference because opencode 2.x does not read the
+	// provider's key variable on its own.
 	return fmt.Sprintf(`{"$schema":"https://opencode.ai/config.json","provider":{"scripted":{"npm":"@ai-sdk/google","name":"scripted","options":{"baseURL":"%s/v1beta","apiKey":"{env:GOOGLE_GENERATIVE_AI_API_KEY}"},"models":{"scripted-model":{"name":"scripted-model"}}}}}`, url)
 }
 
@@ -125,6 +125,11 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		Passthrough:   scriptedSettings(true),
 		CredentialEnv: []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
 		Read:          fakemodel.ReadFile,
+		SSH: &fakemodel.SSHVariant{
+			Package:       "@opencode/cli",
+			HostCommand:   integrationCommand(),
+			RemoteCommand: func(fakemodel.Environment) string { return "opencode" },
+		},
 		PermissionRefusal: &fakemodel.PermissionRefusal{
 			Passthrough: scriptedSettings(false),
 			Guarded:     fakemodel.ReadFile,

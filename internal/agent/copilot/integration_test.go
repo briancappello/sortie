@@ -9,9 +9,9 @@
 //	SORTIE_COPILOT_COMMAND         override the default "copilot" binary
 //	SORTIE_COPILOT_MODEL           override the default "gpt-5-mini" model
 //
-// Authentication: the live cases need at least one of COPILOT_GITHUB_TOKEN,
-// GH_TOKEN, or GITHUB_TOKEN, or an authenticated gh CLI. The scripted-model
-// case reads no credential and needs only SORTIE_COPILOT_TEST=1.
+// Authentication: the live cases need one of COPILOT_GITHUB_TOKEN, GH_TOKEN or
+// GITHUB_TOKEN, or an authenticated gh CLI; the scripted-model case needs only
+// the gate.
 //
 // Run:
 //
@@ -140,6 +140,11 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		CredentialEnv:    []string{"COPILOT_PROVIDER_API_KEY"},
 		UserInstructions: filepath.Join(".copilot", "copilot-instructions.md"),
 		Read:             fakemodel.ReadFile,
+		SSH: &fakemodel.SSHVariant{
+			Package:       "@github/copilot",
+			HostCommand:   integrationCommand(),
+			RemoteCommand: func(fakemodel.Environment) string { return "copilot" },
+		},
 		Finish: func(text string) fakemodel.ToolChoice {
 			summary, _ := json.Marshal(map[string]string{"summary": text})
 			return fakemodel.Named("task_complete", summary)
