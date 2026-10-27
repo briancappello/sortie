@@ -220,6 +220,10 @@ func buildSSHOpts(host string, opts SSHOptions) []string {
 		"-o", "ConnectTimeout=30",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
+		// A shared connection outlives this client, so the remote supervisor
+		// would never see it end, and its master would own a forward's
+		// allocation line.
+		"-o", "ControlPath=none",
 	}
 	if opts.Forward != nil {
 		args = append(args, forwardOptions(opts.Forward.HostPort)...)
@@ -229,9 +233,7 @@ func buildSSHOpts(host string, opts SSHOptions) []string {
 
 // forwardOptions returns the ssh options a forwarded launch adds. A refused
 // forward must not end the launch; LogLevel=INFO keeps the allocation line
-// visible whatever the operator's ssh_config sets; ControlPath=none stops a
-// multiplexing master from owning the forward and logging the allocation
-// line away from this process's standard error. Remote port 0 lets sshd
+// visible whatever the operator's ssh_config sets. Remote port 0 lets sshd
 // allocate one, since a fixed port collides across sessions on one host.
 //
 // It panics when hostPort is outside 1..65535.
@@ -242,7 +244,6 @@ func forwardOptions(hostPort int) []string {
 	return []string{
 		"-o", "ExitOnForwardFailure=no",
 		"-o", "LogLevel=INFO",
-		"-o", "ControlPath=none",
 		"-R", "127.0.0.1:0:127.0.0.1:" + strconv.Itoa(hostPort),
 	}
 }

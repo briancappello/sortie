@@ -329,6 +329,7 @@ func TestBuildSSHLaunch_ZeroEnv(t *testing.T) {
 					"-o", "ConnectTimeout=30",
 					"-o", "ServerAliveInterval=15",
 					"-o", "ServerAliveCountMax=3",
+					"-o", "ControlPath=none",
 					"--",
 					strings.TrimSpace(tt.host),
 				}
@@ -936,7 +937,7 @@ func TestBuildSSHLaunch_ForwardAddsOptionsBeforeTheSeparator(t *testing.T) {
 		t.Fatalf("Args = %q, want a %q separator", launch.Args, "--")
 	}
 	got := strings.Join(launch.Args[:sep], " ")
-	want := "-o ExitOnForwardFailure=no -o LogLevel=INFO -o ControlPath=none -R 127.0.0.1:0:127.0.0.1:4242"
+	want := "-o ExitOnForwardFailure=no -o LogLevel=INFO -R 127.0.0.1:0:127.0.0.1:4242"
 	if !strings.Contains(got, want) {
 		t.Errorf("options before %q = %q, want them to contain %q", "--", got, want)
 	}
