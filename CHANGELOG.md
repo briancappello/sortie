@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Sortie's tool server now supports MCP 2026-07-28, the newest protocol version, as well as earlier ones. Agents that open with the newest version connect directly instead of falling back. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 - When Copilot CLI fails its startup check, the error now adds the runtime's own error output to the Node.js 22+ hint, and the issue is retried with backoff, as for any agent whose runtime exits at startup, instead of being released at once. The check also waits up to twice `agent.read_timeout_ms`, at most 30 seconds, as OpenCode's does, instead of a fixed five seconds. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 - The JSON API schema now lists every reason a held issue can report. A client should still accept a reason it does not know, because a newer release can add one. ([#1523](https://github.com/sortie-ai/sortie/issues/1523))
+- The dashboard words two run outcomes after what happened: a run cut off while its agent waited for an answer now reads Needed input instead of Stopped for a person, and a run whose agent finished and asked for a person now reads Action required instead of Stopped to ask. The Analytics outcome bar and the paused mark now say Stopped.
 
 ### Fixed
 
@@ -36,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Copilot CLI launched locally through the Agent Client Protocol (ACP) silently ignored Sortie's tools while the agent was told they existed. It can now use them, and so can other ACP agents that accept only HTTP tool servers. ([#1485](https://github.com/sortie-ai/sortie/issues/1485))
 - An agent on an SSH worker host now stops when Sortie cancels its turn or stops its session. Before, Claude Code and other runtimes waiting on the model kept running on the host, and kept spending, until stopped by hand; they now get a termination signal and, after `agent.stop_grace_ms`, a force kill. Sortie no longer reuses an SSH connection that `ControlMaster` in `ssh_config` keeps open, because a stop could not reach the host through it.
 - Codex runs now report the tokens written to the prompt cache, so the token breakdown and cost estimates include them. ([#1525](https://github.com/sortie-ai/sortie/issues/1525))
+- The session view says once how a run ended. Its notice gives the reason in plain words and, for the issue's latest run, what happens next, and it no longer repeats the status or shows provider text as the agent's last message. The event log marks a run that stopped at a usage limit, a budget, or for input with the pause mark instead of a failure cross, and a turn count of zero is left out.
+- Run failures read as sentences everywhere they show. Failed CI checks, a cost or token ceiling stop, and a stall no longer show internal text, and a cancelled run says why Sortie stopped it, such as a shutdown or the issue leaving an active state. On the issue page a CI failure is one line of the story instead of a run card, and stage hops are worded in plain language.
 
 ## [1.30.0] - 2026-10-23
 

@@ -977,6 +977,11 @@ on_worker_exit(issue_id, reason, worker_result, state):
     else:  // money_budget
       run_error = money_ceiling_stop_error(issue_cost(running_entry), running_entry.ceiling_stop_request.budget_usd)
     report_ceiling_stop(log, metrics, running_entry.ceiling_stop_request)
+  else if reason == cancelled AND cancel_cause(worker_result) is not null:
+    // The reason the orchestrator cancelled the run: stall detection, a terminal
+    // or inactive tracker state, or shutdown. It replaces any error the worker
+    // reported while the cancellation landed.
+    run_error = cancel_cause(worker_result)
 
   # A provider usage-limit refusal. The status is usage_limited
   # only for an accepted reset on a run whose token figure is measured with
