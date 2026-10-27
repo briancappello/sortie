@@ -219,6 +219,7 @@ func (r *Relay) neverStarted(cause error) *Relay {
 	r.exited = true
 	r.setGapLocked(GapRelayUnavailable, slog.Any("error", cause))
 	r.mu.Unlock()
+	redact.Remove(r.bearer)
 	close(r.exitedCh)
 	close(r.finished)
 	return r
@@ -472,6 +473,7 @@ func (r *Relay) announce(addr string) {
 // It is the last relay goroutine to end.
 func (r *Relay) supervise(ctx context.Context, reaper *procutil.Reaper, collector *procutil.StderrCollector, pipes *procutil.OwnedPipes, readerDone <-chan struct{}) {
 	defer close(r.finished)
+	defer redact.Remove(r.bearer)
 	<-reaper.Done()
 	exitCode := procutil.ExtractExitCode(reaper.Err())
 
