@@ -444,6 +444,9 @@ func (r *Relay) readEvents(out io.Reader, done chan<- struct{}) {
 			r.acceptRefused(ev.Accept)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		r.logger.Debug("stopped reading tool server output", slog.Any("error", err))
+	}
 }
 
 // announce records the child's listener once, when its address is a

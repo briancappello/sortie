@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	announcedPort = 43210
 	announcedAddr = "127.0.0.1:43210"
 	awaitBound    = time.Minute
 )

@@ -55,6 +55,9 @@ func runChild(args []string, p childParams) int {
 			return 3
 		}
 	}
+	if lines.Err() != nil {
+		return 3
+	}
 	return 0
 }
 
