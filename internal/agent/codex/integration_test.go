@@ -67,6 +67,11 @@ func integrationCommand() string {
 	return "codex app-server"
 }
 
+func runtimeCommand() string {
+	command, _, _ := strings.Cut(integrationCommand(), " app-server")
+	return command
+}
+
 func integrationAgentConfig() domain.AgentConfig {
 	return domain.AgentConfig{
 		Command:       integrationCommand(),
@@ -238,7 +243,7 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		SSH: &fakemodel.SSHVariant{
 			Package: "@openai/codex",
 			// app-server rejects --version; the top-level command reports it.
-			HostCommand: strings.TrimSuffix(integrationCommand(), " app-server"),
+			HostCommand: runtimeCommand(),
 			RemoteCommand: func(env fakemodel.Environment) string {
 				return scriptedProviderCommand("codex app-server", env.URL)
 			},
