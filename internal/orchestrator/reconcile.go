@@ -402,9 +402,7 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 			continue
 		}
 
-		if entry.CancelFunc != nil {
-			entry.CancelFunc()
-		}
+		entry.cancelRun(errCancelStall)
 
 		entryLog.Warn("stall detected, cancelling worker",
 			slog.Int64("elapsed_ms", elapsedMS),
@@ -426,7 +424,7 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 			IssueIdentity:       issueIdentityOf(entry.Issue),
 			Attempt:             nextAttempt,
 			DelayMS:             delayMS,
-			Error:               "stall timeout exceeded",
+			Error:               StallCancelError,
 			LastSSHHost:         entry.SSHHost,
 			SessionID:           entry.SessionID,
 			ContinuationContext: entry.ContinuationContext,
@@ -671,9 +669,7 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 
 			var counts issueReleaseCounts
 			if entry != nil {
-				if entry.CancelFunc != nil {
-					entry.CancelFunc()
-				}
+				entry.cancelRun(terminalCancelCause(stateName))
 				counts = releaseIssueRuntimeState(ctx, state, params.Store, issueID, entryLog)
 				entry.PendingCleanup = true
 				entry.ObservedTerminalState = stateName
@@ -732,9 +728,7 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 		}
 
 		// Non-active, non-terminal: cancel without workspace cleanup.
-		if entry.CancelFunc != nil {
-			entry.CancelFunc()
-		}
+		entry.cancelRun(inactiveCancelCause(stateName))
 		if incumbent := retrySlotIncumbent(state, issueID); incumbent != nil {
 			// Skipping only one of CancelRetry or DeleteRetryEntry would
 			// leave the in-memory entry and the persisted row disagreeing,

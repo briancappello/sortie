@@ -105,6 +105,10 @@ type WorkerResult struct {
 	// returned when the worker exits on it; else nil.
 	StartupError error
 
+	// CancelCause is the worker context's cancellation cause on a cancelled
+	// exit; nil otherwise.
+	CancelCause error
+
 	// StoppedByCeiling is true when the worker context's cancellation
 	// cause is a budget ceiling's own in-flight stop request.
 	StoppedByCeiling bool
@@ -788,6 +792,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 			deps.VerificationCache.evict(cacheKey)
 		}
 		result.StoppedByCeiling = result.ExitKind == WorkerExitCancelled && errors.Is(context.Cause(ctx), errCeilingStop)
+		if result.ExitKind == WorkerExitCancelled {
+			result.CancelCause = context.Cause(ctx)
+		}
 		result.SessionID = acceptedSessionID
 		result.ResumeUsage = resumeUsage
 		result.ResumeUsageByModel = resumeUsageByModel

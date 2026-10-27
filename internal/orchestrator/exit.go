@@ -413,6 +413,8 @@ func HandleWorkerExit(state *State, workerResult WorkerResult, params HandleWork
 	if status == "budget_stopped" {
 		runError = ceilingStopError(state, entry, request)
 		reportCeilingStop(log, metrics, request)
+	} else if cancelErr := cancelRunError(workerResult.CancelCause); workerResult.ExitKind == WorkerExitCancelled && cancelErr != nil {
+		runError = cancelErr
 	}
 
 	if evidenceWithheld {

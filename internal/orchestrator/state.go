@@ -184,6 +184,11 @@ type RunningEntry struct {
 	// nested under it. Nil only in test fixtures that bypass [DispatchIssue].
 	CancelFunc context.CancelFunc
 
+	// CancelCauseFunc cancels the same run context as CancelFunc and records
+	// the cause the worker reads back. Nil only in test fixtures that bypass
+	// [DispatchIssue].
+	CancelCauseFunc context.CancelCauseFunc
+
 	// CeilingCancelFunc cancels the worker context with cause
 	// [errCeilingStop]. Nil only in test fixtures that bypass [DispatchIssue].
 	CeilingCancelFunc context.CancelFunc

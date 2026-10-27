@@ -434,7 +434,7 @@ func TestDegradedSchemaWarning(t *testing.T) {
 			caps: persistence.RunHistoryCapabilities{},
 			want: []string{
 				"before sortie recorded turns, self-review results, dispatch-rule routing, tokens and cost",
-				"stage chains, what started each run, the first run after each stage hop, which runs stopped to wait for a person",
+				"stage chains, what started each run, the first run after each stage hop, which runs required action",
 				"Run sortie once with this workflow to add them.",
 			},
 			absent: []string{"does carry", "falls back"},
@@ -936,8 +936,8 @@ func TestStatsByChain(t *testing.T) {
 func TestAggregatorReport_WarningsComposition(t *testing.T) {
 	t.Parallel()
 
-	const funnelMissing = "this database was written before sortie recorded which runs stopped to wait for a person, so the report leaves out the funnel of each stage chain, cost, and the breakdown by skill. Run sortie once with this workflow to add them."
-	const funnelMissingWithoutChains = "this database was written before sortie recorded which runs stopped to wait for a person, so the report leaves out cost and the breakdown by skill. Run sortie once with this workflow to add them."
+	const funnelMissing = "this database was written before sortie recorded which runs required action, so the report leaves out the funnel of each stage chain, cost, and the breakdown by skill. Run sortie once with this workflow to add them."
+	const funnelMissingWithoutChains = "this database was written before sortie recorded which runs required action, so the report leaves out cost and the breakdown by skill. Run sortie once with this workflow to add them."
 	const everyLaterTierMissing = "this database was written before sortie recorded the model of each run, stage chains, what started each run, the first run after each stage hop, and the skill calls of each run, so the report leaves out the breakdown by model, the breakdown by stage chain, the breakdown by retry trigger, the breakdown by run origin, cost, and the breakdown by skill. Run sortie once with this workflow to add them."
 	const skillsMissing = "this database was written before sortie recorded the skill calls of each run, so the report leaves out the breakdown by skill. Run sortie once with this workflow to add it."
 

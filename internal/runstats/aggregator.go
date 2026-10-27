@@ -395,7 +395,7 @@ func degradedSchemaWarning(caps persistence.RunHistoryCapabilities) string {
 		{caps.HasStageChains, "stage chains"},
 		{caps.HasTrigger, "what started each run"},
 		{caps.HasFirstAfterHop, "the first run after each stage hop"},
-		{caps.HasAgentBlocked, "which runs stopped to wait for a person"},
+		{caps.HasAgentBlocked, "which runs required action"},
 		{caps.HasSkills, "the skill calls of each run"},
 	}
 
@@ -443,7 +443,7 @@ var laterTiers = []struct {
 	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasStageChains }, recorded: "stage chains", leftOut: "the breakdown by stage chain"},
 	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasTrigger }, recorded: "what started each run", leftOut: "the breakdown by retry trigger"},
 	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasFirstAfterHop }, recorded: "the first run after each stage hop", leftOut: "the breakdown by run origin"},
-	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasAgentBlocked }, recorded: "which runs stopped to wait for a person", leftOut: "the funnel of each stage chain", chainsOnly: true},
+	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasAgentBlocked }, recorded: "which runs required action", leftOut: "the funnel of each stage chain", chainsOnly: true},
 	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasRecordedCost }, recorded: "the cost of each run", leftOut: "cost"},
 	{has: func(c persistence.RunHistoryCapabilities) bool { return c.HasSkills }, recorded: "the skill calls of each run", leftOut: "the breakdown by skill"},
 }

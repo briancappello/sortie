@@ -803,7 +803,7 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 		panic("DispatchIssue: nil WorkerFunc")
 	}
 
-	runCtx, cancelFn := context.WithCancel(ctx) //nolint:gosec // G118: cancelFn is stored in RunningEntry.CancelFunc for later use
+	runCtx, cancelRunCause := context.WithCancelCause(ctx) //nolint:gosec // G118: cancelRunCause is stored in RunningEntry.CancelCauseFunc for later use
 	workerCtx, cancelWorkerCause := context.WithCancelCause(runCtx)
 	ceilingCancelFn := func() {
 		cancelWorkerCause(errCeilingStop)
@@ -827,7 +827,8 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 		DispatchID:        dispatchID,
 		RetryAttempt:      attemptCopy,
 		StartedAt:         time.Now().UTC(),
-		CancelFunc:        cancelFn,
+		CancelFunc:        func() { cancelRunCause(nil) },
+		CancelCauseFunc:   cancelRunCause,
 		CeilingCancelFunc: ceilingCancelFn,
 		WorkerDone:        workerCtx.Done(),
 		SSHHost:           sshHost,
