@@ -238,7 +238,8 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		Read:          fakemodel.CatFile,
 		SSH: &fakemodel.SSHVariant{
 			Package:     "@openai/codex",
-			HostCommand: integrationCommand(),
+			// app-server rejects --version; the top-level command reports it.
+			HostCommand: strings.TrimSuffix(integrationCommand(), " app-server"),
 			RemoteCommand: func(env fakemodel.Environment) string {
 				return scriptedProviderCommand("codex app-server", env.URL)
 			},

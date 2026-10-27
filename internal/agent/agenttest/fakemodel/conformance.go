@@ -126,8 +126,8 @@ type SSHVariant struct {
 	// scenarios drive.
 	Package string
 
-	// HostCommand is the host runtime's command line; its first word is run
-	// with --version.
+	// HostCommand is the host runtime's command line, queried with --version
+	// through [agentcore.QueryRuntimeVersion] as an adapter queries its own.
 	HostCommand string
 
 	// Install, when not empty, is the [agenttest.SSHLabParams].Install script
@@ -506,19 +506,24 @@ func labInstall(t *testing.T, v *SSHVariant) string {
 	if v.Install != "" {
 		return v.Install
 	}
-	binary, _, _ := strings.Cut(strings.TrimSpace(v.HostCommand), " ")
-	if v.Package == "" || binary == "" {
+	if v.Package == "" || strings.TrimSpace(v.HostCommand) == "" {
 		t.Fatal("SSHVariant names neither Install nor both Package and HostCommand")
 	}
-	out, err := exec.CommandContext(t.Context(), binary, "--version").CombinedOutput() //nolint:gosec // G204: the binding's own runtime.
-	if err != nil {
-		t.Fatalf("%s --version: %v\n%s", binary, err, out)
+	target, agentErr := agentcore.ResolveLaunchTarget(domain.StartSessionParams{
+		WorkspacePath: t.TempDir(),
+		AgentConfig:   domain.AgentConfig{Command: v.HostCommand},
+	}, "")
+	if agentErr != nil {
+		t.Fatalf("resolve %q: %v", v.HostCommand, agentErr)
 	}
-	version, _, ok := agentcore.ParseRuntimeVersion(out)
-	if !ok {
-		t.Fatalf("%s --version printed no version: %q", binary, out)
+	reported, agentErr := agentcore.QueryRuntimeVersion(t.Context(), target, domain.AgentConfig{}, nil, nil)
+	if agentErr != nil {
+		t.Fatalf("%s --version: %v", v.HostCommand, agentErr)
 	}
-	return "npm install -g " + v.Package + "@" + version
+	if reported.Version == "" {
+		t.Fatalf("%s --version printed no version: %q", v.HostCommand, reported.Line)
+	}
+	return "npm install -g " + v.Package + "@" + reported.Version
 }
 
 type drive struct {
