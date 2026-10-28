@@ -261,7 +261,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - A successful dispatch-time transition is followed by one state-and-labels read of the issue before `session.started`, and the running row then serves that read's state and labels without a reconcile tick
 - No read follows a dispatch-time transition that is skipped, fails, is not configured, or is suppressed because the dispatch drives no issue state; a failed read is logged and the run continues
 - A stage hop removes no stage label that only a recorded read showed and the dispatch read lacked
-- If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate limits
+- If a snapshot API is implemented, it returns running rows, retry rows, token totals, and usage windows per agent kind
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 - CI status reconciliation is skipped when `reactions.ci_failure.provider` is not configured
 - CI status passing clears CI fix attempts for the issue
@@ -490,7 +490,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Validation failures are operator-visible
 - Structured logging includes issue/session context fields
 - Logging sink failures do not crash orchestration
-- Token/rate-limit aggregation remains correct across repeated agent updates
+- Token aggregation and the newest usage-window report per agent kind remain correct across repeated agent updates
+- Windows a pull reports when a turn ends reach the orchestrator before the turn's terminal event, and no pull runs for a cancelled turn or a credential-verification session
+- A pull the runtime cannot answer in a session ends the session's pulls, so the next turn of that session sends no pull request; a pull that fails otherwise reports no window and leaves every held window in place
+- A pull of a remote session reads a credential file on the remote host, resolving the remote home from the variable the runtime reads it from, and an error exit of the connection itself is an error rather than a missing file
 - If a human-readable status surface is implemented, it is driven from orchestrator state and does not affect correctness
 - If humanized event summaries are implemented, they cover key agent event classes without changing orchestrator behavior
 - An unmeasured run is distinguishable from a zero-consumption run in the persisted row, in both `sortie stats` output forms and in the `cost_budget` result; an unmeasured run creates no Prometheus series

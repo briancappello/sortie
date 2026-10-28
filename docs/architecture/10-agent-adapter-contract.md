@@ -132,6 +132,8 @@ Each event should include:
 
 Token accounting is normalized at the adapter boundary. The orchestrator receives `{input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_write_tokens}` directly and does not parse adapter-specific payload shapes.
 
+Usage windows: a provider usage window is a quota a provider meters over a span such as five hours or a week and enforces by refusing requests until it resets. An adapter whose runtime reports windows hands the usage component the readings of each report in the runtime's own terms, tagged with the source that carries them; the component normalizes them, and the adapter MUST NOT normalize, name, or merge a window itself. The adapter emits the normalized windows in `AgentEvent.UsageWindows` on a notification with an empty message. A report never removes a window it does not carry: the orchestrator merges the windows of each event into the newest report of every window per agent kind. A window source is live or pull, and its declaration says which. A live source reads the runtime's own output or protocol messages as they arrive. A pull source asks for the windows with a request the adapter makes, either to the runtime itself (a command of its own, or an extension request on the session's own connection) or to the endpoint the runtime itself calls. One policy, owned by the usage component, runs every pull: a pull runs when a turn that reached the runtime ends, whatever the turn's outcome, before the turn's terminal event; it MUST NOT run for a cancelled turn or for a credential-verification session; it is bounded like an auxiliary launch of the runtime; a pull that fails reports no window and leaves every held window in place; and once the runtime cannot answer a pull in a session, the session pulls no more. A pull asks about the account and sets nothing that enables the runtime's telemetry. A pull reads a credential only where the runtime reads it, in the environment Sortie launches the runtime with or in the runtime's own files on its host, and sends it only to the endpoint the runtime sends it to; Sortie MUST NOT store, log, refresh, or rewrite that credential. A remote session pulls on the remote host: an extension request travels on the session's own connection, a command of the runtime runs through the session's own SSH launch, and a credential file is read on the remote host through the shared remote read, which resolves the remote home; an endpoint request then leaves from Sortie's host. A window may carry an amount, the use and the limit in the vendor's own unit such as credits, which the source declares for each window it reports; the amount is never converted, and the used share is the ratio of the two when the source reports none. A source may report the share of a window that is left rather than used, and its declaration says so. The generic protocol kind reads windows under the per-runtime declaration chosen once per session, by the name the runtime gives in its handshake or, when that name matches no declaration, by the launch command that starts the runtime; a runtime with no declaration reports none. No ceiling reads a window.
+
 ### 10.4 Approval, Tools, and User Input Policy
 
 This section covers the approval posture, tool subsystem, and user-input handling for agent sessions.
@@ -596,7 +598,7 @@ What each kind's request still carries, because its runtime offers no qualifying
 | `claude-code` | Nothing |
 | `copilot-cli` | One read-only tool and the built-in system prompt |
 | `codex` | The tools no switch removes and the user instructions |
-| `opencode` | Project instructions, user instructions, and the built-in system prompt, with every tool denied |
+| `opencode` | Some tools, project instructions, user instructions, and the built-in system prompt, with every tool denied |
 | `agent-client-protocol` | Every component for a remote launch and for a command line no addition claims; otherwise what the claiming addition declares |
 | `mock` | Nothing, because it launches no runtime |
 
@@ -614,7 +616,7 @@ Session creation in the protocol carries no context member, so every lever is sp
 |---|---|---|
 | Gemini CLI | A session-private file on the launching host holding the shared replacement prompt, named by the runtime's system-prompt override variable | All tools, project instructions, user instructions |
 | Copilot CLI | The read-only tool as the only available tool, and no custom instructions | Some tools, system prompt, project instructions, user instructions |
-| OpenCode | An inline configuration document that denies every tool | Project instructions, user instructions, system prompt |
+| OpenCode | An inline configuration document that denies every tool | Some tools, project instructions, user instructions, system prompt |
 | Kiro CLI | A selection by name of a session-private agent definition with no tools, held in a directory on the launching host that the runtime's agent-directory variable names | Project instructions, user instructions, system prompt |
 
 The Copilot CLI row passes the instruction switch and still keeps both instruction components, because the runtime loads them over the protocol whatever the switch says.

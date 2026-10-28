@@ -1944,7 +1944,7 @@ A reverse proxy in front of Sortie must pass on the `Host` header the browser se
 | GET    | `/ui/`                   | The dashboard: a client-side application that reads the JSON API and refetches when the change stream signals a change: run-history reads (History, the older runs of an issue page or a session view, and the issue lookup of the command palette) at most once per 5 seconds and Analytics at most once per 30 seconds. Prices reads its route each time it opens and never refetches on a change signal. |
 | GET    | `/livez`                 | Liveness probe. Returns 200 while the process is running and not draining, 503 during graceful shutdown. No I/O. |
 | GET    | `/readyz`                | Readiness probe. Returns 200 when database, preflight, and workflow are healthy. Returns 503 with per-check status when any dependency fails. |
-| GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, the eligible issues Sortie holds back from dispatch, one entry per active issue in a stable order, the list of what needs a person, aggregate token/runtime totals, rate limits, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
+| GET    | `/api/v1/state`          | System-wide runtime snapshot (running sessions, retry queue, pending pull request reactions, parked issues, the eligible issues Sortie holds back from dispatch, one entry per active issue in a stable order, the list of what needs a person, aggregate token/runtime totals, the usage windows each agent kind reported, the effective workflow shape, the health of Sortie's own checks, the Sortie version, and the process start time). Every row of an issue carries a plain English status sentence. |
 | GET    | `/api/v1/runs`           | Run history, newest first, one page at a time, narrowed by issue, dispatch rule, status, stage, completion-time range, and the range in which the issue ended. Every `issue_outcome` carries the sentence of how its issue ended. |
 | GET    | `/api/v1/runs/issues`    | Run history grouped by issue, the issue with the newest matching run first, one page of issues at a time, narrowed by issue key (the `owner/repo#9` form included), search text matched against the key and the title, dispatch rule, status, and stage. Each group carries the sentence of how its issue ended or what it is doing now, the issue's newest runs, and its totals. |
 | GET    | `/api/v1/runs/{dispatch_id}/events` | The agent events Sortie kept for one run, oldest first, each with a plain English sentence. A running run is served from memory and a finished run from the store, for at least 365 days after it ends. Returns 404 for a run whose events are not retained. |
@@ -2012,7 +2012,7 @@ The readiness checks keep their meaning. `workflow` passes while a configuration
 
 #### `GET /api/v1/state` — Runtime Snapshot
 
-Returns the system-wide runtime state including running sessions, retry queue, budget-exhausted and parked issues, pending pull request reactions, issues between stages, the eligible issues Sortie holds back from dispatch (`held`), one entry per active issue in a stable order (`active`), the list of what needs a person (`attention`) with the time a person acknowledged each item, aggregate token/runtime totals, rate limits, and the effective workflow shape (`config`), which names the tracker kind and project. It also names the Sortie version and the time the process started, and carries the `health` block, the health of Sortie's own checks.
+Returns the system-wide runtime state including running sessions, retry queue, budget-exhausted and parked issues, pending pull request reactions, issues between stages, the eligible issues Sortie holds back from dispatch (`held`), one entry per active issue in a stable order (`active`), the list of what needs a person (`attention`) with the time a person acknowledged each item, aggregate token/runtime totals, the usage windows each agent kind reported (`rate_limits`, keyed by agent kind: each member holds `reported_at` and `windows`, each window holds `label`, `used_percent`, `status`, `resets_at`, `reported_at`, and `amount`, a window past its reset time is not served, and a share, status, or reset the report did not carry is `null`). `amount` holds `used`, `limit`, and `unit` for a window the agent counts in its own unit, such as credits, and is `null` for a window without one. Sortie never converts the unit, and a window that reports an amount and no share serves their ratio as `used_percent`, and the effective workflow shape (`config`), which names the tracker kind and project. It also names the Sortie version and the time the process started, and carries the `health` block, the health of Sortie's own checks.
 
 ```json
 {
@@ -2545,7 +2545,21 @@ Returns the system-wide runtime state including running sessions, retry queue, b
     "running_unreported": 1,
     "running_non_reporting": 0
   },
-  "rate_limits": {},
+  "rate_limits": {
+    "claude-code": {
+      "reported_at": "2026-02-24T20:12:00Z",
+      "windows": [
+        {"label": "5-hour limit", "used_percent": null, "status": "allowed", "resets_at": "2026-02-24T23:00:00Z", "reported_at": "2026-02-24T20:12:00Z", "amount": null},
+        {"label": "Weekly limit", "used_percent": 82, "status": "warning", "resets_at": "2026-02-26T09:00:00Z", "reported_at": "2026-02-24T18:40:00Z", "amount": null}
+      ]
+    },
+    "agent-client-protocol": {
+      "reported_at": "2026-10-28T13:50:00Z",
+      "windows": [
+        {"label": "Monthly limit", "used_percent": 0.708, "status": null, "resets_at": "2026-11-01T00:00:00Z", "reported_at": "2026-10-28T13:50:00Z", "amount": {"used": 7.08, "limit": 1000, "unit": "credits"}}
+      ]
+    }
+  },
   "config": {
     "tracker": {"kind": "jira", "project": "PROJ", "active_states": ["To Do", "In Progress"], "in_progress_state": "In Progress", "handoff_state": "In Review", "terminal_states": ["Done"]},
     "polling": {"interval_ms": 30000},
@@ -4793,6 +4807,8 @@ copilot-cli:
 
 The `copilot-cli` block is forwarded to the Copilot CLI adapter, which runs `copilot -p --output-format json -s --autopilot --no-ask-user` once per turn and maps these fields to CLI flags. The adapter mints its own session identifier, a v4 UUID, when it starts a session: the first turn of a session it created carries `--session-id <uuid>`, and every later turn carries `--resume <uuid>`. No launch ever carries `--continue`, which resumed whichever session the home directory saw most recently, possibly another issue's. The adapter validates none of these values and forwards each as written, except in the two cases described below: a non-positive `max_autopilot_continues` is replaced by `50`, and `mcp_config` is reformatted before it reaches `--additional-mcp-config`. A string key whose YAML value carries another type fails the session start and, offline, is reported by `sortie validate` under the check `copilot-cli.<key>.wrong_type`. The adapter reads the runtime's own task-completion report as the turn's outcome, not solely the terminal event's exit code. Copilot CLI 1.0.51 or later is required for `--session-id`; an older CLI rejects the flag. The credential-verification session (Section 2.6) is deleted at the end of that step with a `session.delete` call over the runtime's `--server --stdio` interface, so it leaves no stored conversation behind.
 
+When each turn ends, Sortie asks Copilot CLI for its usage limits with Copilot CLI's own GitHub sign-in, and the dashboard shows the monthly quotas that come back. Sortie's host sends the request to `api.github.com` with the first of `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN` that is set in the agent's environment, and the request leaves from Sortie's host on an SSH worker too. When none is set, or GitHub does not accept it, Sortie asks Copilot CLI itself, which answers from its own sign-in and, on an SSH worker, runs on the worker host. Limits are reported only for a GitHub sign-in: with `COPILOT_PROVIDER_BASE_URL` set, the custom provider spends no Copilot quota and nothing is asked. A cancelled or timed out turn asks nothing, and a failed request reports nothing and leaves the limits already shown in place. Sortie never stores or logs the token.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `copilot-cli.model` | string | _(absent)_ | Forwarded to `--model`. The accepted model identifiers depend on the installed CLI and the account; `copilot --help` lists the set. |
@@ -4865,6 +4881,8 @@ The `opencode` block is forwarded to the OpenCode adapter, which drives OpenCode
 
 The adapter runs `opencode run --format json --standalone` once per turn with the prompt on standard input, appends `--session <session_id>` when continuing a session, and recovers final token usage with `opencode session export --standalone --sanitize <session_id>` when the session ID is known.
 
+When each turn ends, Sortie asks OpenCode for its usage limits by running `opencode api experimental.usage.limits`, which answers from OpenCode's own sign-in, and the dashboard shows the rolling, weekly, and monthly limits that come back. Limits are reported only while OpenCode is signed in to its console and the installed release has that command; otherwise nothing is reported. The command uses OpenCode's background service and starts it when it is not running. It runs on this host, or on the worker host for an SSH worker, and Sortie's host contacts no other host for it. OpenCode also reports a free usage limit while it is reached, with the time it resets. A cancelled or timed out turn asks nothing, and a failed command reports nothing and leaves the limits already shown in place.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `opencode.model` | string | _(absent)_ | Value forwarded to `opencode run --model`. A non-empty `opencode.effort` or `opencode.variant` is appended after a `#`. |
@@ -4891,6 +4909,8 @@ agent-client-protocol:
 ```
 
 The `agent-client-protocol` block is forwarded to the Agent Client Protocol adapter. `mcp_config` is the block's only key. The kind carries no reasoning setting. Write the runtime's own reasoning option in `agent.command`, for example `copilot --acp --reasoning-effort high` or `kiro-cli acp -a --effort high`; a runtime without one runs at its own default. The option and its value are the operator's call, and Sortie checks neither. An `effort` key in this block draws the advisory `agent.effort.not_forwarded`. A string key whose YAML value carries another type fails the session start and, offline, is reported by `sortie validate` under the check `agent-client-protocol.mcp_config.wrong_type`.
+
+When each turn ends, Sortie asks Gemini CLI or Kiro CLI for its usage limits with the agent's own sign-in, and the dashboard shows what comes back. Limits are reported for Gemini CLI signed in with Google and for Kiro CLI; a Gemini CLI on an API key or on Vertex AI reports none, and a runtime that is neither asks nothing. For Gemini CLI, Sortie reads the sign-in where Gemini CLI itself keeps it, on the machine that runs the agent: the access token in `GOOGLE_CLOUD_ACCESS_TOKEN` when `GOOGLE_GENAI_USE_GCA` is also set in the agent's environment, otherwise the file `.gemini/oauth_creds.json` under `GEMINI_CLI_HOME`, or under the home directory when that is not set, and with `GEMINI_FORCE_ENCRYPTED_FILE_STORAGE=true` the operating system keychain or the encrypted file `.gemini/gemini-credentials.json` in the same place. Sortie's host sends its access token to `cloudcode-pa.googleapis.com`, or to the endpoint `CODE_ASSIST_ENDPOINT` names in the agent's environment. The project comes from `GOOGLE_CLOUD_PROJECT` in the agent's environment, then from `GOOGLE_CLOUD_PROJECT_ID`, and only then from the same host. A sign-in whose access token has expired is skipped. Sortie never stores or logs the token. For Kiro CLI, Sortie sends the request over the session's own connection, with no agent text, and contacts no host; the credits used against the plan and the date the billing cycle resets come back. A cancelled or timed out turn asks nothing, and a failed request reports nothing and leaves the limits already shown in place.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
