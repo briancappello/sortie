@@ -1093,7 +1093,12 @@ func (p *pumpState) finalizeActiveTurnOnDeadline() {
 	if turn == nil {
 		return
 	}
-	// The wait elapsing costs a draining turn its figure, not its outcome.
+	// The wait elapsing costs a held turn its windows and a draining turn its
+	// figure, never its outcome.
+	if held := turn.held; held != nil {
+		p.finalizeTurnWithUsage(held.evidence, held.observed)
+		return
+	}
 	if turn.draining {
 		p.finalizeTurn(turn.drainEvidence)
 		return

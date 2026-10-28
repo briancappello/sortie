@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
@@ -868,6 +869,27 @@ func TestPumpPulledUsage(t *testing.T) {
 		if got := len(windowEvents(slices.Concat(first, second))); got != 0 {
 			t.Errorf("events carrying windows = %d, want 0", got)
 		}
+	})
+
+	t.Run("an unanswered usage request keeps the turn's outcome", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			state, out, inPw := newPulledUsageSession(t, loadAgentInfoFixture(t, "pulled_usage_agent.json"), agentcore.LaunchTarget{})
+			outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: func(domain.AgentEvent) {}})
+
+			promptID := out.awaitMethod(t, methodSessionPrompt)
+			respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
+			out.awaitMethod(t, runtime.Execute)
+
+			outcome := waittest.Receive(t, outcomeCh, "turn outcome")
+			if outcome.err != nil {
+				t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
+			}
+			if outcome.result.ExitReason != domain.EventTurnCompleted {
+				t.Errorf("RunTurn() exit reason = %q, want %q", outcome.result.ExitReason, domain.EventTurnCompleted)
+			}
+		})
 	})
 
 	t.Run("a cancelled turn sends no usage request", func(t *testing.T) {
