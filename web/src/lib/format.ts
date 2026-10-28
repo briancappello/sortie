@@ -201,6 +201,11 @@ export function fmtPercent(ratio: number): string {
   return `${isPartial ? Math.min(99, Math.max(1, percent)) : percent}%`;
 }
 
+/** Writes a quantity with en-US digit grouping and at most two fraction digits, trailing zeros dropped. */
+export function fmtAmount(n: number): string {
+  return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
 /** Writes a mean with one decimal place, "4.0" included. */
 export function fmtMean(n: number): string {
   return n.toFixed(1);

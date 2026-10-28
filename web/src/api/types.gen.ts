@@ -48,6 +48,11 @@ export interface AgentEventFrame {
   usage?: TokenInfo | null;
 }
 
+export interface AgentUsageWindowsResponse {
+  reported_at: string;
+  windows: UsageWindowResponse[] | null;
+}
+
 export interface AttemptsInfo {
   restart_count: number;
   current_retry_attempt: number;
@@ -1039,7 +1044,7 @@ export interface StateResponse {
   held: HeldIssueResponse[] | null;
   attention: AttentionItemResponse[] | null;
   agent_totals: SnapshotAgentTotals;
-  rate_limits: Record<string, unknown> | null;
+  rate_limits: Record<string, AgentUsageWindowsResponse>;
   active_estimated_cost_usd?: number;
   cost_unpriced_running?: number;
   spend_ceiling?: SpendCeilingResponse;
@@ -1118,6 +1123,21 @@ export interface Tokens {
   cache_read: number;
   cache_write: number;
   uncached: number;
+}
+
+export interface UsageWindowAmountResponse {
+  used: number;
+  limit: number;
+  unit: string;
+}
+
+export interface UsageWindowResponse {
+  label: string;
+  used_percent: number | null;
+  status: "allowed" | "warning" | "exhausted" | null;
+  resets_at: string | null;
+  reported_at: string;
+  amount: UsageWindowAmountResponse | null;
 }
 
 export interface VerdictCount {

@@ -9,6 +9,7 @@ import { useShortcuts } from "@/app/keys";
 import { useAttentionActions } from "@/components/use-attention-actions";
 import { useOpenLatestSession } from "@/components/use-open-session";
 import { usePeek } from "@/components/use-peek";
+import { usageByKind } from "@/lib/agent-kinds";
 import { activeRows, filterRows } from "@/lib/active-rows";
 import { hasRateSource } from "@/lib/budget";
 import { condition } from "@/lib/condition";
@@ -27,6 +28,7 @@ import { buildHeadline } from "./headline";
 import { HeldList } from "./HeldList";
 import { activeNavKey, attentionNavKey, endedNavKey } from "./rows";
 import { SpendCeilings } from "./SpendCeilings";
+import { UsageLimits } from "./UsageLimits";
 
 import type { AttentionItemResponse, Report, RunsResponse, StateResponse } from "@/api/types.gen";
 import type { Binding } from "@/app/keys";
@@ -322,6 +324,11 @@ function OverviewBody({ state }: OverviewBodyProps) {
         />
       ) : undefined}
       <SpendCeilings ceiling={view.state.spend_ceiling} />
+      <UsageLimits
+        rateLimits={view.state.rate_limits}
+        kinds={config ? usageByKind(config).map(([kind]) => kind) : []}
+        now={view.now}
+      />
       <ActiveList
         rows={view.rows}
         visibleRows={visibleRows}
