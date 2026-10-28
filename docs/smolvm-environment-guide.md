@@ -139,10 +139,16 @@ sortie validate WORKFLOW.md
 | --- | --- |
 | `agent-client-protocol` with `opencode acp` | Supported. Verified end to end in a VM. |
 | `agent-client-protocol` with `claude-agent-acp` | Supported. Verified with one turn through OpenRouter's Anthropic-compatible endpoint. |
-| `codex` | The codex client accepts the credential binding's certificate (one `codex exec` turn verified). The kind's own `codex app-server` launch was not run in a VM. |
-| `claude-code`, `copilot-cli`, `pi` | Not verified. |
+| `claude-code` | Supported. Verified end to end in a VM (Claude Code 2.1.308, Claude subscription OAuth token). Needs `IS_SANDBOX` (below). |
+| `codex` | Supported with `codex.thread_sandbox: dangerFullAccess`. Verified end to end in a VM (codex 0.154.0 through OpenRouter). Under the default `workspaceWrite`, codex cannot write `.sortie/` (below). |
+| `copilot-cli` | Not usable with a credential binding: Copilot CLI refuses the placeholder as an "Unsupported token type" before it sends a request. Passing a real token through `pass_env` puts it in the VM in plain text; that path is not verified. |
+| `pi` | Not verified. |
 
-The agent's binary must be in the pack: the VM cannot see the host's. The `base` layer ships only opencode. claude-agent-acp needs Node, from the `node` layer, and an install in your project layer, for example `RUN npm i -g @agentclientprotocol/claude-agent-acp@<version>`.
+The agent's binary must be in the pack: the VM cannot see the host's. The `base` layer ships only opencode. claude-agent-acp, Claude Code, codex, and Copilot CLI need Node, from the `node` layer, and an install in your project layer, for example `RUN npm i -g @anthropic-ai/claude-code@<version> @openai/codex@<version>`.
+
+The agent runs as root in the VM. Claude Code refuses `--dangerously-skip-permissions` as root unless `IS_SANDBOX=1` is set: export it in Sortie's environment and list it in `pass_env`.
+
+codex's `workspaceWrite` sandbox allows writes only under the workspace. In the VM, `.sortie` is a link to the control directory outside it, so codex cannot write `.sortie/status`, `.sortie/review_verdict.json`, or `.sortie/pr.json`. Set `codex.thread_sandbox: dangerFullAccess`; the VM is the sandbox. codex 0.154 refuses `externalSandbox` in `thread/start`.
 
 ### `allow_hosts` for each agent
 
@@ -152,7 +158,8 @@ The VM reaches no host that is not listed. A credential binding's hosts are adde
 | --- | --- |
 | opencode through OpenRouter | `openrouter.ai` (or your provider's API host), `models.opencode.ai`, `registry.npmjs.org` |
 | claude-agent-acp | The API host of its Anthropic-compatible endpoint: `api.anthropic.com`, or `openrouter.ai` for OpenRouter |
-| codex through OpenRouter | `openrouter.ai`. codex also calls `api.github.com` and `chatgpt.com`; the turn works with both denied. |
+| claude-code | `api.anthropic.com` |
+| codex through OpenRouter | `openrouter.ai`. codex also calls `api.github.com`, `github.com`, and `chatgpt.com`; the turn works with all of them denied. |
 
 opencode needs `models.opencode.ai`. Without it, opencode silently falls back to the model `opencode/big-pickle`, and every call fails. It fetches provider packages from `registry.npmjs.org`.
 
@@ -191,6 +198,42 @@ environment:
 ```
 
 Export `ANTHROPIC_AUTH_TOKEN` with your OpenRouter key in Sortie's environment. `ANTHROPIC_API_KEY` must be empty in the VM.
+
+Claude Code with a Claude subscription reads an OAuth token from `CLAUDE_CODE_OAUTH_TOKEN`; bind it to `api.anthropic.com`:
+
+```yaml
+environment:
+  kind: smolvm
+  smolvm:
+    pass_env: [IS_SANDBOX]
+    credentials:
+      - {name: anthropic, env: CLAUDE_CODE_OAUTH_TOKEN, hosts: [api.anthropic.com]}
+```
+
+codex through OpenRouter takes its provider from `-c` options. Put them after `app-server`: options before the subcommand do not reach the app-server's threads, which then use the default OpenAI provider.
+
+```yaml
+agent:
+  kind: codex
+  command:
+    - codex
+    - app-server
+    - -c
+    - model_provider="openrouter"
+    - -c
+    - model_providers.openrouter={name="OpenRouter", base_url="https://openrouter.ai/api/v1", env_key="OPENROUTER_API_KEY", wire_api="responses", supports_websockets=false}
+    - -c
+    - model="openai/gpt-5.1-codex-mini"
+
+codex:
+  thread_sandbox: dangerFullAccess
+
+environment:
+  kind: smolvm
+  smolvm:
+    credentials:
+      - {name: openrouter, env: OPENROUTER_API_KEY, hosts: [openrouter.ai]}
+```
 
 When an agent kind declares a credential variable, such as `ANTHROPIC_API_KEY` for `claude-code`, and that variable is set in Sortie's environment, bind it or list it in `pass_env`, or unset it. Otherwise the dispatch preflight fails under `environment.agent_credential`. `pass_env` copies the value into the VM in plain text; use it only for values that may live there.
 
