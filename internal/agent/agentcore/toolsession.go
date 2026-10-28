@@ -123,7 +123,9 @@ func ResolveToolDelivery(ctx context.Context, params domain.StartSessionParams, 
 		}
 	}
 
-	if relay := session.currentRelay(); relay != nil && relay.HostPort() != 0 {
+	// Only an SSH launch settles a forward; a carrier session reaches the
+	// relay through its tool channel.
+	if relay := session.currentRelay(); session.remote && relay != nil && relay.HostPort() != 0 {
 		if agentErr := session.probe(ctx, target); agentErr != nil {
 			session.Close() //nolint:errcheck,gosec // best-effort; the session start fails anyway
 			return nil, agentErr

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -121,6 +122,28 @@ func TestToolSession_CarrierWithoutChannelDeclaresTheGap(t *testing.T) {
 	}
 	if session.PlacesLate() || len(session.Launch(placeDocument).Secrets) != 0 {
 		t.Error("a launch without a tool channel carries tool secrets, want none")
+	}
+}
+
+// A carrier session runs its agent only through the carrier: settling the
+// tool server must not start the agent's command on Sortie's host.
+func TestToolSession_CarrierRunsNothingOnTheHost(t *testing.T) {
+	t.Parallel()
+
+	carrier, _ := carrierChannel(t)
+	tools := fmt.Sprintf(`"sortie-tools":{"command":%q,"args":["mcp-server"]}`,
+		agenttest.FakeRuntime(t, t.TempDir(), "sortie", agenttest.HTTPToolServerScenario, struct{}{}))
+	dir := t.TempDir()
+	ran := filepath.Join(dir, "ran")
+	agent := filepath.Join(dir, "agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\necho \"$@\" >> "+ran+"\n"), 0o700); err != nil { //nolint:gosec // G306: the test's own script
+		t.Fatalf("write agent: %v", err)
+	}
+	target := LaunchTarget{Command: agent, WorkspacePath: t.TempDir(), Carrier: carrier}
+	startSession(t, domain.StartSessionParams{MCPConfigPath: writeConfig(t, tools)}, target, registry.MCPDialectMCPServersJSONAlwaysLoad)
+
+	if got, err := os.ReadFile(ran); !errors.Is(err, fs.ErrNotExist) { //nolint:gosec // G304: the test's own temp file
+		t.Errorf("the agent's command ran on the host with %q, want it never started there", got)
 	}
 }
 
