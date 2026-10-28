@@ -94,8 +94,7 @@ func runHeadlessQuota(t *testing.T, replies [][]string) ([]usage.WindowReading, 
 
 	readings, err := headlessQuota(waittest.Context(t), agentcore.LaunchTarget{Command: bin, WorkspacePath: dir}, nil)
 
-	raw, _ := os.ReadFile(capturePath)
-	return readings, strings.Fields(string(raw)), err
+	return readings, strings.Fields(string(waittest.File(t, capturePath))), err
 }
 
 func TestHeadlessQuota(t *testing.T) {
