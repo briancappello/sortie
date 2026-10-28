@@ -286,6 +286,21 @@ func TestParse_PathOutsideSortieDirIsRejected(t *testing.T) {
 	}
 }
 
+// A session whose agent runs elsewhere reads its generated file from the
+// orchestrator-only directory.
+func TestParse_HostDirIsRead(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	if err := workspacekit.WriteHostFile(ws, "mcp.json", []byte(`{"mcpServers":{"sortie-tools":{"command":"/usr/local/bin/sortie"}}}`)); err != nil {
+		t.Fatalf("WriteHostFile: %v", err)
+	}
+	servers, err := Parse(filepath.Join(ws, workspacekit.HostDir, "mcp.json"))
+	if err != nil || len(servers) != 1 || servers[0].Name != ToolServerName {
+		t.Errorf("Parse(.sortie-host/mcp.json) = %+v, %v, want the tool server", servers, err)
+	}
+}
+
 func TestParse_LinkedWorkspaceDirYieldsErrLink(t *testing.T) {
 	t.Parallel()
 

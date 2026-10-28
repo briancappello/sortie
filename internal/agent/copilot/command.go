@@ -148,9 +148,7 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 		args = append(args, "--disable-builtin-mcps")
 	} else {
 		if state.mcpConfigPath != "" {
-			// The runtime opens the file where it runs, so it gets the
-			// path at which it sees the file there.
-			args = append(args, "--additional-mcp-config", "@"+state.target.GuestPath(state.mcpConfigPath))
+			args = append(args, "--additional-mcp-config", "@"+state.mcpConfigPath)
 		} else if !state.target.Remote() {
 			if v := formatMCPConfigValue(pt.MCPConfig); v != "" {
 				args = append(args, "--additional-mcp-config", v)

@@ -16,10 +16,11 @@ import (
 )
 
 // TestMCPServersByLaunchTarget asserts, for each remote launch target,
-// whether session/new hands the runtime the generated stdio servers. The
-// protocol carries them inline, parsed from the host copy of the file, so
-// the path itself never reaches the runtime. A local launch reaches Sortie's
-// server over HTTP instead, which the shared tool-delivery tests cover.
+// whether session/new hands the runtime Sortie's tool server: none over
+// SSH without a forward, and over HTTP at the tool channel's guest port in
+// an execution environment. The protocol carries servers inline, so no
+// configuration path reaches the runtime. A local launch is covered by the
+// shared tool-delivery tests.
 func TestMCPServersByLaunchTarget(t *testing.T) {
 	// Not parallel: the SSH case puts a fake ssh first on PATH.
 	tests := []struct {
@@ -56,8 +57,12 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 				t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 				params.SSHHost = "user@stand-in-host"
 			case "carrier":
-				carrier = &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace"}
+				carrier = &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace", Channel: agenttest.NewToolChannel(t)}
 				params.Carrier = carrier
+				params.MCPConfigPath = agenttest.WriteHTTPToolServerConfig(t, ws)
+				// The stand-in agent never connects; the session gives up
+				// waiting for it after the read timeout.
+				params.AgentConfig.ReadTimeoutMS = 200
 			}
 
 			session, err := startTestSession(context.Background(), &ClientProtocolAdapter{}, params)
@@ -76,6 +81,9 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 			}
 			if got := strings.Contains(string(captured), "sortie-tools"); got != tt.wantMCP {
 				t.Errorf("session/new names sortie-tools = %v, want %v: %s", got, tt.wantMCP, captured)
+			}
+			if carrier != nil && !strings.Contains(string(captured), "http://127.0.0.1:47800/mcp") {
+				t.Errorf("session/new = %s, want Sortie's tool server at the tool channel's guest port", captured)
 			}
 			if carrier != nil && len(carrier.Launches()) != 1 {
 				t.Errorf("carrier launches = %d, want the session's one launch", len(carrier.Launches()))

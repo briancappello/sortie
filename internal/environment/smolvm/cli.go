@@ -279,15 +279,23 @@ type ExecOptions struct {
 	// as it is written instead of after the command exits; its
 	// standard input is empty.
 	Stream bool
+
+	// Detach starts the guest command in the background and returns at
+	// once; it keeps running while the machine runs. It excludes
+	// Interactive and Stream.
+	Detach bool
 }
 
 // ExecArgs returns the arguments, without the program, of an invocation
 // that runs argv in the machine name.
 func ExecArgs(name string, opts ExecOptions, argv []string) []string {
 	args := []string{"machine", "exec", "--name", name}
-	if opts.Interactive {
+	switch {
+	case opts.Detach:
+		args = append(args, "-d")
+	case opts.Interactive:
 		args = append(args, "-i")
-	} else if opts.Stream {
+	case opts.Stream:
 		args = append(args, "--stream")
 	}
 	if opts.Workdir != "" {

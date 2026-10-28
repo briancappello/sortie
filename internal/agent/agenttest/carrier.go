@@ -1,29 +1,34 @@
 package agenttest
 
 import (
+	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
 // FakeCarrier is a [domain.LaunchCarrier] that stands in for an execution
 // environment in tests. Its "environment" is this host: the argv it builds
 // runs the agent through env(1), which unsets every Unset name and sets
 // every Env and AgentEnv entry first, so a fake runtime started through it
-// runs and sees what a carried agent would see. It maps paths under
-// HostWorkspace to GuestWorkspace, and records every launch. Safe for
-// concurrent use.
+// runs and sees what a carried agent would see; a SecretEnv name reaches it
+// from the carrier process's own environment, which env(1) inherits. It
+// records every launch. Safe for concurrent use.
 type FakeCarrier struct {
 	// HostWorkspace and GuestWorkspace are the workspace on this host and
-	// inside the stand-in environment. GuestPath maps the first to the
-	// second; empty HostWorkspace maps nothing.
+	// inside the stand-in environment. Workspace returns GuestWorkspace.
 	HostWorkspace  string
 	GuestWorkspace string
+
+	// Channel is what ToolChannel returns; nil reports no channel.
+	Channel *domain.ToolChannel
 
 	// Resolve replaces an argv[0] it names with the host path to run, so
 	// a test can resolve an agent command to a fake runtime.
@@ -70,17 +75,15 @@ func (c *FakeCarrier) LaunchArgv(launch domain.CarrierLaunch) ([]string, error) 
 	return append(argv, agent...), nil
 }
 
-// GuestPath maps a path under HostWorkspace to the same path under
-// GuestWorkspace and returns any other path unchanged.
-func (c *FakeCarrier) GuestPath(hostPath string) string {
-	if c.HostWorkspace == "" {
-		return hostPath
+// Workspace returns GuestWorkspace.
+func (c *FakeCarrier) Workspace() string { return c.GuestWorkspace }
+
+// ToolChannel returns Channel, and false when it is nil.
+func (c *FakeCarrier) ToolChannel() (domain.ToolChannel, bool) {
+	if c.Channel == nil {
+		return domain.ToolChannel{}, false
 	}
-	rel, err := filepath.Rel(c.HostWorkspace, hostPath)
-	if err != nil || !filepath.IsLocal(rel) {
-		return hostPath
-	}
-	return path.Join(c.GuestWorkspace, filepath.ToSlash(rel))
+	return *c.Channel, true
 }
 
 // ConnectionFailed records stderrTail and reports whether exitCode and
@@ -110,4 +113,34 @@ func (c *FakeCarrier) StderrTails() [][]string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.tails)
+}
+
+// NewToolChannel returns a tool channel whose host socket lies in a new
+// short directory, under the length a Unix socket path allows, at guest
+// port 47800. The directory is removed when t ends.
+func NewToolChannel(t testing.TB) *domain.ToolChannel {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tc")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return &domain.ToolChannel{HostSocket: filepath.Join(dir, "tools.sock"), GuestPort: 47800}
+}
+
+// WriteHTTPToolServerConfig writes workspace/.sortie/mcp.json naming one
+// server, sortie-tools, a fake runtime of [HTTPToolServerScenario], as the
+// orchestrator names Sortie's tool server, and returns its path.
+func WriteHTTPToolServerConfig(t testing.TB, workspace string) string {
+	t.Helper()
+	server := FakeRuntime(t, t.TempDir(), "sortie", HTTPToolServerScenario, struct{}{})
+	path := filepath.Join(workspace, workspacekit.SortieDir, "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	doc := `{"mcpServers":{"sortie-tools":{"type":"stdio","command":` + strconv.Quote(server) + `,"args":["mcp-server"]}}}`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
 }

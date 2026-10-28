@@ -115,9 +115,6 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 	if len(p.args) > 0 && p.args[0] == "mcp-server" {
 		return bootResult{}, runMCPServer(ctx, p.args[1:], p.stdout, p.stderr)
 	}
-	if len(p.args) > 0 && p.args[0] == "mcp-relay" {
-		return bootResult{}, runMCPRelay(ctx, p.args[1:], os.Stdin, p.stdout, p.stderr)
-	}
 
 	fs := flag.NewFlagSet("sortie", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

@@ -139,10 +139,16 @@ sortie validate WORKFLOW.md
 | --- | --- |
 | `agent-client-protocol` with `opencode acp` | Supported. Verified end to end in a VM. |
 | `agent-client-protocol` with `claude-agent-acp` | Supported. Verified with one turn through OpenRouter's Anthropic-compatible endpoint. |
-| `codex` | The codex client accepts the credential binding's certificate (one `codex exec` turn verified). The kind's own `codex app-server` launch was not run in a VM. |
-| `claude-code`, `copilot-cli`, `pi` | Not verified. |
+| `claude-code` | Supported. Verified end to end in a VM (Claude Code 2.1.308, Claude subscription OAuth token). Needs `IS_SANDBOX` (below). |
+| `codex` | Supported with `codex.thread_sandbox: dangerFullAccess`. Verified end to end in a VM (codex 0.154.0 through OpenRouter). Under the default `workspaceWrite`, codex cannot write `.sortie/` (below). |
+| `copilot-cli` | Not usable with a credential binding: Copilot CLI refuses the placeholder as an "Unsupported token type" before it sends a request. Passing a real token through `pass_env` puts it in the VM in plain text; that path is not verified. |
+| `pi` | Not verified. |
 
-The agent's binary must be in the pack: the VM cannot see the host's. The `base` layer ships only opencode. claude-agent-acp needs Node, from the `node` layer, and an install in your project layer, for example `RUN npm i -g @agentclientprotocol/claude-agent-acp@<version>`.
+The agent's binary must be in the pack: the VM cannot see the host's. The `base` layer ships only opencode. claude-agent-acp, Claude Code, codex, and Copilot CLI need Node, from the `node` layer, and an install in your project layer, for example `RUN npm i -g @anthropic-ai/claude-code@<version> @openai/codex@<version>`.
+
+The agent runs as root in the VM. Claude Code refuses `--dangerously-skip-permissions` as root unless `IS_SANDBOX=1` is set: export it in Sortie's environment and list it in `pass_env`.
+
+codex's `workspaceWrite` sandbox allows writes only under the workspace. In the VM, `.sortie` is a link to the control directory outside it, so codex cannot write `.sortie/status`, `.sortie/review_verdict.json`, or `.sortie/pr.json`. Set `codex.thread_sandbox: dangerFullAccess`; the VM is the sandbox. codex 0.154 refuses `externalSandbox` in `thread/start`.
 
 ### `allow_hosts` for each agent
 
@@ -152,7 +158,8 @@ The VM reaches no host that is not listed. A credential binding's hosts are adde
 | --- | --- |
 | opencode through OpenRouter | `openrouter.ai` (or your provider's API host), `models.opencode.ai`, `registry.npmjs.org` |
 | claude-agent-acp | The API host of its Anthropic-compatible endpoint: `api.anthropic.com`, or `openrouter.ai` for OpenRouter |
-| codex through OpenRouter | `openrouter.ai`. codex also calls `api.github.com` and `chatgpt.com`; the turn works with both denied. |
+| claude-code | `api.anthropic.com` |
+| codex through OpenRouter | `openrouter.ai`. codex also calls `api.github.com`, `github.com`, and `chatgpt.com`; the turn works with all of them denied. |
 
 opencode needs `models.opencode.ai`. Without it, opencode silently falls back to the model `opencode/big-pickle`, and every call fails. It fetches provider packages from `registry.npmjs.org`.
 
@@ -192,6 +199,42 @@ environment:
 
 Export `ANTHROPIC_AUTH_TOKEN` with your OpenRouter key in Sortie's environment. `ANTHROPIC_API_KEY` must be empty in the VM.
 
+Claude Code with a Claude subscription reads an OAuth token from `CLAUDE_CODE_OAUTH_TOKEN`; bind it to `api.anthropic.com`:
+
+```yaml
+environment:
+  kind: smolvm
+  smolvm:
+    pass_env: [IS_SANDBOX]
+    credentials:
+      - {name: anthropic, env: CLAUDE_CODE_OAUTH_TOKEN, hosts: [api.anthropic.com]}
+```
+
+codex through OpenRouter takes its provider from `-c` options. Put them after `app-server`: options before the subcommand do not reach the app-server's threads, which then use the default OpenAI provider.
+
+```yaml
+agent:
+  kind: codex
+  command:
+    - codex
+    - app-server
+    - -c
+    - model_provider="openrouter"
+    - -c
+    - model_providers.openrouter={name="OpenRouter", base_url="https://openrouter.ai/api/v1", env_key="OPENROUTER_API_KEY", wire_api="responses", supports_websockets=false}
+    - -c
+    - model="openai/gpt-5.1-codex-mini"
+
+codex:
+  thread_sandbox: dangerFullAccess
+
+environment:
+  kind: smolvm
+  smolvm:
+    credentials:
+      - {name: openrouter, env: OPENROUTER_API_KEY, hosts: [openrouter.ai]}
+```
+
 When an agent kind declares a credential variable, such as `ANTHROPIC_API_KEY` for `claude-code`, and that variable is set in Sortie's environment, bind it or list it in `pass_env`, or unset it. Otherwise the dispatch preflight fails under `environment.agent_credential`. `pass_env` copies the value into the VM in plain text; use it only for values that may live there.
 
 ### Stopping a session
@@ -200,7 +243,7 @@ smolvm cannot send a termination signal into the VM. When Sortie stops a session
 
 ### Sortie's tools
 
-The agent in the VM keeps Sortie's tools, such as `sortie_status`. The generated `.sortie/mcp.json` starts `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, a read-only copy of Sortie's own binary, and Sortie serves the tools on the host through that socket. The tracker credentials and the workflow file stay on the host. A relay that finds no tool server exits with `tool server unavailable`.
+The agent in the VM keeps Sortie's tools, such as `sortie_status`. Sortie runs its tool server on the host, over HTTP, for each agent session, and hands the agent `http://127.0.0.1:47800/mcp` with a bearer that is valid only for that session. In the VM, a `socat` listener on that port carries each connection through the issue's socket to the host. The tracker credentials and the workflow file stay on the host, and the VM holds no Sortie binary. The pack must contain `socat`; smol-builder's `base` layer ships it, and a pack without it fails preparation with an error that names it.
 
 ### A broker on the host
 
@@ -298,7 +341,7 @@ smolvm pack prune --keep 5    # keep at most 5 unused entries
 
 Entries that a VM still uses are always kept.
 
-**Host state.** Sortie keeps its smolvm state next to the database: `env/<key>/` holds each issue's tool socket, `env-bin/` the Sortie binary the VMs mount read-only, and `repos/` the mirrors. Do not edit them while Sortie runs. Each workspace directory under `workspace.root` holds only `.sortie` and `.sortie-host`; the code is in the VM.
+**Host state.** Sortie keeps its smolvm state next to the database: `env/<key>/` holds each issue's tool socket while an agent session runs, and `repos/` the mirrors. An `env-bin/` directory left by an earlier version is unused and can be removed. Do not edit them while Sortie runs. Each workspace directory under `workspace.root` holds only `.sortie` and `.sortie-host`; the code is in the VM.
 
 **Do not manage Sortie's VMs by hand.** Deleting a VM discards the workspace on its disk; the next dispatch creates a new VM and runs `after_create` again. To start an issue over, remove its workspace directory instead, and the sweep deletes the VM.
 
@@ -325,4 +368,4 @@ The reload applies the change. Each existing workspace was created by `smolvm`, 
 | The run fails with `branch moved upstream` | Someone pushed to the issue branch since Sortie's last push. The next run shows the agent that commit as `origin/<branch>`; nothing is overwritten. |
 | The run fails with an export error naming the bundle size | The issue branch's bundle is larger than `max_bundle_mib`. Raise it, or keep large files out of the branch. |
 | The agent's work does not reach the branch | The agent did not commit. Only committed work is exported. |
-| The agent reports `tool server unavailable` | Sortie was not serving the issue's tool socket. It serves it again after a restart; check Sortie's log. |
+| The session opens with a tool-server gap and the agent has no Sortie tools | The agent did not reach the tool server: the VM's `socat` listener is not running (Sortie starts it at each VM start), the runtime accepts no HTTP tool server, or the tool server did not start. Check Sortie's log for `declared tool server gap`. |

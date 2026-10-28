@@ -252,10 +252,11 @@ func (s *sessionState) turnEnv() ([]string, []sshutil.EnvVar) {
 }
 
 // declaresLate reports whether the skeleton places a late entry: a remote
-// launch whose relay announced a listener. Without one the document must travel
+// launch whose relay announced a listener, or a carrier launch whose tool
+// channel is open. Without one the document must travel
 // with the static settings or the runtime would start without its tool policy.
 func (s *sessionState) declaresLate() bool {
-	return s.tools != nil && s.target.RemoteCommand != "" && s.tools.Forward(nil) != nil
+	return s.tools.PlacesLate()
 }
 
 // placeTools carries the whole inline configuration as a late entry, because

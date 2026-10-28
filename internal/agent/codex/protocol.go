@@ -183,7 +183,7 @@ func authenticateIfNeeded(ctx context.Context, state *sessionState, logger *slog
 // the guest workspace inside an execution environment, where the host
 // path does not exist, and the host path otherwise.
 func runtimeWorkspace(state *sessionState) string {
-	return state.target.GuestPath(state.target.WorkspacePath)
+	return state.target.RuntimeWorkspace()
 }
 
 // verificationDisabledFeatures are flags from the runtime's published

@@ -191,6 +191,19 @@ func TestLaunchArgv(t *testing.T) {
 		t.Errorf("LaunchArgv() with Unset = %q, %v\nwant %q", argv, err, want)
 	}
 
+	launch.Unset = nil
+	launch.SecretEnv = []string{"SORTIE_TOOL_SERVER_BEARER"}
+	argv, err = carrier.LaunchArgv(launch)
+	secretHead := append(slices.Clone(head[:len(head)-1]), "--secret-env", "SORTIE_TOOL_SERVER_BEARER=SORTIE_TOOL_SERVER_BEARER", "--")
+	if want := append(secretHead, "opencode", "acp"); err != nil || !slices.Equal(argv, want) {
+		t.Errorf("LaunchArgv() with SecretEnv = %q, %v\nwant %q", argv, err, want)
+	}
+	launch.SecretEnv = []string{"BAD=NAME"}
+	if _, err := carrier.LaunchArgv(launch); err == nil {
+		t.Error("LaunchArgv() with a SecretEnv entry holding '=' error = nil, want a refusal")
+	}
+	launch.SecretEnv = nil
+
 	launch.Unset = []string{"A=B"}
 	if _, err := carrier.LaunchArgv(launch); err == nil {
 		t.Error("LaunchArgv() with an Unset entry holding '=' error = nil, want a refusal")
@@ -198,8 +211,8 @@ func TestLaunchArgv(t *testing.T) {
 	if _, err := carrier.LaunchArgv(domain.CarrierLaunch{}); err == nil {
 		t.Error("LaunchArgv() without an agent command error = nil, want a refusal")
 	}
-	if got := carrier.GuestPath(f.ws.HostPath + "/.sortie/mcp.json"); got != "/workspace/.sortie/mcp.json" {
-		t.Errorf("GuestPath() = %q, want /workspace/.sortie/mcp.json", got)
+	if got := carrier.Workspace(); got != "/workspace" {
+		t.Errorf("Workspace() = %q, want /workspace", got)
 	}
 }
 

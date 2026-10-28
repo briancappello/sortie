@@ -18,6 +18,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/environment/environmenttest"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/workspace"
+	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
 // recordingEnvironment returns a recorder that runs every command through
@@ -437,6 +438,7 @@ func TestRunWorkerAttempt_SessionLaunchCarrier(t *testing.T) {
 
 			ec := newExitCapture()
 			RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
+				WorkflowPath:           filepath.Join(root, "WORKFLOW.md"),
 				TrackerAdapter:         &mockTrackerAdapter{},
 				AgentAdapter:           adapter,
 				ConfigFunc:             func() config.ServiceConfig { return cfg },
@@ -472,9 +474,11 @@ func TestRunWorkerAttempt_SessionLaunchCarrier(t *testing.T) {
 				if err != nil || !slices.Equal(argv, []string{"carrier", "--", "agent"}) {
 					t.Errorf("Carrier.LaunchArgv() = %q, %v, want the environment's launch", argv, err)
 				}
-				mcp := filepath.Join(result.WorkspacePath, ".sortie", "mcp.json")
-				if got := p.Carrier.GuestPath(mcp); got != mcp {
-					t.Errorf("Carrier.GuestPath(%q) = %q, want it unchanged: the recorder's guest path is the host path", mcp, got)
+				if got := p.Carrier.Workspace(); got != result.WorkspacePath {
+					t.Errorf("Carrier.Workspace() = %q, want %q: the recorder's guest path is the host path", got, result.WorkspacePath)
+				}
+				if want := filepath.Join(result.WorkspacePath, workspacekit.HostDir, "mcp.json"); !p.CredentialVerification && p.MCPConfigPath != want {
+					t.Errorf("work session MCPConfigPath = %q, want %q: the agent elsewhere must not read the tool server's env block", p.MCPConfigPath, want)
 				}
 			}
 			if !sawCheck || !sawWork {

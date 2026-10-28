@@ -272,7 +272,9 @@ func (guestEnvCarrier) LaunchArgv(launch domain.CarrierLaunch) ([]string, error)
 	return append(argv, launch.Argv...), nil
 }
 
-func (guestEnvCarrier) GuestPath(hostPath string) string { return hostPath }
+func (guestEnvCarrier) Workspace() string { return "/workspace" }
+
+func (guestEnvCarrier) ToolChannel() (domain.ToolChannel, bool) { return domain.ToolChannel{}, false }
 
 func (guestEnvCarrier) ConnectionFailed(int, []string) bool { return false }
 

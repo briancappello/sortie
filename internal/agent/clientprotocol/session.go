@@ -317,7 +317,7 @@ func startSession(ctx context.Context, a *ClientProtocolAdapter, params domain.S
 		}
 		state.inbox = jsonrpc.NewInbox[pumpItem]()
 
-		launch, agentErr := target.ForwardedSessionLaunch(verificationSwitches.Args, tools.Forward(nil))
+		launch, agentErr := target.ToolSessionLaunch(verificationSwitches.Args, tools.Launch(nil))
 		if agentErr != nil {
 			return domain.Session{}, agentErr
 		}
@@ -496,7 +496,7 @@ func finishSession(ctx context.Context, state *sessionState, params domain.Start
 
 	// The runtime resolves cwd where it runs: inside an execution
 	// environment that is the guest workspace, not the host path.
-	cwd := target.GuestPath(target.WorkspacePath)
+	cwd := target.RuntimeWorkspace()
 	sessionID, agentErr := resolveSession(ctx, state, params.ResumeSessionID, caps, cwd, wired)
 	if agentErr != nil {
 		teardownOnFailure()

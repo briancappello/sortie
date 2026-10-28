@@ -2956,7 +2956,7 @@ func contractEnclosingFuncName(file *ast.File, pos token.Pos) string {
 var contractAnchorSortieDirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/workspace", name: "handoffEvidencePathspecs", reason: "Git pathspec"},
 	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "GenerateMCPConfig", reason: "returned path"},
-	{importPath: "github.com/sortie-ai/sortie/internal/agent/mcpconfig", name: "Parse", reason: "location check"},
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/mcpconfig", name: "readConfigFile", reason: "location check"},
 	{importPath: "github.com/sortie-ai/sortie/internal/orchestrator", name: "RunWorkerAttempt", reason: "exported summary path"},
 	{importPath: "github.com/sortie-ai/sortie/tools/qualify/probe", name: "writeToolServerMCPConfig", reason: "fixture path"},
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "NewSortieTools", reason: "returned path"},
@@ -2965,6 +2965,7 @@ var contractAnchorSortieDirSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/claude", name: "writeDerivedConfig", reason: "returned path"},
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/copilot", name: "writeDerivedConfig", reason: "returned path"},
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "WriteSeededMCPConfig", reason: "returned path"},
+	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "WriteHTTPToolServerConfig", reason: "returned path"},
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/agenttest", name: "assertMalformedMCPConfigRejected", reason: "fixture path"},
 }
 
@@ -2978,7 +2979,6 @@ var contractWorkdirSites = []contractSiteEntry{
 
 var contractLifecycleSites = []contractSiteEntry{
 	{importPath: "github.com/sortie-ai/sortie/internal/agent/copilot", name: "deleteVerificationSession", reason: "auxiliary launch answering one framed request on standard input"},
-	{importPath: "github.com/sortie-ai/sortie/internal/toolsocket", name: "listener.handle", reason: "tool server bridged to one socket connection, not an agent session"},
 }
 
 // contractAnchorOwner is the package rule ANCHOR directs every .sortie
