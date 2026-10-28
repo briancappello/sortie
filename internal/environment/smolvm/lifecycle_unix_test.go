@@ -126,7 +126,7 @@ func TestResume(t *testing.T) {
 		wantArgvs [][]string
 	}{
 		{name: "stopped VM starts", state: StateStopped, wantReady: true,
-			wantArgvs: [][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}},
+			wantArgvs: append([][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)},
 		{name: "running VM", state: StateRunning, wantReady: true, wantArgvs: [][]string{listArgv}},
 		{name: "no VM", wantArgvs: [][]string{listArgv}},
 	}

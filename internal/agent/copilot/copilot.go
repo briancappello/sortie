@@ -314,7 +314,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 	}
 
 	mcpConfigPath := ""
-	if target.RemoteCommand == "" && tools.Configured() && !params.CredentialVerification {
+	if !target.Remote() && tools.Configured() && !params.CredentialVerification {
 		var err error
 		mcpConfigPath, err = writeDerivedConfig(target.WorkspacePath, tools)
 		if err != nil {

@@ -289,17 +289,7 @@ func Parse(path string) ([]Server, error) {
 	if path == "" {
 		return nil, &Error{Kind: ErrorUnreadable, Path: path, Err: fmt.Errorf("path is empty")}
 	}
-	if filepath.Base(filepath.Dir(path)) != workspacekit.SortieDir {
-		return nil, &Error{Kind: ErrorUnreadable, Path: path, Err: fmt.Errorf("path is not inside a %s directory", workspacekit.SortieDir)}
-	}
-
-	f, err := workspacekit.OpenSortieFile(filepath.Dir(filepath.Dir(path)), filepath.Base(path))
-	if err != nil {
-		return nil, &Error{Kind: ErrorUnreadable, Path: path, Err: err}
-	}
-	defer f.Close() //nolint:errcheck // read-only file; close error is not actionable after data is read
-
-	raw, err := io.ReadAll(f)
+	raw, err := readConfigFile(path)
 	if err != nil {
 		return nil, &Error{Kind: ErrorUnreadable, Path: path, Err: err}
 	}
@@ -444,4 +434,28 @@ func parseEntry(path, name string, raw json.RawMessage) (Server, error) {
 		}
 	}
 	return server, nil
+}
+
+// maxHostConfigBytes caps a generated configuration read from
+// [workspacekit.HostDir], which only the orchestrator writes.
+const maxHostConfigBytes = 4 << 20
+
+// readConfigFile reads path, which must be a file directly inside a
+// workspace's [workspacekit.SortieDir] or, for a session whose agent runs
+// elsewhere, its orchestrator-only [workspacekit.HostDir].
+func readConfigFile(path string) ([]byte, error) {
+	workspace, name := filepath.Dir(filepath.Dir(path)), filepath.Base(path)
+	switch filepath.Base(filepath.Dir(path)) {
+	case workspacekit.SortieDir:
+		f, err := workspacekit.OpenSortieFile(workspace, name)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close() //nolint:errcheck // read-only file; close error is not actionable after data is read
+		return io.ReadAll(f)
+	case workspacekit.HostDir:
+		return workspacekit.ReadHostFile(workspace, name, maxHostConfigBytes)
+	default:
+		return nil, fmt.Errorf("path is not inside a %s or %s directory", workspacekit.SortieDir, workspacekit.HostDir)
+	}
 }

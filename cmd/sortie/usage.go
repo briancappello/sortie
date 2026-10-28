@@ -162,30 +162,12 @@ Global flags:
 `)
 }
 
-func printMCPRelayHelp(w io.Writer) {
-	fmt.Fprint(w, //nolint:errcheck // help output write failure is unrecoverable
-		`Relay MCP stdio to a Sortie tool server listening on a Unix socket.
-
-Copies standard input to the socket and the socket's output to standard
-output. When the connection closes before any response, it writes
-"tool server unavailable" to standard error and exits with a non-zero
-status. It is intended to be spawned by an agent runtime inside an
-execution environment, not run manually.
-
-Usage:
-  sortie mcp-relay SOCKET
-
-Global flags:
-  -h, --help        Print this help message and quit
-`)
-}
-
 // interceptShortFlags scans args for short help (-h, -help) and short
 // version (-V) flags before the flag package sees them. Subcommand
 // tokens and the POSIX "--" terminator stop the scan immediately.
 func interceptShortFlags(args []string) string {
 	for _, arg := range args {
-		if arg == "validate" || arg == "stats" || arg == "plan" || arg == "mcp-server" || arg == "mcp-relay" {
+		if arg == "validate" || arg == "stats" || arg == "plan" || arg == "mcp-server" {
 			return ""
 		}
 		if arg == "--" {

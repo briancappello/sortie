@@ -109,8 +109,11 @@ func TestLaunchCarrier(t *testing.T) {
 	if env.gotWorkspace != ws {
 		t.Errorf("carrier workspace = %+v, want %+v", env.gotWorkspace, ws)
 	}
-	if got := c.GuestPath("/root/ENV-1/.sortie/mcp.json"); got != "/workspace/.sortie/mcp.json" {
-		t.Errorf("GuestPath() = %q, want /workspace/.sortie/mcp.json", got)
+	if got := c.Workspace(); got != "/workspace" {
+		t.Errorf("Workspace() = %q, want /workspace", got)
+	}
+	if _, ok := c.ToolChannel(); ok {
+		t.Error("ToolChannel() ok = true for an environment that offers no tool channel, want false")
 	}
 	if !c.ConnectionFailed(1, []string{"Error: vm not found"}) || env.gotExit != 1 || len(env.gotTail) != 1 || env.gotFailedWorkspace != ws {
 		t.Errorf("ConnectionFailed() did not reach the environment with its workspace, exit code, and stderr tail: got %+v, %d, %q", env.gotFailedWorkspace, env.gotExit, env.gotTail)

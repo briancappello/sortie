@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -447,7 +448,7 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 	}()
 
 	var localEnv []string
-	if target.RemoteCommand == "" {
+	if !target.Remote() {
 		delivery := tools.Delivery(sshutil.ForwardOutcome{})
 		target.Args = append(target.Args, delivery.Args...)
 		localEnv = append(tools.LocalEnv(), delivery.Env...)
@@ -464,14 +465,14 @@ func (a *CodexAdapter) StartSession(ctx context.Context, params domain.StartSess
 		reducedVerificationContext: params.ReducedVerificationContext(),
 	}
 
-	launch, agentErr := target.ForwardedSessionLaunch(nil, tools.Forward(placeToolServers))
+	launch, agentErr := target.ToolSessionLaunch(nil, tools.Launch(placeToolServers))
 	if agentErr != nil {
 		return domain.Session{}, agentErr
 	}
 	cmd := exec.CommandContext(ctx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	grace := procutil.StopGrace(state.agentConfig.StopGraceMS)
 	procutil.SetGroupCancel(cmd, grace)
-	cmd.Env = append(os.Environ(), localEnv...)
+	cmd.Env = slices.Concat(os.Environ(), localEnv, launch.Env)
 	if bindErr := target.BindWorkspace(cmd); bindErr != nil {
 		return domain.Session{}, bindErr
 	}

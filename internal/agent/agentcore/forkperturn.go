@@ -161,7 +161,7 @@ type ForkPerTurnHooks struct {
 	Tools *ToolSession
 
 	// ToolPlacement is required when Tools is non-nil and the target is
-	// remote.
+	// remote or carried.
 	ToolPlacement PlaceFunc
 }
 
@@ -270,8 +270,8 @@ func NewForkPerTurnSession(
 	if logger == nil {
 		panic("agentcore: ForkPerTurnSession logger must be non-nil")
 	}
-	if hooks.Tools != nil && target.RemoteCommand != "" && hooks.ToolPlacement == nil {
-		panic("agentcore: ForkPerTurnHooks.ToolPlacement must be non-nil when Tools is set on a remote launch")
+	if hooks.Tools != nil && (target.RemoteCommand != "" || target.Carrier != nil) && hooks.ToolPlacement == nil {
+		panic("agentcore: ForkPerTurnHooks.ToolPlacement must be non-nil when Tools is set on a remote or carrier launch")
 	}
 	return &ForkPerTurnSession{
 		target:     target,
@@ -364,11 +364,7 @@ func (s *ForkPerTurnSession) RunTurn(
 		environ = append(slices.Clip(environ), s.hooks.Tools.LocalEnv()...)
 	}
 
-	var toolForward *sshutil.ReverseForward
-	if s.hooks.Tools != nil {
-		toolForward = s.hooks.Tools.Forward(s.hooks.ToolPlacement)
-	}
-	launch, launchErr := s.target.ForwardedSessionLaunch(cmdArgs, toolForward, sshEnv...)
+	launch, launchErr := s.target.ToolSessionLaunch(cmdArgs, s.hooks.Tools.Launch(s.hooks.ToolPlacement), sshEnv...)
 	if launchErr != nil {
 		usage, _, measured := s.hooks.GetUsage()
 		return unfinished(domain.TurnResult{
@@ -380,7 +376,7 @@ func (s *ForkPerTurnSession) RunTurn(
 	cmd := exec.CommandContext(cmdCtx, launch.Path, launch.Args...) //nolint:gosec // args are constructed programmatically with shell quoting
 	cmd.Stdin = s.turnStdin(launch.StdinReader(), prompt)
 	procutil.SetGroupCancel(cmd, s.stopGrace)
-	cmd.Env = environ
+	cmd.Env = append(slices.Clip(environ), launch.Env...)
 
 	if bindErr := s.target.BindWorkspace(cmd); bindErr != nil {
 		usage, _, measured := s.hooks.GetUsage()

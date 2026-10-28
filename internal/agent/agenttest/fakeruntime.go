@@ -223,6 +223,9 @@ func runScenario(config []byte, scenarios map[string]Scenario) int {
 	if cfg.Scenario == SSHStandInScenario {
 		run = Typed(runSSHStandIn)
 	}
+	if cfg.Scenario == HTTPToolServerScenario {
+		run = Typed(runHTTPToolServer)
+	}
 	if run == nil {
 		fmt.Fprintf(os.Stderr, "fake runtime: unknown scenario %q\n", cfg.Scenario)
 		return 2

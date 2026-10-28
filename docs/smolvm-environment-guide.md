@@ -200,7 +200,7 @@ smolvm cannot send a termination signal into the VM. When Sortie stops a session
 
 ### Sortie's tools
 
-The agent in the VM keeps Sortie's tools, such as `sortie_status`. The generated `.sortie/mcp.json` starts `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, a read-only copy of Sortie's own binary, and Sortie serves the tools on the host through that socket. The tracker credentials and the workflow file stay on the host. A relay that finds no tool server exits with `tool server unavailable`.
+The agent in the VM keeps Sortie's tools, such as `sortie_status`. Sortie runs its tool server on the host, over HTTP, for each agent session, and hands the agent `http://127.0.0.1:47800/mcp` with a bearer that is valid only for that session. In the VM, a `socat` listener on that port carries each connection through the issue's socket to the host. The tracker credentials and the workflow file stay on the host, and the VM holds no Sortie binary. The pack must contain `socat`; smol-builder's `base` layer ships it, and a pack without it fails preparation with an error that names it.
 
 ### A broker on the host
 
@@ -298,7 +298,7 @@ smolvm pack prune --keep 5    # keep at most 5 unused entries
 
 Entries that a VM still uses are always kept.
 
-**Host state.** Sortie keeps its smolvm state next to the database: `env/<key>/` holds each issue's tool socket, `env-bin/` the Sortie binary the VMs mount read-only, and `repos/` the mirrors. Do not edit them while Sortie runs. Each workspace directory under `workspace.root` holds only `.sortie` and `.sortie-host`; the code is in the VM.
+**Host state.** Sortie keeps its smolvm state next to the database: `env/<key>/` holds each issue's tool socket while an agent session runs, and `repos/` the mirrors. An `env-bin/` directory left by an earlier version is unused and can be removed. Do not edit them while Sortie runs. Each workspace directory under `workspace.root` holds only `.sortie` and `.sortie-host`; the code is in the VM.
 
 **Do not manage Sortie's VMs by hand.** Deleting a VM discards the workspace on its disk; the next dispatch creates a new VM and runs `after_create` again. To start an issue over, remove its workspace directory instead, and the sweep deletes the VM.
 
@@ -325,4 +325,4 @@ The reload applies the change. Each existing workspace was created by `smolvm`, 
 | The run fails with `branch moved upstream` | Someone pushed to the issue branch since Sortie's last push. The next run shows the agent that commit as `origin/<branch>`; nothing is overwritten. |
 | The run fails with an export error naming the bundle size | The issue branch's bundle is larger than `max_bundle_mib`. Raise it, or keep large files out of the branch. |
 | The agent's work does not reach the branch | The agent did not commit. Only committed work is exported. |
-| The agent reports `tool server unavailable` | Sortie was not serving the issue's tool socket. It serves it again after a restart; check Sortie's log. |
+| The session opens with a tool-server gap and the agent has no Sortie tools | The agent did not reach the tool server: the VM's `socat` listener is not running (Sortie starts it at each VM start), the runtime accepts no HTTP tool server, or the tool server did not start. Check Sortie's log for `declared tool server gap`. |

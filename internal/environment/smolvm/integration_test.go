@@ -143,18 +143,18 @@ func TestIntegration_PrepareRealVM(t *testing.T) {
 			t.Errorf("label %s = %q, want %q", k, m.Labels[k], v)
 		}
 	}
-	// smolvm counts the two directory mounts; the socket is not counted.
-	if m.Mounts != 2 || m.Network {
-		t.Errorf("VM mounts = %d, network = %v; want 2 mounts and no network", m.Mounts, m.Network)
+	// smolvm counts the one directory mount; the socket is not counted.
+	if m.Mounts != 1 || m.Network {
+		t.Errorf("VM mounts = %d, network = %v; want 1 mount and no network", m.Mounts, m.Network)
 	}
-	if err := guest("echo from-guest > /run/sortie/control/probe && test -S /run/sortie/tools.sock && test -d /opt/sortie"); err != nil {
+	if err := guest("echo from-guest > /run/sortie/control/probe && test -S /run/sortie/tools.sock && test ! -e /opt/sortie"); err != nil {
 		t.Fatalf("guest mount check: %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(host, ".sortie", "probe")); err != nil || strings.TrimSpace(string(data)) != "from-guest" {
 		t.Errorf("host .sortie/probe = %q, %v, want the guest's write", data, err)
 	}
-	if err := guest("touch /opt/sortie/planted"); err == nil {
-		t.Error("guest write to /opt/sortie succeeded, want a read-only mount")
+	if err := guest("pgrep -x socat"); err != nil {
+		t.Errorf("guest tool listener: %v, want socat running after Prepare()", err)
 	}
 	if err := guest("touch /workspace/marker"); err != nil {
 		t.Fatalf("guest write to /workspace: %v", err)
@@ -170,6 +170,9 @@ func TestIntegration_PrepareRealVM(t *testing.T) {
 	prepare(false)
 	if err := guest("test -e /workspace/marker"); err != nil {
 		t.Errorf("marker after a restart: %v, want the guest workspace kept", err)
+	}
+	if err := guest("pgrep -x socat"); err != nil {
+		t.Errorf("guest tool listener after a restart: %v, want socat running again", err)
 	}
 
 	// A host directory without the record is a fresh workspace: the

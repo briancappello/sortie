@@ -101,6 +101,9 @@ func (e *Environment) Resume(ctx context.Context, ws environment.Workspace) (boo
 	if err := e.cli.Start(ctx, vm.Name); err != nil {
 		return false, err
 	}
+	if err := e.startToolListener(ctx, vm.Name); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -113,9 +116,6 @@ func (e *Environment) ensureMountDirs(key string) error {
 	stateDir, err := filepath.Abs(e.stateDir)
 	if err != nil {
 		return fmt.Errorf("resolve state directory: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(stateDir, stateBinDir), 0o750); err != nil {
-		return err
 	}
 	return os.MkdirAll(filepath.Join(stateDir, stateEnvDir, key), 0o700)
 }

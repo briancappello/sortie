@@ -384,9 +384,8 @@ type StartSessionParams struct {
 
 // LaunchCarrier carries an agent launch into an execution environment
 // that runs the workspace's code somewhere other than this host. The
-// agent binary is resolved inside that environment, and the MCP
-// configuration Sortie generates in the workspace is valid there.
-// Implementations must be safe for concurrent use.
+// agent binary is resolved inside that environment. Implementations must
+// be safe for concurrent use.
 type LaunchCarrier interface {
 	// LaunchArgv returns the host argv, program first, whose process
 	// runs launch.Argv in the workspace inside the environment, with its
@@ -395,10 +394,13 @@ type LaunchCarrier interface {
 	// through standard input, which belongs to the agent alone.
 	LaunchArgv(launch CarrierLaunch) ([]string, error)
 
-	// GuestPath returns the path inside the environment for hostPath, a
-	// path in the workspace on this host. A path outside the workspace
-	// is returned unchanged.
-	GuestPath(hostPath string) string
+	// Workspace returns the workspace's path inside the environment,
+	// where the agent runs.
+	Workspace() string
+
+	// ToolChannel returns how the agent reaches a tool server on this
+	// host, and false when the environment offers no such channel.
+	ToolChannel() (ToolChannel, bool)
 
 	// ConnectionFailed reports whether a carrier process that exited
 	// with exitCode failed before the agent command started, such as an
@@ -406,6 +408,16 @@ type LaunchCarrier interface {
 	// the carrier process wrote to standard error, or nil where the
 	// caller holds none.
 	ConnectionFailed(exitCode int, stderrTail []string) bool
+}
+
+// ToolChannel is the path from an execution environment to a tool server
+// on this host: a connection the agent opens to GuestPort on the
+// environment's loopback arrives at the Unix socket HostSocket on this
+// host. Whoever serves tools listens on HostSocket; the environment keeps
+// the guest side open.
+type ToolChannel struct {
+	HostSocket string
+	GuestPort  int
 }
 
 // CarrierLaunch describes one agent launch for
@@ -424,6 +436,12 @@ type CarrierLaunch struct {
 	// this launch, such as a runtime setting. The carrier passes each to
 	// the agent unchanged. None of them is a credential.
 	AgentEnv []string
+
+	// SecretEnv names variables the agent receives with the value the
+	// carrier process inherits on this host. Their values never appear in
+	// the argv; the caller sets them in the carrier process's
+	// environment.
+	SecretEnv []string
 
 	// Unset names variables the agent must run without, even when the
 	// environment itself defines them.

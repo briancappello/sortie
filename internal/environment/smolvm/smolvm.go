@@ -15,9 +15,10 @@
 // [Environment.Resume] starts it again for the before_remove hook,
 // [Environment.Remove] deletes it with its workspace, and
 // [Environment.Sweep] deletes the VMs whose workspace directory is gone.
-// [Environment.ToolSocketPath] names the host socket each VM reaches
-// Sortie's tools through, with the copy of the Sortie binary Prepare
-// keeps current at [GuestSortieBinary] as the relay.
+// [Environment.ToolChannel] names each VM's tool channel: a host socket
+// mounted in the VM, which a socat listener Prepare and Resume start in
+// the guest serves at [GuestToolPort], so an agent reaches Sortie's tool
+// server on the host over HTTP.
 //
 // The package touches only a VM it labeled as managed, for the
 // workspace key the VM's name derives from, and for this workflow; any
@@ -37,11 +38,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
@@ -56,13 +59,13 @@ const (
 	// is mounted, read-write.
 	GuestControlDir = "/run/sortie/control"
 
-	// GuestBinDir is where the directory holding only the Sortie binary
-	// is mounted, read-only.
-	GuestBinDir = "/opt/sortie"
-
-	// GuestToolSocket is where the issue's tool-server socket is
+	// GuestToolSocket is where the issue's tool channel socket is
 	// mounted.
 	GuestToolSocket = "/run/sortie/tools.sock"
+
+	// GuestToolPort is the guest loopback port at which the VM's socat
+	// listener joins every connection to [GuestToolSocket].
+	GuestToolPort = 47800
 )
 
 // Labels Sortie puts on every VM it creates.
@@ -74,11 +77,9 @@ const (
 )
 
 // Layout of the environment's directories under the state directory:
-// env/<key> holds each workspace's tool socket, and env-bin, apart from
-// every per-workspace directory, holds the Sortie binary the VMs mount.
+// env/<key> holds each workspace's tool channel socket.
 const (
 	stateEnvDir      = "env"
-	stateBinDir      = "env-bin"
 	toolSocketName   = "tools.sock"
 	recordMaxBytes   = 4096
 	maxUnixSocketLen = 107 // sun_path holds 108 bytes, one of them the terminating NUL
@@ -114,12 +115,6 @@ type Environment struct {
 
 	packMu   sync.Mutex
 	packSums map[string]packSum
-
-	// sortieBinary is the Sortie binary the binary directory holds a
-	// copy of; "" is the running executable.
-	sortieBinary string
-	binMu        sync.Mutex
-	binSource    binarySource
 }
 
 // packSum is a pack file's SHA-256 together with the size and
@@ -138,7 +133,7 @@ var (
 	_ environment.AfterCreateFinisher = (*Environment)(nil)
 	_ environment.Resumer             = (*Environment)(nil)
 	_ environment.EnvForwarder        = (*Environment)(nil)
-	_ environment.ToolSocketer        = (*Environment)(nil)
+	_ environment.ToolChanneler       = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a
@@ -156,8 +151,6 @@ func New(params environment.Params) (environment.Environment, error) {
 		stateDir: params.StateDir,
 		logger:   logger,
 		packSums: map[string]packSum{},
-
-		sortieBinary: params.SortieBinary,
 	}
 	if params.WorkflowPath != "" {
 		abs, err := filepath.Abs(params.WorkflowPath)
@@ -190,33 +183,28 @@ func (e *Environment) ForwardsEnv(name string) bool {
 	return slices.Contains(e.cfg.PassEnv, name)
 }
 
-// ToolSocketPath returns the host path of the socket mounted at
-// [GuestToolSocket] in ws's VM: <state dir>/env/<key>/tools.sock. Its
-// directory is removed with the VM.
-func (e *Environment) ToolSocketPath(ws environment.Workspace) (string, error) {
+// ToolChannel returns ws's tool channel: the host socket
+// <state dir>/env/<key>/tools.sock, mounted at [GuestToolSocket] in ws's
+// VM, which reaches it at [GuestToolPort]. Its directory is removed with
+// the VM.
+func (e *Environment) ToolChannel(ws environment.Workspace) (domain.ToolChannel, error) {
 	if e.stateDir == "" {
-		return "", errors.New("smolvm environment: a state directory is required for the tool socket")
+		return domain.ToolChannel{}, errors.New("smolvm environment: a state directory is required for the tool channel")
 	}
 	if !validKey(ws.Key) {
-		return "", fmt.Errorf("smolvm environment: workspace key %q cannot name a state directory", ws.Key)
+		return domain.ToolChannel{}, fmt.Errorf("smolvm environment: workspace key %q cannot name a state directory", ws.Key)
 	}
 	stateDir, err := filepath.Abs(e.stateDir)
 	if err != nil {
-		return "", fmt.Errorf("resolve state directory: %w", err)
+		return domain.ToolChannel{}, fmt.Errorf("resolve state directory: %w", err)
 	}
 	path := filepath.Join(stateDir, stateEnvDir, ws.Key, toolSocketName)
 	if len(path) > maxUnixSocketLen {
-		return "", fmt.Errorf("smolvm environment: tool socket path %q is longer than a Unix socket path may be (%d bytes)",
+		return domain.ToolChannel{}, fmt.Errorf("smolvm environment: tool socket path %q is longer than a Unix socket path may be (%d bytes)",
 			path, maxUnixSocketLen)
 	}
-	return path, nil
+	return domain.ToolChannel{HostSocket: path, GuestPort: GuestToolPort}, nil
 }
-
-// GuestToolSocketPath returns [GuestToolSocket].
-func (*Environment) GuestToolSocketPath() string { return GuestToolSocket }
-
-// GuestSortieBinaryPath returns [GuestSortieBinary].
-func (*Environment) GuestSortieBinaryPath() string { return GuestSortieBinary }
 
 // InstanceName returns the name of the VM that runs ws.
 func (*Environment) InstanceName(ws environment.Workspace) string { return VMName(ws.Key) }
@@ -279,9 +267,6 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 	if err != nil {
 		return environment.PrepareResult{}, err
 	}
-	if err := e.ensureBinary(paths.binDir); err != nil {
-		return environment.PrepareResult{}, err
-	}
 	name := VMName(ws.Key)
 
 	machines, err := e.cli.List(ctx)
@@ -309,11 +294,13 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 			// The label names the pack the VM was created from, which a
 			// rebuild of the pack file since does not change.
 			reused := environment.PrepareResult{ImageDigest: existing.Labels[LabelPack]}
-			if existing.Running() {
-				return reused, nil
+			if !existing.Running() {
+				e.warnUnsetCredentials(ctx, name)
+				if err := e.cli.Start(ctx, name); err != nil {
+					return environment.PrepareResult{}, err
+				}
 			}
-			e.warnUnsetCredentials(ctx, name)
-			if err := e.cli.Start(ctx, name); err != nil {
+			if err := e.startToolListener(ctx, name); err != nil {
 				return environment.PrepareResult{}, err
 			}
 			return reused, nil
@@ -336,6 +323,9 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 	if err := e.cli.Start(ctx, name); err != nil {
 		return environment.PrepareResult{}, err
 	}
+	if err := e.startToolListener(ctx, name); err != nil {
+		return environment.PrepareResult{}, err
+	}
 	e.logger.InfoContext(ctx, "created VM", slog.String("vm", name), slog.String("workspace", ws.HostPath))
 	return environment.PrepareResult{CreatedNow: true, ImageDigest: labelValue(spec.Labels, LabelPack)}, nil
 }
@@ -353,7 +343,6 @@ func labelValue(labels []Label, key string) string {
 // hostPaths holds the host side of a VM's mounts.
 type hostPaths struct {
 	control string
-	binDir  string
 	socket  string
 }
 
@@ -379,7 +368,6 @@ func (e *Environment) preparePaths(ws environment.Workspace) (hostPaths, error) 
 	envDir := filepath.Join(stateDir, stateEnvDir)
 	paths := hostPaths{
 		control: filepath.Join(ws.HostPath, workspacekit.SortieDir),
-		binDir:  filepath.Join(stateDir, stateBinDir),
 		socket:  filepath.Join(envDir, ws.Key, toolSocketName),
 	}
 	if len(paths.socket) > maxUnixSocketLen {
@@ -392,9 +380,6 @@ func (e *Environment) preparePaths(ws environment.Workspace) (hostPaths, error) 
 		return hostPaths{}, fmt.Errorf("create %s: %w", paths.control, err)
 	}
 	_ = dir.Close()
-	if err := os.MkdirAll(paths.binDir, 0o750); err != nil {
-		return hostPaths{}, fmt.Errorf("create %s: %w", paths.binDir, err)
-	}
 	if err := os.MkdirAll(filepath.Dir(paths.socket), 0o700); err != nil {
 		return hostPaths{}, fmt.Errorf("create %s: %w", filepath.Dir(paths.socket), err)
 	}
@@ -418,8 +403,7 @@ func recordNames(hostPath, name string) bool {
 
 // createSpec describes the VM for ws: the configured pack and sizing,
 // the labels, the egress allowlist and credential bindings, and exactly
-// three host resources: the control directory, the binary directory
-// read-only, and the tool socket.
+// two host resources: the control directory and the tool channel socket.
 func (e *Environment) createSpec(name string, ws environment.Workspace, paths hostPaths) (CreateSpec, error) {
 	packSHA, err := e.packSHA256(e.cfg.Pack)
 	if err != nil {
@@ -440,7 +424,6 @@ func (e *Environment) createSpec(name string, ws environment.Workspace, paths ho
 		SSHAgent: e.cfg.SSHAgent,
 		Volumes: []Volume{
 			{Host: paths.control, Guest: GuestControlDir},
-			{Host: paths.binDir, Guest: GuestBinDir, ReadOnly: true},
 		},
 		Sockets: []SocketMount{{Host: paths.socket, Guest: GuestToolSocket}},
 	}
@@ -505,4 +488,59 @@ func (e *Environment) warnUnsetCredentials(ctx context.Context, name string) {
 				slog.String("vm", name), slog.String("credential", cred.Name), slog.String("variable", cred.Env))
 		}
 	}
+}
+
+// toolListenerArgv is the guest command that serves the tool channel: a
+// socat listener on the guest loopback at [GuestToolPort] that joins each
+// connection to [GuestToolSocket].
+var toolListenerArgv = []string{
+	"socat",
+	"TCP-LISTEN:" + strconv.Itoa(GuestToolPort) + ",bind=127.0.0.1,reuseaddr,fork",
+	"UNIX-CONNECT:" + GuestToolSocket,
+}
+
+// noSocatExit is the exit status of [toolListenerCheck] for a guest
+// without socat.
+const noSocatExit = 42
+
+// toolListenerCheck exits [noSocatExit] when the guest has no socat.
+var toolListenerCheck = []string{"sh", "-c", "command -v socat >/dev/null 2>&1 || exit " + strconv.Itoa(noSocatExit)}
+
+// Attempts and spacing of the check. Right after a start, smolvm can run
+// a command before the pack's root filesystem is in place, where socat is
+// missing even from a pack that has it, so every failure is retried.
+const (
+	toolListenerAttempts = 10
+	toolListenerBackoff  = 300 * time.Millisecond
+)
+
+// startToolListener starts the guest side of the tool channel in the
+// running VM name, detached, so it lives as long as the VM runs. A VM
+// whose listener already runs keeps it: the second listener cannot bind
+// and exits. A pack without socat fails preparation with an error that
+// names it.
+func (e *Environment) startToolListener(ctx context.Context, name string) error {
+	var err error
+	for attempt := 1; attempt <= toolListenerAttempts; attempt++ {
+		_, err = e.cli.Exec(ctx, name, ExecOptions{}, toolListenerCheck)
+		if err == nil || ctx.Err() != nil || attempt == toolListenerAttempts {
+			break
+		}
+		e.logger.DebugContext(ctx, "tool listener check failed, retrying", slog.String("vm", name), slog.Int("attempt", attempt), slog.Any("error", err))
+		select {
+		case <-ctx.Done():
+		case <-time.After(toolListenerBackoff):
+		}
+	}
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) && cliErr.ExitCode == noSocatExit {
+		return fmt.Errorf("smolvm environment: the pack of VM %q has no socat, which carries Sortie's tool server into the VM; add it to the pack", name)
+	}
+	if err != nil {
+		return fmt.Errorf("smolvm environment: check the tool listener's socat in VM %q: %w", name, err)
+	}
+	if _, err := e.cli.Exec(ctx, name, ExecOptions{Detach: true}, toolListenerArgv); err != nil {
+		return fmt.Errorf("smolvm environment: start the tool listener in VM %q: %w", name, err)
+	}
+	return nil
 }

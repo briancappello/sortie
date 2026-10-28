@@ -29,13 +29,14 @@ type OpeningNotice func(emit func(domain.AgentEvent), toolServersGap bool)
 // arguments and late environment entries that carry it.
 type PlaceFunc func(d mcpconfig.Delivery) sshutil.LatePreamble
 
-// ToolSession is one session's tool-server delivery, local or remote. It is
-// safe for concurrent use; Close is idempotent.
+// ToolSession is one session's tool-server delivery: local, remote over SSH,
+// or in an execution environment through its tool channel. It is safe for
+// concurrent use; Close is idempotent.
 type ToolSession struct {
 	logger      *slog.Logger
 	dialect     registry.MCPDialect
 	remote      bool
-	guest       bool
+	carrier     domain.LaunchCarrier
 	configured  bool
 	stopGrace   time.Duration
 	readTimeout time.Duration
@@ -53,6 +54,10 @@ type ToolSession struct {
 	noHTTP     bool
 
 	localOnce sync.Once
+
+	// channel is the open tool channel of a carrier session, nil before it
+	// opens and when it could not.
+	channel *toolChannel
 }
 
 // placeholderEndpoint lets a remote session check that its servers render
@@ -74,7 +79,7 @@ func ResolveToolDelivery(ctx context.Context, params domain.StartSessionParams, 
 		logger:      logger,
 		dialect:     dialect,
 		remote:      target.RemoteCommand != "",
-		guest:       target.Carrier != nil,
+		carrier:     target.Carrier,
 		configured:  params.MCPConfigPath != "",
 		stopGrace:   procutil.StopGrace(params.AgentConfig.StopGraceMS),
 		readTimeout: ReadTimeout(params.AgentConfig),
@@ -96,14 +101,17 @@ func ResolveToolDelivery(ctx context.Context, params domain.StartSessionParams, 
 	}
 
 	switch {
-	case !session.remote:
+	case !session.remote && session.carrier == nil:
 		session.config = loaded
 	case session.hasLaunch:
 		session.startRemote(ctx, loaded)
+		if session.carrier != nil {
+			session.openChannel(ctx)
+		}
 	}
 
 	var placeholder *mcpconfig.Endpoint
-	if session.remote {
+	if session.remote || session.carrier != nil {
 		placeholder = &placeholderEndpoint
 	}
 	if _, err := session.render(session.config, placeholder); err != nil {
@@ -238,8 +246,11 @@ func (s *ToolSession) usableEndpoint(o sshutil.ForwardOutcome) *mcpconfig.Endpoi
 		return nil
 	}
 	lookup := relay.LocalEndpoint
-	if s.remote {
+	switch {
+	case s.remote:
 		lookup = func() (mcpconfig.Endpoint, bool) { return relay.EndpointFor(o) }
+	case s.carrier != nil:
+		lookup = func() (mcpconfig.Endpoint, bool) { return relay.EndpointFor(s.channelOutcome()) }
 	}
 	ep, ok := lookup()
 	if !ok {
@@ -249,7 +260,8 @@ func (s *ToolSession) usableEndpoint(o sshutil.ForwardOutcome) *mcpconfig.Endpoi
 }
 
 // Delivery renders the session's current servers in the kind's dialect. A
-// local caller passes the zero outcome.
+// local or carrier caller passes the zero outcome; a carrier session renders
+// Sortie's tool server at its tool channel's guest port.
 //
 // The configuration already rendered at resolve and later sets only shrink, so
 // a render failure here is logged and yields an empty delivery.
@@ -288,6 +300,54 @@ func (s *ToolSession) Forward(place PlaceFunc) *sshutil.ReverseForward {
 	}
 }
 
+// LaunchTools is what one launch of a session carries for Sortie's tool
+// server: the reverse forward an SSH launch requests, or, on a carrier
+// launch, the trailing arguments place renders and the variables, the
+// bearer among them, the agent receives by name. The zero value carries
+// nothing, as a local launch does.
+type LaunchTools struct {
+	Forward *sshutil.ReverseForward
+	Args    []string
+	Secrets []sshutil.EnvVar
+}
+
+// Launch returns what a launch of the session carries for its tool server.
+// A nil place carries nothing on a carrier launch, which suits a kind that
+// declares its servers, header values included, inside its protocol. A nil
+// session carries nothing.
+func (s *ToolSession) Launch(place PlaceFunc) LaunchTools {
+	if s == nil {
+		return LaunchTools{}
+	}
+	switch {
+	case s.remote:
+		return LaunchTools{Forward: s.Forward(place)}
+	case s.carrier != nil && s.PlacesLate():
+		late := s.renderLate(place, s.channelOutcome())
+		return LaunchTools{Args: late.Args, Secrets: late.Env}
+	default:
+		return LaunchTools{}
+	}
+}
+
+// PlacesLate reports whether a launch places the tool servers after the
+// static settings: a remote launch whose relay announced a listener, or a
+// carrier launch whose tool channel is open.
+func (s *ToolSession) PlacesLate() bool {
+	if s == nil {
+		return false
+	}
+	if s.remote {
+		return s.Forward(nil) != nil
+	}
+	if s.carrier == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.channel != nil
+}
+
 func (s *ToolSession) renderLate(place PlaceFunc, outcome sshutil.ForwardOutcome) sshutil.LatePreamble {
 	if place == nil {
 		return sshutil.LatePreamble{}
@@ -314,11 +374,9 @@ func (s *ToolSession) renderLate(place PlaceFunc, outcome sshutil.ForwardOutcome
 // ServeLocal starts the relay for a local session whose runtime advertised
 // HTTP tool-server support and reports whether its loopback endpoint is
 // usable. From the first call on, the session's own stdio entry is no longer
-// delivered. A session in an execution environment never serves locally: its
-// runtime cannot reach this host's loopback, so it keeps the stdio entry the
-// generated configuration names for it.
+// delivered. A remote or carrier session started its relay already.
 func (s *ToolSession) ServeLocal(ctx context.Context) bool {
-	if s.remote || s.guest || !s.hasLaunch {
+	if s.remote || s.carrier != nil || !s.hasLaunch {
 		return false
 	}
 	s.localOnce.Do(func() {
@@ -363,7 +421,7 @@ func (s *ToolSession) WithholdForRuntime() bool {
 	s.mu.Unlock()
 
 	withheldRelay := false
-	if s.remote && relay != nil {
+	if (s.remote || s.carrier != nil) && relay != nil {
 		withheldRelay = decisionPending(relay.Decision())
 		relay.WithholdForRuntime()
 	}
@@ -466,10 +524,17 @@ func decisionPending(decision toolrelay.Decision) bool {
 	return !decision.Delivered && decision.Gap == ""
 }
 
-// Close closes the relay, if any. It is idempotent and nil-safe.
+// Close closes the tool channel and the relay, if any. It is idempotent and
+// nil-safe.
 func (s *ToolSession) Close() error {
 	if s == nil {
 		return nil
+	}
+	s.mu.Lock()
+	channel := s.channel
+	s.mu.Unlock()
+	if channel != nil {
+		channel.close()
 	}
 	if relay := s.currentRelay(); relay != nil {
 		return relay.Close()

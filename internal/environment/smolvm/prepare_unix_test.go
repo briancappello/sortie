@@ -106,6 +106,16 @@ func sha256Hex(s string) string {
 
 var listArgv = []string{"machine", "ls", "--json"}
 
+// toolListenerCalls are the calls that start the guest side of the tool
+// channel in the running VM sortie-VM-1: the socat check, then the
+// detached listener.
+func toolListenerCalls() [][]string {
+	return [][]string{
+		append([]string{"machine", "exec", "--name", "sortie-VM-1", "--"}, toolListenerCheck...),
+		append([]string{"machine", "exec", "--name", "sortie-VM-1", "-d", "--"}, toolListenerArgv...),
+	}
+}
+
 func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 	t.Parallel()
 
@@ -130,7 +140,6 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 	}
 
 	control := filepath.Join(f.ws.HostPath, ".sortie")
-	binDir := filepath.Join(f.stateDir, "env-bin")
 	socket := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock")
 	wantCreate := []string{
 		"machine", "create", "--name", "sortie-VM-1", "--from", f.pack,
@@ -148,17 +157,19 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 		"--credential", "github=GH_TOKEN@api.github.com,*.githubusercontent.com",
 		"--ssh-agent",
 		"-v", control + ":/run/sortie/control",
-		"-v", binDir + ":/opt/sortie:ro",
 		"--mount-socket", socket + ":/run/sortie/tools.sock",
 	}
-	want := [][]string{listArgv, wantCreate, {"machine", "start", "--name", "sortie-VM-1"}}
+	want := append([][]string{listArgv, wantCreate, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
 	got := f.fake.argvs()
 	if !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 		t.Fatalf("calls:\n got %q\nwant %q", got, want)
 	}
 	assertOnlyGrantedResources(t, got[1])
 
-	for _, dir := range []string{control, binDir, filepath.Dir(socket)} {
+	if _, err := os.Stat(filepath.Join(f.stateDir, "env-bin")); err == nil {
+		t.Error("Prepare() created env-bin, want no binary directory: the guest needs no Sortie binary")
+	}
+	for _, dir := range []string{control, filepath.Dir(socket)} {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 			t.Errorf("Stat(%s) = %v, %v, want a directory created before the VM", dir, info, err)
 		}
@@ -168,9 +179,9 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 	}
 }
 
-// assertOnlyGrantedResources fails unless create holds exactly the two
-// directory mounts and the socket mount, and none of the flags that give
-// a VM more of the host.
+// assertOnlyGrantedResources fails unless create holds exactly the control
+// directory mount and the socket mount, and none of the flags that give a
+// VM more of the host.
 func assertOnlyGrantedResources(t *testing.T, create []string) {
 	t.Helper()
 	forbidden := []string{
@@ -186,8 +197,8 @@ func assertOnlyGrantedResources(t *testing.T, create []string) {
 		}
 		counts[arg]++
 	}
-	if counts["-v"] != 2 || counts["--mount-socket"] != 1 {
-		t.Errorf("create argv has %d -v and %d --mount-socket, want 2 and 1", counts["-v"], counts["--mount-socket"])
+	if counts["-v"] != 1 || counts["--mount-socket"] != 1 {
+		t.Errorf("create argv has %d -v and %d --mount-socket, want 1 and 1", counts["-v"], counts["--mount-socket"])
 	}
 }
 
@@ -236,7 +247,7 @@ func TestPrepare_StartSeesSortiesEnvironment(t *testing.T) {
 		t.Fatalf("Prepare() error = %v", err)
 	}
 	calls := f.fake.calls()
-	start := calls[len(calls)-1]
+	start := calls[len(calls)-1-len(toolListenerCalls())]
 	if start.Args[1] != "start" || start.Env[variable] != "placeholder-value" {
 		t.Errorf("last call = %+v, want machine start with %s in its environment", start, variable)
 	}
@@ -253,8 +264,9 @@ func TestPrepare_RunningVMIsLeftAlone(t *testing.T) {
 	if err != nil || res.CreatedNow {
 		t.Fatalf("Prepare() = %+v, %v, want CreatedNow false", res, err)
 	}
-	if got := f.fake.argvs(); !slices.EqualFunc(got, [][]string{listArgv}, slices.Equal[[]string]) {
-		t.Errorf("calls = %q, want only the listing", got)
+	want := append([][]string{listArgv}, toolListenerCalls()...)
+	if got := f.fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
+		t.Errorf("calls = %q, want the listing and the tool listener %q", got, want)
 	}
 }
 
@@ -270,7 +282,7 @@ func TestPrepare_StoppedVMIsStarted(t *testing.T) {
 		if err != nil || res.CreatedNow {
 			t.Fatalf("Prepare() with a %s VM = %+v, %v, want CreatedNow false", state, res, err)
 		}
-		want := [][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}
+		want := append([][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
 		if got := f.fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 			t.Errorf("calls with a %s VM = %q, want %q", state, got, want)
 		}
@@ -303,9 +315,10 @@ func TestPrepare_VMPredatingTheWorkspaceIsRecreated(t *testing.T) {
 			t.Fatalf("%s: Prepare() = %+v, %v, want CreatedNow true", name, res, err)
 		}
 		got := f.fake.argvs()
-		if len(got) != 4 || !slices.Equal(got[1], []string{"machine", "delete", "-f", "--name", "sortie-VM-1"}) ||
-			got[2][1] != "create" || got[3][1] != "start" {
-			t.Errorf("%s: calls = %q, want listing, delete, create, start", name, got)
+		if len(got) != 6 || !slices.Equal(got[1], []string{"machine", "delete", "-f", "--name", "sortie-VM-1"}) ||
+			got[2][1] != "create" || got[3][1] != "start" ||
+			!slices.EqualFunc(got[4:], toolListenerCalls(), slices.Equal[[]string]) {
+			t.Errorf("%s: calls = %q, want listing, delete, create, start, and the tool listener", name, got)
 		}
 	}
 }
@@ -423,10 +436,9 @@ func TestPrepare_KeyBinKeepsItsOwnStateDirectory(t *testing.T) {
 		t.Fatalf("Prepare(key bin) error = %v", err)
 	}
 	create := strings.Join(f.fake.argvs()[1], " ")
-	binDir := filepath.Join(f.stateDir, "env-bin")
 	socket := filepath.Join(f.stateDir, "env", "bin", "tools.sock")
-	if !strings.Contains(create, "-v "+binDir+":/opt/sortie:ro") || !strings.Contains(create, "--mount-socket "+socket+":") {
-		t.Errorf("create argv = %q, want the binary directory %s apart from the socket %s", create, binDir, socket)
+	if !strings.Contains(create, "--mount-socket "+socket+":") {
+		t.Errorf("create argv = %q, want the socket %s", create, socket)
 	}
 }
 
@@ -483,29 +495,76 @@ func TestPrepare_ReportsThePackDigestTheVMRecords(t *testing.T) {
 	}
 }
 
-func TestToolSocketPath_IsTheMountedSocket(t *testing.T) {
+func TestToolChannel_IsTheMountedSocket(t *testing.T) {
 	t.Parallel()
 
 	f := newPrepareFixture(t, fakeState{}, nil)
 	if _, err := f.env.Prepare(context.Background(), f.ws); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	got, err := f.env.ToolSocketPath(f.ws)
+	got, err := f.env.ToolChannel(f.ws)
 	if err != nil {
-		t.Fatalf("ToolSocketPath() error = %v", err)
+		t.Fatalf("ToolChannel() error = %v", err)
 	}
-	if want := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock"); got != want {
-		t.Errorf("ToolSocketPath() = %q, want %q", got, want)
+	if want := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock"); got.HostSocket != want || got.GuestPort != GuestToolPort {
+		t.Errorf("ToolChannel() = %+v, want socket %q at guest port %d", got, want, GuestToolPort)
 	}
 	argvs := f.fake.argvs()
 	if len(argvs) < 2 {
 		t.Fatalf("calls = %q, want a create", argvs)
 	}
 	create := strings.Join(argvs[1], " ")
-	if !strings.Contains(create, "--mount-socket "+got+":"+f.env.GuestToolSocketPath()) {
-		t.Errorf("create argv %q does not mount %q at %q", create, got, f.env.GuestToolSocketPath())
+	if !strings.Contains(create, "--mount-socket "+got.HostSocket+":"+GuestToolSocket) {
+		t.Errorf("create argv %q does not mount %q at %q", create, got.HostSocket, GuestToolSocket)
 	}
-	if _, err := f.env.ToolSocketPath(environment.Workspace{Key: "../x"}); err == nil {
-		t.Error("ToolSocketPath(../x) succeeded, want an error")
+	if _, err := f.env.ToolChannel(environment.Workspace{Key: "../x"}); err == nil {
+		t.Error("ToolChannel(../x) succeeded, want an error")
+	}
+}
+
+// A pack without socat cannot carry the tool channel into the VM, so
+// preparation fails with an error that says so.
+func TestPrepare_RefusesAPackWithoutSocat(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, nil)
+	f.fake.setState(fakeState{Fail: map[string]fakeFailure{"machine exec": {Exit: noSocatExit}}})
+	_, err := f.env.Prepare(context.Background(), f.ws)
+	if err == nil || !strings.Contains(err.Error(), "socat") {
+		t.Fatalf("Prepare() error = %v, want a refusal naming socat", err)
+	}
+	execs := 0
+	for _, argv := range f.fake.argvs() {
+		if slices.Contains(argv, "-d") {
+			t.Errorf("calls include %q, want no listener started without socat", argv)
+		}
+		if argv[1] == "exec" {
+			execs++
+		}
+	}
+	if execs != toolListenerAttempts {
+		t.Errorf("socat checks = %d, want %d: a VM that just started can lack its root filesystem for a moment", execs, toolListenerAttempts)
+	}
+}
+
+// A check that fails for another reason, as a guest still settling right
+// after its start can, is retried and its last error reported.
+func TestPrepare_RetriesAFailedToolListenerCheck(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, nil)
+	f.fake.setState(fakeState{Fail: map[string]fakeFailure{"machine exec": {Exit: 127, Stderr: "Error: guest not ready"}}})
+	_, err := f.env.Prepare(context.Background(), f.ws)
+	if err == nil || strings.Contains(err.Error(), "has no socat") {
+		t.Fatalf("Prepare() error = %v, want a check failure that does not blame socat", err)
+	}
+	execs := 0
+	for _, argv := range f.fake.argvs() {
+		if argv[1] == "exec" {
+			execs++
+		}
+	}
+	if execs != toolListenerAttempts {
+		t.Errorf("socat checks = %d, want %d", execs, toolListenerAttempts)
 	}
 }

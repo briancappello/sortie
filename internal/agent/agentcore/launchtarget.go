@@ -115,22 +115,14 @@ func (t LaunchTarget) Remote() bool {
 	return t.RemoteCommand != "" || t.Carrier != nil
 }
 
-// MCPInGuest reports whether the MCP configuration Sortie generated in
-// the workspace is valid where the agent runs, so a remote launch may
-// pass it to the agent: true in carrier mode only. A local launch reads
-// it on this host; an SSH launch gets no MCP servers.
-func (t LaunchTarget) MCPInGuest() bool {
-	return t.Carrier != nil
-}
-
-// GuestPath returns the path at which the agent sees hostPath, a path in
-// the workspace on this host: the carrier's mapping in carrier mode, and
-// hostPath itself in local and SSH mode.
-func (t LaunchTarget) GuestPath(hostPath string) string {
+// RuntimeWorkspace returns the workspace path where the agent runs: the
+// carrier's workspace in carrier mode, and WorkspacePath in local and SSH
+// mode.
+func (t LaunchTarget) RuntimeWorkspace() string {
 	if t.Carrier == nil {
-		return hostPath
+		return t.WorkspacePath
 	}
-	return t.Carrier.GuestPath(hostPath)
+	return t.Carrier.Workspace()
 }
 
 // ResolveLaunchTarget resolves the workspace path and agent binary for a
@@ -427,6 +419,12 @@ type HostLaunch struct {
 	// exec.Command's variadic arguments.
 	Args []string
 
+	// Env holds KEY=VALUE entries the host process must carry in its
+	// environment on top of what the caller sets: in carrier mode, the
+	// values of the secret variables the carrier passes to the agent by
+	// name. The caller appends them last.
+	Env []string
+
 	ssh sshutil.SSHLaunch
 }
 
@@ -473,23 +471,26 @@ func (l HostLaunch) WaitOutcome(ctx context.Context) (sshutil.ForwardOutcome, er
 // It must not be called in local mode. A carrier that cannot build the
 // launch yields a port_exit [*domain.AgentError].
 func (t LaunchTarget) RemoteLaunch(args []string, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
-	return t.remoteLaunch(args, nil, settings)
+	return t.remoteLaunch(args, LaunchTools{}, settings)
 }
 
-// remoteLaunch is [LaunchTarget.RemoteLaunch] with forward, the reverse
-// forward an SSH launch requests. A carrier launch ignores forward.
-func (t LaunchTarget) remoteLaunch(args []string, forward *sshutil.ReverseForward, settings []sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
+// remoteLaunch is [LaunchTarget.RemoteLaunch] with tools: an SSH launch
+// requests tools.Forward, and a carrier launch appends tools.Args to the
+// agent's arguments and passes each tools.Secrets entry by name, its value
+// returned in [HostLaunch.Env].
+func (t LaunchTarget) remoteLaunch(args []string, tools LaunchTools, settings []sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
 	if t.Carrier == nil {
 		opts := t.SSHOptions(settings...)
-		opts.Forward = forward
+		opts.Forward = tools.Forward
 		launch := sshutil.BuildSSHLaunch(t.SSHHost, t.WorkspacePath, t.RemoteCommand, args, opts)
 		return HostLaunch{Path: t.Command, Args: launch.Args, ssh: launch}, nil
 	}
 
-	argv := make([]string, 0, 1+len(t.Args)+len(args))
+	argv := make([]string, 0, 1+len(t.Args)+len(args)+len(tools.Args))
 	argv = append(argv, t.Command)
 	argv = append(argv, t.Args...)
 	argv = append(argv, args...)
+	argv = append(argv, tools.Args...)
 
 	sessionNames := make(map[string]bool, len(t.SessionEnv))
 	env := make([]string, 0, len(t.SessionEnv))
@@ -514,7 +515,17 @@ func (t LaunchTarget) remoteLaunch(args []string, forward *sshutil.ReverseForwar
 		unset = slices.DeleteFunc(slices.Clone(t.WithheldEnv), func(name string) bool { return sessionNames[name] })
 	}
 
-	hostArgv, err := t.Carrier.LaunchArgv(domain.CarrierLaunch{Argv: argv, Env: env, AgentEnv: agentEnv, Unset: unset})
+	var secretNames, secretEnv []string
+	for _, entry := range tools.Secrets {
+		if added[entry.Name] || sessionNames[entry.Name] {
+			continue
+		}
+		added[entry.Name] = true
+		secretNames = append(secretNames, entry.Name)
+		secretEnv = append(secretEnv, entry.Name+"="+entry.Value)
+	}
+
+	hostArgv, err := t.Carrier.LaunchArgv(domain.CarrierLaunch{Argv: argv, Env: env, AgentEnv: agentEnv, SecretEnv: secretNames, Unset: unset})
 	if err == nil && len(hostArgv) == 0 {
 		err = errors.New("the execution environment returned an empty launch command")
 	}
@@ -525,7 +536,7 @@ func (t LaunchTarget) remoteLaunch(args []string, forward *sshutil.ReverseForwar
 			Err:     err,
 		}
 	}
-	return HostLaunch{Path: hostArgv[0], Args: hostArgv[1:]}, nil
+	return HostLaunch{Path: hostArgv[0], Args: hostArgv[1:], Env: secretEnv}, nil
 }
 
 // SessionLaunch builds the host process of one launch of the agent
@@ -541,18 +552,17 @@ func (t LaunchTarget) remoteLaunch(args []string, forward *sshutil.ReverseForwar
 //
 // It fails only where [LaunchTarget.RemoteLaunch] does.
 func (t LaunchTarget) SessionLaunch(args []string, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
-	return t.ForwardedSessionLaunch(args, nil, settings...)
+	return t.ToolSessionLaunch(args, LaunchTools{}, settings...)
 }
 
-// ForwardedSessionLaunch is [LaunchTarget.SessionLaunch] for a session
-// whose SSH launch requests forward, the reverse forward that carries
-// Sortie's tool server to the remote host. A nil forward, a local launch,
-// and a carrier launch request none.
-func (t LaunchTarget) ForwardedSessionLaunch(args []string, forward *sshutil.ReverseForward, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
+// ToolSessionLaunch is [LaunchTarget.SessionLaunch] for a session whose
+// launch carries tools, Sortie's tool server, as [ToolSession.Launch]
+// returns them. A local launch carries none.
+func (t LaunchTarget) ToolSessionLaunch(args []string, tools LaunchTools, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
 	var launch HostLaunch
 	if t.Remote() {
 		var agentErr *domain.AgentError
-		launch, agentErr = t.remoteLaunch(args, forward, settings)
+		launch, agentErr = t.remoteLaunch(args, tools, settings)
 		if agentErr != nil {
 			return HostLaunch{}, agentErr
 		}

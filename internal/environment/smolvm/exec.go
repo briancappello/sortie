@@ -67,7 +67,9 @@ func (e *Environment) Command(ctx context.Context, ws environment.Workspace, spe
 // byte-exact pipe, in the guest workspace. The guest command's
 // environment is [environment.GuestEnv] of launch.Env, then
 // launch.AgentEnv unchanged, then the pass_env variables as
-// [Environment.Command] passes them. A name in launch.Unset is removed
+// [Environment.Command] passes them, and each launch.SecretEnv name the
+// same way: smolvm resolves its value from the host process's environment,
+// so it is never in the argv. A name in launch.Unset is removed
 // in the guest with env -u before the agent starts, so the agent runs
 // without it even where the VM's image sets it.
 func (e *Environment) LaunchArgv(ws environment.Workspace, launch domain.CarrierLaunch) ([]string, error) {
@@ -93,10 +95,17 @@ func (e *Environment) LaunchArgv(ws environment.Workspace, launch domain.Carrier
 		argv = append(argv, "--")
 		argv = append(argv, launch.Argv...)
 	}
+	secrets := e.passEnv(env)
+	for _, secret := range launch.SecretEnv {
+		if !validEnvName(secret) {
+			return nil, fmt.Errorf("smolvm environment: %q is not a variable name to pass", secret)
+		}
+		secrets = append(secrets, secret+"="+secret)
+	}
 	opts := ExecOptions{
 		Workdir:     GuestWorkspace,
 		Env:         env,
-		SecretEnv:   e.passEnv(env),
+		SecretEnv:   secrets,
 		Interactive: true,
 	}
 	return append([]string{e.cli.Binary()}, ExecArgs(name, opts, argv)...), nil
@@ -264,4 +273,20 @@ func (e *Environment) AfterCreate(ctx context.Context, ws environment.Workspace)
 		return fmt.Errorf("link %s to %s in the VM: %w", link, GuestControlDir, err)
 	}
 	return nil
+}
+
+// validEnvName reports whether name is a POSIX environment variable name.
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }

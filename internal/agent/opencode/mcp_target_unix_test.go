@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
@@ -18,7 +19,8 @@ import (
 // TestMCPServersByLaunchTarget asserts, for each launch target, whether
 // the session passes the generated MCP servers to the runtime. opencode
 // inlines them from the host copy of the file into the turn's
-// configuration, so the path itself never reaches the runtime.
+// configuration, so the path itself never reaches the runtime. A carried
+// session names Sortie's tool server at its tool channel's guest port.
 func TestMCPServersByLaunchTarget(t *testing.T) {
 	// Not parallel: the SSH case puts a fake ssh first on PATH.
 	tests := []struct {
@@ -41,6 +43,9 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 			if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"sortie-tools":{"command":"/usr/local/bin/sortie","args":["mcp-server"]}}}`), 0o600); err != nil {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
+			if tt.target == "carrier" {
+				mcpPath = agenttest.WriteHTTPToolServerConfig(t, ws)
+			}
 			command := fakeMinimalRuntime(t)
 			params := domain.StartSessionParams{
 				WorkspacePath: ws,
@@ -55,7 +60,7 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 				t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 				params.SSHHost = "build-host"
 			case "carrier":
-				carrier = &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace"}
+				carrier = &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace", Channel: agenttest.NewToolChannel(t)}
 				params.Carrier = carrier
 			}
 
@@ -87,9 +92,15 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 			if turn.Argv[0] != command {
 				t.Errorf("turn argv = %q, want it to run %q", turn.Argv, command)
 			}
-			idx := slices.IndexFunc(turn.AgentEnv, func(e string) bool { return strings.HasPrefix(e, "OPENCODE_CONFIG_CONTENT=") })
-			if idx < 0 || !strings.Contains(turn.AgentEnv[idx], "sortie-tools") {
-				t.Errorf("turn agent env = %q, want OPENCODE_CONFIG_CONTENT naming the MCP servers", turn.AgentEnv)
+			// The configuration names the tool server at the channel's
+			// guest port, so it travels by name, beside the bearer.
+			if slices.ContainsFunc(turn.AgentEnv, func(e string) bool { return strings.HasPrefix(e, "OPENCODE_CONFIG_CONTENT=") }) {
+				t.Errorf("turn agent env = %q, want OPENCODE_CONFIG_CONTENT passed by name, not in the argv", turn.AgentEnv)
+			}
+			for _, name := range []string{"OPENCODE_CONFIG_CONTENT", mcpconfig.BearerEnv} {
+				if !slices.Contains(turn.SecretEnv, name) {
+					t.Errorf("turn SecretEnv = %q, want %s", turn.SecretEnv, name)
+				}
 			}
 		})
 	}

@@ -13,8 +13,8 @@ import (
 const versionCheckTimeout = 10 * time.Second
 
 // CheckHost checks that this host can run the smolvm kind as cfg
-// configures it. It refuses a host other than Linux, whose Sortie
-// binary the Linux guest could not run, and a credential binding that
+// configures it. It refuses a host other than Linux, the only host the
+// kind is proven on, and a credential binding that
 // sets a header, which smolvm's credential flag cannot express, and runs
 // the configured binary's version command once, refusing a binary that cannot be run
 // or whose version is outside [SupportedVersion]. Every refusal is a
@@ -23,7 +23,7 @@ func CheckHost(cfg config.EnvironmentConfig) error {
 	if runtime.GOOS != "linux" {
 		return &config.ConfigError{
 			Field: "environment.kind",
-			Message: fmt.Sprintf("smolvm VMs run this host's Sortie binary, which must be a Linux executable; this host is %s",
+			Message: fmt.Sprintf("the smolvm environment runs only on a Linux host; this host is %s",
 				runtime.GOOS),
 		}
 	}

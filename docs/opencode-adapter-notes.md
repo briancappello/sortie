@@ -144,7 +144,7 @@ Work evidence for the turn is this turn's own parsed assistant parts, text, reas
 The document is set only in the turn's own environment (local), on the SSH carrier, or on an execution environment's carrier, never in the shared managed-environment builder. So the export and delete helper invocations never carry it and never start a tool server of their own.
 
 On an SSH launch the `mcp` member names Sortie's tool server by the address of the launch's reverse forward and each operator HTTP server by its URL, with header values carried by reference to environment variables Sortie sets, and operator stdio servers are left out. The document depends on the forward's outcome, so it travels on the SSH carrier. A refused or unconfirmed forward carries the document without Sortie's entry, and the session opens with the gap declared.
-In an execution environment's VM the document's `sortie-tools` entry is the relay, `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, and the document travels on the carrier's argv as `-e OPENCODE_CONFIG_CONTENT=...`.
+In an execution environment's VM the document's `sortie-tools` entry is the HTTP server at the environment's tool channel, `http://127.0.0.1:47800/mcp`, and the document and the bearer travel by name, as `--secret-env`, not on the carrier's argv.
 
 The `run` output has no MCP startup status. A server that fails to start shows up only as failing tool calls. The runtime starts each server in the background and does not wait for it before the turn begins.
 

@@ -1052,3 +1052,30 @@ func TestResolveToolServerBinary(t *testing.T) {
 		}
 	})
 }
+
+// An environment that runs the agent elsewhere shares .sortie with it, so
+// the generated file, whose env block can carry credentials, is written to
+// the orchestrator-only directory, and one left in .sortie is removed.
+func TestGenerateMCPConfig_HostOnly(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if _, err := GenerateMCPConfig(mcpParams(dir)); err != nil {
+		t.Fatalf("GenerateMCPConfig() shared: %v", err)
+	}
+	params := mcpParams(dir)
+	params.HostOnly = true
+	out, err := GenerateMCPConfig(params)
+	if err != nil {
+		t.Fatalf("GenerateMCPConfig() host-only: %v", err)
+	}
+	if want := filepath.Join(dir, ".sortie-host", "mcp.json"); out != want {
+		t.Errorf("GenerateMCPConfig() = %q, want %q", out, want)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Errorf("Stat(%q) = %v, want the file", out, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".sortie", "mcp.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(.sortie/mcp.json) = %v, want it removed from the shared directory", err)
+	}
+}

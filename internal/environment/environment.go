@@ -189,26 +189,14 @@ type Carrier interface {
 	ConnectionFailed(ws Workspace, exitCode int, stderrTail []string) bool
 }
 
-// ToolSocketer is implemented by an environment whose instances reach
-// Sortie's tool server through a Unix socket on this host instead of
-// starting it themselves. Sortie listens on the socket for each such
-// workspace and serves the tool server on this host for every
-// connection.
-type ToolSocketer interface {
-	// ToolSocketPath returns the host path of ws's tool socket. Its
-	// directory belongs to ws alone, outside the workspace and out of
-	// the instance's reach, and is removed with ws's environment, so a
-	// caller may keep its own files for ws there.
-	ToolSocketPath(ws Workspace) (string, error)
-
-	// GuestToolSocketPath returns the path of the tool socket inside the
-	// environment.
-	GuestToolSocketPath() string
-
-	// GuestSortieBinaryPath returns the path, inside the environment, of
-	// the copy of the Sortie binary the environment keeps current. Its
-	// mcp-relay subcommand connects the agent to the tool socket.
-	GuestSortieBinaryPath() string
+// ToolChanneler is implemented by an environment whose instances reach a
+// tool server on this host through a channel the environment keeps open,
+// as [domain.ToolChannel] describes.
+type ToolChanneler interface {
+	// ToolChannel returns ws's channel. The directory of its host socket
+	// belongs to ws alone, outside the workspace and out of the instance's
+	// reach, and is removed with ws's environment.
+	ToolChannel(ws Workspace) (domain.ToolChannel, error)
 }
 
 // EnvForwarder is implemented by an environment that runs elsewhere and
@@ -252,8 +240,20 @@ func (b boundCarrier) LaunchArgv(launch domain.CarrierLaunch) ([]string, error) 
 	return b.carrier.LaunchArgv(b.ws, launch)
 }
 
-func (b boundCarrier) GuestPath(hostPath string) string {
-	return b.ws.GuestPathOf(hostPath)
+func (b boundCarrier) Workspace() string {
+	return b.ws.GuestPath
+}
+
+func (b boundCarrier) ToolChannel() (domain.ToolChannel, bool) {
+	channeler, ok := b.carrier.(ToolChanneler)
+	if !ok {
+		return domain.ToolChannel{}, false
+	}
+	channel, err := channeler.ToolChannel(b.ws)
+	if err != nil {
+		return domain.ToolChannel{}, false
+	}
+	return channel, true
 }
 
 func (b boundCarrier) ConnectionFailed(exitCode int, stderrTail []string) bool {
@@ -335,11 +335,6 @@ type Params struct {
 
 	// WorkflowPath is the path of the workflow file.
 	WorkflowPath string
-
-	// SortieBinary is the absolute path of the Sortie binary an
-	// environment that runs elsewhere gives its instances a copy of.
-	// Empty is the running executable.
-	SortieBinary string
 
 	// Logger receives the environment's diagnostics. Never nil when
 	// the orchestrator constructs an environment.

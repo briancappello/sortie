@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -51,8 +50,8 @@ func TestResolveLaunchTarget_Carrier(t *testing.T) {
 			if target.RemoteCommand != "" || target.SSHHost != "" {
 				t.Errorf("RemoteCommand, SSHHost = %q, %q, want both empty", target.RemoteCommand, target.SSHHost)
 			}
-			if !target.Remote() || !target.MCPInGuest() {
-				t.Errorf("Remote(), MCPInGuest() = %v, %v, want true, true", target.Remote(), target.MCPInGuest())
+			if !target.Remote() || target.RuntimeWorkspace() != carrier.Workspace() {
+				t.Errorf("Remote(), RuntimeWorkspace() = %v, %q, want true, %q", target.Remote(), target.RuntimeWorkspace(), carrier.Workspace())
 			}
 			if target.Carrier != carrier || !slices.Equal(target.SessionEnv, session) {
 				t.Errorf("target = %+v, want the carrier and session env passed through", target)
@@ -79,18 +78,19 @@ func TestResolveLaunchTarget_Carrier(t *testing.T) {
 	})
 }
 
-func TestLaunchTarget_RemoteAndMCPInGuest(t *testing.T) {
+func TestLaunchTarget_RemoteAndRuntimeWorkspace(t *testing.T) {
 	t.Parallel()
 
+	ws := t.TempDir()
 	tests := []struct {
-		name           string
-		target         LaunchTarget
-		wantRemote     bool
-		wantMCPInGuest bool
+		name          string
+		target        LaunchTarget
+		wantRemote    bool
+		wantWorkspace string
 	}{
-		{name: "local", target: LaunchTarget{Command: "/bin/agent"}},
-		{name: "ssh", target: LaunchTarget{Command: "/usr/bin/ssh", RemoteCommand: "agent", SSHHost: "h"}, wantRemote: true},
-		{name: "carrier", target: LaunchTarget{Command: "agent", Carrier: &agenttest.FakeCarrier{}}, wantRemote: true, wantMCPInGuest: true},
+		{name: "local", target: LaunchTarget{Command: "/bin/agent", WorkspacePath: ws}, wantWorkspace: ws},
+		{name: "ssh", target: LaunchTarget{Command: "/usr/bin/ssh", WorkspacePath: ws, RemoteCommand: "agent", SSHHost: "h"}, wantRemote: true, wantWorkspace: ws},
+		{name: "carrier", target: LaunchTarget{Command: "agent", WorkspacePath: ws, Carrier: &agenttest.FakeCarrier{GuestWorkspace: "/workspace"}}, wantRemote: true, wantWorkspace: "/workspace"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,39 +98,45 @@ func TestLaunchTarget_RemoteAndMCPInGuest(t *testing.T) {
 			if got := tt.target.Remote(); got != tt.wantRemote {
 				t.Errorf("Remote() = %v, want %v", got, tt.wantRemote)
 			}
-			if got := tt.target.MCPInGuest(); got != tt.wantMCPInGuest {
-				t.Errorf("MCPInGuest() = %v, want %v", got, tt.wantMCPInGuest)
+			if got := tt.target.RuntimeWorkspace(); got != tt.wantWorkspace {
+				t.Errorf("RuntimeWorkspace() = %q, want %q", got, tt.wantWorkspace)
 			}
 		})
 	}
 }
 
-func TestLaunchTarget_GuestPath(t *testing.T) {
+// A carrier launch appends the tool arguments to the agent's and passes
+// each tool secret by name, with its value returned for the host process
+// only, never in the argv.
+func TestLaunchTarget_ToolSessionLaunch_CarrierSecrets(t *testing.T) {
 	t.Parallel()
 
-	ws := t.TempDir()
-	mcp := filepath.Join(ws, ".sortie", "mcp.json")
-	outside := filepath.Join(t.TempDir(), "operator-mcp.json")
-	carrier := &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace"}
-
-	tests := []struct {
-		name   string
-		target LaunchTarget
-		in     string
-		want   string
-	}{
-		{name: "local is the identity", target: LaunchTarget{Command: "/bin/agent", WorkspacePath: ws}, in: mcp, want: mcp},
-		{name: "ssh is the identity", target: LaunchTarget{Command: "/usr/bin/ssh", WorkspacePath: ws, RemoteCommand: "agent", SSHHost: "h"}, in: mcp, want: mcp},
-		{name: "carrier maps the control directory", target: LaunchTarget{Command: "agent", WorkspacePath: ws, Carrier: carrier}, in: mcp, want: "/workspace/.sortie/mcp.json"},
-		{name: "carrier keeps a path outside the workspace", target: LaunchTarget{Command: "agent", WorkspacePath: ws, Carrier: carrier}, in: outside, want: outside},
+	carrier := &agenttest.FakeCarrier{GuestWorkspace: "/workspace"}
+	target := LaunchTarget{Command: "agent", Args: []string{"run"}, WorkspacePath: t.TempDir(), Carrier: carrier,
+		SessionEnv: []domain.EnvVar{{Name: "SORTIE_ISSUE_ID", Value: "1"}}}
+	tools := LaunchTools{
+		Args:    []string{"--mcp-config", `{"mcpServers":{}}`},
+		Secrets: []sshutil.EnvVar{{Name: "SORTIE_MCP_BEARER", Value: "bearer-value-0123456789"}, {Name: "SORTIE_ISSUE_ID", Value: "shadow"}},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tt.target.GuestPath(tt.in); got != tt.want {
-				t.Errorf("GuestPath(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
+	launch, agentErr := target.ToolSessionLaunch([]string{"-p"}, tools)
+	if agentErr != nil {
+		t.Fatalf("ToolSessionLaunch() error = %v", agentErr)
+	}
+	got := carrier.Launches()
+	if len(got) != 1 {
+		t.Fatalf("carrier launches = %d, want 1", len(got))
+	}
+	if want := []string{"agent", "run", "-p", "--mcp-config", `{"mcpServers":{}}`}; !slices.Equal(got[0].Argv, want) {
+		t.Errorf("carrier argv = %q, want %q", got[0].Argv, want)
+	}
+	if !slices.Equal(got[0].SecretEnv, []string{"SORTIE_MCP_BEARER"}) {
+		t.Errorf("SecretEnv = %q, want only the bearer: a session variable keeps its own value", got[0].SecretEnv)
+	}
+	if !slices.Equal(launch.Env, []string{"SORTIE_MCP_BEARER=bearer-value-0123456789"}) {
+		t.Errorf("HostLaunch.Env = %q, want the bearer for the host process", launch.Env)
+	}
+	if strings.Contains(strings.Join(append([]string{launch.Path}, launch.Args...), " "), "bearer-value-0123456789") {
+		t.Error("the bearer value is in the host argv")
 	}
 }
 
