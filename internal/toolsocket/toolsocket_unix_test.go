@@ -44,6 +44,9 @@ func runHelper() {
 	for sc.Scan() {
 		fmt.Printf("%s:%s\n", os.Getenv("SORTIE_ISSUE_ID"), sc.Text())
 	}
+	if sc.Err() != nil {
+		os.Exit(1)
+	}
 	os.Exit(0)
 }
 

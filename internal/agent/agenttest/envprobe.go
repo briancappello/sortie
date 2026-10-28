@@ -84,6 +84,9 @@ func ReadEnvProbe(t testing.TB, path string) []EnvProbeLaunch {
 		}
 		launches = append(launches, launch)
 	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("read probe log: %v", err)
+	}
 	return launches
 }
 
