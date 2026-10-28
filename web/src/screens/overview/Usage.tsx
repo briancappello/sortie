@@ -1,6 +1,8 @@
 import { BudgetMeter } from "@/components/BudgetMeter";
 import { Parts } from "@/components/Parts";
-import { fmtAgo, fmtAmount, fmtPercent, fmtUtcStamp, parseInstant } from "@/lib/format";
+import { fmtAmount, fmtPercent, fmtUtcStamp, parseInstant } from "@/lib/format";
+
+import { SpendBudget, spendWindows } from "./SpendBudget";
 
 import type { StateResponse } from "@/api/types.gen";
 
@@ -15,9 +17,10 @@ const STATUS_WORDS: Readonly<Record<string, string>> = {
   exhausted: "Usage limit reached",
 };
 
-function whenText(at: string, now: number): string {
+// A report under an hour old is current enough to need no time beside it.
+function isStale(at: string, now: number): boolean {
   const instant = parseInstant(at);
-  return instant !== null && now - instant < HOUR_MS ? fmtAgo(at, now) : fmtUtcStamp(at);
+  return instant === null || now - instant >= HOUR_MS;
 }
 
 function isDrawn(window: UsageWindow, now: number): boolean {
@@ -48,8 +51,8 @@ function UsageWindowBlock({ window, memberReportedAt, now }: UsageWindowBlockPro
     parts.push(statusWords);
   }
   parts.push(resetsAt === null ? "Reset time not reported" : `Resets ${fmtUtcStamp(resetsAt)}`);
-  if (reportedAt !== memberReportedAt) {
-    parts.push(`Reported ${whenText(reportedAt, now)}`);
+  if (reportedAt !== memberReportedAt && isStale(reportedAt, now)) {
+    parts.push(`Reported ${fmtUtcStamp(reportedAt)}`);
   }
   return (
     <div className="flex flex-col gap-xxs">
@@ -82,53 +85,66 @@ function UsageWindowBlock({ window, memberReportedAt, now }: UsageWindowBlockPro
 
 interface UsageKindBlockProps {
   kind: string;
-  usage: KindUsage | undefined;
+  usage: KindUsage;
+  windows: UsageWindow[];
   now: number;
 }
 
-function UsageKindBlock({ kind, usage, now }: UsageKindBlockProps) {
-  const windows = (usage?.windows ?? []).filter((window) => isDrawn(window, now));
+function UsageKindBlock({ kind, usage, windows, now }: UsageKindBlockProps) {
   return (
     <div className="flex flex-col gap-sm">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm text-body-md">
         <h3 className="text-ink">{kind}</h3>
-        <span className="text-body-sm text-ink-muted">
-          {usage === undefined ? "Not reported" : `Reported ${whenText(usage.reported_at, now)}`}
-        </span>
+        {isStale(usage.reported_at, now) ? (
+          <span className="text-body-sm text-ink-muted">
+            Reported {fmtUtcStamp(usage.reported_at)}
+          </span>
+        ) : undefined}
       </div>
-      {usage === undefined
-        ? undefined
-        : windows.map((window, index) => (
-            <UsageWindowBlock
-              key={index}
-              window={window}
-              memberReportedAt={usage.reported_at}
-              now={now}
-            />
-          ))}
+      {windows.map((window, index) => (
+        <UsageWindowBlock
+          key={index}
+          window={window}
+          memberReportedAt={usage.reported_at}
+          now={now}
+        />
+      ))}
     </div>
   );
 }
 
-/** Props of {@link UsageLimits}. */
-export interface UsageLimitsProps {
+/** Props of {@link Usage}. */
+export interface UsageProps {
+  ceiling: StateResponse["spend_ceiling"];
   rateLimits: StateResponse["rate_limits"];
-  /** The listed agent kinds, one block each whether or not it reported; empty while `config` is not served. */
+  /** The listed agent kinds in display order; empty while `config` is not served. */
   kinds: readonly string[];
   /** Overview's server-corrected clock in epoch milliseconds. */
   now: number;
 }
 
-/** Renders the Usage limits section: one block per listed agent kind with the provider usage windows it last reported. */
-export function UsageLimits({ rateLimits, kinds, now }: UsageLimitsProps) {
-  if (kinds.length === 0) {
+/**
+ * Renders the Usage section: the operator's spend ceilings, then each listed agent kind's current plan
+ * windows. A kind with no current window, and the section with nothing to show, render nothing.
+ */
+export function Usage({ ceiling, rateLimits, kinds, now }: UsageProps) {
+  const reported = kinds.flatMap((kind) => {
+    const usage = rateLimits[kind];
+    const windows = (usage?.windows ?? []).filter((window) => isDrawn(window, now));
+    return usage === undefined || windows.length === 0 ? [] : [{ kind, usage, windows }];
+  });
+  const hasBudget = ceiling !== undefined && spendWindows(ceiling).length > 0;
+  if (!hasBudget && reported.length === 0) {
     return undefined;
   }
   return (
-    <section className="flex flex-col gap-sm">
-      <h2 className="font-heading text-h7 font-semibold text-ink">Usage limits</h2>
-      {kinds.map((kind) => (
-        <UsageKindBlock key={kind} kind={kind} usage={rateLimits[kind]} now={now} />
+    <section className="flex flex-col gap-md">
+      <h2 className="font-heading text-h7 font-semibold text-ink">Usage</h2>
+      {hasBudget ? (
+        <SpendBudget ceiling={ceiling} isEstimateNoted={reported.length > 0} />
+      ) : undefined}
+      {reported.map(({ kind, usage, windows }) => (
+        <UsageKindBlock key={kind} kind={kind} usage={usage} windows={windows} now={now} />
       ))}
     </section>
   );

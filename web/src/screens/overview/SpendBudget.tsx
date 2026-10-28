@@ -4,11 +4,6 @@ import { fmtMoney, fmtMoneyAtLeast, fmtUtcStamp } from "@/lib/format";
 
 import type { SpendCeilingResponse, SpendWindowResponse } from "@/api/types.gen";
 
-/** Props of {@link SpendCeilings}. */
-export interface SpendCeilingsProps {
-  ceiling: SpendCeilingResponse | undefined;
-}
-
 interface SpendMeterProps {
   name: string;
   window: SpendWindowResponse;
@@ -46,24 +41,36 @@ const SPEND_LABELS: Record<keyof SpendCeilingResponse, string> = {
 // Object.keys widens to string[]; the keys are exactly those of SPEND_LABELS.
 const SPEND_WINDOWS = Object.keys(SPEND_LABELS) as (keyof SpendCeilingResponse)[];
 
-/** Renders the Spend section: one meter per configured instance spend window, shortest window first. */
-export function SpendCeilings({ ceiling }: SpendCeilingsProps) {
-  if (ceiling === undefined) {
-    return undefined;
-  }
-  const meters = SPEND_WINDOWS.flatMap((key) => {
-    const window = ceiling[key];
-    return window === null
-      ? []
-      : [<SpendMeter key={key} name={SPEND_LABELS[key]} window={window} />];
-  });
-  if (meters.length === 0) {
-    return undefined;
-  }
+/** Lists the configured instance spend windows, shortest first; empty while no ceiling is set. */
+export function spendWindows(
+  ceiling: SpendCeilingResponse | undefined,
+): (keyof SpendCeilingResponse)[] {
+  return ceiling === undefined ? [] : SPEND_WINDOWS.filter((key) => ceiling[key] !== null);
+}
+
+/** Props of {@link SpendBudget}. */
+export interface SpendBudgetProps {
+  ceiling: SpendCeilingResponse;
+  /** Whether to say the figures are estimated at API prices, which matters once an agent reports a plan's limits. */
+  isEstimateNoted: boolean;
+}
+
+/** Renders the operator's spend ceilings: one meter per configured window, shortest window first. */
+export function SpendBudget({ ceiling, isEstimateNoted }: SpendBudgetProps) {
   return (
-    <section className="flex flex-col gap-sm">
-      <h2 className="font-heading text-h7 font-semibold text-ink">Spend</h2>
-      {meters}
-    </section>
+    <div className="flex flex-col gap-sm">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm text-body-md">
+        <h3 className="text-ink">Budget</h3>
+        {isEstimateNoted ? (
+          <span className="text-body-sm text-ink-muted">Estimated at API prices</span>
+        ) : undefined}
+      </div>
+      {spendWindows(ceiling).map((key) => {
+        const window = ceiling[key];
+        return window === null ? undefined : (
+          <SpendMeter key={key} name={SPEND_LABELS[key]} window={window} />
+        );
+      })}
+    </div>
   );
 }
