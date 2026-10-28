@@ -90,9 +90,6 @@ func TestNewState(t *testing.T) {
 			if s.AgentTotals != tt.totals {
 				t.Errorf("AgentTotals = %+v, want %+v", s.AgentTotals, tt.totals)
 			}
-			if s.AgentRateLimits != nil {
-				t.Errorf("AgentRateLimits = %v, want nil", s.AgentRateLimits)
-			}
 
 			if s.MaxConcurrentByState == nil {
 				t.Fatal("MaxConcurrentByState = nil, want non-nil")
@@ -271,8 +268,11 @@ func TestRuntimeSnapshot(t *testing.T) {
 		if result.AgentTotals.SecondsRunning != 42.5 {
 			t.Errorf("AgentTotals.SecondsRunning = %f, want 42.5", result.AgentTotals.SecondsRunning)
 		}
-		if result.RateLimits != nil {
-			t.Errorf("RateLimits = %v, want nil", result.RateLimits)
+		if result.UsageWindows == nil {
+			t.Error("UsageWindows = nil, want non-nil empty map")
+		}
+		if len(result.UsageWindows) != 0 {
+			t.Errorf("len(UsageWindows) = %d, want 0", len(result.UsageWindows))
 		}
 	})
 
@@ -436,45 +436,33 @@ func TestRuntimeSnapshot(t *testing.T) {
 		}
 	})
 
-	t.Run("rate limits present with isolation", func(t *testing.T) {
+	t.Run("kind with every window reset", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(5000, 10, 0, nil, AgentTotals{})
-		origData := map[string]any{
-			"requests_remaining": 42,
-			"reset_at":           "2026-03-24T13:00:00Z",
-		}
-		state.AgentRateLimits = &RateLimitSnapshot{
-			Data:       origData,
-			ReceivedAt: fixedNow,
+		older := fixedNow.Add(-3 * time.Hour)
+		newest := fixedNow.Add(-time.Hour)
+		state.UsageWindows = map[string][]domain.UsageWindow{
+			"claude-code": {
+				{Key: "five_hour", Label: "5-hour limit", ResetsAt: fixedNow.Add(-30 * time.Minute), ReportedAt: older},
+				{Key: "seven_day", Label: "Weekly limit", ResetsAt: fixedNow, ReportedAt: newest},
+			},
 		}
 
 		result := RuntimeSnapshot(state, fixedNow)
 
-		if result.RateLimits == nil {
-			t.Fatal("RateLimits = nil, want non-nil")
+		got, ok := result.UsageWindows["claude-code"]
+		if !ok {
+			t.Fatal("UsageWindows[claude-code] missing, want the kind served after all its windows reset")
 		}
-		if got, ok := result.RateLimits["requests_remaining"]; !ok || got != 42 {
-			t.Errorf("RateLimits[requests_remaining] = %v, want 42", got)
+		if got.Windows == nil {
+			t.Error("Windows = nil, want non-nil empty slice")
 		}
-		if got, ok := result.RateLimits["reset_at"]; !ok || got != "2026-03-24T13:00:00Z" {
-			t.Errorf("RateLimits[reset_at] = %v, want %q", got, "2026-03-24T13:00:00Z")
+		if len(got.Windows) != 0 {
+			t.Errorf("len(Windows) = %d, want 0 (windows reset at or before now are not served)", len(got.Windows))
 		}
-
-		origData["injected_key"] = "should not appear"
-		if _, leaked := result.RateLimits["injected_key"]; leaked {
-			t.Error("RateLimits contains injected_key after original mutation — shallow copy isolation failed")
-		}
-	})
-
-	t.Run("rate limits nil", func(t *testing.T) {
-		t.Parallel()
-
-		state := NewState(5000, 10, 0, nil, AgentTotals{})
-		result := RuntimeSnapshot(state, fixedNow)
-
-		if result.RateLimits != nil {
-			t.Errorf("RateLimits = %v, want nil", result.RateLimits)
+		if !got.ReportedAt.Equal(newest) {
+			t.Errorf("ReportedAt = %v, want %v (newest report of every held window)", got.ReportedAt, newest)
 		}
 	})
 

@@ -301,7 +301,7 @@ func TestRunWorkerAttempt_RelayedVerificationEventsCarryOnlyTheVerificationShape
 				Message:        "raw message",
 				ToolName:       "raw-tool",
 				ToolDurationMS: 999,
-				RateLimits:     map[string]any{"limit": int64(5)},
+				UsageWindows:   []domain.UsageWindow{{Key: "five_hour", Label: "5-hour limit"}},
 			})
 			params.OnEvent(domain.AgentEvent{
 				Type:      domain.EventNotification,
@@ -332,8 +332,8 @@ func TestRunWorkerAttempt_RelayedVerificationEventsCarryOnlyTheVerificationShape
 		if e.Message != "verifying the agent credential" {
 			t.Errorf("received[%d].Message = %q, want %q", i, e.Message, "verifying the agent credential")
 		}
-		if e.SessionID != "" || e.AgentPID != "" || e.ToolName != "" || e.ToolDurationMS != 0 || e.RateLimits != nil {
-			t.Errorf("received[%d] = %+v, want no SessionID, AgentPID, tool field or rate limits", i, e)
+		if e.SessionID != "" || e.AgentPID != "" || e.ToolName != "" || e.ToolDurationMS != 0 || e.UsageWindows != nil {
+			t.Errorf("received[%d] = %+v, want no SessionID, AgentPID, tool field or usage windows", i, e)
 		}
 	}
 	if received[1].Usage.TotalTokens != 100 || received[1].Model != "raw-model" {

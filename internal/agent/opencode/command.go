@@ -362,7 +362,8 @@ func buildInlineConfig(pt passthroughConfig, mcp []byte) (string, error) {
 // buildVerificationInlineConfig denies every tool because the runtime offers no
 // other switch that removes tool definitions without touching its provider or
 // model resolution, and denied tools also end the tool calls that wrote a file
-// into the workspace.
+// into the workspace. The runtime appends its own skill rule after the
+// configuration, so that one tool stays declared but unusable.
 func buildVerificationInlineConfig(pt passthroughConfig, mcp []byte) (string, error) {
 	return marshalInlineConfig(pt, permissionPolicy{"*": permissionDeny}, mcp)
 }

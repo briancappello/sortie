@@ -1767,66 +1767,6 @@ func TestRunWorkerAttempt(t *testing.T) {
 		}
 	})
 
-	t.Run("on_event_relay_copies_rate_limits", func(t *testing.T) {
-		t.Parallel()
-
-		tmpDir := t.TempDir()
-		cfg := defaultWorkerConfig(tmpDir)
-		cfg.Agent.MaxTurns = 1
-
-		adapterMap := map[string]any{"remaining": 42}
-
-		var relayedMap atomic.Value
-		ec := newExitCapture()
-
-		deps := WorkerDeps{
-			TrackerAdapter: &mockTrackerAdapter{},
-			AgentAdapter: &mockAgentAdapter{
-				runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
-					if params.OnEvent != nil {
-						params.OnEvent(domain.AgentEvent{
-							Type:       domain.EventNotification,
-							Timestamp:  time.Now().UTC(),
-							RateLimits: adapterMap,
-						})
-					}
-					return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
-				},
-			},
-			ConfigFunc:             func() config.ServiceConfig { return cfg },
-			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
-			OnEvent: func(_ string, event domain.AgentEvent) {
-				if event.RateLimits != nil {
-					relayedMap.Store(event.RateLimits)
-				}
-			},
-			OnExit: ec.onExit,
-			Logger: discardLogger(),
-		}
-
-		RunWorkerAttempt(context.Background(), workerTestIssue(), nil, deps)
-
-		result := ec.waitResult(t)
-		if result.ExitKind != WorkerExitNormal {
-			t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
-		}
-
-		got, ok := relayedMap.Load().(map[string]any)
-		if !ok {
-			t.Fatal("OnEvent never relayed an event with RateLimits")
-		}
-
-		if got["remaining"] != 42 {
-			t.Errorf("relayed RateLimits[\"remaining\"] = %v, want 42", got["remaining"])
-		}
-
-		// The relayed map must be a distinct object from the adapter's
-		// original, proving the OnEvent relay defensive-copied it.
-		if fmt.Sprintf("%p", got) == fmt.Sprintf("%p", adapterMap) {
-			t.Error("relayed RateLimits has same pointer as adapter map, want defensive copy")
-		}
-	})
-
 	t.Run("tool_advertisement_on_turn_1", func(t *testing.T) {
 		t.Parallel()
 
@@ -2308,7 +2248,7 @@ func TestRunWorkerAttempt_SelfReviewFoldsWorkerMirror(t *testing.T) {
 		event   domain.AgentEvent
 	}
 
-	type buildRunTurnFn func(t *testing.T, wsPath func() string, rateLimits map[string]any, record func(domain.AgentEvent), codingTurnState, reviewTurnState *workerState) func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error)
+	type buildRunTurnFn func(t *testing.T, wsPath func() string, record func(domain.AgentEvent), codingTurnState, reviewTurnState *workerState) func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error)
 
 	runVariant := func(t *testing.T, build buildRunTurnFn, maxIterations int) {
 		t.Helper()
@@ -2323,15 +2263,11 @@ func TestRunWorkerAttempt_SelfReviewFoldsWorkerMirror(t *testing.T) {
 			VerificationTimeoutMS: 5000,
 		}
 
-		rateLimits := map[string]any{"limit": int64(5)}
 		startFn, wsPath := captureWorkspacePath()
 		var received []receivedEvent
 		var emitted []domain.AgentEvent
 		var codingTurnState, reviewTurnState workerState
 		record := func(event domain.AgentEvent) {
-			if event.RateLimits != nil {
-				event.RateLimits = maps.Clone(event.RateLimits)
-			}
 			emitted = append(emitted, event)
 		}
 		ec := newExitCapture()
@@ -2340,7 +2276,7 @@ func TestRunWorkerAttempt_SelfReviewFoldsWorkerMirror(t *testing.T) {
 			TrackerAdapter: &mockTrackerAdapter{},
 			AgentAdapter: &mockAgentAdapter{
 				startSessionFn: startFn,
-				runTurnFn:      build(t, wsPath, rateLimits, record, &codingTurnState, &reviewTurnState),
+				runTurnFn:      build(t, wsPath, record, &codingTurnState, &reviewTurnState),
 			},
 			ConfigFunc:             func() config.ServiceConfig { return cfg },
 			PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
@@ -2384,17 +2320,6 @@ func TestRunWorkerAttempt_SelfReviewFoldsWorkerMirror(t *testing.T) {
 			}
 		}
 
-		// The event's RateLimits must reach deps.OnEvent as a copy: the
-		// mock's runTurnFn mutates the original map after emitting the
-		// event.
-		gotLimits := received[2].event.RateLimits
-		if gotLimits == nil {
-			t.Fatal("received[2].RateLimits = nil, want a non-nil copy")
-		}
-		if gotLimits["limit"] != int64(5) {
-			t.Errorf(`received[2].RateLimits["limit"] = %v, want 5 (unaffected by the later mutation)`, gotLimits["limit"])
-		}
-
 		assertTokenUsageMatches(t, reviewTurnState, reviewUsage)
 		assertNonTokenFieldsMatch(t, reviewTurnState, codingTurnState)
 
@@ -2408,16 +2333,15 @@ func TestRunWorkerAttempt_SelfReviewFoldsWorkerMirror(t *testing.T) {
 	t.Run("event emitted during the review turn", func(t *testing.T) {
 		t.Parallel()
 
-		build := buildRunTurnFn(func(t *testing.T, wsPath func() string, rateLimits map[string]any, record func(domain.AgentEvent), codingTurnState, reviewTurnState *workerState) func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error) {
+		build := buildRunTurnFn(func(t *testing.T, wsPath func() string, record func(domain.AgentEvent), codingTurnState, reviewTurnState *workerState) func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error) {
 			var codingTurnDone bool
 			return func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
 				switch {
 				case isSelfReviewTurnPrompt(params.Prompt):
-					event := domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Model: "r", Usage: reviewUsage, Message: "review notes", RateLimits: rateLimits}
+					event := domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Model: "r", Usage: reviewUsage, Message: "review notes"}
 					params.OnEvent(event)
 					*reviewTurnState = readWorkerStateFile(t, wsPath())
 					record(event)
-					rateLimits["limit"] = int64(999)
 					writeVerdictFile(t, wsPath(), domain.ReviewVerdict{Verdict: "pass", Summary: "looks good"})
 				case !codingTurnDone:
 					codingTurnDone = true
@@ -2438,16 +2362,15 @@ func TestRunWorkerAttempt_SelfReviewFoldsWorkerMirror(t *testing.T) {
 	t.Run("event emitted during the fix turn", func(t *testing.T) {
 		t.Parallel()
 
-		build := buildRunTurnFn(func(t *testing.T, wsPath func() string, rateLimits map[string]any, record func(domain.AgentEvent), codingTurnState, reviewTurnState *workerState) func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error) {
+		build := buildRunTurnFn(func(t *testing.T, wsPath func() string, record func(domain.AgentEvent), codingTurnState, reviewTurnState *workerState) func(context.Context, domain.Session, domain.RunTurnParams) (domain.TurnResult, error) {
 			var codingTurnDone bool
 			return func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
 				switch {
 				case isSelfReviewFixPrompt(params.Prompt):
-					event := domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Model: "r", Usage: reviewUsage, Message: "review notes", RateLimits: rateLimits}
+					event := domain.AgentEvent{Type: domain.EventTokenUsage, Timestamp: time.Now().UTC(), Model: "r", Usage: reviewUsage, Message: "review notes"}
 					params.OnEvent(event)
 					*reviewTurnState = readWorkerStateFile(t, wsPath())
 					record(event)
-					rateLimits["limit"] = int64(999)
 				case isSelfReviewTurnPrompt(params.Prompt):
 					writeVerdictFile(t, wsPath(), domain.ReviewVerdict{Verdict: "iterate", Summary: "needs fix"})
 				case !codingTurnDone:

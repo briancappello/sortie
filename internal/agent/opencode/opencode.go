@@ -21,6 +21,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -43,6 +44,7 @@ func init() {
 		UsageLimitRecognition:         registry.UsageLimitNotRecognized,
 		UsageLimitNotRecognizedReason: "the runtime's run error carries no usage-limit form the adapter reads",
 		VerificationContext: registry.DeclareVerificationContext(
+			registry.VerificationKeepsSomeTools,
 			registry.VerificationKeepsProjectInstructions,
 			registry.VerificationKeepsUserInstructions,
 			registry.VerificationKeepsSystemPrompt,
@@ -229,6 +231,12 @@ func newForkSession(state *sessionState) *agentcore.ForkPerTurnSession {
 		Tools:             state.tools,
 		ToolPlacement:     state.placeTools,
 	}
+	if !state.credentialVerification {
+		puller := usage.NewPuller(limitsSource, agentcore.AuxiliaryTimeout(state.agentConfig), func(ctx context.Context) ([]usage.WindowReading, error) {
+			return pullLimits(ctx, state)
+		})
+		hooks.PullWindows = puller.Pull
+	}
 	return agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 }
 
@@ -369,6 +377,9 @@ func (s *sessionState) parseLine(line []byte, emit func(domain.AgentEvent), _ st
 
 	case "error":
 		s.outcome = domain.EventTurnFailed
+		if readings := freeLimitReadings(event.Error); len(readings) > 0 {
+			agentcore.EmitUsageWindows(emit, now, usage.Windows(freeLimitSource, readings, now))
+		}
 		// One failure can surface as two error events: the actionable
 		// diagnostic the session publishes, and the generic placeholder
 		// the run command reports when the failure is not in its API
@@ -546,11 +557,8 @@ func runWindow(state *sessionState) int64 {
 	return state.runStartedAtMS
 }
 
-// hasUsage reports whether the export recovered a figure, not whether that
-// figure is non-zero. The value-based test it replaces threw away a
-// successful recovery whose messages all reported zero tokens, and with it
-// the model the export named -- so a KNOWN zero spend was reported as an
-// UNKNOWN one, which is the distinction the measured verdict exists to make.
+// hasUsage reports whether the export recovered a figure, zero included: a
+// known zero spend must not read as an unknown one.
 func hasUsage(usage exportUsage) bool {
 	return usage.Recovered
 }

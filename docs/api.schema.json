@@ -191,6 +191,32 @@
       ],
       "type": "object"
     },
+    "AgentUsageWindowsResponse": {
+      "properties": {
+        "reported_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "windows": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/UsageWindowResponse"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reported_at",
+        "windows"
+      ],
+      "type": "object"
+    },
     "AttemptsInfo": {
       "properties": {
         "current_retry_attempt": {
@@ -5103,15 +5129,10 @@
           ]
         },
         "rate_limits": {
-          "anyOf": [
-            {
-              "additionalProperties": {},
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "additionalProperties": {
+            "$ref": "#/$defs/AgentUsageWindowsResponse"
+          },
+          "type": "object"
         },
         "retrying": {
           "anyOf": [
@@ -5591,6 +5612,91 @@
         "cache_read",
         "cache_write",
         "uncached"
+      ],
+      "type": "object"
+    },
+    "UsageWindowAmountResponse": {
+      "properties": {
+        "limit": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "used": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "used",
+        "limit",
+        "unit"
+      ],
+      "type": "object"
+    },
+    "UsageWindowResponse": {
+      "properties": {
+        "amount": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageWindowAmountResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "reported_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "resets_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "allowed",
+                "warning",
+                "exhausted"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "used_percent": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "label",
+        "used_percent",
+        "status",
+        "resets_at",
+        "reported_at",
+        "amount"
       ],
       "type": "object"
     },

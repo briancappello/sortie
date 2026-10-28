@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/runstats"
 )
@@ -59,7 +60,12 @@ type jsonField struct {
 }
 
 var contractEnums = map[reflect.Type]map[string][]string{
-	reflect.TypeFor[holdResponse](): {"reason": holdReasonValues()},
+	reflect.TypeFor[holdResponse]():        {"reason": holdReasonValues()},
+	reflect.TypeFor[usageWindowResponse](): {"status": usageWindowStatusValues()},
+}
+
+var contractNeverNull = map[reflect.Type][]string{
+	reflect.TypeFor[stateResponse](): {"rate_limits"},
 }
 
 var dateTime = contractNode{"string", map[string]any{"type": "string", "format": "date-time"}}
@@ -83,6 +89,14 @@ func holdReasonValues() []string {
 		values[i] = string(r)
 	}
 	return values
+}
+
+func usageWindowStatusValues() []string {
+	return []string{
+		string(domain.UsageWindowAllowed),
+		string(domain.UsageWindowWarning),
+		string(domain.UsageWindowExhausted),
+	}
 }
 
 func declaredHoldReasons(t *testing.T) []string {
@@ -226,7 +240,7 @@ func (c *contract) addStruct(t reflect.Type) (string, error) {
 		if values, ok := contractEnums[t][f.name]; ok {
 			n = enumNode(values)
 		}
-		if k := f.typ.Kind(); !f.optional && (k == reflect.Pointer || k == reflect.Slice || k == reflect.Map || k == reflect.Interface) {
+		if k := f.typ.Kind(); !f.optional && !slices.Contains(contractNeverNull[t], f.name) && (k == reflect.Pointer || k == reflect.Slice || k == reflect.Map || k == reflect.Interface) {
 			n = nullable(n)
 		}
 		members = append(members, contractMember{f.name, n, f.optional})

@@ -3,20 +3,23 @@ package clientprotocol
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
+	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
-// usageReader supplies token measurements read outside the wire, for a
-// runtime whose protocol carries no spend counter. A reader must claim the
-// resolved launch target, recognize the runtime name the handshake reports,
-// and produce a record on its first drain; failing any of those drops the
-// reader and leaves the session unmeasured with the token ceiling inactive.
+// usageReader supplies token measurements read outside the wire, for a runtime
+// whose protocol carries no spend counter. A reader that fails to claim the
+// launch target, recognize the handshake's runtime name, or produce a record on
+// its first drain is dropped, leaving the session unmeasured and the token
+// ceiling inactive.
 //
-// Drain reports whether a measurement exists at all; Completeness grades how
-// far the figure it just returned was proven to reach.
+// Drain reports whether a measurement exists; Completeness grades how far the
+// figure it just returned was proven to reach.
 type usageReader interface {
 	Claim(target agentcore.LaunchTarget, runtime string) ([]string, bool)
 	Recognize(name string) bool
@@ -26,34 +29,27 @@ type usageReader interface {
 	Close()
 }
 
-// usageClaim is one source's accepted claim: the source itself and the
-// environment assignments its launch needs.
 type usageClaim struct {
 	source      usageReader
 	assignments []string
 }
 
-// usageClaims is one offer round's outcome, in registry order: every source
-// that claimed the launch, and every source that refused it.
+// usageClaims is one offer round's outcome, in registry order.
 type usageClaims struct {
 	claimed   []usageClaim
 	unclaimed []usageReader
 }
 
-// usageVerdict is one start's handshake settlement of a usageClaims:
-// confirmed is the claimed source the handshake recognized, nil when none
-// was; released is every other claimed source; recognizer is, only after the
-// first start found no confirmed source, the unclaimed source that
-// recognizes the runtime's name.
+// usageVerdict is one start's handshake settlement of a usageClaims. recognizer
+// is set only when the first start confirmed no claimed source.
 type usageVerdict struct {
 	confirmed  *usageClaim
 	released   []usageReader
 	recognizer usageReader
 }
 
-// claimUsageSources offers target to a fresh instance of every source
-// registered in sources, in registry order, and buckets each by whether its
-// first offer, with an empty runtime, accepts.
+// claimUsageSources offers target, with an empty runtime name, to a fresh
+// instance of every registered source and buckets each by whether it accepts.
 func claimUsageSources(sources *registry.Registry[usagesource.Constructor, struct{}], target agentcore.LaunchTarget) usageClaims {
 	var claims usageClaims
 	for _, kind := range sources.Kinds() {
@@ -68,14 +64,10 @@ func claimUsageSources(sources *registry.Registry[usagesource.Constructor, struc
 	return claims
 }
 
-// settleUsageSources settles claims against one start's handshake. info is
-// the handshake's reported agent implementation, nil when the handshake
-// carried none; remote is whether the launch was remote. The first claimed
-// source, in claim order, whose Recognize accepts the reported name becomes
-// confirmed; every other claimed source is released. Only when no claimed
-// source is confirmed, the reported name is non-empty, and the launch is not
-// remote, the first unclaimed source whose Recognize accepts that name
-// becomes the recognizer.
+// settleUsageSources settles claims against one start's handshake. The first
+// claimed source that recognizes the reported name is confirmed and the rest are
+// released. Only when none is confirmed, the name is non-empty, and the launch is
+// local does the first unclaimed source recognizing it become the recognizer.
 func settleUsageSources(claims usageClaims, info *implementation, remote bool) usageVerdict {
 	name := ""
 	if info != nil {
@@ -111,9 +103,95 @@ func settleUsageSources(claims usageClaims, info *implementation, remote bool) u
 	return verdict
 }
 
-// releaseUsageSources closes every source state.claimed carries and the
-// verification addition that claimed the launch. It runs after teardown, once
-// the pump has stopped and no drain is still reading what a source removes.
+// selectDeclaration returns the declaration registered under the handshake's
+// name, or the zero Declaration. It claims nothing, so a remote launch is
+// selected like a local one.
+func selectDeclaration(declarations *registry.Registry[usagesource.Declaration, struct{}], info *implementation) usagesource.Declaration {
+	if info == nil || info.Name == "" {
+		return usagesource.Declaration{}
+	}
+	declaration, err := declarations.Get(info.Name)
+	if err != nil {
+		return usagesource.Declaration{}
+	}
+	return declaration
+}
+
+// selectDeclarationByLaunch returns the first declaration whose Launches accepts
+// target, for a runtime whose handshake names no registered declaration.
+func selectDeclarationByLaunch(declarations *registry.Registry[usagesource.Declaration, struct{}], target agentcore.LaunchTarget) usagesource.Declaration {
+	for _, kind := range declarations.Kinds() {
+		declaration, err := declarations.Get(kind)
+		if err == nil && declaration.Launches != nil && declaration.Launches(target) {
+			return declaration
+		}
+	}
+	return usagesource.Declaration{}
+}
+
+// resolveDeclaration returns the declaration registered under the handshake's
+// name, else the one that claims the launch target.
+func resolveDeclaration(declarations *registry.Registry[usagesource.Declaration, struct{}], info *implementation, target agentcore.LaunchTarget) usagesource.Declaration {
+	if info != nil && declarations.Has(info.Name) {
+		return selectDeclaration(declarations, info)
+	}
+	return selectDeclarationByLaunch(declarations, target)
+}
+
+// pullRuntime is a declaration's only path to the session's connection, launch
+// environment, and runtime home.
+type pullRuntime struct {
+	state *sessionState
+}
+
+func (r pullRuntime) SessionID() string {
+	return r.state.sessionID
+}
+
+func (r pullRuntime) Request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	resp, err := r.state.conn.Call(ctx, method, params)
+	if err != nil {
+		return nil, fmt.Errorf("pull request %s: %w", method, err)
+	}
+	if resp.Error == nil {
+		return resp.Result, nil
+	}
+	if resp.Error.Code == jsonrpc.MethodNotFoundCode {
+		return nil, fmt.Errorf("pull request %s: %w", method, usagesource.ErrMethodNotFound)
+	}
+	return nil, fmt.Errorf("pull request %s: error %d: %s", method, resp.Error.Code, quoteJSONRPCError(resp.Error))
+}
+
+func (r pullRuntime) LaunchEnv(name string) (string, bool) {
+	return r.state.target.RuntimeEnv(r.state.launchEnv, name)
+}
+
+func (r pullRuntime) ReadHomeFile(ctx context.Context, homeVar, rel string, limit int64) ([]byte, error) {
+	return r.state.target.ReadRuntimeFile(ctx, r.state.launchEnv, homeVar, rel, limit)
+}
+
+func (r pullRuntime) RemoteHost() bool {
+	return r.state.target.RemoteCommand != ""
+}
+
+func (r pullRuntime) RunHostCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return r.state.target.RunHostCommand(ctx, name, args...)
+}
+
+// newSessionPuller builds the session's puller from decl, or returns nil when
+// the declaration has no pull or the session verifies a credential.
+func newSessionPuller(decl usagesource.Declaration, state *sessionState, credentialVerification bool) *usage.Puller {
+	if decl.PullWindows == nil || credentialVerification {
+		return nil
+	}
+	runtime := pullRuntime{state: state}
+	return usage.NewPuller(decl.Pull, agentcore.AuxiliaryTimeout(state.agentConfig), func(ctx context.Context) ([]usage.WindowReading, error) {
+		return decl.PullWindows(ctx, runtime)
+	})
+}
+
+// releaseUsageSources closes every claimed source and the verification addition.
+// It runs after teardown, once no drain is still reading what a source removes.
 func releaseUsageSources(state *sessionState) {
 	for _, source := range state.claimed {
 		source.Close()

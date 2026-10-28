@@ -25,6 +25,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -33,6 +34,10 @@ import (
 
 // defaultCommand is what a session launches when it is given no command.
 const defaultCommand = "codex app-server"
+
+// appServerSource: usedPercent is a percent, not a fraction; each
+// window states its own length and name.
+var appServerSource = usage.Source{Windows: usage.WindowDeclaration{Share: usage.SharePercent}}
 
 func init() {
 	registry.Agents.RegisterWithMeta("codex", NewCodexAdapter, registry.AgentMeta{
@@ -1171,12 +1176,15 @@ func (a *CodexAdapter) RunTurn(ctx context.Context, session domain.Session, para
 				reportMCPStartupFailure(msg, logger)
 
 			case "account/rateLimits/updated":
-				if p, parseErr := parseRateLimitsUpdated(msg.Params); parseErr != nil {
+				p, parseErr := parseRateLimitsUpdated(msg.Params)
+				if parseErr != nil {
 					logger.Debug("account/rateLimits/updated unmarshal failed", slog.Any("error", parseErr))
-				} else {
-					state.rateLimits.record(p)
+					agentcore.EmitNotification(emit, "")
+					continue
 				}
-				agentcore.EmitNotification(emit, "")
+				state.rateLimits.record(p)
+				at := time.Now().UTC()
+				agentcore.EmitUsageWindows(emit, at, usage.Windows(appServerSource, p.windowReadings(), at))
 
 			case "model/rerouted":
 				p, parseErr := parseModelRerouted(msg.Params)

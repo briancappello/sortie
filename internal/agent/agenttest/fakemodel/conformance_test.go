@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1326,7 +1327,8 @@ func TestConformancePropertyContainment(t *testing.T) {
 		{
 			name: "event that cannot be encoded",
 			mutate: func(s *conformanceContainmentState) {
-				s.run.Events[conformanceEventToolAt].RateLimits = map[string]any{"unencodable": make(chan int)}
+				nan := math.NaN()
+				s.run.Events[conformanceEventToolAt].UsageWindows = []domain.UsageWindow{{Key: "five_hour", UsedPercent: &nan}}
 			},
 			want: []string{"cannot be encoded"},
 		},

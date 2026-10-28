@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -219,22 +220,11 @@ func HandleAgentEvent(state *State, issueID string, event domain.AgentEvent, log
 		}
 	}
 
-	// Snapshot the rate-limit payload when present. The worker's
-	// OnEvent relay already defensive-copies the map before it crosses
-	// the goroutine boundary. The second maps.Clone here is
-	// defense-in-depth: it isolates the stored snapshot from any
-	// top-level mutation of event.RateLimits within this function or
-	// future callers.
-	if event.RateLimits != nil {
-		// Only replace the snapshot when this event is at least as recent
-		// as the stored one, preserving monotonicity under out-of-order
-		// delivery.
-		if state.AgentRateLimits == nil || !event.Timestamp.Before(state.AgentRateLimits.ReceivedAt) {
-			state.AgentRateLimits = &RateLimitSnapshot{
-				Data:       maps.Clone(event.RateLimits),
-				ReceivedAt: event.Timestamp,
-			}
+	if len(event.UsageWindows) > 0 {
+		if state.UsageWindows == nil {
+			state.UsageWindows = make(map[string][]domain.UsageWindow)
 		}
+		state.UsageWindows[entry.AgentKind] = usage.MergeWindows(state.UsageWindows[entry.AgentKind], event.UsageWindows)
 	}
 
 	// Emit a Debug-level summary for observability. Handlers skip
