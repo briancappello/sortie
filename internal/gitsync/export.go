@@ -161,6 +161,26 @@ func (s *Syncer) checkExportRefs(ctx context.Context, key, branch string) error 
 // environment.
 func (s *Syncer) guestOutBundle() string { return path.Join(s.guestDir, "out.bundle") }
 
+// exportBundleScript bundles the issue branch ($2) in the environment,
+// leaving out the commits the mirror already holds: those of the guest's
+// origin/<base> ($3) and origin/<issue branch> ($4), which came from the
+// mirror. A branch with no commit beyond them is bundled as its tip alone,
+// on its parent, since git refuses an empty bundle. So the bundle carries
+// the run's work, not the repository's history: smolvm caps a command's
+// output at about 11 MiB, which a large repository's whole history passes.
+// The guest decides only what the bundle leaves out; the host checks the
+// bundle as before, and its import fails when the mirror lacks a commit it
+// needs.
+const exportBundleScript = `umask 077 && mkdir -p "$1" && rm -f -- "$1/out.bundle" || exit
+set -- "$1" "$2" "$3" "$4" ""
+for r in "$3" "$4"; do
+  if git rev-parse --quiet --verify "$r^{commit}" >/dev/null; then set -- "$1" "$2" "$3" "$4" "$5 ^$r"; fi
+done
+if [ -n "$5" ] && [ "$(git rev-list --count "$2" $5)" = 0 ]; then
+  if git rev-parse --quiet --verify "$2^" >/dev/null; then set -- "$1" "$2" "$3" "$4" "^$2^"; else set -- "$1" "$2" "$3" "$4" ""; fi
+fi
+exec git bundle create --quiet "$1/out.bundle" "$2" $5`
+
 // receiveBundle bundles branch in ws's environment and reads the bundle
 // into dst on the host. It reports false, having written nothing, when
 // the environment has no such branch.
@@ -174,8 +194,8 @@ func (s *Syncer) receiveBundle(ctx context.Context, env environment.Environment,
 	}
 
 	defer s.removeGuestFile(ctx, env, ws, s.guestOutBundle())
-	script := `umask 077 && mkdir -p "$1" && rm -f -- "$1/out.bundle" && git bundle create --quiet "$1/out.bundle" "$2"`
-	if err := s.guest(ctx, env, ws, nil, "sh", "-c", script, "sh", s.guestDir, "refs/heads/"+branch); err != nil {
+	if err := s.guest(ctx, env, ws, nil, "sh", "-c", exportBundleScript, "sh", s.guestDir, "refs/heads/"+branch,
+		"refs/remotes/origin/"+s.repo.Base, "refs/remotes/origin/"+branch); err != nil {
 		return false, fmt.Errorf("bundle issue branch %q in the environment: %w", branch, err)
 	}
 	if err := s.readGuestFile(ctx, env, ws, s.guestOutBundle(), dst); err != nil {
