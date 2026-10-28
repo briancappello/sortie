@@ -3,6 +3,8 @@
 # Usage: comments.sh [FILE...]
 # Without arguments, checks the files changed since the merge base with
 # origin/main (or main), including uncommitted and untracked ones.
+# COMMENTS_BASE names another base ref, for a fork whose default branch is
+# not main.
 
 set -eu
 
@@ -11,7 +13,11 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/lib/common.sh"
 
 changed_files() {
-	base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main)
+	if [ -n "${COMMENTS_BASE:-}" ]; then
+		base=$(git merge-base HEAD "$COMMENTS_BASE")
+	else
+		base=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main)
+	fi
 	{
 		git diff --name-only --diff-filter=d "$base"
 		git ls-files --others --exclude-standard

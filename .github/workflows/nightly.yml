@@ -535,6 +535,8 @@ jobs:
 
   hook-stress:
     name: Windows hook stress
+    # Forks that do not ship Windows builds skip it.
+    if: github.repository == 'sortie-ai/sortie'
     runs-on: windows-latest
     timeout-minutes: 25
 
