@@ -104,7 +104,7 @@ A verdict that withholds the write is, immediately before any of its effects, ch
   - Schedule an exponential-backoff retry when the retry slot (Section 7.5) is free; defer to the incumbent already occupying it otherwise, keeping the claim.
 
 - `Agent Update Event`
-  - Update live session fields, token counters, and rate limits.
+  - Update live session fields, token counters, and the agent kind's usage windows.
   - Every agent update and self-review progress message a worker delivered before its exit is applied before that exit is handled, so no message from one run is applied after its exit or to a later run of the same issue. A usage figure applied this way for a run whose exit is being handled or already waiting is evaluated against neither an in-flight ceiling (token or money) nor the token warning threshold, because that run has already ended; the run's recorded total carries the figure to the next dispatch decision.
 
 - `Retry Timer Fired`

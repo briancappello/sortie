@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,7 +121,7 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		}
 	}
 
-	fakemodel.AssertConformance(t, fakemodel.Binding{
+	binding := fakemodel.Binding{
 		Kind:                "opencode",
 		Passthrough:         scriptedSettings(true),
 		CredentialEnv:       []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
@@ -156,6 +157,34 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 				Env: map[string]string{"OPENCODE_CONFIG": document},
 			}
 		},
+	}
+
+	fakemodel.AssertConformance(t, binding)
+
+	t.Run("free usage limit", func(t *testing.T) {
+		run := fakemodel.RunCustomTurn(t, binding, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{{
+				Status: http.StatusTooManyRequests,
+				Header: http.Header{"Retry-After": {"3600"}},
+				Body:   []byte(`{"type": "error", "error": {"type": "FreeUsageLimitError", "message": "Rate limit exceeded. Please try again later."}}`),
+			}},
+			Prompt: "Reply with the word ok.",
+		})
+
+		var windows []domain.UsageWindow
+		for _, e := range run.Events {
+			windows = append(windows, e.UsageWindows...)
+		}
+		if len(windows) != 1 {
+			t.Fatalf("usage windows of the refused turn = %+v, want exactly one", windows)
+		}
+		w := windows[0]
+		if w.Label != "Free usage limit" || w.Status != domain.UsageWindowExhausted {
+			t.Errorf("window = {Label %q, Status %q}, want {%q, %q}", w.Label, w.Status, "Free usage limit", domain.UsageWindowExhausted)
+		}
+		if got := w.ResetsAt.Sub(w.ReportedAt); got != time.Hour {
+			t.Errorf("window ResetsAt - ReportedAt = %v, want %v", got, time.Hour)
+		}
 	})
 }
 

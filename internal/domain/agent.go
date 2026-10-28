@@ -120,9 +120,10 @@ type AgentEvent struct {
 	// or empty when unknown.
 	Model string
 
-	// RateLimits is the latest adapter-defined rate-limit payload, opaque
-	// to the orchestrator. Nil when unavailable.
-	RateLimits map[string]any
+	// UsageWindows carries the provider usage windows this event reports;
+	// nil when it reports none. A window the event does not carry keeps its
+	// earlier report.
+	UsageWindows []UsageWindow
 
 	// APIDurationMS is the LLM API wait time in milliseconds for this
 	// event; a value > 0 contributes to the session's cumulative API
@@ -151,6 +152,62 @@ type AgentEvent struct {
 
 	// ToolError reports whether a tool_result call returned an error.
 	ToolError bool
+}
+
+// UsageWindowStatus is how near a usage window is to its limit, as the
+// runtime reported it.
+type UsageWindowStatus string
+
+const (
+	// UsageWindowAllowed means the window is under its limit.
+	UsageWindowAllowed UsageWindowStatus = "allowed"
+	// UsageWindowWarning means the window is near its limit.
+	UsageWindowWarning UsageWindowStatus = "warning"
+	// UsageWindowExhausted means the window is used up until it resets.
+	UsageWindowExhausted UsageWindowStatus = "exhausted"
+)
+
+// UsageWindow is one provider usage window in runtime-neutral form, as
+// the usage component normalized it. Immutable once emitted.
+type UsageWindow struct {
+	// Key is the window's identifier as its source reported it, its
+	// identity within one agent kind. Empty when the report names none.
+	Key string
+
+	// Label is the display name, for example "5-hour limit".
+	Label string
+
+	// Minutes is the window length; 0 when not reported.
+	Minutes int64
+
+	// UsedPercent is the share used in percent and may exceed 100. Nil
+	// when not reported.
+	UsedPercent *float64
+
+	// Status is empty when not reported.
+	Status UsageWindowStatus
+
+	// ResetsAt is in UTC; zero when not reported.
+	ResetsAt time.Time
+
+	// ReportedAt is the UTC instant the adapter observed the report.
+	ReportedAt time.Time
+
+	// Amount is nil when the window reports no amount.
+	Amount *UsageWindowAmount
+}
+
+// UsageWindowAmount is a window's use in its vendor's own unit, never
+// converted.
+type UsageWindowAmount struct {
+	// Used is in Unit and not negative.
+	Used float64
+
+	// Limit is in Unit and above 0.
+	Limit float64
+
+	// Unit is a plural display name, for example "credits".
+	Unit string
 }
 
 // AgentCommand is an agent launch command in one of two forms: the

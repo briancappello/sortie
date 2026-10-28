@@ -61,6 +61,43 @@ The third is the credential path. `session/load` needs an authentication type re
 
 The handshake advertises no `sessionCapabilities` object, so Sortie never closes a session here through the protocol.
 
+## Usage limits
+
+No usage window reaches the protocol as data. A `usage_update` carries context-window use, the `_meta.quota` block on a prompt result carries token counts despite its name, and a rate-limit failure arrives as an error with a message and no data. The runtime does fetch its per-model quota from Google's Code Assist service, so Sortie asks that service when a turn ends, with the runtime's own Google sign-in. The declaration is selected by the handshake name `gemini-cli`.
+
+When both `GOOGLE_GENAI_USE_GCA` and `GOOGLE_CLOUD_ACCESS_TOKEN` are set in the runtime's environment, the runtime uses that access token before any store, with no expiry, and so does the pull. For a remote session the two come from the variables the launch forwards, else from the remote shell. Otherwise the pull reads the sign-in from the store the runtime itself reads, in the runtime's own order, and takes from it the access token and its expiry in Unix milliseconds. The rest of the bytes are dropped. Where that store sits depends on `GEMINI_FORCE_ENCRYPTED_FILE_STORAGE`:
+
+- Not `true`: the plain file `oauth_creds.json` under `.gemini` in `GEMINI_CLI_HOME`, else in the home directory. It holds `access_token` and `expiry_date`.
+- `true`: the OS keychain first, then the encrypted file `gemini-credentials.json` in the same directory, then the plain file the runtime migrates away from. The first store that holds a sign-in wins.
+
+The keychain is skipped, as the runtime skips it, when `GEMINI_FORCE_FILE_STORAGE` is `true` or `WSL_DISTRO_NAME`, `WSLENV`, or `WSL_INTEROP` is set. A keychain entry and an encrypted-file entry both hold the JSON `{"token": {"accessToken": "...", "expiresAt": <Unix ms>, ...}}`. The keychain entry is service `gemini-cli-oauth`, account `main-account`; the encrypted file keeps the same pair under `{"gemini-cli-oauth": {"main-account": "<that JSON as a string>"}}`.
+
+The keychain is read with the host's own tool, on the machine that runs the agent: `secret-tool lookup service gemini-cli-oauth account main-account` for libsecret on Linux, `security find-generic-password -s gemini-cli-oauth -a main-account -w` on macOS, and the Credential Manager entry `gemini-cli-oauth/main-account` (a generic credential, secret stored as UTF-8) on Windows. A host without the tool, a locked keychain, and a missing entry all mean the keychain holds no sign-in. On macOS the first read of an entry that another program created can raise the system's access prompt; the pull's time bound ends the wait.
+
+The encrypted file is `<iv>:<tag>:<ciphertext>`, each part hex, sealed with AES-256-GCM (12-byte or 16-byte IV, 16-byte tag). The key is `scrypt("gemini-cli-oauth", "<host name>-<user name>-gemini-cli", N=16384, r=8, p=1)` at 32 bytes. The host name and user name belong to the machine that runs the agent, not to Sortie's, so a remote session reads them there (`uname -n` and `id -un`). The plaintext is JSON.
+
+A local session reads on this host and a remote session over its SSH launch. For a remote session the settings above come from the variables the launch forwards, else from the remote shell, which is where the runtime inherits them. Sortie reads these stores and never writes or refreshes them. The runtime confirms a working keychain by writing a probe entry, which the pull does not do, so a keychain that holds no entry sends the pull on to the encrypted file where the runtime would stop.
+
+An expiry at or before the current time means no request and no window; a session signed in with Google refreshes its store itself while it works. When no store holds a sign-in, the session's pulls end.
+
+API-key and Vertex sessions have no Code Assist sign-in, so they normally report no window. The pull looks only at the stores, not at the session's authentication type, so a Google sign-in that other runs on the same home keep fresh makes such a session report that account's quota.
+
+The base URL is `https://cloudcode-pa.googleapis.com`, or the `CODE_ASSIST_ENDPOINT` value in the runtime's launch environment. Both requests are POSTs to `{base}/v1internal:<method>` with `Authorization: Bearer <access_token>`. The token goes only to this host and is never logged.
+
+The project comes from `GOOGLE_CLOUD_PROJECT` in the launch environment, then `GOOGLE_CLOUD_PROJECT_ID`, the order the runtime's own user setup uses. With neither set, `loadCodeAssist` returns it as `cloudaicompanionProject`. The body is the one that user setup sends, which for an account with no project is only the client metadata.
+
+```json
+{"metadata": {"ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}}
+```
+
+`retrieveUserQuota` takes `{"project": "<id>"}` and answers one bucket per model and token type, as the runtime's client types declare it:
+
+```json
+{"buckets": [{"modelId": "<model>", "tokenType": "<type>", "remainingFraction": 0.82, "remainingAmount": "<count>", "resetTime": "<RFC 3339>"}]}
+```
+
+`remainingFraction` runs from 0 to 1 and is the share left. A bucket without `modelId` or `remainingFraction` is skipped, as the runtime skips it, and `remainingAmount` is not read. Each bucket becomes one window named by the model, plus `/` and the token type when present, so a model with several token types shows several windows. A 403 means the account has no Code Assist access and ends the session's pulls.
+
 ## Native headless observations
 
 Turn disposition and retry classification are gaps on both native surfaces. The cases were induced, and the surfaces reported no outcome. Cancellation cannot be told apart, because both surfaces are one-shot launches that write their terminal output only at exit. The human-input outcome has no place in either surface's terminal vocabulary. A case a surface stays silent about keeps its obligation and counts against the surface.

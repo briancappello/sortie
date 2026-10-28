@@ -11,9 +11,11 @@ const opencodeExecutableName = "opencode"
 
 const opencodePackageName = "opencode-ai"
 
-// opencodeDenyAllConfig is the inline configuration that removes every tool
-// definition from the request, tool-server and skill tools included, and ends
-// the tool calls a verification prompt would otherwise provoke.
+// opencodeDenyAllConfig is the inline configuration that removes the tool
+// definitions from the request, tool-server tools included, and ends the tool
+// calls a verification prompt would otherwise provoke. The runtime appends a
+// rule after the configuration that keeps the skill tool declared, so no
+// configuration removes that one.
 const opencodeDenyAllConfig = `{"permission":{"*":"deny"}}`
 
 func init() {
@@ -31,6 +33,7 @@ func (opencodeVerification) Claim(target agentcore.LaunchTarget) (VerificationSw
 
 func (opencodeVerification) Context() registry.VerificationContext {
 	return registry.DeclareVerificationContext(
+		registry.VerificationKeepsSomeTools,
 		registry.VerificationKeepsProjectInstructions,
 		registry.VerificationKeepsUserInstructions,
 		registry.VerificationKeepsSystemPrompt,

@@ -525,12 +525,43 @@ func TestRunTurn_UsageLimitRefusal(t *testing.T) {
 	replay := func(mutate func(string) string) *replayAdapter {
 		return &replayAdapter{CodexAdapter: &CodexAdapter{}, state: makeTestState(t, recordedRefusalTurn(t, mutate))}
 	}
+	var mu sync.Mutex
+	var windows []domain.UsageWindow
+	collect := func(e domain.AgentEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		windows = append(windows, e.UsageWindows...)
+	}
 	cases := []agenttest.UsageLimitRefusalCase{
-		{Name: "recorded refusal", Adapter: replay(func(s string) string { return s }), WantResetsAt: time.Unix(4102444800, 0).UTC()},
+		{
+			Name:         "recorded refusal",
+			Adapter:      replay(func(s string) string { return s }),
+			Turn:         domain.RunTurnParams{OnEvent: collect},
+			WantResetsAt: time.Unix(4102444800, 0).UTC(),
+		},
 		{Name: "window below the limit", Adapter: replay(windowBelowLimit(t))},
 	}
 
 	agenttest.AssertUsageLimitRefusal(t, "codex", cases)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(windows) != 1 {
+		t.Fatalf("usage windows emitted by the recorded refusal = %+v, want exactly one for the primary window", windows)
+	}
+	got := windows[0]
+	if got.Key != "codex/primary" || got.Label != "5-hour limit" || got.Status != "" {
+		t.Errorf("window = {Key %q, Label %q, Status %q}, want {%q, %q, %q}", got.Key, got.Label, got.Status, "codex/primary", "5-hour limit", "")
+	}
+	if got.UsedPercent == nil || *got.UsedPercent != 100 {
+		t.Errorf("window UsedPercent = %v, want 100", got.UsedPercent)
+	}
+	if want := time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC); !got.ResetsAt.Equal(want) {
+		t.Errorf("window ResetsAt = %v, want %v", got.ResetsAt, want)
+	}
+	if got.ReportedAt.IsZero() {
+		t.Error("window ReportedAt is zero, want the instant the report was observed")
+	}
 }
 
 // TestRunTurn_EmptyTurnStatus pins both ways a turn/completed

@@ -24,6 +24,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/registry"
@@ -361,7 +362,7 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 				// The event type itself names an assistant message, so it
 				// is a work signal even though its payload is unparsed.
 				state.work.ObserveAssistantOutput()
-				// Stall timer reset; ephemeral streaming content.
+				// Empty notification: resets the stall timer only.
 				agentcore.EmitNotification(emit, "")
 
 			case "assistant.message":
@@ -415,11 +416,9 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 							ToolError:      !toolData.Success,
 						})
 
-						// The CLI's own non-interactive permission policy
-						// denied this tool call and the session continues;
-						// --no-ask-user closes the human-question path, so
-						// every recognized request here is a permission
-						// request with no reply channel.
+						// --no-ask-user closes the human-question path, so a
+						// denied call here is always a permission request
+						// with no reply channel.
 						if !toolData.Success && toolData.Error != nil && toolData.Error.Code == copilotToolDeniedCode {
 							posture := agentcore.DecideHumanRequest(agentcore.ClassPermission, false, agentcore.AnswerRuntimeRefused)
 							agentcore.EmitNotification(emit, posture.Notice)
@@ -562,9 +561,16 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 			result.ResumeUsageByModel = state.turnResumeByModel
 			return result, agentErr
 		},
-		// Copilot emits EventSessionStarted before the scan loop using the
-		// session's own ID, assigned in StartSession.
 		EmitSessionStartID: func() string { return state.copilotSessionID },
+	}
+
+	if !params.CredentialVerification {
+		// The adapter sets no TurnEnv hook, so a turn runs with the host
+		// environment and a nil env reads exactly that.
+		puller := usage.NewPuller(quotaSource, agentcore.AuxiliaryTimeout(params.AgentConfig), func(ctx context.Context) ([]usage.WindowReading, error) {
+			return pullQuota(ctx, target, nil)
+		})
+		hooks.PullWindows = puller.Pull
 	}
 
 	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
@@ -576,9 +582,8 @@ func (a *CopilotAdapter) StartSession(ctx context.Context, params domain.StartSe
 	}, nil
 }
 
-// RunTurn executes one agent turn by delegating to the session's
-// [agentcore.ForkPerTurnSession]. Per-turn scan state is reset before
-// delegation so each turn starts with a fresh accumulator and clean state.
+// RunTurn executes one agent turn on the session's
+// [agentcore.ForkPerTurnSession], with per-turn scan state reset first.
 func (a *CopilotAdapter) RunTurn(ctx context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
 	if params.OnEvent == nil {
 		panic("copilot: OnEvent must be non-nil")
@@ -589,8 +594,7 @@ func (a *CopilotAdapter) RunTurn(ctx context.Context, session domain.Session, pa
 		return domain.TurnResult{}, fmt.Errorf("unexpected session internal type %T", session.Internal)
 	}
 
-	// state.usage carries the run-cumulative snapshot across turns, so it is
-	// not reset here.
+	// state.usage is run-cumulative and deliberately not reset.
 	state.inFlight = agentcore.NewToolTracker()
 	state.work = agentcore.NewWorkObserver(agentcore.WorkSignals{AssistantOutput: true, ToolActivity: true})
 	state.turnCompletionSeen = false

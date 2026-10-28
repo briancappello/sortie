@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's OpenCode adapter in `internal/agent/opencode`.
 
-Last updated: 2026-10-22
+Last updated: 2026-10-28
 
 ## Where to get the volatile facts
 
@@ -47,6 +47,8 @@ Turns run on `agentcore.ForkPerTurnSession`, the skeleton Claude Code and Copilo
 
 `StopSession` calls the skeleton's stop, then deletes the verification session when the session is a credential verification.
 
+The verification request carries a deny-all permission policy, and on 2.2.0 it still declares the `skill` tool: the runtime's browser plugin appends a `skill` rule after every configuration source, so no configuration removes the definition. The deny-all rules leave the tool unusable, and the adapter declares that the verification request keeps some tools.
+
 The first-event deadline is the larger of the read timeout and `agentcore.CredentialExchangeBound`. OpenCode prints nothing until the provider starts answering, and the free hosted model can take much longer than the 5-second default read timeout. The deadline stops at the first envelope, so it catches a process that never talks, not a stall in the middle of a turn. Stalls belong to the orchestrator.
 
 The export runs after the reap, on a context that outlives the turn's cancellation, and bounds itself with `agentcore.AuxiliaryTimeout`. A slow export delays the turn's result, never the stop.
@@ -88,6 +90,42 @@ A message counts only once its `finish` field is set. The runtime saves an assis
 The configuration document disables the runtime's title agent. Its request is billed but recorded in no message, so the sum would miss it.
 
 A failed or empty export must never lower a figure the run has already reported. The settle step skips the update entirely rather than replacing a settled value with zero.
+
+## Usage limits
+
+The run stream carries no subscription window. Two other places do.
+
+The pull runs `opencode api experimental.usage.limits` once a turn that reached the runtime has ended, through the same auxiliary launch the export uses, locally or over the session's SSH launch. It runs on empty stdin. A cancelled turn and a credential-verification session do not pull. The command exists only on releases that ship the usage-limits subsystem. On an older build it fails or hangs until the bound, and a command that fails to start, exits non-zero, outlives the bound, or prints no object ends the session's pulls. Do not gate the pull on a version check.
+
+The answer is a JSON object, with the payload under `data` next to a `location` member. Trimmed:
+
+```json
+{
+  "data": {
+    "workspace": { "id": "wrk_...", "name": "...", "usageURL": "..." },
+    "go": {
+      "rolling": { "percent": 37.5, "limited": false, "resetsAt": 1793199600000 },
+      "weekly": { "percent": 12, "limited": false, "resetsAt": 1793577600000 },
+      "monthly": { "percent": 100, "limited": true, "resetsAt": 1794700800000 }
+    },
+    "budgets": []
+  }
+}
+```
+
+`percent` is the share used, from 0 to 100. `limited` marks an exhausted window. `resetsAt` is epoch milliseconds, so convert before comparing it with Unix seconds. A member of `go` can be null, and it yields no reading. The `budgets` list holds spend budgets in dollars and is not read.
+
+The command answers only for a runtime signed in to the OpenCode console. Without that sign-in the payload is `{"data":null}`, which carries no `go` and ends the session's pulls. The runtime makes the console calls itself with the console credential it holds; Sortie neither reads nor sends that credential.
+
+The command goes through the runtime's background service, not through an in-process server. That is the service every launch avoids with `--standalone`, so this is the one invocation that uses it, and it starts the service when none is running. Two consequences follow. The service keeps the environment of whichever client started it first and outlives Sortie, so a service an operator already runs answers for its own state. And a service from another release already holding the default port makes the command collide with it until the port is changed with `opencode service set port`. A plain `opencode serve` route returns 401 without the service credential that `api` supplies, so do not call the HTTP route directly.
+
+The free hosted model reports its limit in the stream instead. When the limit is hit the run prints an error envelope with `type` set to `provider.free-limit`, status 429, and `retryAfterMs`:
+
+```json
+{"type":"error","error":{"type":"provider.free-limit","status":429,"retryAfterMs":3600000}}
+```
+
+`retryAfterMs` is milliseconds, relative to the moment of the failure. It derives from the response's `retry-after-ms` or `retry-after` header, which is why a header of 3600 seconds arrives as 3600000. The adapter turns it into one exhausted window that resets that long after the observation. The envelope is also the free-tier refusal described under failure detection, and reading the delay changes nothing about how that failure is reported. Other quota errors, such as `provider.budget-limit` and `provider.quota`, carry no usable window. The same run over the protocol surface drops the delay, which is why only the native kind reads it.
 
 ## Failure detection
 

@@ -707,6 +707,34 @@ func TestForkPerTurnSession(t *testing.T) {
 		}
 	})
 
+	t.Run("PullWindows_BetweenSettleAndFinalize_SkippedOnceCtxDone", func(t *testing.T) {
+		t.Parallel()
+		var order []string
+		cancel := func() {}
+		hooks := noopHooks()
+		hooks.SettleUsage = func(context.Context, func(domain.AgentEvent), *TurnSpend) {
+			order = append(order, "settle")
+			cancel()
+		}
+		hooks.PullWindows = func(context.Context) ([]domain.UsageWindow, error) {
+			order = append(order, "pull")
+			return []domain.UsageWindow{{Key: "five_hour"}}, nil
+		}
+		emit := func(e domain.AgentEvent) { order = append(order, string(e.Type)) }
+		sess := NewForkPerTurnSession(fakeTarget(t, false, agenttest.OutputScenario, agenttest.Output{}), hooks, slog.Default(), 0)
+		doneCtx, done := context.WithCancel(context.Background())
+		defer done()
+
+		_, err1 := sess.RunTurn(context.Background(), "p", emit)
+		cancel = done
+		_, err2 := sess.RunTurn(doneCtx, "p", emit)
+
+		want := []string{"settle", "pull", string(domain.EventNotification), string(domain.EventTurnCompleted), "settle", string(domain.EventTurnCompleted)}
+		if err1 != nil || err2 != nil || !slices.Equal(order, want) {
+			t.Errorf("RunTurn() errors = %v, %v, order = %q, want nil, nil and %q", err1, err2, order, want)
+		}
+	})
+
 	t.Run("Arm7_OnFinalizeError", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()

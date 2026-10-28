@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,6 +135,9 @@ func TestIntegration_StartSession_InvalidCommand(t *testing.T) {
 func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessCopilotIntegration(t)
 
+	quota := serveQuota(t, http.StatusInternalServerError, nil)
+	t.Setenv("COPILOT_GITHUB_TOKEN", "unused-token-for-quota-endpoint")
+
 	fakemodel.AssertConformance(t, fakemodel.Binding{
 		Kind:             "copilot-cli",
 		Passthrough:      map[string]any{"model": "scripted-model", "max_autopilot_continues": float64(5)},
@@ -165,6 +169,11 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			}
 		},
 		Inspect: func(t *testing.T, run fakemodel.Run) {
+			for _, ev := range run.Events {
+				if len(ev.UsageWindows) != 0 {
+					t.Errorf("event %q reports %d usage windows on a custom provider, want none", ev.Type, len(ev.UsageWindows))
+				}
+			}
 			if run.Environment.Scenario != fakemodel.ScenarioTurn {
 				return
 			}
@@ -172,14 +181,17 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 			if !ok {
 				t.Fatalf("session.Internal type = %T, want *sessionState", run.Session.Internal)
 			}
-			// A normal turn decides at the terminal-success row and never
-			// consults Work, so the disposition alone does not show the
-			// observer fired against the installed runtime.
+			// The disposition never consults Work on a normal turn, so only
+			// the observer shows it fired.
 			if !state.work.Observed() {
 				t.Error("state.work.Observed() = false after a scripted turn, want true")
 			}
 		},
 	})
+
+	if n := quota.hits.Load(); n != 0 {
+		t.Errorf("quota endpoint requests on a custom provider = %d, want 0", n)
+	}
 }
 
 func TestIntegration_CredentialVerification(t *testing.T) {

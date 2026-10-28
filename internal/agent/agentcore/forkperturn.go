@@ -22,8 +22,9 @@ import (
 // ForkPerTurnHooks provides the adapter-specific behavior points plugged into
 // [ForkPerTurnSession]. BuildArgs, ParseLine, GetUsage, GetSessionID, and
 // OnFinalize are required. EmitSessionStartID, PromptOnStdin,
-// FirstEventTimeout, SettleUsage, TurnEnv, Tools, and ToolPlacement
-// are optional, and each zero value keeps the default turn behavior.
+// FirstEventTimeout, SettleUsage, PullWindows, TurnEnv, Tools, and
+// ToolPlacement are optional, and each zero value keeps the default turn
+// behavior.
 type ForkPerTurnHooks struct {
 	// BuildArgs is called once per RunTurn before the subprocess starts.
 	// turn is the prospective 1-based turn number for this session
@@ -141,6 +142,14 @@ type ForkPerTurnHooks struct {
 	// consumer ahead of the terminal event, and GetUsage reflects what it
 	// settled. Nil disables it.
 	SettleUsage func(ctx context.Context, emit func(domain.AgentEvent), spend *TurnSpend)
+
+	// PullWindows runs once per started turn, on RunTurn's goroutine, after
+	// SettleUsage and before the terminal event, on the endings that run
+	// SettleUsage. It is skipped for a cancelled turn and once ctx is done.
+	// ctx is the turn's own, so the adapter bounds its own work. A non-empty
+	// result reaches the consumer as usage windows; an error is logged and
+	// does not change how the turn ends. Nil disables it.
+	PullWindows func(ctx context.Context) ([]domain.UsageWindow, error)
 
 	// TurnEnv returns the started process's environment and the settings
 	// an SSH launch carries. Nil keeps the host environment and no
@@ -631,6 +640,16 @@ loop:
 	endedByHook := !cancelled && trigger == triggerEndTurn
 	if s.hooks.SettleUsage != nil && !endedByHook {
 		s.hooks.SettleUsage(context.WithoutCancel(ctx), emit, &spend)
+	}
+
+	if s.hooks.PullWindows != nil && !endedByHook && !cancelled && ctx.Err() == nil {
+		windows, err := s.hooks.PullWindows(ctx)
+		if err != nil {
+			logger.Debug("usage pull failed", slog.Any("error", err))
+		}
+		if len(windows) > 0 {
+			EmitUsageWindows(emit, time.Now().UTC(), windows)
+		}
 	}
 
 	failedTurn := func(message string, agentErr *domain.AgentError) (domain.TurnResult, error) {

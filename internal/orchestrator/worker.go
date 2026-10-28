@@ -1303,12 +1303,6 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	}
 
 	relayTurnEvent := func(event domain.AgentEvent) {
-		// Defensive copy in the worker goroutine, before the event crosses
-		// the goroutine boundary, so the orchestrator never iterates a map
-		// the adapter may still mutate.
-		if event.RateLimits != nil {
-			event.RateLimits = maps.Clone(event.RateLimits)
-		}
 		event.Usage = applyUsageOffset(event.Usage, verificationSpend)
 		if event.UsageByModel != nil {
 			event.UsageByModel = agentcore.AddUsageByModel(event.UsageByModel, verificationUsageByModel)

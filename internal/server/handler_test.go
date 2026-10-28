@@ -1430,6 +1430,9 @@ func TestToStateResponse(t *testing.T) {
 		if got.RateLimits == nil {
 			t.Fatal("RateLimits = nil, want non-nil empty map")
 		}
+		if len(got.RateLimits) != 0 {
+			t.Errorf("len(RateLimits) = %d, want 0", len(got.RateLimits))
+		}
 	})
 
 	t.Run("counts match entries", func(t *testing.T) {
@@ -2216,8 +2219,79 @@ func TestHandleState(t *testing.T) {
 		if string(rawMap["retrying"]) == "null" {
 			t.Error("retrying = null in JSON, want []")
 		}
-		if string(rawMap["rate_limits"]) == "null" {
-			t.Error("rate_limits = null in JSON, want {}")
+		if got := string(rawMap["rate_limits"]); got != "{}" {
+			t.Errorf("rate_limits = %s in JSON, want {}", got)
+		}
+	})
+
+	t.Run("rate limits serve unknown values as null", func(t *testing.T) {
+		t.Parallel()
+
+		reset := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+		share := 82.0
+		snap := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: fixedTime,
+			UsageWindows: map[string]orchestrator.SnapshotUsageWindows{
+				"claude-code": {
+					ReportedAt: fixedTime,
+					Windows: []domain.UsageWindow{
+						{Key: "seven_day", Label: "Weekly limit", UsedPercent: &share, Status: domain.UsageWindowWarning, ResetsAt: reset, ReportedAt: fixedTime, Amount: &domain.UsageWindowAmount{Used: 410, Limit: 500, Unit: "credits"}},
+						{Key: "five_hour", Label: "5-hour limit", ReportedAt: fixedTime},
+					},
+				},
+				"codex": {ReportedAt: fixedTime, Windows: []domain.UsageWindow{}},
+			},
+		}
+
+		ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
+		_, body := getJSON[struct {
+			RateLimits map[string]struct {
+				Windows []struct {
+					Label       string          `json:"label"`
+					UsedPercent *float64        `json:"used_percent"`
+					Status      *string         `json:"status"`
+					ResetsAt    *time.Time      `json:"resets_at"`
+					Amount      json.RawMessage `json:"amount"`
+				} `json:"windows"`
+			} `json:"rate_limits"`
+		}](t, ts, "/api/v1/state")
+
+		claude := body.RateLimits["claude-code"].Windows
+		if len(claude) != 2 {
+			t.Fatalf("len(rate_limits[claude-code].windows) = %d, want 2", len(claude))
+		}
+		known, unknown := claude[0], claude[1]
+		if known.UsedPercent == nil || *known.UsedPercent != 82 {
+			t.Errorf("known window used_percent = %v, want 82", known.UsedPercent)
+		}
+		if known.Status == nil || *known.Status != "warning" {
+			t.Errorf("known window status = %v, want %q", known.Status, "warning")
+		}
+		if known.ResetsAt == nil || !known.ResetsAt.Equal(reset) {
+			t.Errorf("known window resets_at = %v, want %v", known.ResetsAt, reset)
+		}
+		if unknown.UsedPercent != nil {
+			t.Errorf("unknown window used_percent = %v, want null", *unknown.UsedPercent)
+		}
+		if unknown.Status != nil {
+			t.Errorf("unknown window status = %q, want null", *unknown.Status)
+		}
+		if unknown.ResetsAt != nil {
+			t.Errorf("unknown window resets_at = %v, want null", *unknown.ResetsAt)
+		}
+		if got, want := string(known.Amount), `{"used":410,"limit":500,"unit":"credits"}`; got != want {
+			t.Errorf("known window amount = %s, want %s", got, want)
+		}
+		if got := string(unknown.Amount); got != "null" {
+			t.Errorf("unknown window amount = %s, want null", got)
+		}
+
+		codex, ok := body.RateLimits["codex"]
+		if !ok {
+			t.Fatal("rate_limits[codex] missing, want a member with no current window")
+		}
+		if codex.Windows == nil {
+			t.Error("rate_limits[codex].windows = null, want []")
 		}
 	})
 

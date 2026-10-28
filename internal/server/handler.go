@@ -18,22 +18,22 @@ import (
 
 // stateResponse is the JSON wire format for GET /api/v1/state.
 type stateResponse struct {
-	GeneratedAt            time.Time                        `json:"generated_at"`
-	Version                string                           `json:"version"`
-	StartedAt              *time.Time                       `json:"started_at"`
-	Counts                 stateCounts                      `json:"counts"`
-	Running                []runningEntryResponse           `json:"running"`
-	Retrying               []retryEntryResponse             `json:"retrying"`
-	BudgetExhausted        []budgetExhaustedResponse        `json:"budget_exhausted"`
-	Parked                 []parkedEntryResponse            `json:"parked"`
-	PendingReactions       []pendingReactionResponse        `json:"pending_reactions"`
-	BetweenStages          []stageHopResponse               `json:"between_stages"`
-	Active                 []activeIssueResponse            `json:"active"`
-	Held                   []heldIssueResponse              `json:"held"`
-	Attention              []attentionItemResponse          `json:"attention"`
-	AgentTotals            orchestrator.SnapshotAgentTotals `json:"agent_totals"`
-	RateLimits             map[string]any                   `json:"rate_limits"`
-	ActiveEstimatedCostUSD *float64                         `json:"active_estimated_cost_usd,omitempty"`
+	GeneratedAt            time.Time                            `json:"generated_at"`
+	Version                string                               `json:"version"`
+	StartedAt              *time.Time                           `json:"started_at"`
+	Counts                 stateCounts                          `json:"counts"`
+	Running                []runningEntryResponse               `json:"running"`
+	Retrying               []retryEntryResponse                 `json:"retrying"`
+	BudgetExhausted        []budgetExhaustedResponse            `json:"budget_exhausted"`
+	Parked                 []parkedEntryResponse                `json:"parked"`
+	PendingReactions       []pendingReactionResponse            `json:"pending_reactions"`
+	BetweenStages          []stageHopResponse                   `json:"between_stages"`
+	Active                 []activeIssueResponse                `json:"active"`
+	Held                   []heldIssueResponse                  `json:"held"`
+	Attention              []attentionItemResponse              `json:"attention"`
+	AgentTotals            orchestrator.SnapshotAgentTotals     `json:"agent_totals"`
+	RateLimits             map[string]agentUsageWindowsResponse `json:"rate_limits"`
+	ActiveEstimatedCostUSD *float64                             `json:"active_estimated_cost_usd,omitempty"`
 
 	// CostUnpricedRunning counts running, measured sessions
 	// ActiveEstimatedCostUSD excludes for lacking a configured rate.
@@ -270,6 +270,33 @@ type holdResponse struct {
 	Model       string                `json:"model,omitempty"`
 	ReasonText  string                `json:"reason_text"`
 	ReleaseText string                `json:"release_text"`
+}
+
+// agentUsageWindowsResponse is the JSON wire format for one agent kind's
+// usage windows.
+type agentUsageWindowsResponse struct {
+	ReportedAt time.Time             `json:"reported_at"`
+	Windows    []usageWindowResponse `json:"windows"`
+}
+
+// usageWindowResponse is the JSON wire format for one provider usage window.
+// A figure the agent did not report serves as null, never as zero.
+type usageWindowResponse struct {
+	Label       string     `json:"label"`
+	UsedPercent *float64   `json:"used_percent"`
+	Status      *string    `json:"status"`
+	ResetsAt    *time.Time `json:"resets_at"`
+	ReportedAt  time.Time  `json:"reported_at"`
+
+	Amount *usageWindowAmountResponse `json:"amount"`
+}
+
+// usageWindowAmountResponse is the JSON wire format for a window's use in the
+// vendor's own unit, never converted.
+type usageWindowAmountResponse struct {
+	Used  float64 `json:"used"`
+	Limit float64 `json:"limit"`
+	Unit  string  `json:"unit"`
 }
 
 // heldIssueResponse is the JSON wire format for an eligible candidate the
@@ -1111,6 +1138,35 @@ func heldUsedTokens(e orchestrator.SnapshotBudgetEntry) *int64 {
 	return e.UsedTokens
 }
 
+// toAgentUsageWindowsResponse maps one kind's snapshot windows to wire form.
+func toAgentUsageWindowsResponse(member orchestrator.SnapshotUsageWindows) agentUsageWindowsResponse {
+	windows := make([]usageWindowResponse, 0, len(member.Windows))
+	for _, w := range member.Windows {
+		resp := usageWindowResponse{
+			Label:       w.Label,
+			UsedPercent: w.UsedPercent,
+			ReportedAt:  w.ReportedAt.UTC(),
+		}
+		if w.Status != "" {
+			status := string(w.Status)
+			resp.Status = &status
+		}
+		if !w.ResetsAt.IsZero() {
+			resetsAt := w.ResetsAt.UTC()
+			resp.ResetsAt = &resetsAt
+		}
+		if w.Amount != nil {
+			resp.Amount = &usageWindowAmountResponse{
+				Used:  w.Amount.Used,
+				Limit: w.Amount.Limit,
+				Unit:  w.Amount.Unit,
+			}
+		}
+		windows = append(windows, resp)
+	}
+	return agentUsageWindowsResponse{ReportedAt: member.ReportedAt.UTC(), Windows: windows}
+}
+
 func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Context, health *orchestrator.SnapshotHealth) stateResponse {
 	running := make([]runningEntryResponse, 0, len(snap.Running))
 	for _, e := range snap.Running {
@@ -1156,9 +1212,9 @@ func toStateResponse(snap orchestrator.RuntimeSnapshotResult, words sentence.Con
 
 	attention := toAttentionResponses(sentence.Attention(snap, health, words))
 
-	rateLimits := snap.RateLimits
-	if rateLimits == nil {
-		rateLimits = map[string]any{}
+	rateLimits := make(map[string]agentUsageWindowsResponse, len(snap.UsageWindows))
+	for kind, member := range snap.UsageWindows {
+		rateLimits[kind] = toAgentUsageWindowsResponse(member)
 	}
 
 	resp := stateResponse{

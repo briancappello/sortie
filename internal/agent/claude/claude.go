@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -36,6 +37,25 @@ const effortEnvName = "CLAUDE_CODE_EFFORT_LEVEL"
 // when it does not recognize the --effort value and runs at the model's
 // default level instead.
 const unknownEffortPrefix = "Warning: Unknown --effort value"
+
+// streamSource: the stream reports utilization as a fraction and names
+// windows without stating their length, so lengths are declared here.
+var streamSource = usage.Source{Windows: usage.WindowDeclaration{
+	Share: usage.ShareFraction,
+	Statuses: map[string]domain.UsageWindowStatus{
+		"allowed":         domain.UsageWindowAllowed,
+		"allowed_warning": domain.UsageWindowWarning,
+		"rejected":        domain.UsageWindowExhausted,
+	},
+	Spans: map[string]usage.Span{
+		"five_hour":                  {Minutes: 300},
+		"seven_day":                  {Minutes: 10080},
+		"seven_day_opus":             {Minutes: 10080, Scope: "Opus"},
+		"seven_day_sonnet":           {Minutes: 10080, Scope: "Sonnet"},
+		"seven_day_overage_included": {Minutes: 10080},
+		"overage":                    {Scope: "extra usage"},
+	},
+}}
 
 func init() {
 	registry.Agents.RegisterWithMeta("claude-code", NewClaudeCodeAdapter, registry.AgentMeta{
@@ -451,7 +471,8 @@ func (a *ClaudeCodeAdapter) StartSession(ctx context.Context, params domain.Star
 				if event.RateLimitInfo != nil {
 					state.rateLimit = event.RateLimitInfo
 				}
-				agentcore.EmitNotification(emit, "")
+				at := time.Now().UTC()
+				agentcore.EmitUsageWindows(emit, at, usage.Windows(streamSource, event.RateLimitInfo.windowReadings(), at))
 
 			case "stream_event":
 				agentcore.EmitNotification(emit, "")

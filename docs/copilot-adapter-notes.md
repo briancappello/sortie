@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's GitHub Copilot CLI adapter in `internal/agent/copilot`.
 
-Last updated: 2026-10-17
+Last updated: 2026-10-28
 
 ## Where to get the volatile facts
 
@@ -41,6 +41,53 @@ The registered kind declares `turn_end` arrival and `per_model` attribution: the
 There is a third source worth knowing about even though the adapter does not read it. This CLI can export OpenTelemetry, and its spans carry the per-request input and output token counts that the JSON stream does not. An operator who exports the relevant variables into Sortie's environment gets them in the subprocess too, since it inherits that environment, and ends up with a token breakdown the adapter itself cannot see. That is the answer to give when someone needs per-request accounting today rather than a change here.
 
 The model name is the shutdown record's `modelMetrics` key whose token count grew the most since the previous record, breaking a tie by whichever trimmed name sorts first. A record naming no model, or one where no key grew, leaves the field blank rather than falling back to the operator-configured `copilot-cli.model` passthrough value, which is the model requested rather than the model the runtime reported using. The usage event also carries the newest shutdown record's `modelMetrics` per model, under the shared resume baseline seeded from the source of the combined seed.
+
+## Quota windows are pulled, not streamed
+
+Neither the JSON stream nor the session-state journal carries a quota figure. The runtime's quota snapshot event is ephemeral and never reaches the journal, so the adapter asks for the quotas after a turn that reached the runtime has ended. A cancelled turn and a credential-verification session do not ask. A pull the runtime cannot answer ends the session's pulls; any other failure leaves the next turn to try again.
+
+There are two routes, tried in one pull. Both yield one reading per quota that is not unlimited. Test the unlimited flag, not the entitlement: the SDK documents `-1` for an unlimited entitlement, while a live answer for an unlimited quota carries `0`.
+
+The endpoint route is `GET https://api.github.com/copilot_internal/user` with `Authorization: token <T>`. `T` is the first non-empty of `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, read from the turn's environment. The fields read, trimmed:
+
+```json
+{
+  "quota_reset_date_utc": "2026-11-01T00:00:00.000Z",
+  "quota_snapshots": {
+    "premium_interactions": {
+      "unlimited": false,
+      "percent_remaining": 0.0,
+      "entitlement": 20000,
+      "timestamp_utc": "2026-10-28T00:34:20.549Z"
+    },
+    "chat": { "unlimited": true, "percent_remaining": 100.0 }
+  }
+}
+```
+
+`percent_remaining` is the share left, so the used share is its complement. `timestamp_utc` is when the snapshot was taken, and `quota_reset_date_utc` is the instant the quotas reset. The answer is fresh on every call. The sibling `quota_reset_date` is a bare date and is not read. A 401, 403, or 404 falls through to the headless route. Any other HTTP error is reported as its status code alone. The token goes in that one header and nowhere else, and the response body is never logged.
+
+The headless route runs when no token variable is set, or when the endpoint refuses the token. It starts `copilot --headless --no-auto-update --stdio` as an auxiliary command, locally or over the session's SSH launch, and speaks JSON-RPC with `Content-Length` framing on the standard streams. The exchange is `connect` first, with the parameters `@github/copilot-sdk` sends, then `account.getQuota` with `{}`, then stdin closes. The answer, trimmed:
+
+```json
+{
+  "quotaSnapshots": {
+    "premium_interactions": {
+      "isUnlimitedEntitlement": false,
+      "entitlementRequests": 20000,
+      "usedRequests": 20000,
+      "remainingPercentage": 0,
+      "resetDate": "2026-10-28T00:15:43.579Z"
+    }
+  }
+}
+```
+
+Two traps live in this answer. First, the runtime serves it from a cached copy of the endpoint's answer, kept in its user cache file outside `COPILOT_HOME`, with no network round trip. Authenticated headless runs did not refresh that cache, so the figure can trail the endpoint. Second, `resetDate` is the time the cached snapshot was taken, not a reset: it equals the cache's `timestamp_utc` and differs from the endpoint's `quota_reset_date_utc`. The adapter reads it as the observation time and reports no reset on this route. An error answer, such as `Not authenticated`, means the runtime holds no GitHub sign-in of its own, and it ends the session's pulls.
+
+A custom provider reports no quota. With `COPILOT_PROVIDER_BASE_URL` set in the runtime's environment the turn spends no Copilot quota, so the pull returns unsupported before any request on either route.
+
+The endpoint request is made from Sortie's host, also for a remote session. A token that only the remote host sets is invisible there, so such a session reaches the quotas through the headless route on the remote host.
 
 ## Approvals
 

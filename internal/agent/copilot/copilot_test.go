@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,6 +49,15 @@ var fakeScenarios = map[string]agenttest.Scenario{
 }
 
 func TestMain(m *testing.M) {
+	// A fake runtime's turn pulls quota with the host environment, so an
+	// inherited GitHub token would reach the real endpoint; the live suite
+	// keeps it.
+	if os.Getenv("SORTIE_COPILOT_TEST") != "1" {
+		quota := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		quotaEndpoint = quota.URL
+	}
 	agenttest.Main(m, fakeScenarios)
 }
 

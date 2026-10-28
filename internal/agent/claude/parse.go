@@ -8,6 +8,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
@@ -67,6 +68,22 @@ type rawRateLimitInfo struct {
 	ResetsAt      int64  `json:"resetsAt"`
 	RateLimitType string `json:"rateLimitType"`
 	OverageStatus string `json:"overageStatus"`
+
+	// Utilization is a fraction of the window; absent when the report
+	// only says the window is open.
+	Utilization *float64 `json:"utilization"`
+}
+
+func (i *rawRateLimitInfo) windowReadings() []usage.WindowReading {
+	if i == nil {
+		return nil
+	}
+	return []usage.WindowReading{{
+		Window:   i.RateLimitType,
+		Share:    i.Utilization,
+		Status:   i.Status,
+		ResetsAt: i.ResetsAt,
+	}}
 }
 
 // rawUsage holds token counts from a Claude Code result event.

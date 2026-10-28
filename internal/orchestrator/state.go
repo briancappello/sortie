@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
@@ -81,13 +82,6 @@ type AgentTotals struct {
 	// recorded, cumulative across restarts. The counters above exclude
 	// these sessions.
 	UnmeasuredSessions int64
-}
-
-// RateLimitSnapshot holds the latest rate-limit payload from an agent
-// event. Opaque because the payload format is agent-adapter-defined.
-type RateLimitSnapshot struct {
-	Data       map[string]any
-	ReceivedAt time.Time
 }
 
 // RunningEntry tracks a single in-flight agent session. Created by dispatch
@@ -1447,9 +1441,9 @@ type State struct {
 	// computed at snapshot time.
 	AgentTotals AgentTotals
 
-	// AgentRateLimits is the most recent rate-limit payload from any agent
-	// event. Nil when none observed.
-	AgentRateLimits *RateLimitSnapshot
+	// UsageWindows maps an agent kind to the newest report of each of its
+	// usage windows. Runtime-only.
+	UsageWindows map[string][]domain.UsageWindow
 
 	// ReactionAttempts maps composite key (issueID:kind) to the count of
 	// reaction-triggered continuations. Reset when the issue leaves Running
@@ -1978,18 +1972,27 @@ type SnapshotAgentTotals struct {
 	RunningNonReporting int     `json:"running_non_reporting"`
 }
 
+// SnapshotUsageWindows is one agent kind's usage windows at snapshot time.
+type SnapshotUsageWindows struct {
+	// ReportedAt is the newest report among all held windows, current or not.
+	ReportedAt time.Time `json:"reported_at"`
+
+	// Windows holds the current windows only; never nil.
+	Windows []domain.UsageWindow `json:"windows"`
+}
+
 // RuntimeSnapshotResult is a point-in-time capture of the orchestrator's
 // runtime state, produced by [RuntimeSnapshot].
 type RuntimeSnapshotResult struct {
-	GeneratedAt          time.Time              `json:"generated_at"`
-	Running              []SnapshotRunningEntry `json:"running"`
-	Retrying             []SnapshotRetryEntry   `json:"retrying"`
-	AgentTotals          SnapshotAgentTotals    `json:"agent_totals"`
-	RateLimits           map[string]any         `json:"rate_limits"`
-	BudgetExhaustedCount int                    `json:"budget_exhausted_count"`
-	BudgetExhausted      []SnapshotBudgetEntry  `json:"budget_exhausted"`
-	ParkedCount          int                    `json:"parked_count"`
-	Parked               []SnapshotParkedEntry  `json:"parked"`
+	GeneratedAt          time.Time                       `json:"generated_at"`
+	Running              []SnapshotRunningEntry          `json:"running"`
+	Retrying             []SnapshotRetryEntry            `json:"retrying"`
+	AgentTotals          SnapshotAgentTotals             `json:"agent_totals"`
+	UsageWindows         map[string]SnapshotUsageWindows `json:"usage_windows"`
+	BudgetExhaustedCount int                             `json:"budget_exhausted_count"`
+	BudgetExhausted      []SnapshotBudgetEntry           `json:"budget_exhausted"`
+	ParkedCount          int                             `json:"parked_count"`
+	Parked               []SnapshotParkedEntry           `json:"parked"`
 
 	// PendingReactions is never nil.
 	PendingReactions []SnapshotPendingReaction `json:"pending_reactions"`
@@ -2137,9 +2140,8 @@ func spendOfRunningEntry(entry *RunningEntry) pricing.Spend {
 // runtime state. now is normalized to UTC internally.
 //
 // Running, Retrying, Parked, PendingReactions, BetweenStages, Held, and AgentTotals are copied out and
-// may be retained without synchronization. RateLimits is shallow-copied and may alias
-// nested mutable values; callers must treat it and its referents as
-// read-only.
+// may be retained without synchronization. UsageWindows is copied out, and the UsedPercent values its
+// windows point to are never written.
 //
 // Must be called from the event loop goroutine; [State] is not safe for
 // concurrent access.
@@ -2366,11 +2368,27 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 	snap.Held = snapshotHeld(state)
 	snap.ActiveOrder = activeOrderOf(state)
 
-	if state.AgentRateLimits != nil {
-		snap.RateLimits = maps.Clone(state.AgentRateLimits.Data)
-	}
+	snap.UsageWindows = snapshotUsageWindows(state, now)
 
 	return snap
+}
+
+// snapshotUsageWindows returns the per-kind windows current at now; never nil.
+func snapshotUsageWindows(state *State, now time.Time) map[string]SnapshotUsageWindows {
+	windows := make(map[string]SnapshotUsageWindows, len(state.UsageWindows))
+	for kind, held := range state.UsageWindows {
+		var reportedAt time.Time
+		for _, w := range held {
+			if w.ReportedAt.After(reportedAt) {
+				reportedAt = w.ReportedAt
+			}
+		}
+		windows[kind] = SnapshotUsageWindows{
+			ReportedAt: reportedAt,
+			Windows:    usage.CurrentWindows(held, now),
+		}
+	}
+	return windows
 }
 
 // snapshotPendingReactions builds the pending-reaction rows sorted by issue

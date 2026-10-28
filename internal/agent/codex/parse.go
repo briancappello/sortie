@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -228,8 +229,9 @@ func parseModelRerouted(params json.RawMessage) (modelReroutedParams, error) {
 // notification. ResetsAt is a pointer so a window without a reset
 // instant is distinguishable from one resetting at Unix zero.
 type rateLimitWindow struct {
-	UsedPercent int    `json:"usedPercent"`
-	ResetsAt    *int64 `json:"resetsAt"`
+	UsedPercent        int    `json:"usedPercent"`
+	WindowDurationMins *int64 `json:"windowDurationMins"`
+	ResetsAt           *int64 `json:"resetsAt"`
 }
 
 // rateLimitsUpdatedParams is the params payload of an
@@ -238,9 +240,35 @@ type rateLimitWindow struct {
 type rateLimitsUpdatedParams struct {
 	RateLimits struct {
 		LimitID   string           `json:"limitId"`
+		LimitName *string          `json:"limitName"`
 		Primary   *rateLimitWindow `json:"primary"`
 		Secondary *rateLimitWindow `json:"secondary"`
 	} `json:"rateLimits"`
+}
+
+func (p rateLimitsUpdatedParams) windowReadings() []usage.WindowReading {
+	var readings []usage.WindowReading
+	for _, w := range []struct {
+		suffix string
+		window *rateLimitWindow
+	}{{"/primary", p.RateLimits.Primary}, {"/secondary", p.RateLimits.Secondary}} {
+		if w.window == nil {
+			continue
+		}
+		share := float64(w.window.UsedPercent)
+		reading := usage.WindowReading{Window: p.RateLimits.LimitID + w.suffix, Share: &share}
+		if w.window.WindowDurationMins != nil {
+			reading.Span.Minutes = *w.window.WindowDurationMins
+		}
+		if p.RateLimits.LimitName != nil {
+			reading.Span.Scope = *p.RateLimits.LimitName
+		}
+		if w.window.ResetsAt != nil {
+			reading.ResetsAt = *w.window.ResetsAt
+		}
+		readings = append(readings, reading)
+	}
+	return readings
 }
 
 // parseRateLimitsUpdated unmarshals the params payload of an

@@ -25,6 +25,10 @@ type rawRunError struct {
 	Type    string `json:"type,omitempty"`
 	Message string `json:"message,omitempty"`
 	Status  any    `json:"status,omitempty"` // a JSON number when present
+
+	// RetryAfterMs is the delay in milliseconds after the failure at which
+	// the runtime expects a retry to succeed.
+	RetryAfterMs *int64 `json:"retryAfterMs"`
 }
 
 const (
@@ -192,8 +196,7 @@ func parseStepFinishPart(raw json.RawMessage) (rawStepFinishPart, error) {
 
 // freeTierRefusalClause returns a clause naming the free-tier-required
 // tools state's policy denies, or "" when runErr does not match the
-// free-tier refusal envelope, or the policy denies neither tool. It reads no member of runErr beyond what identifies the
-// refusal shape, starts no subprocess, and emits no event.
+// free-tier refusal envelope, or the policy denies neither tool.
 func freeTierRefusalClause(runErr *rawRunError, pt passthroughConfig) string {
 	if runErr == nil || !isFreeTierRefusal(runErr) {
 		return ""

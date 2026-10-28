@@ -30,7 +30,7 @@ function start_service(once_mode):
     retry_attempts: {},
     completed: set(),
     agent_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    agent_rate_limits: null
+    usage_windows: {}
   }
 
   for entry in persisted_retries:

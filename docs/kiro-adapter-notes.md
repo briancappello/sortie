@@ -69,13 +69,36 @@ Permission handling was measured with the `-a` switch removed. The runtime raise
 
 ## Protocol-specific observations
 
-The handshake advertises `loadSession` true, `mcpCapabilities.http` true with `sse` false, and an empty `sessionCapabilities` object, so Sortie never closes a session here through the protocol. `authMethods` is empty, which proves nothing either way. `agentInfo` carries a name and a version, which the gated suite's identity rule reads.
+The handshake advertises `loadSession` true, `mcpCapabilities.http` true with `sse` false, and an empty `sessionCapabilities` object, so Sortie never closes a session here through the protocol. `authMethods` is empty, which proves nothing either way. On the default engine `agentInfo` carries a name and a version, which the gated suite's identity rule reads; the `--agent-engine v3` engine sends no `agentInfo` at all.
 
 Session continuation restores the session and its memory: the recall turn runs under the seed's own session identifier and returns what the seed asked it to remember. A successful load alone does not prove that; only the recall answer does.
 
 The runtime sends many notifications under its own vendor method prefix. Sortie records them as unrecognized and moves on. Do not add handlers for them to quiet a log; the standard surface already carries everything the adapter reads.
 
 `limit_reached` was not induced here: the prompt channel cannot carry a request big enough to reach the runtime's limit.
+
+## Usage limits
+
+The runtime answers a credit-usage question on the session's own connection, so Sortie asks it when a turn ends and no credential leaves the runtime. The engines name the method differently, and Sortie tries them in order:
+
+1. `_kiro.dev/commands/execute` with `{"sessionId": "<id>", "command": {"command": "usage", "args": {}}}`. This is the default engine's method, the one the runtime's own terminal client calls for its usage panel.
+2. `_kiro/account/getUsage` with `{}`, when the first answers method not found. The `--agent-engine v3` engine serves this one, and the vendor documents that it drops the first. The v3 engine does not list it under `agentCapabilities._meta.kiro.extensionMethods` although the vendor says it does, so the handshake cannot be used to choose.
+
+Neither request makes the runtime emit agent text. The notifications seen around it are command lists, metadata, and context use, so nothing joins the turn's last agent message. The request costs no credits and, on the session's own connection, no extra session files; a separate probe process leaves a session pair in the runtime's store.
+
+The result is the usage object under `data`, or the result itself when `data` is absent. `success` false is an error. Trimmed:
+
+```json
+{"success": true, "message": "...", "data": {"planName": "<plan>", "billingCycleReset": "<YYYY-MM-DD>", "usageBreakdowns": [{"resourceType": "CREDIT", "displayName": "Credits", "used": 7.05, "limit": 1000.0, "percentage": 0.7, "hasLimit": true}], "bonusCredits": [], "addOnCredits": []}}
+```
+
+Each `usageBreakdowns` entry with `hasLimit` true becomes one window: `resourceType` names it, `displayName` is its scope, and `used` and `limit` are the amount in credits. Sortie computes the share from those two numbers. `percentage` is left unread because it is an integer on some engines and builds and a float on others, and it rounds to 0 below one percent.
+
+`billingCycleReset` is a calendar date with no time or zone. Sortie reads it as 00:00 UTC, so the shown reset can differ from the real instant by hours. The plan name, add-on credits, bonus credits, and overage fields are not read.
+
+The figure trails the spend. A 0.035-credit turn did not move `used` at once or a minute later, and it moved some minutes after. A window pulled when a turn ends therefore shows the usage before that turn and the turns just before it.
+
+The usage declaration is registered under the runtime's name `kiro`, which no handshake reports. The default engine's `agentInfo.name` is `Kiro CLI Agent`, and the v3 engine sends none. So when the handshake name matches no declaration, the declaration is selected by the launch command naming `kiro-cli`.
 
 ## Native headless observations
 

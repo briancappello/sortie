@@ -1,4 +1,5 @@
 import { useStateQuery } from "@/api/queries";
+import { usageByKind } from "@/lib/agent-kinds";
 import { hasRateSource } from "@/lib/budget";
 import { fmtCount, fmtMoney, fmtStamp, fmtTokens } from "@/lib/format";
 import { rateText, UNSET_RATE, UNSET_RATE_FROM_INPUT } from "@/lib/rates";
@@ -89,18 +90,6 @@ function TrackerPanel({ config }: ConfigProps) {
       </Pairs>
     </Panel>
   );
-}
-
-function usageByKind(config: ConfigResponse): [string, string][] {
-  const byKind = new Map<string, string>([[config.agent.kind, config.agent.usage_arrival]]);
-  const { dispatch } = config;
-  if (dispatch.default !== null) {
-    byKind.set(dispatch.default.agent_kind, dispatch.default.usage_arrival);
-  }
-  for (const rule of dispatch.rules ?? []) {
-    byKind.set(rule.agent_kind, rule.usage_arrival);
-  }
-  return [...byKind].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 function AgentPanel({ config }: ConfigProps) {

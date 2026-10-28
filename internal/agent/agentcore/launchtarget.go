@@ -256,6 +256,40 @@ func (t LaunchTarget) SSHOptions(settings ...sshutil.EnvVar) sshutil.SSHOptions 
 	}
 }
 
+// RuntimeEnv returns name's value as the runtime receives it from
+// Sortie: from env, or [os.Environ] when env is nil, for a local
+// launch; for a remote launch, only a variable the launch forwards
+// over SSH, which is a name in t.SSHEnvNames whose value in env holds a
+// non-whitespace character, the rule [LaunchTarget.SSHOptions] carries
+// by. A value the remote host sets for itself is invisible. A name in
+// t.WithheldEnv is never visible. When env holds a name more than once
+// the last entry wins, as it does for a launched process.
+func (t LaunchTarget) RuntimeEnv(env []string, name string) (string, bool) {
+	if slices.Contains(t.WithheldEnv, name) {
+		return "", false
+	}
+	remote := t.RemoteCommand != ""
+	if remote && !slices.Contains(t.SSHEnvNames, name) {
+		return "", false
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	var value string
+	var found bool
+	for _, entry := range env {
+		if !isEnvEntryNamed(entry, name) {
+			continue
+		}
+		_, value, _ = strings.Cut(entry, "=")
+		found = true
+	}
+	if remote && strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	return value, found
+}
+
 // BindWorkspace re-verifies t.WorkspacePath and, on success, sets
 // cmd.Dir to it, sets cmd.Env to os.Environ() when it is nil, and
 // replaces every PWD entry already in cmd.Env with one naming the same
