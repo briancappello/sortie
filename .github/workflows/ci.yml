@@ -47,6 +47,8 @@ jobs:
 
       - name: Check comments
         if: matrix.goos == 'linux'
+        env:
+          COMMENTS_BASE: origin/${{ github.base_ref || github.event.repository.default_branch }}
         run: scripts/comments.sh
 
       - name: Lint tool module
@@ -178,6 +180,8 @@ jobs:
 
   test-windows:
     name: Test (Windows)
+    # Forks that do not ship Windows builds skip it.
+    if: github.repository == 'sortie-ai/sortie'
     runs-on: windows-latest
 
     steps:
