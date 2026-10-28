@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/redact"
@@ -36,16 +38,37 @@ const effortEnvName = "CLAUDE_CODE_EFFORT_LEVEL"
 // default level instead.
 const unknownEffortPrefix = "Warning: Unknown --effort value"
 
+// streamSource: the stream reports utilization as a fraction and names
+// windows without stating their length, so lengths are declared here.
+var streamSource = usage.Source{Windows: usage.WindowDeclaration{
+	Share: usage.ShareFraction,
+	Statuses: map[string]domain.UsageWindowStatus{
+		"allowed":         domain.UsageWindowAllowed,
+		"allowed_warning": domain.UsageWindowWarning,
+		"rejected":        domain.UsageWindowExhausted,
+	},
+	Spans: map[string]usage.Span{
+		"five_hour":                  {Minutes: 300},
+		"seven_day":                  {Minutes: 10080},
+		"seven_day_opus":             {Minutes: 10080, Scope: "Opus"},
+		"seven_day_sonnet":           {Minutes: 10080, Scope: "Sonnet"},
+		"seven_day_overage_included": {Minutes: 10080},
+		"overage":                    {Scope: "extra usage"},
+	},
+}}
+
 func init() {
 	registry.Agents.RegisterWithMeta("claude-code", NewClaudeCodeAdapter, registry.AgentMeta{
 		RequiresCommand:        true,
 		DefaultCommand:         defaultCommand,
 		ValidateAgentConfig:    validateConfig,
-		MCPInjection:           registry.MCPInjectionSupported,
+		MCPDialect:             registry.MCPDialectMCPServersJSONAlwaysLoad,
 		SessionResumeBlockedBy: sessionResumeBlockedBy,
 		UsageArrival:           registry.UsageArrivalIncremental,
 		UsageAttribution:       registry.UsageAttributionPerModel,
+		UsageLimitRecognition:  registry.UsageLimitRecognized,
 		CredentialEnv:          registry.DeclareCredentialEnv("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+		VerificationContext:    registry.DeclareVerificationContext(),
 		EffortForwarding:       registry.EffortForwarded,
 	})
 }
@@ -62,6 +85,14 @@ var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 // Code CLI subprocesses. One adapter instance serves all concurrent
 // sessions; per-session state is held in [sessionState] via the
 // [domain.Session] Internal field.
+
+// syntheticModel is the model Claude Code stamps on a message it writes
+// itself, such as an API error or an interruption notice. It names no model,
+// so it must not replace the model that did the work.
+const syntheticModel = "<synthetic>"
+
+const authenticationFailedError = "authentication_failed"
+
 type ClaudeCodeAdapter struct{}
 
 // sessionState is adapter-internal state stored in [domain.Session]
@@ -75,10 +106,12 @@ type sessionState struct {
 	agentConfig     domain.AgentConfig
 	baseLogger      *slog.Logger
 
-	// mcpConfigPath is the worker-generated MCP config file path.
+	// mcpConfigPath is the derived MCP config file; empty on a remote launch.
 	mcpConfigPath string
 
 	credentialVerification bool
+
+	reducedVerificationContext bool
 
 	// forkSession owns the subprocess lifecycle for this session.
 	forkSession *agentcore.ForkPerTurnSession
@@ -86,6 +119,16 @@ type sessionState struct {
 	// acc holds the session's run-cumulative token usage. Constructed
 	// once in StartSession and never reset between turns.
 	acc *agentcore.RunUsage
+
+	// resume tracks the runtime's session-cumulative counter. Never reset
+	// between turns.
+	resume agentcore.ResumeBaseline
+
+	// processSpend sums the results of processes that do not restore saved
+	// totals, each of which reports only its own spend. Never reset.
+	processSpend domain.TokenUsage
+
+	processSpendByModel map[string]domain.TokenUsage
 
 	// usageMeasured reports whether an assistant usage object or a
 	// result-event usage figure has been observed for this session.
@@ -95,12 +138,15 @@ type sessionState struct {
 	// Per-turn scan state owned by the ParseLine and OnFinalize hook
 	// closures. Reset at the top of each RunTurn call before delegating
 	// to forkSession.
-	turnMessages     map[string]domain.TokenUsage
-	lastModel        string
-	apiCallStart     time.Time
-	emittedAPITiming bool
-	inFlight         *agentcore.ToolTracker
-	work             *agentcore.WorkObserver
+	restoresTotals    bool
+	turnResume        *domain.TokenUsage
+	turnResumeByModel map[string]domain.TokenUsage
+	turnMessages      map[string]domain.TokenUsage
+	lastModel         string
+	apiCallStart      time.Time
+	emittedAPITiming  bool
+	inFlight          *agentcore.ToolTracker
+	work              *agentcore.WorkObserver
 
 	// humanInputEnds and humanInputDetail record a recognized request that
 	// only a person could answer, observed in ParseLine on a
@@ -111,6 +157,15 @@ type sessionState struct {
 	// [agentcore.FinalizeTurn].
 	humanInputEnds   bool
 	humanInputDetail string
+
+	// authRefused records an assistant event reporting a refused login,
+	// observed in ParseLine and applied in OnFinalize to a failed result.
+	authRefused bool
+
+	// rateLimit is the latest rate_limit_event of the turn, observed in
+	// ParseLine and read in OnFinalize to tell a subscription refusal from
+	// an API-key 429.
+	rateLimit *rawRateLimitInfo
 
 	// effortReported records that the session has already logged the
 	// runtime's report of an unrecognized effort value. Touched only from
@@ -146,9 +201,46 @@ func (s *sessionState) relayEffortReport(effort string, stderrLines []string) {
 	s.effortReported = true
 }
 
-func (s *sessionState) refreshForkLogger() {
-	if s.forkSession != nil {
-		s.forkSession.SetLogger(s.logger())
+// settleResult folds a result event into the run total.
+//
+// A process that restored its session's saved totals reports the whole
+// session in modelUsage, so the figure is a reading of the session counter
+// and the baseline subtracts what the run did not add. A result with no
+// usable modelUsage, such as a crash result with zeroed figures, settles
+// nothing and hands no resume figure over, because the runtime may still
+// have saved spend the result does not show. An older process saves and
+// restores nothing, so each result covers only that process and adds to
+// the run.
+//
+// Only a restoring process with session persistence on reports a running
+// session total: without persistence nothing was saved to restore, and an
+// older process reports its own spend alone.
+func (s *sessionState) settleResult(event rawEvent, spend *agentcore.TurnSpend) {
+	breakdown, byModel := usageFromResult(event)
+	if !s.restoresTotals {
+		s.processSpend = agentcore.AddUsage(s.processSpend, breakdown)
+		s.processSpendByModel = agentcore.AddUsageByModel(s.processSpendByModel, byModel)
+		run, runByModel := s.resume.Run()
+		s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run), agentcore.AddUsageByModel(s.processSpendByModel, runByModel))
+		s.turnResume, s.turnResumeByModel = s.resume.Resume()
+		if breakdown.InputTokens > 0 || breakdown.OutputTokens > 0 {
+			spend.MarkSettled()
+		}
+		return
+	}
+	if len(event.ModelUsage) == 0 || (breakdown.InputTokens == 0 && breakdown.OutputTokens == 0) {
+		return
+	}
+	own := usageFromAssistant(event.Usage)
+	run, runByModel, estimated := s.resume.Observe(breakdown, byModel, &own)
+	s.acc.SetRunCumulative(agentcore.AddUsage(s.processSpend, run), agentcore.AddUsageByModel(s.processSpendByModel, runByModel))
+	s.turnResume, s.turnResumeByModel = s.resume.Resume()
+	spend.MarkSettled()
+	if s.passthrough.SessionPersistence && !s.credentialVerification {
+		spend.MarkSessionTotal()
+	}
+	if estimated {
+		spend.MarkEstimated()
 	}
 }
 
@@ -173,7 +265,7 @@ const detailAnswerToQuestion = "an answer to a question"
 // StartSession parses the session's settings, validates the workspace path,
 // resolves the claude binary, and initializes per-session state. No
 // subprocess is spawned; that happens in [ClaudeCodeAdapter.RunTurn].
-func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartSessionParams) (domain.Session, error) {
+func (a *ClaudeCodeAdapter) StartSession(ctx context.Context, params domain.StartSessionParams) (domain.Session, error) {
 	pt, fault := parsePassthroughConfig(params.Settings)
 	if fault != nil {
 		return domain.Session{}, agentcore.SettingsError(fault.Error(), fault)
@@ -203,23 +295,56 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		sessionUUID = uuid
 	}
 
+	resumeFrom := &domain.TokenUsage{}
+	var resumeFromByModel map[string]domain.TokenUsage
+	if isContinuation {
+		resumeFrom = params.ResumeUsage
+		resumeFromByModel = params.ResumeUsageByModel
+	}
+
+	baseLogger := slog.Default().With(slog.String("component", "claude-adapter"))
+
+	tools, toolsErr := agentcore.ResolveToolDelivery(ctx, params, target, registry.MCPDialectMCPServersJSONAlwaysLoad, baseLogger)
+	if toolsErr != nil {
+		return domain.Session{}, toolsErr
+	}
+
+	mcpConfigPath := ""
+	if target.RemoteCommand == "" && tools.Configured() && !params.CredentialVerification {
+		var err error
+		mcpConfigPath, err = writeDerivedConfig(target.WorkspacePath, tools)
+		if err != nil {
+			_ = tools.Close()
+			return domain.Session{}, &domain.AgentError{
+				Kind:    domain.ErrResponseError,
+				Message: fmt.Sprintf("prepare MCP config: %v", err),
+				Err:     err,
+			}
+		}
+	}
+
 	state := &sessionState{
 		target:                 target,
 		claudeSessionID:        sessionUUID,
 		isContinuation:         isContinuation,
 		passthrough:            pt,
 		agentConfig:            params.AgentConfig,
-		baseLogger:             slog.Default().With(slog.String("component", "claude-adapter")),
-		mcpConfigPath:          params.MCPConfigPath,
+		baseLogger:             baseLogger,
+		mcpConfigPath:          mcpConfigPath,
 		credentialVerification: params.CredentialVerification,
 		acc:                    agentcore.NewRunUsage(),
+		resume:                 *agentcore.NewResumeBaseline(resumeFrom, resumeFromByModel),
+
+		reducedVerificationContext: params.ReducedVerificationContext(),
 	}
 
 	hooks := agentcore.ForkPerTurnHooks{
+		Tools:         tools,
+		ToolPlacement: placeMCPConfig,
 		BuildArgs: func(turn int, prompt string) []string {
 			return buildArgs(state, turn, prompt, state.passthrough)
 		},
-		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string) (any, error) {
+		ParseLine: func(line []byte, emit func(domain.AgentEvent), pid string, spend *agentcore.TurnSpend) (any, error) {
 			now := time.Now().UTC()
 
 			event, parseErr := parseEvent(line)
@@ -233,8 +358,8 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 				case "init":
 					if event.SessionID != "" {
 						state.claudeSessionID = event.SessionID
-						state.refreshForkLogger()
 					}
+					state.restoresTotals = restoresSavedTotals(event.ClaudeCodeVersion)
 					agentcore.EmitSessionStarted(emit, pid, state.claudeSessionID)
 					// The first API call is imminent. Start the monotonic timer.
 					state.apiCallStart = time.Now()
@@ -260,16 +385,28 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 						state.humanInputDetail = detail
 					}
 					agentcore.EmitNotification(emit, posture.NoticeWithDetail(detail))
+				case "task_started", "task_progress", "task_notification":
+					// A sub-agent task event proves the model served this turn
+					// output; its usage figure is a context size, not spend.
+					spend.MarkModelReached()
+					agentcore.EmitNotification(emit, "")
 				default:
-					agentcore.EmitNotification(emit, event.summary())
+					// Task and background-task bookkeeping carries no
+					// operator-readable text; a blank ping keeps stall
+					// detection alive without cluttering the run timeline.
+					agentcore.EmitNotification(emit, "")
 				}
 
 			case "assistant":
+				if event.ErrorField == authenticationFailedError {
+					state.authRefused = true
+				}
 				if len(event.Message) > 0 {
 					var meta rawAssistantMessageMeta
 					if err := json.Unmarshal(event.Message, &meta); err == nil {
-						if meta.Model != "" {
+						if meta.Model != "" && meta.Model != syntheticModel {
 							state.lastModel = meta.Model
+							spend.MarkModelReached()
 						}
 						if meta.Usage != nil {
 							state.usageMeasured = true
@@ -278,7 +415,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 							candidate := usageFromAssistant(meta.Usage)
 							prior, seen := state.turnMessages[meta.ID]
 							state.turnMessages[meta.ID] = agentcore.MaxUsage(prior, candidate)
-							provisional := sumTurnMessages(state.turnMessages)
+							provisional := agentcore.SumUsage(state.turnMessages)
 							snapshot := state.acc.SetTurnProvisional(provisional)
 
 							// Claude Code repeats one message id across every
@@ -286,10 +423,11 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 							// id's first sighting represents a new API request.
 							if !seen {
 								tokenEvt := domain.AgentEvent{
-									Type:      domain.EventTokenUsage,
-									Timestamp: now,
-									Usage:     snapshot,
-									Model:     state.lastModel,
+									Type:         domain.EventTokenUsage,
+									Timestamp:    now,
+									Usage:        snapshot,
+									UsageByModel: state.acc.ByModel(),
+									Model:        state.lastModel,
 								}
 								if !state.apiCallStart.IsZero() {
 									dur := time.Since(state.apiCallStart).Milliseconds()
@@ -323,39 +461,39 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 
 			case "result":
 				captured := event
-				// The result event's modelUsage (or, absent that, its usage
-				// object) is the authoritative per-turn figure: it includes
-				// sub-agent activity the streamed assistant events never
-				// carry. It settles into the run total regardless of what
-				// the assistant events already contributed, so a message
-				// only some of whose usage streamed still counts in full.
-				authoritative, _ := usageFromResult(event)
-				state.acc.AddTurn(authoritative)
+				state.settleResult(event, spend)
 				if len(event.ModelUsage) > 0 || event.Usage != nil {
 					state.usageMeasured = true
 				}
 				return &captured, nil
 
+			case "rate_limit_event":
+				if event.RateLimitInfo != nil {
+					state.rateLimit = event.RateLimitInfo
+				}
+				at := time.Now().UTC()
+				agentcore.EmitUsageWindows(emit, at, usage.Windows(streamSource, event.RateLimitInfo.windowReadings(), at))
+
 			case "stream_event":
 				agentcore.EmitNotification(emit, "")
 
 			default:
-				emit(domain.AgentEvent{
-					Type:      domain.EventOtherMessage,
-					Timestamp: now,
-					Message:   event.summary(),
-				})
+				agentcore.EmitNotification(emit, "")
 			}
 
 			return nil, nil
 		},
-		GetUsage:     func() (domain.TokenUsage, bool) { return state.acc.Snapshot(), state.usageMeasured },
+		GetUsage: func() (domain.TokenUsage, map[string]domain.TokenUsage, bool) {
+			return state.acc.Snapshot(), state.acc.ByModel(), state.usageMeasured
+		},
 		GetSessionID: func() string { return state.claudeSessionID },
-		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError) (domain.TurnResult, *domain.AgentError) {
+		OnFinalize: func(emit func(domain.AgentEvent), lastParsed any, exitCode int, waitErr error, stderrLines []string, earlyExit *domain.AgentError, spend *agentcore.TurnSpend) (domain.TurnResult, *domain.AgentError) {
 			usage := state.acc.Snapshot()
 
 			finalize := func(ev agentcore.TurnEvidence, meta agentcore.TurnMeta) (domain.TurnResult, *domain.AgentError) {
-				result, agentErr := agentcore.FinalizeTurn(emit, state.logger(), ev, meta)
+				meta.ResumeUsage = state.turnResume
+				meta.ResumeUsageByModel = state.turnResumeByModel
+				result, agentErr := agentcore.FinalizeTurn(emit, state.logger(), ev, meta, *spend)
 				if agentErr == nil {
 					state.relayEffortReport(state.passthrough.Effort, stderrLines)
 				}
@@ -370,6 +508,7 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 				meta := agentcore.TurnMeta{
 					SessionID:     state.claudeSessionID,
 					Usage:         usage,
+					UsageByModel:  state.acc.ByModel(),
 					UsageMeasured: state.usageMeasured,
 				}
 				return finalize(evidence, meta)
@@ -402,12 +541,20 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 					} else {
 						ev.TerminalMessage = lastResult.Subtype
 					}
+					if state.authRefused {
+						ev.TerminalErrorKind = domain.ErrCredentialUnverified
+						ev.TerminalMessage = agentcore.CredentialRefusedMessage(ev.TerminalMessage)
+					} else if limit := usageLimitOf(lastResult, state.rateLimit); limit != nil {
+						ev.TerminalErrorKind = domain.ErrUsageLimit
+						ev.UsageLimit = limit
+					}
 				}
 			}
 
 			meta := agentcore.TurnMeta{
 				SessionID:     state.claudeSessionID,
 				Usage:         usage,
+				UsageByModel:  state.acc.ByModel(),
 				UsageMeasured: state.usageMeasured,
 				APIDurationMS: turnAPIDuration,
 			}
@@ -417,11 +564,12 @@ func (a *ClaudeCodeAdapter) StartSession(_ context.Context, params domain.StartS
 		EmitSessionStartID: nil, // Claude emits EventSessionStarted from ParseLine on "system/init"
 	}
 
-	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.logger(), state.agentConfig.StopGraceMS)
+	state.forkSession = agentcore.NewForkPerTurnSession(&state.target, hooks, state.baseLogger, state.agentConfig.StopGraceMS)
 
 	return domain.Session{
-		ID:       sessionUUID,
-		Internal: state,
+		ID:            sessionUUID,
+		Internal:      state,
+		NoToolChannel: tools.NoToolChannel(),
 	}, nil
 }
 
@@ -441,11 +589,12 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 		}
 	}
 
-	state.refreshForkLogger()
-
-	// Reset per-turn scan state before delegation. state.acc is
-	// constructed once in StartSession and carries the run-cumulative
-	// snapshot across turns, so it is not reset here.
+	// Reset per-turn scan state before delegation. state.acc, state.resume,
+	// and state.processSpend are constructed once in StartSession and carry
+	// the run's usage across turns, so they are not reset here.
+	state.restoresTotals = false
+	state.turnResume = nil
+	state.turnResumeByModel = nil
 	state.turnMessages = make(map[string]domain.TokenUsage)
 	state.lastModel = ""
 	state.apiCallStart = time.Time{}
@@ -454,8 +603,33 @@ func (a *ClaudeCodeAdapter) RunTurn(ctx context.Context, session domain.Session,
 	state.work = agentcore.NewWorkObserver(agentcore.WorkSignals{AssistantOutput: true, ToolActivity: true})
 	state.humanInputEnds = false
 	state.humanInputDetail = ""
+	state.authRefused = false
+	state.rateLimit = nil
 
 	return state.forkSession.RunTurn(ctx, params.Prompt, params.OnEvent)
+}
+
+// usageLimitOf returns the refusal a failed result reports, or nil when the
+// result is not a subscription allowance refusal. An API-key 429 carries no
+// rejected rate_limit_event, and an overage that is not itself rejected means
+// the account can still spend, so neither counts.
+func usageLimitOf(result *rawEvent, info *rawRateLimitInfo) *domain.UsageLimit {
+	if !result.IsError || result.APIErrorStatus != http.StatusTooManyRequests {
+		return nil
+	}
+	if info == nil || info.Status != "rejected" {
+		return nil
+	}
+	if info.OverageStatus != "" && info.OverageStatus != "rejected" {
+		return nil
+	}
+	limit := &domain.UsageLimit{
+		ModelOnly: info.RateLimitType == "seven_day_opus" || info.RateLimitType == "seven_day_sonnet",
+	}
+	if info.ResetsAt > 0 {
+		limit.ResetsAt = time.Unix(info.ResetsAt, 0).UTC()
+	}
+	return limit
 }
 
 // StopSession terminates a running Claude Code subprocess gracefully by
@@ -590,15 +764,15 @@ func processToolBlocks(
 	for _, block := range blocks {
 		if block.Type == "tool_use" && block.ID != "" {
 			work.ObserveToolActivity()
-			inFlight.Begin(block.ID, block.Name)
+			inFlight.Begin(block.ID, toolCallOf(block.Name, block.Input))
 		}
 		if block.Type == "tool_result" {
 			work.ObserveToolActivity()
-			toolName, durationMS, ok := inFlight.End(block.ToolUseID)
-			if !ok {
-				toolName = "unknown"
+			call, durationMS, _ := inFlight.End(block.ToolUseID)
+			msg := "tool_result"
+			if call.Name != "" {
+				msg += ": " + call.Name
 			}
-			msg := "tool_result: " + toolName
 			if block.IsError {
 				if errText := toolResultText(block); errText != "" {
 					msg = truncateToolError(redact.Mask(stripClaudeMarkup(errText)), maxToolErrorLen)
@@ -607,7 +781,9 @@ func processToolBlocks(
 			onEvent(domain.AgentEvent{
 				Type:           domain.EventToolResult,
 				Timestamp:      wallTime,
-				ToolName:       toolName,
+				ToolName:       call.Name,
+				ToolKind:       call.Kind,
+				ToolArgument:   call.Argument,
 				ToolDurationMS: durationMS,
 				ToolError:      block.IsError,
 				Message:        msg,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/notify/render"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
@@ -66,8 +67,12 @@ func TestApplyEscalate_DeliversOneEvent(t *testing.T) {
 	if n.Envelope.Escalation != (domain.SessionEscalation{Kind: "question", Rule: "implement", URL: "https://viewer.example/s/1"}) {
 		t.Errorf("escalation = %+v, want kind question, rule implement, and the URL", n.Envelope.Escalation)
 	}
-	if n.Message.AgentText != "Which database should I target?" || !strings.Contains(n.Message.Title, "LIVE-1") {
-		t.Errorf("message = %+v, want the text as AgentText and a title naming LIVE-1", n.Message)
+	text := render.Notification(n)
+	if n.Message.AgentText != "Which database should I target?" || !strings.Contains(text.Title, "LIVE-1") {
+		t.Errorf("message = %+v, rendered title %q, want the text as AgentText and a title naming LIVE-1", n.Message, text.Title)
+	}
+	if want := "The running session on rule implement asks for a person (question).\nSession: https://viewer.example/s/1"; text.Body != want {
+		t.Errorf("rendered body = %q, want %q", text.Body, want)
 	}
 }
 

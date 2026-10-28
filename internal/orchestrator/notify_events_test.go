@@ -15,6 +15,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/notify/render"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/workspace"
@@ -194,7 +195,7 @@ func escalationKinds() []escalationKind {
 			escalate: func(state *State, p ReconcileParams, pending *PendingReaction, m domain.Metrics) {
 				pending.Kind = ReactionKindReview
 				data := &ReviewReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
-				escalateReviewFailure(state, p, pending, 3, trigger, data, log, ctx, m)
+				escalateReviewFailure(state, p, pending, 3, trigger, data, "fp", goldenNow, time.Second, log, ctx, m)
 			},
 		},
 		{
@@ -207,7 +208,7 @@ func escalationKinds() []escalationKind {
 			escalate: func(state *State, p ReconcileParams, pending *PendingReaction, m domain.Metrics) {
 				pending.Kind = ReactionKindBotReview
 				data := &BotReviewReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
-				escalateBotReviewFailure(state, p, pending, 3, trigger, data, log, ctx, m)
+				escalateBotReviewFailure(state, p, pending, 3, trigger, data, "fp", goldenNow, time.Second, log, ctx, m)
 			},
 		},
 		{
@@ -220,7 +221,7 @@ func escalationKinds() []escalationKind {
 			escalate: func(state *State, p ReconcileParams, pending *PendingReaction, m domain.Metrics) {
 				pending.Kind = ReactionKindMergeConflict
 				data := &MergeConflictReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
-				escalateMergeConflictFailure(state, p, pending, 2, trigger, data, log, ctx, m)
+				escalateMergeConflictFailure(state, p, pending, 2, trigger, data, "fp", goldenNow, time.Second, log, ctx, m)
 			},
 		},
 	}
@@ -337,7 +338,7 @@ func TestNotifyEvents_AutoMergeEscalationCountsOnce(t *testing.T) {
 			pending := &PendingReaction{IssueID: goldenIssueID, Identifier: goldenIssueID, Kind: ReactionKindAutoMerge, CreatedAt: goldenNow}
 			data := &AutoMergeReactionData{PRNumber: 42, Owner: "acme", Repo: "widgets"}
 
-			escalateAutoMergeFailure(state, params, pending, 3, data, discardLogger(), context.Background(), counters)
+			escalateAutoMergeFailure(state, params, pending, 3, EscalationTriggerBudget, "", data, goldenNow, time.Second, discardLogger(), context.Background(), counters)
 			state.TrackerOpsWg.Wait()
 
 			if got := counters.recorded("auto_merge"); !slices.Equal(got, []string{"escalated"}) {
@@ -507,11 +508,12 @@ func TestNotifyEvents_ReloadKeepsHeldEscalationPosting(t *testing.T) {
 
 	o.updateRouter(config.ServiceConfig{CIFeedback: config.CIFeedbackConfig{Escalation: "label"}})
 
-	delivery := o.router.Route(reactionNotification(domain.EventEscalationReviewComments, &PendingReaction{IssueID: "ISS-1", Identifier: "ISS-1"}, "needs a human"))
+	delivery := o.router.Route(reactionNotification(domain.EventEscalationReviewComments, &PendingReaction{IssueID: "ISS-1", Identifier: "ISS-1"}, domain.ReviewEscalationFacts{PRNumber: 7, Branch: "feat/x", Turns: 2}))
 	if _, err := delivery.Deliver(context.Background()).TrackerComment(); err != nil {
 		t.Fatalf("Deliver(): %v", err)
 	}
-	if !slices.Equal(ops.comments, []string{"needs a human"}) {
+	wantComment := "Review fix continuation turns exhausted for PR #7 on branch feat/x.\n2 continuation turns attempted. Remaining review comments require human attention."
+	if !slices.Equal(ops.comments, []string{wantComment}) {
 		t.Errorf("tracker comments after a reload = %v, want the held comment escalation still posted", ops.comments)
 	}
 }
@@ -534,7 +536,7 @@ func TestNotifyEvents_RoutingUpdateFailureKeepsInstalledTable(t *testing.T) {
 	if !strings.Contains(logs.String(), "notification routing update failed") {
 		t.Errorf("log = %q, want an ERROR record for the rejected routing update", logs.String())
 	}
-	if o.router.Route(reactionNotification(domain.EventSessionFailed, &PendingReaction{IssueID: "ISS-1"}, "x")).Empty() {
+	if o.router.Route(reactionNotification(domain.EventSessionFailed, &PendingReaction{IssueID: "ISS-1"}, domain.SessionFailedFacts{})).Empty() {
 		t.Error("session.failed is no longer routed after a failed update, want the installed table kept")
 	}
 }
@@ -673,29 +675,29 @@ func TestNotifyEvents_NotificationEnvelopes(t *testing.T) {
 	}{
 		{
 			name:         "session event carries the run identity",
-			got:          session.notification(domain.EventSessionCompleted, "", "done"),
+			got:          session.notification(domain.EventSessionCompleted, "", domain.SessionCompletedFacts{}),
 			wantType:     domain.EventSessionCompleted,
 			wantSeverity: "info",
 			wantTitle:    "PROJ-One: session.completed",
 			wantEnvelope: domain.NotificationEnvelope{
-				IssueID: "id-1", Identifier: "PROJ-1", DispatchID: "dispatch-1", SessionID: "sess-1",
+				IssueID: "id-1", Identifier: "PROJ-1", DisplayID: "PROJ-One", DispatchID: "dispatch-1", SessionID: "sess-1",
 				Attempt: &attempt, Agent: "claude-code", EventType: domain.EventSessionCompleted,
 			},
 		},
 		{
 			name:         "a severity override replaces the catalog severity",
-			got:          session.notification(domain.EventSessionStopped, "info", "nothing to change"),
+			got:          session.notification(domain.EventSessionStopped, "info", domain.SessionStoppedFacts{}),
 			wantType:     domain.EventSessionStopped,
 			wantSeverity: "info",
 			wantTitle:    "PROJ-One: session.stopped",
 			wantEnvelope: domain.NotificationEnvelope{
-				IssueID: "id-1", Identifier: "PROJ-1", DispatchID: "dispatch-1", SessionID: "sess-1",
+				IssueID: "id-1", Identifier: "PROJ-1", DisplayID: "PROJ-One", DispatchID: "dispatch-1", SessionID: "sess-1",
 				Attempt: &attempt, Agent: "claude-code", EventType: domain.EventSessionStopped,
 			},
 		},
 		{
 			name:         "the title falls back to the identifier and then the issue id",
-			got:          sessionEvent{IssueID: "id-2"}.notification(domain.EventSessionFailed, "", "failed"),
+			got:          sessionEvent{IssueID: "id-2"}.notification(domain.EventSessionFailed, "", domain.SessionFailedFacts{}),
 			wantType:     domain.EventSessionFailed,
 			wantSeverity: "warning",
 			wantTitle:    "id-2: session.failed",
@@ -704,11 +706,11 @@ func TestNotifyEvents_NotificationEnvelopes(t *testing.T) {
 		{
 			name: "reaction event carries only the issue",
 			got: reactionNotification(domain.EventEscalationBotReview,
-				&PendingReaction{IssueID: "id-3", Identifier: "PROJ-3", DisplayID: "PROJ-Three"}, "escalated"),
+				&PendingReaction{IssueID: "id-3", Identifier: "PROJ-3", DisplayID: "PROJ-Three"}, domain.BotReviewEscalationFacts{}),
 			wantType:     domain.EventEscalationBotReview,
 			wantSeverity: "warning",
 			wantTitle:    "PROJ-Three: escalation.bot_review",
-			wantEnvelope: domain.NotificationEnvelope{IssueID: "id-3", Identifier: "PROJ-3", EventType: domain.EventEscalationBotReview},
+			wantEnvelope: domain.NotificationEnvelope{IssueID: "id-3", Identifier: "PROJ-3", DisplayID: "PROJ-Three", EventType: domain.EventEscalationBotReview},
 		},
 		{
 			name: "budget hold carries the issue and the notice text",
@@ -731,8 +733,8 @@ func TestNotifyEvents_NotificationEnvelopes(t *testing.T) {
 			if got.Message.Severity != tt.wantSeverity {
 				t.Errorf("Message.Severity = %q, want %q", got.Message.Severity, tt.wantSeverity)
 			}
-			if got.Message.Title != tt.wantTitle {
-				t.Errorf("Message.Title = %q, want %q", got.Message.Title, tt.wantTitle)
+			if title := render.Notification(got).Title; title != tt.wantTitle {
+				t.Errorf("render.Notification(...).Title = %q, want %q", title, tt.wantTitle)
 			}
 			if got.Message.Category != "" {
 				t.Errorf("Message.Category = %q, want empty", got.Message.Category)
@@ -854,8 +856,8 @@ func TestNotifyEvents_WorkerExitPublishesSessionEvents(t *testing.T) {
 			if envelope.Attempt == nil || *envelope.Attempt != attempt {
 				t.Errorf("Envelope.Attempt = %v, want %d", envelope.Attempt, attempt)
 			}
-			if sent[0].Message.Body == "" {
-				t.Error("Message.Body is empty, want the comment text")
+			if render.Notification(sent[0]).Body == "" {
+				t.Error("rendered Body is empty, want the comment text")
 			}
 		})
 	}
@@ -892,5 +894,51 @@ func TestNotifyEvents_OrchestratorEventsCreateNoSlotFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspaceDir, ".sortie", "notification_slots")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Stat(.sortie/notification_slots) error = %v, want not-exist", err)
+	}
+}
+
+func TestNotifyEvents_SessionStartedWithheldInsideNotifiedEpisode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		usageLimitNotified bool
+		wantPublished      int
+	}{
+		{name: "retry inside a notified episode", usageLimitNotified: true, wantPublished: 0},
+		{name: "dispatch outside an episode", usageLimitNotified: false, wantPublished: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			slack := &notifierSpy{}
+			tracker := &mockTrackerAdapter{}
+			router := mustRouter(t, tracker, spyLookup(slack), route.Inputs{
+				Entries:  []config.NotificationBackend{subscribe("slack", domain.EventTypeSessionStarted)},
+				Comments: config.TrackerCommentsConfig{OnDispatch: true},
+			})
+			var wg sync.WaitGroup
+			deps := WorkerDeps{
+				Router:             router,
+				TrackerOpsWg:       &wg,
+				Metrics:            &spyMetrics{},
+				UsageLimitNotified: tt.usageLimitNotified,
+			}
+
+			publishSessionStarted(context.Background(), workerTestIssue(), nil, "mock", deps, discardLogger())
+			wg.Wait()
+
+			tracker.commentMu.Lock()
+			comments := len(tracker.commentCalls)
+			tracker.commentMu.Unlock()
+			if got := len(slack.notifications()); got != tt.wantPublished {
+				t.Errorf("session.started notifications with UsageLimitNotified %v = %d, want %d", tt.usageLimitNotified, got, tt.wantPublished)
+			}
+			if comments != tt.wantPublished {
+				t.Errorf("dispatch comments with UsageLimitNotified %v = %d, want %d", tt.usageLimitNotified, comments, tt.wantPublished)
+			}
+		})
 	}
 }

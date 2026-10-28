@@ -18,6 +18,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // mustTriageWorkspace creates a workspace root containing a directory for
@@ -181,26 +182,6 @@ func probeTriageConfig(t *testing.T) config.ReactionTriageConfig {
 	return config.ReactionTriageConfig{Script: writeHookScript(t, handledScript), TimeoutMS: 5000}
 }
 
-// triageTestRunTimeout bounds how long a test waits for a real triage
-// subprocess to finish.
-const triageTestRunTimeout = 5 * time.Second
-
-// waitTriageRunDone blocks until run's Done channel closes or
-// triageTestRunTimeout elapses, failing the test on timeout. Tests use
-// this instead of a fixed sleep because the real subprocess's
-// completion time is not otherwise observable.
-func waitTriageRunDone(t *testing.T, run *ReactionTriageRun) {
-	t.Helper()
-	if run == nil {
-		t.Fatal("waitTriageRunDone: run is nil")
-	}
-	select {
-	case <-run.Done:
-	case <-time.After(triageTestRunTimeout):
-		t.Fatalf("triage run did not finish within %v", triageTestRunTimeout)
-	}
-}
-
 // triageCancelSpy records how many times Cancel was invoked, for tests
 // that assert an in-flight run is torn down rather than left to leak.
 type triageCancelSpy struct {
@@ -238,8 +219,6 @@ func finishedTriageRun(fingerprint string, outcome ReactionTriageOutcome, applie
 	}
 }
 
-// inFlightTriageRun builds a run whose Done channel never closes, for
-// gate subtests that drive a not-done row without a real subprocess.
 func inFlightTriageRun(fingerprint string, cancel func()) *ReactionTriageRun {
 	if cancel == nil {
 		cancel = func() {}
@@ -252,10 +231,10 @@ func inFlightTriageRun(fingerprint string, cancel func()) *ReactionTriageRun {
 	}
 }
 
-// triageGateStore is a minimal ReconcileStore for gate tests: only
-// MarkReactionDispatched carries behavior, the rest satisfy the
-// interface but are never expected to be called by the gate.
 type triageGateStore struct {
+	reactionActivityLog
+	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	markCalls int
@@ -293,9 +272,6 @@ func (s *triageGateStore) AppendRunHistory(_ context.Context, run persistence.Ru
 	return run, nil
 }
 
-// gateParams returns a ReconcileParams and State wired for
-// reactionTriageGate tests: a real workspace, a real MaxConcurrentAgents
-// cap, and a triageGateStore.
 func gateParams(t *testing.T, store *triageGateStore, workspaceRoot string) (*State, ReconcileParams) {
 	t.Helper()
 	state := NewState(1000, 5, 0, nil, AgentTotals{})
@@ -689,6 +665,8 @@ func TestRunReactionTriage_SubjectTextNeverInEnvironment(t *testing.T) {
 	}
 }
 
+var gateLineage = StageLineage{ChainID: "chain-gate", DispatchedAt: baseTime}
+
 func TestReactionTriageGate(t *testing.T) {
 	t.Parallel()
 
@@ -752,7 +730,7 @@ func TestReactionTriageGate(t *testing.T) {
 			t.Errorf("pending.Triage.Fingerprint = %q, want %q", pending.Triage.Fingerprint, "fp-3")
 		}
 
-		waitTriageRunDone(t, pending.Triage)
+		waittest.Receive(t, pending.Triage.Done, "triage run to finish")
 	})
 
 	t.Run("not done same fingerprint waits without acting", func(t *testing.T) {
@@ -805,7 +783,7 @@ func TestReactionTriageGate(t *testing.T) {
 			t.Errorf("pending.Triage = %+v, want a run for fp-new", pending.Triage)
 		}
 
-		waitTriageRunDone(t, pending.Triage)
+		waittest.Receive(t, pending.Triage.Done, "triage run to finish")
 	})
 
 	t.Run("done different fingerprint discards and starts a new run", func(t *testing.T) {
@@ -831,7 +809,7 @@ func TestReactionTriageGate(t *testing.T) {
 			t.Errorf("pending.Triage = %+v, want a run for fp-new-2", pending.Triage)
 		}
 
-		waitTriageRunDone(t, pending.Triage)
+		waittest.Receive(t, pending.Triage.Done, "triage run to finish")
 	})
 
 	t.Run("done same fingerprint unapplied dispatch-agent proceeds", func(t *testing.T) {
@@ -862,10 +840,12 @@ func TestReactionTriageGate(t *testing.T) {
 		run := finishedTriageRun("fp-8", ReactionTriageOutcome{Disposition: TriageHandled}, false, false)
 		store := &triageGateStore{}
 		state, params := gateParams(t, store, mustTriageWorkspace(t, "ISS-8"))
-		pending := &PendingReaction{IssueID: "ISS-8", Triage: run}
+		pending := &PendingReaction{IssueID: "ISS-8", Kind: ReactionKindCI, Triage: run, StageLineage: gateLineage}
 		req := gateRequest(params.WorkspaceRoot, "ISS-8", "fp-8")
 
 		verdict := reactionTriageGate(state, params, pending, probeTriageConfig(t), req, discardLogger(), context.Background())
+		reactionTriageGate(state, params, pending, probeTriageConfig(t), req, discardLogger(), context.Background())
+		reactionTriageGate(state, params, pending, probeTriageConfig(t), req, discardLogger(), context.Background())
 
 		if verdict != triageHandled {
 			t.Errorf("reactionTriageGate() = %v, want triageHandled", verdict)
@@ -879,6 +859,10 @@ func TestReactionTriageGate(t *testing.T) {
 		if store.markCalls != 1 {
 			t.Errorf("MarkReactionDispatched called %d times, want 1", store.markCalls)
 		}
+		actions := store.activities(persistence.ReactionActivityAction)
+		if len(actions) != 1 || actions[0].IssueID != "ISS-8" || actions[0].ChainID != gateLineage.ChainID || actions[0].Kind != ReactionKindCI {
+			t.Errorf("RecordReactionActivity action records over three passes = %+v, want one for ISS-8 kind %q chain %q", actions, ReactionKindCI, gateLineage.ChainID)
+		}
 	})
 
 	t.Run("done same fingerprint unapplied escalate marks dispatched", func(t *testing.T) {
@@ -887,7 +871,7 @@ func TestReactionTriageGate(t *testing.T) {
 		run := finishedTriageRun("fp-9", ReactionTriageOutcome{Disposition: TriageEscalate}, false, false)
 		store := &triageGateStore{}
 		state, params := gateParams(t, store, mustTriageWorkspace(t, "ISS-9"))
-		pending := &PendingReaction{IssueID: "ISS-9", Triage: run}
+		pending := &PendingReaction{IssueID: "ISS-9", Triage: run, StageLineage: gateLineage}
 		req := gateRequest(params.WorkspaceRoot, "ISS-9", "fp-9")
 
 		verdict := reactionTriageGate(state, params, pending, probeTriageConfig(t), req, discardLogger(), context.Background())
@@ -900,6 +884,9 @@ func TestReactionTriageGate(t *testing.T) {
 		}
 		if store.markCalls != 1 {
 			t.Errorf("MarkReactionDispatched called %d times, want 1", store.markCalls)
+		}
+		if len(store.recorded) != 0 {
+			t.Errorf("RecordReactionActivity records = %+v, want none: the escalation is recorded by beginEscalation", store.recorded)
 		}
 	})
 
@@ -1026,25 +1013,13 @@ func TestReactionTriageGate(t *testing.T) {
 		if run3.Cancel != nil {
 			run3.Cancel()
 		}
-		waitStateTriageWg(t, state, 5*time.Second)
+		drained := make(chan struct{})
+		go func() {
+			state.TriageWg.Wait()
+			close(drained)
+		}()
+		waittest.Receive(t, drained, "state.TriageWg to drain")
 	})
-}
-
-// waitStateTriageWg waits for state.TriageWg to drain, bounded, so a test
-// that cancels its own background runs does not leak goroutines into
-// later tests.
-func waitStateTriageWg(t *testing.T, state *State, bound time.Duration) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() {
-		state.TriageWg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(bound):
-		t.Log("state.TriageWg did not drain within the bound; background goroutines may still be running")
-	}
 }
 
 // TestStartReactionTriage_UnconsumedRun_StillLogsCompletion verifies
@@ -1071,7 +1046,7 @@ func TestStartReactionTriage_UnconsumedRun_StillLogsCompletion(t *testing.T) {
 	if run == nil {
 		t.Fatal("startReactionTriage() = nil, want a started run")
 	}
-	waitTriageRunDone(t, run)
+	waittest.Receive(t, run.Done, "triage run to finish")
 
 	mu.Lock()
 	output := buf.String()

@@ -6,12 +6,24 @@ import (
 	"testing"
 )
 
-// Fork migrations live in their own range, after every upstream one.
+// Upstream migrations are numbered from 1 with no gap, and fork migrations
+// from 1001 with no gap, so an upstream merge adds only versions below the
+// fork range.
 func TestMigrations_ForkRangeStartsAt1001(t *testing.T) {
 	t.Parallel()
+	upstream, fork := 0, 1000
 	for _, m := range migrations {
-		if m.Version > 24 && m.Version < 1001 {
-			t.Errorf("migration %d (%s) is between upstream's range and the fork range", m.Version, m.Description)
+		switch {
+		case m.Version < 1001:
+			if m.Version != upstream+1 {
+				t.Errorf("migration %d (%s) follows upstream migration %d, want %d", m.Version, m.Description, upstream, upstream+1)
+			}
+			upstream = m.Version
+		default:
+			if m.Version != fork+1 {
+				t.Errorf("migration %d (%s) follows fork migration %d, want %d", m.Version, m.Description, fork, fork+1)
+			}
+			fork = m.Version
 		}
 	}
 }
@@ -51,11 +63,7 @@ func TestMigrate_RefusesOldForkNumbering(t *testing.T) {
 func TestMigrate_UpstreamVersion25IsNotRefused(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
-	migrateToVersion(t, s, 24)
-	if _, err := s.db.ExecContext(context.Background(),
-		`INSERT INTO schema_migrations (version, applied_at) VALUES (25, '2026-10-16T00:00:00Z')`); err != nil {
-		t.Fatalf("record upstream version 25: %v", err)
-	}
+	migrateToVersion(t, s, 25)
 
 	migrateOrFatal(t, s)
 	if !hasColumn(t, s, "run_history", "held_ms") {
@@ -79,4 +87,43 @@ func hasColumn(t *testing.T, s *Store, table, column string) bool {
 		t.Fatalf("pragma_table_info(%s): %v", table, err)
 	}
 	return n == 1
+}
+
+// A database a fork build migrated before the merge holds upstream's
+// migrations up to 24 and the fork's from 1001. The merged build applies
+// upstream's newer migrations after the fork's, and every fork column and
+// table survives them.
+func TestMigrate_ForkDatabaseTakesLaterUpstreamMigrations(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	migrateToVersion(t, s, 24)
+	for _, m := range migrations {
+		if m.Version < 1001 {
+			continue
+		}
+		if err := s.applyMigration(ctx, m); err != nil {
+			t.Fatalf("apply fork migration %d: %v", m.Version, err)
+		}
+	}
+
+	migrateOrFatal(t, s)
+
+	applied, err := s.appliedVersions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if _, ok := applied[m.Version]; !ok {
+			t.Errorf("migration %d (%s) not applied", m.Version, m.Description)
+		}
+	}
+	for _, column := range []string{"held_ms", "environment_image_sha256", "exported_commit", "dispatch_id", "skills"} {
+		if !hasColumn(t, s, "run_history", column) {
+			t.Errorf("run_history lacks %s after the upgrade", column)
+		}
+	}
+	if !hasColumn(t, s, "plan_satisfaction", "issue_id") {
+		t.Error("plan_satisfaction lost after the upgrade")
+	}
 }

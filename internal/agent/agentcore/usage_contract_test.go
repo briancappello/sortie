@@ -370,6 +370,44 @@ func checkTurnEndUsageWiring(arrival string, facts turnEndUsageFacts) []usageCon
 	return violations
 }
 
+var spendFieldNames = map[string]bool{
+	"SpendUnaccounted": true,
+	"SpendCoverable":   true,
+	"CoversSession":    true,
+}
+
+func checkSpendFieldWriters(fset *token.FileSet, pkg usageContractPackage) []usageContractViolation {
+	if pkg.dirName == "agentcore" {
+		return nil
+	}
+
+	var violations []usageContractViolation
+	for _, file := range pkg.files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.AssignStmt:
+				for _, lhs := range node.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && spendFieldNames[sel.Sel.Name] {
+						violations = append(violations, usageContractViolation{
+							pos:  fset.Position(sel.Pos()),
+							text: "assigns " + sel.Sel.Name + " outside agentcore; only the shared TurnSpend rule writes a spend field",
+						})
+					}
+				}
+			case *ast.KeyValueExpr:
+				if key, ok := node.Key.(*ast.Ident); ok && spendFieldNames[key.Name] {
+					violations = append(violations, usageContractViolation{
+						pos:  fset.Position(key.Pos()),
+						text: "sets " + key.Name + " in a composite literal outside agentcore; only the shared TurnSpend rule writes a spend field",
+					})
+				}
+			}
+			return true
+		})
+	}
+	return violations
+}
+
 // TestUsageDeclarationContractInvariant walks the non-test Go files
 // under internal/agent/, grouped by package directory, and fails when
 // a package outside usageContractAllowlist registers an agent kind
@@ -455,6 +493,11 @@ func TestUsageDeclarationContractInvariant(t *testing.T) {
 		}
 		facts := turnEndUsageRegistrationFacts(fset, pkg.files)
 		for _, v := range checkTurnEndUsageWiring(arrival, facts) {
+			t.Errorf("%s: %s", v.pos, v.text)
+		}
+	}
+	for _, dir := range dirOrder {
+		for _, v := range checkSpendFieldWriters(fset, *packages[dir]) {
 			t.Errorf("%s: %s", v.pos, v.text)
 		}
 	}
@@ -844,5 +887,28 @@ func (a *adapter) emit() domain.AgentEvent {
 				t.Errorf("checkTurnEndUsageWiring() returned %d violations, want %d: %+v", len(got), tt.wantCount, got)
 			}
 		})
+	}
+}
+
+func TestCheckSpendFieldWriters_FlagsAssignmentAndLiteralKey(t *testing.T) {
+	t.Parallel()
+
+	const src = `package fixture
+
+func finish(result *Result) Result {
+	result.SpendUnaccounted = true
+	return Result{CoversSession: true}
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "fixture.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parser.ParseFile: %v", err)
+	}
+
+	got := checkSpendFieldWriters(fset, usageContractPackage{dirName: "fixture", files: []*ast.File{file}})
+
+	if len(got) != 2 {
+		t.Errorf("checkSpendFieldWriters() returned %d violations, want 2: %+v", len(got), got)
 	}
 }

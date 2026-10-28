@@ -193,7 +193,7 @@ func TestAddNamed_UsesNameConventionToChooseWholeOrURLCredentials(t *testing.T) 
 func TestAddURLCredentials(t *testing.T) {
 	t.Parallel()
 
-	t.Run("scheme with user and password registers the whole userinfo and the password", func(t *testing.T) {
+	t.Run("scheme with user and password registers the whole userinfo, the username and the password", func(t *testing.T) {
 		t.Parallel()
 		user := randomSecret(t)
 		pass := randomSecret(t)
@@ -205,6 +205,9 @@ func TestAddURLCredentials(t *testing.T) {
 		}
 		if got := Mask(pass); got == pass {
 			t.Errorf("Mask(%q) = %q, want the password masked", pass, got)
+		}
+		if got := Mask(user + ":***"); strings.Contains(got, user) {
+			t.Errorf("Mask(%q) = %q, want the username masked", user+":***", got)
 		}
 	})
 
@@ -280,6 +283,20 @@ func TestMask_Idempotent(t *testing.T) {
 	twice := Mask(once)
 	if once != twice {
 		t.Errorf("Mask(Mask(s)) = %q, want %q (Mask(s))", twice, once)
+	}
+}
+
+func TestRemove_StopsMaskingOnlyTheRemovedValue(t *testing.T) {
+	t.Parallel()
+
+	removed, kept := randomSecret(t), randomSecret(t)
+	Add("test", removed)
+	Add("test", kept)
+	Remove(removed)
+
+	text := removed + " " + kept
+	if got, want := Mask(text), removed+" "+Marker; got != want {
+		t.Errorf("Mask(%q) = %q, want %q", text, got, want)
 	}
 }
 
@@ -390,9 +407,10 @@ func TestMaskTruncated_CompleteValueOverlappingTheCutStaysMasked(t *testing.T) {
 func TestMaskTruncated_NothingRegisteredMatchesMask(t *testing.T) {
 	t.Parallel()
 
-	// Ends in a character no registered value of a parallel test starts
-	// with, so no suffix of the text is a fragment of one.
-	text := "no registered value here " + randomSecret(t)[:12] + "."
+	// Other tests register values that start with any hex digit, so the
+	// text must not end in one or its last byte reads as a cut fragment.
+	Add("test.MaskTruncated unrelated", randomSecret(t))
+	text := "no registered value here."
 	if got, want := MaskTruncated(text), Mask(text); got != want {
 		t.Errorf("MaskTruncated(%q) = %q, want %q", text, got, want)
 	}

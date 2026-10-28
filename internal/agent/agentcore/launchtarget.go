@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
@@ -100,6 +101,11 @@ type LaunchTarget struct {
 	// through from StartSessionParams with element zero resolved on this
 	// host. No auxiliary command runs behind it.
 	HostPrefix []string
+
+	// StopGrace is the session's resolved agent.stop_grace_ms, which a remote
+	// launch also grants its runtime once the SSH connection is gone. Zero in
+	// local mode.
+	StopGrace time.Duration
 }
 
 // Remote reports whether the agent binary is not on this host, so no
@@ -249,6 +255,7 @@ func resolveSSHLaunch(params domain.StartSessionParams, absPath, sshHost, remote
 		SSHStrictHostKeyChecking: params.SSHStrictHostKeyChecking,
 		SSHEnvNames:              params.SSHEnvNames,
 		SessionEnv:               slices.Clone(params.SessionEnv),
+		StopGrace:                procutil.StopGrace(params.AgentConfig.StopGraceMS),
 	}, nil
 }
 
@@ -404,6 +411,7 @@ func (t LaunchTarget) SSHOptions(settings ...sshutil.EnvVar) sshutil.SSHOptions 
 		StrictHostKeyChecking: t.SSHStrictHostKeyChecking,
 		Env:                   carried,
 		Unset:                 unset,
+		StopGrace:             t.StopGrace,
 	}
 }
 
@@ -437,6 +445,20 @@ func (l HostLaunch) PrefixStdin(w io.WriteCloser) io.WriteCloser {
 	return l.ssh.PrefixStdin(w)
 }
 
+// WatchStderr returns r, through which the launch reads a reverse
+// forward's outcome from the host process's standard error, as
+// [sshutil.SSHLaunch.WatchStderr] does. A launch without a forward
+// returns r unchanged.
+func (l HostLaunch) WatchStderr(r io.Reader) io.Reader {
+	return l.ssh.WatchStderr(r)
+}
+
+// WaitOutcome waits for the outcome of the launch's reverse forward, as
+// [sshutil.SSHLaunch.WaitOutcome] does.
+func (l HostLaunch) WaitOutcome(ctx context.Context) (sshutil.ForwardOutcome, error) {
+	return l.ssh.WaitOutcome(ctx)
+}
+
 // RemoteLaunch builds the host process that runs the agent command with
 // args appended at a remote target. In SSH mode it is the ssh launch
 // [sshutil.BuildSSHLaunch] builds from t.SSHOptions(settings...). In
@@ -451,8 +473,16 @@ func (l HostLaunch) PrefixStdin(w io.WriteCloser) io.WriteCloser {
 // It must not be called in local mode. A carrier that cannot build the
 // launch yields a port_exit [*domain.AgentError].
 func (t LaunchTarget) RemoteLaunch(args []string, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
+	return t.remoteLaunch(args, nil, settings)
+}
+
+// remoteLaunch is [LaunchTarget.RemoteLaunch] with forward, the reverse
+// forward an SSH launch requests. A carrier launch ignores forward.
+func (t LaunchTarget) remoteLaunch(args []string, forward *sshutil.ReverseForward, settings []sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
 	if t.Carrier == nil {
-		launch := sshutil.BuildSSHLaunch(t.SSHHost, t.WorkspacePath, t.RemoteCommand, args, t.SSHOptions(settings...))
+		opts := t.SSHOptions(settings...)
+		opts.Forward = forward
+		launch := sshutil.BuildSSHLaunch(t.SSHHost, t.WorkspacePath, t.RemoteCommand, args, opts)
 		return HostLaunch{Path: t.Command, Args: launch.Args, ssh: launch}, nil
 	}
 
@@ -511,10 +541,18 @@ func (t LaunchTarget) RemoteLaunch(args []string, settings ...sshutil.EnvVar) (H
 //
 // It fails only where [LaunchTarget.RemoteLaunch] does.
 func (t LaunchTarget) SessionLaunch(args []string, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
+	return t.ForwardedSessionLaunch(args, nil, settings...)
+}
+
+// ForwardedSessionLaunch is [LaunchTarget.SessionLaunch] for a session
+// whose SSH launch requests forward, the reverse forward that carries
+// Sortie's tool server to the remote host. A nil forward, a local launch,
+// and a carrier launch request none.
+func (t LaunchTarget) ForwardedSessionLaunch(args []string, forward *sshutil.ReverseForward, settings ...sshutil.EnvVar) (HostLaunch, *domain.AgentError) {
 	var launch HostLaunch
 	if t.Remote() {
 		var agentErr *domain.AgentError
-		launch, agentErr = t.RemoteLaunch(args, settings...)
+		launch, agentErr = t.remoteLaunch(args, forward, settings)
 		if agentErr != nil {
 			return HostLaunch{}, agentErr
 		}
@@ -572,6 +610,40 @@ func remoteConnectionFailedError(carrier domain.LaunchCarrier) *domain.AgentErro
 		return EnvironmentConnectionFailedError()
 	}
 	return ConnectionFailedError()
+}
+
+// RuntimeEnv returns name's value as the runtime receives it from
+// Sortie: from env, or [os.Environ] when env is nil, for a local
+// launch; for a remote launch, only a variable the launch forwards
+// over SSH (none in carrier mode), which is a name in t.SSHEnvNames whose value in env holds a
+// non-whitespace character, the rule [LaunchTarget.SSHOptions] carries
+// by. A value the remote host sets for itself is invisible. A name in
+// t.WithheldEnv is never visible. When env holds a name more than once
+// the last entry wins, as it does for a launched process.
+func (t LaunchTarget) RuntimeEnv(env []string, name string) (string, bool) {
+	if slices.Contains(t.WithheldEnv, name) {
+		return "", false
+	}
+	remote := t.Remote()
+	if remote && !slices.Contains(t.SSHEnvNames, name) {
+		return "", false
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	var value string
+	var found bool
+	for _, entry := range env {
+		if !isEnvEntryNamed(entry, name) {
+			continue
+		}
+		_, value, _ = strings.Cut(entry, "=")
+		found = true
+	}
+	if remote && strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	return value, found
 }
 
 // BindWorkspace re-verifies t.WorkspacePath and, on success, sets

@@ -3,6 +3,7 @@ package claude
 import (
 	"bufio"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -269,11 +270,14 @@ func TestUsageFromAssistant(t *testing.T) {
 func TestUsageFromResult(t *testing.T) {
 	t.Parallel()
 
+	sonnet := domain.TokenUsage{InputTokens: 6200, OutputTokens: 800, TotalTokens: 7000, CacheReadTokens: 1000, CacheWriteTokens: 200}
+	haiku := domain.TokenUsage{InputTokens: 3600, OutputTokens: 1200, TotalTokens: 4800, CacheReadTokens: 500, CacheWriteTokens: 100}
+
 	tests := []struct {
-		name      string
-		event     rawEvent
-		wantUsage domain.TokenUsage
-		wantModel string
+		name        string
+		event       rawEvent
+		wantUsage   domain.TokenUsage
+		wantByModel map[string]domain.TokenUsage
 	}{
 		{
 			name: "modelUsage single entry preferred over usage",
@@ -289,10 +293,14 @@ func TestUsageFromResult(t *testing.T) {
 			wantUsage: domain.TokenUsage{
 				InputTokens: 33649, OutputTokens: 64, TotalTokens: 33713, CacheReadTokens: 17706, CacheWriteTokens: 15933,
 			},
-			wantModel: "claude-haiku-4-5-20251001",
+			wantByModel: map[string]domain.TokenUsage{
+				"claude-haiku-4-5-20251001": {
+					InputTokens: 33649, OutputTokens: 64, TotalTokens: 33713, CacheReadTokens: 17706, CacheWriteTokens: 15933,
+				},
+			},
 		},
 		{
-			name: "modelUsage two entries sums components and picks greater output",
+			name: "modelUsage two entries split by model and sum to the total",
 			event: rawEvent{
 				ModelUsage: map[string]rawModelUsage{
 					"claude-sonnet-4-5-20250929": {InputTokens: 5000, OutputTokens: 800, CacheReadInputTokens: 1000, CacheCreationInputTokens: 200},
@@ -302,18 +310,7 @@ func TestUsageFromResult(t *testing.T) {
 			wantUsage: domain.TokenUsage{
 				InputTokens: 9800, OutputTokens: 2000, TotalTokens: 11800, CacheReadTokens: 1500, CacheWriteTokens: 300,
 			},
-			wantModel: "claude-haiku-4-5-20251001",
-		},
-		{
-			name: "modelUsage tie broken by lexicographically smallest key",
-			event: rawEvent{
-				ModelUsage: map[string]rawModelUsage{
-					"zeta-model":  {InputTokens: 100, OutputTokens: 50},
-					"alpha-model": {InputTokens: 200, OutputTokens: 50},
-				},
-			},
-			wantUsage: domain.TokenUsage{InputTokens: 300, OutputTokens: 100, TotalTokens: 400},
-			wantModel: "alpha-model",
+			wantByModel: map[string]domain.TokenUsage{"claude-sonnet-4-5-20250929": sonnet, "claude-haiku-4-5-20251001": haiku},
 		},
 		{
 			name: "modelUsage absent falls back to usage",
@@ -321,31 +318,28 @@ func TestUsageFromResult(t *testing.T) {
 				Usage: &rawUsage{InputTokens: 200, OutputTokens: 80, CacheReadInputTokens: 8000, CacheCreationInputTokens: 2000},
 			},
 			wantUsage: domain.TokenUsage{InputTokens: 10200, OutputTokens: 80, TotalTokens: 10280, CacheReadTokens: 8000, CacheWriteTokens: 2000},
-			wantModel: "",
 		},
 		{
 			name:      "modelUsage empty map falls back to usage",
 			event:     rawEvent{Usage: &rawUsage{InputTokens: 5, OutputTokens: 2}, ModelUsage: map[string]rawModelUsage{}},
 			wantUsage: domain.TokenUsage{InputTokens: 5, OutputTokens: 2, TotalTokens: 7},
-			wantModel: "",
 		},
 		{
 			name:      "neither modelUsage nor usage present",
 			event:     rawEvent{},
 			wantUsage: domain.TokenUsage{},
-			wantModel: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gotUsage, gotModel := usageFromResult(tt.event)
+			gotUsage, gotByModel := usageFromResult(tt.event)
 			if gotUsage != tt.wantUsage {
 				t.Errorf("usageFromResult() usage = %+v, want %+v", gotUsage, tt.wantUsage)
 			}
-			if gotModel != tt.wantModel {
-				t.Errorf("usageFromResult() model = %q, want %q", gotModel, tt.wantModel)
+			if !maps.Equal(gotByModel, tt.wantByModel) {
+				t.Errorf("usageFromResult() byModel = %+v, want %+v", gotByModel, tt.wantByModel)
 			}
 		})
 	}
@@ -406,12 +400,12 @@ func TestSummarizeAssistant(t *testing.T) {
 		{
 			name:    "text and tool_use",
 			fixture: "assistant_message.json",
-			want:    "I'll analyze the codebase and implement the requested changes. [tool: Read]",
+			want:    "I'll analyze the codebase and implement the requested changes.",
 		},
 		{
-			name:    "tool_use and tool_result",
+			name:    "tool blocks without text",
 			fixture: "tool_use_message.json",
-			want:    "[tool: Bash] [tool_result: ok]",
+			want:    "",
 		},
 	}
 
@@ -436,8 +430,8 @@ func TestSummarizeAssistant_EmptyMessage(t *testing.T) {
 
 	ev := rawEvent{Type: "assistant"}
 	got := summarizeAssistant(ev)
-	if got != "assistant message" {
-		t.Errorf("summarizeAssistant(empty) = %q, want %q", got, "assistant message")
+	if got != "" {
+		t.Errorf("summarizeAssistant(empty) = %q, want blank", got)
 	}
 }
 
@@ -453,37 +447,6 @@ func TestFormatAPIRetry(t *testing.T) {
 	want := "API retry attempt 1/5 (delay 1000ms, status 429: rate_limit)"
 	if got != want {
 		t.Errorf("formatAPIRetry() = %q, want %q", got, want)
-	}
-}
-
-func TestRawEventSummary(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		ev   rawEvent
-		want string
-	}{
-		{
-			name: "type only",
-			ev:   rawEvent{Type: "stream_event"},
-			want: "stream_event",
-		},
-		{
-			name: "type and subtype",
-			ev:   rawEvent{Type: "system", Subtype: "init"},
-			want: "system/init",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := tt.ev.summary()
-			if got != tt.want {
-				t.Errorf("summary() = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -725,7 +688,6 @@ func TestEmitToolResult_ErrorResult(t *testing.T) {
 		t.Fatalf("parseEvent() error = %v", err)
 	}
 
-	// Empty tracker simulates orphaned tool_result.
 	tracker := agentcore.NewToolTracker()
 	now := time.Now().UTC()
 	events := collectToolEvents(t, ev, tracker, now)
@@ -735,8 +697,8 @@ func TestEmitToolResult_ErrorResult(t *testing.T) {
 	}
 
 	got := events[0]
-	if got.ToolName != "unknown" {
-		t.Errorf("event.ToolName = %q, want %q", got.ToolName, "unknown")
+	if got.ToolName != "" {
+		t.Errorf("event.ToolName = %q, want empty for an orphaned result", got.ToolName)
 	}
 	if !got.ToolError {
 		t.Error("event.ToolError = false, want true")
@@ -759,33 +721,27 @@ func TestEmitToolResult_ParallelToolUse(t *testing.T) {
 	now := time.Now().UTC()
 	events := collectToolEvents(t, ev, tracker, now)
 
-	// No tool_result blocks -> no EventToolResult events.
 	if len(events) != 0 {
 		t.Errorf("collectToolEvents() = %d events, want 0", len(events))
 	}
 
-	// Tracker should have both tool_use entries; verify via End.
-	name1, _, ok1 := tracker.End("toolu_par_01")
+	call1, _, ok1 := tracker.End("toolu_par_01")
 	if !ok1 {
 		t.Fatal("tracker missing entry \"toolu_par_01\"")
 	}
-	if name1 != "Read" {
-		t.Errorf("tracker[\"toolu_par_01\"].Name = %q, want %q", name1, "Read")
+	if call1.Name != "Read" {
+		t.Errorf("tracker[\"toolu_par_01\"].Name = %q, want %q", call1.Name, "Read")
 	}
 
-	name2, _, ok2 := tracker.End("toolu_par_02")
+	call2, _, ok2 := tracker.End("toolu_par_02")
 	if !ok2 {
 		t.Fatal("tracker missing entry \"toolu_par_02\"")
 	}
-	if name2 != "Read" {
-		t.Errorf("tracker[\"toolu_par_02\"].Name = %q, want %q", name2, "Read")
+	if call2.Name != "Read" {
+		t.Errorf("tracker[\"toolu_par_02\"].Name = %q, want %q", call2.Name, "Read")
 	}
 }
 
-// TestEmitToolResult_UserEventCorrelation verifies that tool_result blocks
-// in user-type events correlate correctly with tool_use blocks from
-// preceding assistant events. This is a regression test for the bug where
-// user-event tool_result blocks were silently dropped.
 func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 	t.Parallel()
 
@@ -807,7 +763,6 @@ func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 		if parseErr != nil {
 			t.Fatalf("parseEvent() error = %v", parseErr)
 		}
-		// Process both assistant and user events to mirror RunTurn logic.
 		switch ev.Type {
 		case "assistant", "user":
 			now := base.Add(time.Duration(msgIndex) * time.Second)
@@ -819,7 +774,6 @@ func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 		t.Fatalf("scanner error: %v", err)
 	}
 
-	// Exactly one tool_result expected (Read, from user event).
 	if len(toolEvents) != 1 {
 		t.Fatalf("total EventToolResult events = %d, want 1", len(toolEvents))
 	}
@@ -838,7 +792,6 @@ func TestEmitToolResult_UserEventCorrelation(t *testing.T) {
 		t.Errorf("toolEvents[0].Message = %q, want %q", got.Message, "tool_result: Read")
 	}
 
-	// Tracker should be empty after correlation (toolu_u01 was resolved).
 	_, _, stillTracked := tracker.End("toolu_u01")
 	if stillTracked {
 		t.Error("tracker still has entry \"toolu_u01\" after correlation")

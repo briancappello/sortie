@@ -16,6 +16,8 @@ func (d *nopDeleter) DeleteRetryEntry(_ context.Context, id string) error {
 	return nil
 }
 
+func (d *nopDeleter) DeleteReactionEscalations(context.Context, string) error { return nil }
+
 func planParams(tr domain.TrackerAdapter) planControlParams {
 	return planControlParams{
 		Release: "Todo", Backlog: "Backlog", Cancel: "Canceled",

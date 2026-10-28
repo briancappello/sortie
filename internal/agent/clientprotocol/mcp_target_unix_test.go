@@ -15,10 +15,11 @@ import (
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
-// TestMCPServersByLaunchTarget asserts, for each launch target, whether
-// session/new hands the runtime the generated MCP servers. The protocol
-// carries them inline, parsed from the host copy of the file, so the
-// path itself never reaches the runtime.
+// TestMCPServersByLaunchTarget asserts, for each remote launch target,
+// whether session/new hands the runtime the generated stdio servers. The
+// protocol carries them inline, parsed from the host copy of the file, so
+// the path itself never reaches the runtime. A local launch reaches Sortie's
+// server over HTTP instead, which the shared tool-delivery tests cover.
 func TestMCPServersByLaunchTarget(t *testing.T) {
 	// Not parallel: the SSH case puts a fake ssh first on PATH.
 	tests := []struct {
@@ -26,7 +27,6 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 		target  string
 		wantMCP bool
 	}{
-		{name: "local", target: "local", wantMCP: true},
 		{name: "ssh gets no servers", target: "ssh"},
 		{name: "environment carrier gets the servers", target: "carrier", wantMCP: true},
 	}

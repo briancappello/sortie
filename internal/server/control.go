@@ -27,7 +27,7 @@ type holdRequest struct {
 	Holder string `json:"holder"`
 }
 
-type holdResponse struct {
+type runHoldResponse struct {
 	IssueIdentifier string `json:"issue_identifier"`
 	IssueID         string `json:"issue_id"`
 	holdFields
@@ -106,8 +106,8 @@ func (s *Server) writeControlReply(w http.ResponseWriter, r *http.Request, start
 	)
 }
 
-func toHoldResponse(h orchestrator.HoldState) holdResponse {
-	return holdResponse{
+func toRunHoldResponse(h orchestrator.HoldState) runHoldResponse {
+	return runHoldResponse{
 		IssueIdentifier: h.Identifier,
 		IssueID:         h.IssueID,
 		holdFields:      newHoldFields(h.Held, h.Reason, h.Holder, h.HeldSince, h.HeldTotal),
@@ -126,7 +126,7 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply := s.holdFn(r.PathValue("identifier"), req.Reason, req.Holder)
-	s.writeControlReply(w, r, start, reply, toHoldResponse(reply.Hold))
+	s.writeControlReply(w, r, start, reply, toRunHoldResponse(reply.Hold))
 }
 
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,7 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply := s.releaseFn(r.PathValue("identifier"))
-	s.writeControlReply(w, r, start, reply, toHoldResponse(reply.Hold))
+	s.writeControlReply(w, r, start, reply, toRunHoldResponse(reply.Hold))
 }
 
 // EscalateFunc escalates the running issue named by identifier to people.

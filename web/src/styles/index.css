@@ -1,0 +1,18 @@
+@import "tailwindcss";
+@import "./theme.css";
+
+@layer base {
+  html {
+    @media (min-width: 48rem) {
+      scroll-padding-top: var(--size-header);
+    }
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font: var(--font-weight-regular) var(--text-body-md) / var(--text-body-md--line-height)
+      var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}

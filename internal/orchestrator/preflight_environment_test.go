@@ -63,7 +63,7 @@ func credentialPreflight(cfg config.ServiceConfig, kinds map[string][]string, ho
 			if !ok {
 				return registry.AgentMeta{}, false
 			}
-			return registry.AgentMeta{MCPInjection: registry.MCPInjectionSupported, CredentialEnv: registry.DeclareCredentialEnv(names...)}, true
+			return registry.AgentMeta{MCPDialect: registry.MCPDialectMCPServersJSON, CredentialEnv: registry.DeclareCredentialEnv(names...)}, true
 		},
 	}
 	params.EnvironmentFunc = func(envCfg config.EnvironmentConfig) (environment.Environment, error) {

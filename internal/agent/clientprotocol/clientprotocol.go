@@ -19,13 +19,21 @@ const mcpConfigKey = "mcp_config"
 
 func init() {
 	registry.Agents.RegisterWithMeta("agent-client-protocol", NewClientProtocolAdapter, registry.AgentMeta{
-		RequiresCommand:     true,
-		ValidateAgentConfig: validateConfig,
-		MCPInjection:        registry.MCPInjectionTranslated,
-		UsageArrival:        registry.UsageArrivalTurnEnd,
-		UsageAttribution:    registry.UsageAttributionPerModel,
-		CredentialEnv:       registry.DeclareCredentialEnv(),
-		EffortForwarding:    registry.EffortNotForwarded,
+		RequiresCommand:               true,
+		ValidateAgentConfig:           validateConfig,
+		MCPDialect:                    registry.MCPDialectACPSession,
+		UsageArrival:                  registry.UsageArrivalTurnEnd,
+		UsageAttribution:              registry.UsageAttributionPerModel,
+		CredentialEnv:                 registry.DeclareCredentialEnv(),
+		EffortForwarding:              registry.EffortNotForwarded,
+		UsageLimitRecognition:         registry.UsageLimitNotRecognized,
+		UsageLimitNotRecognizedReason: "the protocol carries no usage-limit refusal",
+		VerificationContext: registry.DeclareVerificationContext(
+			registry.VerificationKeepsAllTools,
+			registry.VerificationKeepsProjectInstructions,
+			registry.VerificationKeepsUserInstructions,
+			registry.VerificationKeepsSystemPrompt,
+		),
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
 				// The measurement source reads a local filesystem, while a
@@ -65,8 +73,7 @@ type ClientProtocolAdapter struct {
 
 // NewClientProtocolAdapter constructs a [ClientProtocolAdapter]. The kind's
 // settings arrive per session; the only one it reads is mcp_config, and only
-// to check its type: the path a session uses arrives through
-// StartSessionParams.MCPConfigPath.
+// to check its type: the shared tool delivery owns the path a session uses.
 func NewClientProtocolAdapter() (domain.AgentAdapter, error) {
 	return &ClientProtocolAdapter{}, nil
 }

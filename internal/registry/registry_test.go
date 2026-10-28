@@ -512,6 +512,10 @@ func (m *mockTrackerAdapter) FetchIssueStatesByIDs(_ context.Context, _ []string
 	return nil, nil
 }
 
+func (m *mockTrackerAdapter) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (m *mockTrackerAdapter) FetchIssueStatesByIdentifiers(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }
@@ -525,9 +529,6 @@ func (m *mockTrackerAdapter) TransitionIssue(_ context.Context, _ string, _ stri
 }
 
 func (m *mockTrackerAdapter) CommentIssue(_ context.Context, _ string, _ string) error {
-	return nil
-}
-func (m *mockTrackerAdapter) CommentIssueWithLiteral(_ context.Context, _, _, _ string) error {
 	return nil
 }
 
@@ -768,34 +769,31 @@ func TestHas(t *testing.T) {
 	}
 }
 
-func TestMCPInjection_DeliversTools(t *testing.T) {
+func TestMCPDialect_DeliversTools(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		injection MCPInjection
-		remote    bool
-		want      bool
+		name    string
+		dialect MCPDialect
+		want    bool
 	}{
-		{"supported local", MCPInjectionSupported, false, true},
-		{"supported remote", MCPInjectionSupported, true, true},
-		{"translated local", MCPInjectionTranslated, false, true},
-		{"translated remote", MCPInjectionTranslated, true, false},
-		{"unsupported local", MCPInjectionUnsupported, false, false},
-		{"unsupported remote", MCPInjectionUnsupported, true, false},
-		{"undeclared local", MCPInjectionUndeclared, false, false},
-		{"undeclared remote", MCPInjectionUndeclared, true, false},
-		{"unrecognized value local", MCPInjection("bogus"), false, false},
-		{"unrecognized value remote", MCPInjection("bogus"), true, false},
+		{"undeclared", MCPDialectUndeclared, false},
+		{"none", MCPDialectNone, false},
+		{"mcp_servers_json", MCPDialectMCPServersJSON, true},
+		{"mcp_servers_json_always_load", MCPDialectMCPServersJSONAlwaysLoad, true},
+		{"mcp_servers_toml", MCPDialectMCPServersTOML, true},
+		{"mcp_member_json", MCPDialectMCPMemberJSON, true},
+		{"acp_session", MCPDialectACPSession, true},
+		{"unrecognized value", MCPDialect("bogus"), true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := tt.injection.DeliversTools(tt.remote)
+			got := tt.dialect.DeliversTools()
 			if got != tt.want {
-				t.Errorf("MCPInjection(%q).DeliversTools(%v) = %v, want %v", tt.injection, tt.remote, got, tt.want)
+				t.Errorf("MCPDialect(%q).DeliversTools() = %v, want %v", tt.dialect, got, tt.want)
 			}
 		})
 	}

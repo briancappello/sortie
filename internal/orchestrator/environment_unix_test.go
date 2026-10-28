@@ -491,7 +491,7 @@ func TestRunWorkerAttempt_CarrierSessionKeepsToolChannel(t *testing.T) {
 	env := carrierEnvironment{Recorder: recordingEnvironment(t)}
 
 	var mu sync.Mutex
-	var remotes []bool
+	var kinds []string
 	ec := newExitCapture()
 	RunWorkerAttempt(context.Background(), workerTestIssue(), nil, WorkerDeps{
 		TrackerAdapter:         &mockTrackerAdapter{},
@@ -504,9 +504,9 @@ func TestRunWorkerAttempt_CarrierSessionKeepsToolChannel(t *testing.T) {
 		EnvironmentFunc: func(config.EnvironmentConfig) (environment.Environment, error) {
 			return env, nil
 		},
-		AgentToolChannelFunc: func(_ string, remote bool) bool {
+		AgentToolChannelFunc: func(kind string) bool {
 			mu.Lock()
-			remotes = append(remotes, remote)
+			kinds = append(kinds, kind)
 			mu.Unlock()
 			return true
 		},
@@ -515,7 +515,7 @@ func TestRunWorkerAttempt_CarrierSessionKeepsToolChannel(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if !slices.Equal(remotes, []bool{false}) {
-		t.Errorf("AgentToolChannelFunc remote = %v, want [false]: a carried session receives the generated MCP configuration", remotes)
+	if len(kinds) != 1 {
+		t.Errorf("AgentToolChannelFunc calls = %q, want one: a carried session is asked about its tool channel like a local one", kinds)
 	}
 }

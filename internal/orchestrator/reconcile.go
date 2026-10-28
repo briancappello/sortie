@@ -37,6 +37,14 @@ type ReconcileStore interface {
 	MarkReactionObservationDispatched(ctx context.Context, issueID, kind, fingerprint string) error
 	CountWorkerRunsCompletedSince(ctx context.Context, issueID string, since time.Time) (int, error)
 	DeleteStageHop(ctx context.Context, issueID string) error
+	RecordIssueOutcome(ctx context.Context, outcome persistence.IssueOutcome) error
+	GetReactionEscalation(ctx context.Context, issueID, kind string) (persistence.ReactionEscalation, bool, error)
+	SaveReactionEscalation(ctx context.Context, rec persistence.ReactionEscalation) error
+	EndReactionEscalation(ctx context.Context, issueID, kind string) error
+	DeleteReactionEscalations(ctx context.Context, issueID string) error
+	RecordReactionActivity(ctx context.Context, records []persistence.ReactionActivity) error
+	RecordReactionTriageOutcome(ctx context.Context, outcome persistence.ReactionTriageOutcome) error
+	LatestReactionTriageDisposition(ctx context.Context, issueID, kind, fingerprint string) (disposition string, found bool, err error)
 }
 
 var _ ReconcileStore = (*persistence.Store)(nil)
@@ -121,8 +129,9 @@ type ReconcileParams struct {
 	ReviewConfig ReviewReactionConfig
 
 	// ReviewPendingTTL bounds the age of a review PendingReaction entry,
-	// measured from the entry's creation. Zero or negative disables the
-	// bound. Supplied from reactions.review_comments.watch_window_ms.
+	// measured from the entry's creation, except while its latest check
+	// awaits approval. Zero or negative disables the bound. Supplied from
+	// reactions.review_comments.watch_window_ms.
 	ReviewPendingTTL time.Duration
 
 	// AutoMergeConfig holds auto-merge reaction configuration. Only
@@ -222,6 +231,10 @@ type ReconcileParams struct {
 	// reads this field and never CIFeedback.Triage, which the poll
 	// tick refreshes from the reloaded configuration.
 	CITriage config.ReactionTriageConfig
+
+	// SkipReactions stops reconciliation after the stall, overdue-retry,
+	// and tracker-state passes, so no reaction or label-command pass runs.
+	SkipReactions bool
 }
 
 // ReconcileRunningIssues detects stalled workers and refreshes tracker
@@ -267,7 +280,11 @@ func ReconcileRunningIssues(state *State, params ReconcileParams) {
 
 	// Refresh issue states from the tracker and stop workers for
 	// terminal or non-active issues.
-	reconcileTrackerState(state, params, log, ctx, metrics)
+	reconcileTrackerState(state, params, log, ctx, now, metrics)
+
+	if params.SkipReactions {
+		return
+	}
 
 	// Poll CI status for issues with pending CI checks.
 	reconcileCIStatus(state, params, log, ctx, metrics)
@@ -339,6 +356,7 @@ func reconcileOverdueRetries(state *State, params ReconcileParams, log *slog.Log
 
 		overdueMS := now.UnixMilli() - entry.DueAtMS
 		pausedSinceMS := entry.pausedSinceMS
+		dueBeforeRequestMS := entry.dueBeforeRequestMS
 		entryLog := logging.WithIssue(log, issueID, entry.Identifier)
 
 		CancelRetry(state, issueID)
@@ -346,22 +364,29 @@ func reconcileOverdueRetries(state *State, params ReconcileParams, log *slog.Log
 			IssueID:             issueID,
 			Identifier:          entry.Identifier,
 			DisplayID:           entry.DisplayID,
+			IssueIdentity:       entry.IssueIdentity,
 			Attempt:             entry.Attempt,
 			Error:               entry.Error,
 			LastSSHHost:         entry.LastSSHHost,
 			SessionID:           entry.SessionID,
 			ContinuationContext: entry.ContinuationContext,
 			ReactionKind:        entry.ReactionKind,
+			Continuation:        entry.Continuation,
 			AgentKind:           entry.AgentKind,
+			ConfiguredModel:     entry.ConfiguredModel,
 			RuleName:            entry.RuleName,
 			StageLineage:        entry.StageLineage,
 			RuleSettingsApplied: entry.RuleSettingsApplied,
 			TemplateID:          entry.TemplateID,
 			Logger:              entryLog,
+			Trigger:             entry.Trigger,
+			OriginTrigger:       entry.OriginTrigger,
+			UsageLimitNotified:  entry.UsageLimitNotified,
 		}, params.OnRetryFire)
 
 		if rearmed, ok := state.RetryAttempts[issueID]; ok {
 			rearmed.pausedSinceMS = pausedSinceMS
+			rearmed.dueBeforeRequestMS = dueBeforeRequestMS
 		}
 
 		entryLog.Warn("overdue retry re-armed",
@@ -389,22 +414,12 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 
 		entryLog := logging.WithIssue(log, issueID, entry.Identifier)
 
-		refTime := entry.StartedAt
-		if !entry.LastAgentTimestamp.IsZero() {
-			refTime = entry.LastAgentTimestamp
-		}
-		if entry.HoldReleasedAt.After(refTime) {
-			refTime = entry.HoldReleasedAt
-		}
-
-		elapsedMS := now.Sub(refTime).Milliseconds()
+		elapsedMS := now.Sub(stallReference(entry)).Milliseconds()
 		if elapsedMS <= stallThreshold {
 			continue
 		}
 
-		if entry.CancelFunc != nil {
-			entry.CancelFunc()
-		}
+		entry.cancelRun(errCancelStall)
 
 		entryLog.Warn("stall detected, cancelling worker",
 			slog.Int64("elapsed_ms", elapsedMS),
@@ -423,19 +438,23 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 			IssueID:             issueID,
 			Identifier:          entry.Identifier,
 			DisplayID:           entry.Issue.DisplayID,
+			IssueIdentity:       issueIdentityOf(entry.Issue),
 			Attempt:             nextAttempt,
 			DelayMS:             delayMS,
-			Error:               "stall timeout exceeded",
+			Error:               StallCancelError,
 			LastSSHHost:         entry.SSHHost,
 			SessionID:           entry.SessionID,
 			ContinuationContext: entry.ContinuationContext,
 			ReactionKind:        entry.ReactionKind,
+			Continuation:        entry.Continuation,
 			AgentKind:           entry.AgentKind,
+			ConfiguredModel:     entry.ConfiguredModel,
 			RuleName:            entry.RuleName,
 			StageLineage:        entry.StageLineage,
 			RuleSettingsApplied: entry.RuleSettingsApplied,
 			TemplateID:          entry.TemplateID,
 			Logger:              entryLog,
+			Trigger:             triggerStall,
 		}, params.OnRetryFire)
 		metrics.IncRetries(triggerStall)
 
@@ -449,20 +468,8 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 				continue
 			}
 
-			pEntry := persistence.RetryEntry{
-				IssueID:    retryEntry.IssueID,
-				Identifier: retryEntry.Identifier,
-				Attempt:    retryEntry.Attempt,
-				DueAtMs:    retryEntry.DueAtMS,
-				Error:      stringPtr(retryEntry.Error),
-				RuleName:   retryEntry.RuleName,
-				TemplateID: retryEntry.TemplateID,
-				AgentKind:  retryEntry.AgentKind,
-
-				StagePrevious:        retryEntry.StageLineage.PreviousRule,
-				StagePreviousOutcome: retryEntry.StageLineage.PreviousOutcome,
-				ChainID:              retryEntry.StageLineage.ChainID,
-			}
+			pEntry := retryEntryRow(retryEntry)
+			pEntry.SessionID = nil
 			if err := params.Store.SaveRetryEntry(ctx, pEntry); err != nil {
 				entryLog.Error("failed to persist stall retry entry",
 					slog.Any("error", err),
@@ -521,16 +528,18 @@ type issueReleaseCounts struct {
 	RetryCancelled   bool
 }
 
-// retryEntryDeleter is the one store method [releaseIssueRuntimeState]
-// needs.
+// retryEntryDeleter is the pair of store methods [releaseIssueRuntimeState]
+// needs: the issue's persisted retry and its escalation records.
 type retryEntryDeleter interface {
 	DeleteRetryEntry(ctx context.Context, issueID string) error
+	DeleteReactionEscalations(ctx context.Context, issueID string) error
 }
 
 // releaseIssueRuntimeState drops one issue's runtime reaction bookkeeping
 // and its dispatch claim: every pending reaction entry, every reaction
 // attempt counter, every cached handed-off and reported comment set, the
-// pending retry, and the claim. The stored handed-off rows stay. It
+// pending retry, the escalation records, and the claim. The stored
+// handed-off rows stay. It
 // performs no tracker call, no source-control call, no reaction-fingerprint
 // read or write, and no workspace removal.
 //
@@ -580,6 +589,13 @@ func releaseIssueRuntimeState(ctx context.Context, state *State, store retryEntr
 			slog.Any("error", err),
 		)
 	}
+	// Deleted unconditionally, like the retry row: a record can outlive its
+	// entry across a restart.
+	if err := store.DeleteReactionEscalations(ctx, issueID); err != nil {
+		entryLog.Warn("failed to delete reaction escalation records",
+			slog.Any("error", err),
+		)
+	}
 	if _, exists := state.Claimed[issueID]; exists {
 		delete(state.Claimed, issueID)
 		counts.ClaimReleased = true
@@ -599,7 +615,12 @@ func releaseIssueRuntimeState(ctx context.Context, state *State, store retryEntr
 // An issue reported in no state (an empty state name) is acted on only at
 // its second consecutive such reading, because a person's label edit can
 // pass through zero state labels for a moment.
-func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logger, ctx context.Context, metrics domain.Metrics) {
+//
+// An issue with no worker that the tracker reports outside the handoff
+// state, and that holds a standing escalation, is not left untouched: a
+// person's move has answered the escalation, and [endOutsideHandoff] ends it
+// once a direct read confirms the reading.
+func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logger, ctx context.Context, now time.Time, metrics domain.Metrics) {
 	if params.TrackerAdapter == nil {
 		return
 	}
@@ -609,7 +630,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 		return
 	}
 
-	refreshed, err := params.TrackerAdapter.FetchIssueStatesByIDs(ctx, ids)
+	readStartedAt := time.Now()
+	refreshed, err := params.TrackerAdapter.FetchIssueStatesAndLabelsByIDs(ctx, ids)
 	if err != nil {
 		log.Warn("tracker state refresh failed, keeping workers running",
 			slog.Any("error", err),
@@ -620,7 +642,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 	activeSet := stateSet(params.ActiveStates)
 	terminalSet := stateSet(params.TerminalStates)
 
-	for issueID, stateName := range refreshed {
+	for issueID, read := range refreshed {
+		stateName := read.State
 		entry := state.Running[issueID]
 		hop := state.StageHops[issueID]
 
@@ -658,11 +681,12 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 				continue
 			}
 
+			watch, _ := pendingMergeWatch(state, issueID)
+			recordIssueOutcome(ctx, params.Store, releaseReadOutcome(ctx, params.SCMAdapter, watch, issueID, stateName, now, entryLog), entryLog)
+
 			var counts issueReleaseCounts
 			if entry != nil {
-				if entry.CancelFunc != nil {
-					entry.CancelFunc()
-				}
+				entry.cancelRun(terminalCancelCause(stateName))
 				endHoldRecorded(entry, time.Now().UTC(), metrics)
 				counts = releaseIssueRuntimeState(ctx, state, params.Store, issueID, entryLog)
 				entry.PendingCleanup = true
@@ -687,6 +711,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			continue
 		}
 
+		endOutsideHandoff(ctx, state, params.Store, params.TrackerAdapter, issueID, stateName, params.HandoffState, params.TerminalStates, log)
+
 		if entry == nil {
 			continue
 		}
@@ -699,8 +725,9 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			continue
 		}
 
-		if isActive {
-			entry.Issue.State = stateName
+		keepsRun := readKeepsRun(entry, stateName, params.ActiveStates, params.HandoffState)
+		if keepsRun && isActive {
+			recordIssueRead(entry, read, readStartedAt)
 			metrics.IncReconciliationActions(actionKeep)
 			entryLog.Debug("refreshed issue state",
 				slog.String("state", stateName),
@@ -708,9 +735,8 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 			continue
 		}
 
-		isHandoff := params.HandoffState != "" && strings.EqualFold(stateName, params.HandoffState)
-		if isHandoff && isKnownReactionKind(entry.ReactionKind) {
-			entry.Issue.State = stateName
+		if keepsRun {
+			recordIssueRead(entry, read, readStartedAt)
 			metrics.IncReconciliationActions(actionKeep)
 			entryLog.Debug("keeping reaction worker running in handoff state",
 				slog.String("state", stateName),
@@ -720,9 +746,7 @@ func reconcileTrackerState(state *State, params ReconcileParams, log *slog.Logge
 		}
 
 		// Non-active, non-terminal: cancel without workspace cleanup.
-		if entry.CancelFunc != nil {
-			entry.CancelFunc()
-		}
+		entry.cancelRun(inactiveCancelCause(stateName))
 		endHoldRecorded(entry, time.Now().UTC(), metrics)
 		if incumbent := retrySlotIncumbent(state, issueID); incumbent != nil {
 			// Skipping only one of CancelRetry or DeleteRetryEntry would

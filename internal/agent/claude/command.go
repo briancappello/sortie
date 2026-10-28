@@ -3,6 +3,7 @@ package claude
 import (
 	"strconv"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/typeutil"
 )
@@ -123,18 +124,21 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 	if pt.DisallowedTools != "" {
 		args = append(args, "--disallowedTools", pt.DisallowedTools)
 	}
-	if pt.SystemPrompt != "" {
+	if pt.SystemPrompt != "" && !state.reducedVerificationContext {
 		args = append(args, "--append-system-prompt", pt.SystemPrompt)
 	}
 
 	if state.credentialVerification {
 		args = append(args, "--tools", "", "--strict-mcp-config", "--no-session-persistence")
+		if state.reducedVerificationContext {
+			args = append(args, "--safe-mode", "--system-prompt", agentcore.VerificationSystemPrompt)
+		}
 	} else {
 		if state.mcpConfigPath != "" {
 			// The runtime opens the file where it runs, so it gets the
 			// path at which it sees the file there.
 			args = append(args, "--mcp-config", state.target.GuestPath(state.mcpConfigPath))
-		} else if pt.MCPConfig != "" {
+		} else if pt.MCPConfig != "" && !state.target.Remote() {
 			args = append(args, "--mcp-config", pt.MCPConfig)
 		}
 		if !pt.SessionPersistence {

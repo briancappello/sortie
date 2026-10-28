@@ -15,21 +15,25 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/typeutil"
 )
 
 func init() {
 	registry.Agents.RegisterWithMeta("mock", NewMockAdapter, registry.AgentMeta{
-		MCPInjection:     registry.MCPInjectionUnsupported,
-		UsageArrival:     registry.UsageArrivalIncremental,
-		UsageAttribution: registry.UsageAttributionSessionTotal,
-		CredentialEnv:    registry.DeclareCredentialEnv(),
-		EffortForwarding: registry.EffortNotForwarded,
+		MCPDialect:            registry.MCPDialectNone,
+		MCPDialectNoneReason:  "launches no process",
+		UsageLimitRecognition: registry.UsageLimitRecognized,
+		UsageArrival:          registry.UsageArrivalIncremental,
+		UsageAttribution:      registry.UsageAttributionSessionTotal,
+		CredentialEnv:         registry.DeclareCredentialEnv(),
+		EffortForwarding:      registry.EffortNotForwarded,
+		VerificationContext:   registry.DeclareVerificationContext(),
 		UsageSessionRules: []registry.UsageSessionRule{
 			{
 				// Shares the session's own read of report_token_usage so
 				// the two cannot disagree.
 				When: func(passthrough map[string]any, remote bool) bool {
-					return !boolFromConfig(passthrough, "report_token_usage", true)
+					return !typeutil.BoolFrom(passthrough, "report_token_usage", true)
 				},
 				Arrival:     registry.UsageArrivalNone,
 				Attribution: registry.UsageAttributionNone,
@@ -48,6 +52,8 @@ func init() {
 		},
 	})
 }
+
+const usageLimitOutcome = "usage_limit"
 
 // Compile-time interface satisfaction check.
 var _ domain.AgentAdapter = (*MockAdapter)(nil)
@@ -79,6 +85,7 @@ type mockSettings struct {
 	toolCalls              []mockToolCall
 	reportTokenUsage       bool
 	credentialError        string
+	usageLimitResetsAt     time.Time
 }
 
 func (s *mockSessionState) accrueTurnUsage() {
@@ -110,7 +117,7 @@ type mockToolCall struct {
 // Accepted settings keys: session_id, agent_pid, start_error,
 // turn_outcomes, events_per_turn, input_tokens_per_turn,
 // output_tokens_per_turn, turn_delay_ms, stop_error,
-// report_token_usage. input_tokens_per_turn counts all input including
+// report_token_usage, usage_limit_resets_at. input_tokens_per_turn counts all input including
 // cache reads, so cache_read_tokens_per_turn is a subset of it rather
 // than an addition to it. The adapter reports run-cumulative counts by
 // construction: each turn's contribution accrues onto the totals of
@@ -121,6 +128,13 @@ type mockToolCall struct {
 // reported nothing. A verification session's turn emits no event,
 // consumes no turn_outcomes entry, and fails with credential_error when
 // it is set.
+//
+// turn_outcomes entries are completed, failed, cancelled, error,
+// input_required, incomplete, and usage_limit. A usage_limit turn
+// fails with [domain.ErrUsageLimit], accrues no usage because a refused
+// request bills nothing, and carries the reset instant from
+// usage_limit_resets_at (RFC 3339; absent or unparseable gives a zero
+// instant).
 func NewMockAdapter() (domain.AgentAdapter, error) {
 	return &MockAdapter{}, nil
 }
@@ -168,14 +182,20 @@ func parseSettings(config map[string]any) mockSettings {
 		}
 	}
 
-	m.eventsPerTurn = intFromConfig(config, "events_per_turn", m.eventsPerTurn)
-	m.inputTokensPerTurn = intFromConfig(config, "input_tokens_per_turn", m.inputTokensPerTurn)
-	m.outputTokensPerTurn = intFromConfig(config, "output_tokens_per_turn", m.outputTokensPerTurn)
-	m.cacheReadTokensPerTurn = intFromConfig(config, "cache_read_tokens_per_turn", m.cacheReadTokensPerTurn)
-	m.turnDelayMS = intFromConfig(config, "turn_delay_ms", m.turnDelayMS)
-	m.reportTokenUsage = boolFromConfig(config, "report_token_usage", m.reportTokenUsage)
+	m.eventsPerTurn = typeutil.IntFrom(config, "events_per_turn", m.eventsPerTurn)
+	m.inputTokensPerTurn = typeutil.IntFrom(config, "input_tokens_per_turn", m.inputTokensPerTurn)
+	m.outputTokensPerTurn = typeutil.IntFrom(config, "output_tokens_per_turn", m.outputTokensPerTurn)
+	m.cacheReadTokensPerTurn = typeutil.IntFrom(config, "cache_read_tokens_per_turn", m.cacheReadTokensPerTurn)
+	m.turnDelayMS = typeutil.IntFrom(config, "turn_delay_ms", m.turnDelayMS)
+	m.reportTokenUsage = typeutil.BoolFrom(config, "report_token_usage", m.reportTokenUsage)
 	if v, ok := config["model_name"].(string); ok {
 		m.modelName = v
+	}
+
+	if v, ok := config["usage_limit_resets_at"].(string); ok {
+		if resetsAt, err := time.Parse(time.RFC3339, v); err == nil {
+			m.usageLimitResetsAt = resetsAt.UTC()
+		}
 	}
 
 	m.apiDurationMS = int64FromConfig(config, "api_duration_ms", 0)
@@ -260,7 +280,7 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 	currentIndex := m.turnIndex
 	m.turnIndex++
 	outcome := state.outcomeAt(currentIndex)
-	if state.reportTokenUsage {
+	if state.reportTokenUsage && outcome != usageLimitOutcome {
 		state.accrueTurnUsage()
 	}
 	usage := state.usage
@@ -336,7 +356,7 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 			Usage:         usage,
 			UsageMeasured: state.reportTokenUsage,
 		}
-		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta)
+		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta, agentcore.TurnSpend{})
 	}
 
 	if outcome == "incomplete" {
@@ -349,7 +369,7 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 			Usage:         usage,
 			UsageMeasured: state.reportTokenUsage,
 		}
-		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta)
+		return agentcore.FinalizeTurn(params.OnEvent, nil, ev, meta, agentcore.TurnSpend{})
 	}
 
 	exitReason, errKind, isError := outcomeToEvent(outcome)
@@ -367,10 +387,14 @@ func (m *MockAdapter) RunTurn(ctx context.Context, session domain.Session, param
 	}
 
 	if isError {
-		return turnResult, &domain.AgentError{
+		agentErr := &domain.AgentError{
 			Kind:    errKind,
 			Message: fmt.Sprintf("mock turn %s", outcome),
 		}
+		if errKind == domain.ErrUsageLimit {
+			agentErr.UsageLimit = &domain.UsageLimit{ResetsAt: state.usageLimitResetsAt}
+		}
+		return turnResult, agentErr
 	}
 
 	return turnResult, nil
@@ -407,47 +431,11 @@ func outcomeToEvent(outcome string) (domain.AgentEventType, domain.AgentErrorKin
 		return domain.EventTurnCancelled, domain.ErrTurnCancelled, true
 	case "error":
 		return domain.EventTurnEndedWithError, domain.ErrPortExit, true
+	case usageLimitOutcome:
+		return domain.EventTurnFailed, domain.ErrUsageLimit, true
 	default:
 		return domain.EventTurnCompleted, "", false
 	}
-}
-
-// intFromConfig extracts an integer value from a config map, accepting
-// both int and float64 (JSON unmarshalling yields float64). Fractional
-// float64 values are rejected to prevent silent truncation. Returns
-// the fallback if the key is missing or has an unexpected type.
-func intFromConfig(config map[string]any, key string, fallback int) int {
-	v, ok := config[key]
-	if !ok {
-		return fallback
-	}
-	switch n := v.(type) {
-	case int:
-		return n
-	case float64:
-		if n != float64(int(n)) {
-			return fallback
-		}
-		return int(n)
-	default:
-		return fallback
-	}
-}
-
-// boolFromConfig extracts a boolean value from a config map, accepting
-// a Go bool (the type a YAML boolean reaches the constructor as).
-// Returns the fallback if the key is missing or has an unexpected
-// type.
-func boolFromConfig(config map[string]any, key string, fallback bool) bool {
-	v, ok := config[key]
-	if !ok {
-		return fallback
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return fallback
-	}
-	return b
 }
 
 // int64FromConfig extracts an int64 value from a config map, accepting

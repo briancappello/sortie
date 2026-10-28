@@ -315,10 +315,13 @@ type AgentMeta struct {
 	// means no adapter-specific validation.
 	ValidateAgentConfig func(fields AgentConfigFields) []ValidationDiag
 
-	// MCPInjection declares what this adapter does with the
-	// worker-generated MCP config path today, not what the underlying
-	// CLI is capable of. The empty value means undeclared.
-	MCPInjection MCPInjection
+	// MCPDialect declares the tool-server configuration syntax this kind's
+	// runtime reads. Required.
+	MCPDialect MCPDialect
+
+	// MCPDialectNoneReason is required with MCPDialectNone and empty
+	// otherwise.
+	MCPDialectNoneReason string
 
 	// SessionResumeBlockedBy reports which of this adapter's own
 	// operator-visible config keys, under the given passthrough,
@@ -359,7 +362,38 @@ type AgentMeta struct {
 	// EffortForwarding declares what this adapter does with the effort
 	// key of its own settings block. The empty value means undeclared.
 	EffortForwarding EffortForwarding
+
+	// VerificationContext declares which agent context components the
+	// kind's credential-verification request still carries. The zero
+	// value means undeclared.
+	VerificationContext VerificationContext
+
+	// UsageLimitRecognition declares whether the adapter recognizes a
+	// provider usage-limit refusal. Required.
+	UsageLimitRecognition UsageLimitRecognition
+
+	// UsageLimitNotRecognizedReason is required with
+	// UsageLimitNotRecognized and empty otherwise.
+	UsageLimitNotRecognizedReason string
 }
+
+// UsageLimitRecognition declares whether a kind's adapter returns
+// [domain.ErrUsageLimit] for a provider usage-limit refusal. The empty
+// value means undeclared.
+type UsageLimitRecognition string
+
+const (
+	// UsageLimitRecognitionUndeclared is the zero value.
+	UsageLimitRecognitionUndeclared UsageLimitRecognition = ""
+
+	// UsageLimitRecognized declares that the adapter returns
+	// [domain.ErrUsageLimit] for a provider usage-limit refusal.
+	UsageLimitRecognized UsageLimitRecognition = "recognized"
+
+	// UsageLimitNotRecognized declares that the adapter does not
+	// recognize the refusal and states why.
+	UsageLimitNotRecognized UsageLimitRecognition = "not_recognized"
+)
 
 // CredentialEnv declares the environment variable names an agent
 // kind's runtime reads as the credential for its default provider.
@@ -391,6 +425,70 @@ func (c CredentialEnv) Names() []string {
 		return nil
 	}
 	return slices.Clone(c.names)
+}
+
+// VerificationResidual names one context component that a kind's
+// credential-verification request still carries, because its runtime
+// offers no qualifying switch that drops it.
+type VerificationResidual string
+
+const (
+	// VerificationKeepsSomeTools declares that the request carries
+	// strictly fewer tool definitions than a working request.
+	VerificationKeepsSomeTools VerificationResidual = "some_tools"
+
+	// VerificationKeepsAllTools declares that the request carries no
+	// more tool definitions than a working request.
+	VerificationKeepsAllTools VerificationResidual = "all_tools"
+
+	// VerificationKeepsProjectInstructions declares that the request
+	// carries the instruction files read from the workspace.
+	VerificationKeepsProjectInstructions VerificationResidual = "project_instructions"
+
+	// VerificationKeepsUserInstructions declares that the request
+	// carries the instruction files and skill catalogues read from the
+	// operator's home.
+	VerificationKeepsUserInstructions VerificationResidual = "user_instructions"
+
+	// VerificationKeepsSystemPrompt declares that the request carries
+	// the runtime's built-in system prompt.
+	VerificationKeepsSystemPrompt VerificationResidual = "system_prompt"
+)
+
+// VerificationContext declares the residuals of a kind's
+// credential-verification request: the context components it still
+// carries. The zero value is undeclared; construct a declared value
+// with [DeclareVerificationContext].
+//
+// Tool definitions of every origin count toward the tool components:
+// built-in, skill, and tool-server tools.
+type VerificationContext struct {
+	residuals []VerificationResidual
+	declared  bool
+}
+
+// DeclareVerificationContext returns a declared [VerificationContext]
+// keeping the given residuals. Called with no arguments, it declares a
+// request that keeps nothing. It panics when given both
+// [VerificationKeepsSomeTools] and [VerificationKeepsAllTools], which
+// bound the same component differently.
+func DeclareVerificationContext(residuals ...VerificationResidual) VerificationContext {
+	if slices.Contains(residuals, VerificationKeepsSomeTools) && slices.Contains(residuals, VerificationKeepsAllTools) {
+		panic("registry: verification context declares both some_tools and all_tools")
+	}
+	return VerificationContext{residuals: slices.Clone(residuals), declared: true}
+}
+
+// Declared reports whether v was built by [DeclareVerificationContext].
+// The zero value reports false.
+func (v VerificationContext) Declared() bool {
+	return v.declared
+}
+
+// Keeps reports whether v declares that the request carries r. An
+// undeclared value keeps nothing.
+func (v VerificationContext) Keeps(r VerificationResidual) bool {
+	return slices.Contains(v.residuals, r)
 }
 
 // UsageArrival declares when a usage figure for the agent session
@@ -507,49 +605,43 @@ func (t UsageAttribution) NamesModel() bool {
 	return t == UsageAttributionPerModel
 }
 
-// MCPInjection declares what an agent adapter does with the
-// worker-generated MCP config path. The value describes what the
-// adapter does with the path today, not what the underlying CLI is
-// capable of, and the empty value means undeclared.
-type MCPInjection string
+// MCPDialect names the tool-server configuration syntax the shared delivery
+// renders for a kind's runtime. The empty value means undeclared.
+type MCPDialect string
 
 const (
-	// MCPInjectionUndeclared is the zero value: the adapter has not
-	// declared a disposition toward the generated MCP config path.
-	MCPInjectionUndeclared MCPInjection = ""
+	// MCPDialectUndeclared is the zero value.
+	MCPDialectUndeclared MCPDialect = ""
 
-	// MCPInjectionSupported declares that the adapter hands the
-	// generated MCP config path to the agent process.
-	MCPInjectionSupported MCPInjection = "supported"
+	// MCPDialectNone declares that the kind's runtime receives no tool server.
+	MCPDialectNone MCPDialect = "none"
 
-	// MCPInjectionTranslated declares that the adapter re-expresses
-	// the servers declared in the generated configuration in the
-	// form its runtime parses, and delivers that to the agent
-	// process.
-	MCPInjectionTranslated MCPInjection = "translated"
+	// MCPDialectMCPServersJSON is an {"mcpServers":{...}} document with ${VAR}
+	// header references.
+	MCPDialectMCPServersJSON MCPDialect = "mcp_servers_json"
 
-	// MCPInjectionUnsupported declares that the adapter never hands
-	// the generated MCP config path to the agent process.
-	MCPInjectionUnsupported MCPInjection = "unsupported"
+	// MCPDialectMCPServersJSONAlwaysLoad is mcp_servers_json with Sortie's own
+	// member marked "alwaysLoad".
+	MCPDialectMCPServersJSONAlwaysLoad MCPDialect = "mcp_servers_json_always_load"
+
+	// MCPDialectMCPServersTOML is one "-c mcp_servers.<name>=<inline table>"
+	// argument pair per server.
+	MCPDialectMCPServersTOML MCPDialect = "mcp_servers_toml"
+
+	// MCPDialectMCPMemberJSON is the "mcp" member of the runtime's inline JSON
+	// configuration, with {env:VAR} header references.
+	MCPDialectMCPMemberJSON MCPDialect = "mcp_member_json"
+
+	// MCPDialectACPSession is one Agent Client Protocol McpServer object per
+	// server, sent in the session-creation request.
+	MCPDialectACPSession MCPDialect = "acp_session"
 )
 
-// DeliversTools reports whether a session of this disposition,
-// launched in the given mode, can reach the servers declared in the
-// generated configuration. remote is true when the session runs over
-// SSH, where that configuration is not valid; a session launched into
-// an execution environment, where it is valid, passes false. It is
-// total over the value set: true for MCPInjectionSupported; true for
-// MCPInjectionTranslated only when remote is false; false for every
-// other value, including a value outside the declared set.
-func (m MCPInjection) DeliversTools(remote bool) bool {
-	switch m {
-	case MCPInjectionSupported:
-		return true
-	case MCPInjectionTranslated:
-		return !remote
-	default:
-		return false
-	}
+// DeliversTools reports whether a kind declaring this dialect can reach
+// Sortie's tool server. It is true for every dialect but MCPDialectUndeclared
+// and MCPDialectNone, including a value outside the declared set.
+func (d MCPDialect) DeliversTools() bool {
+	return d != MCPDialectUndeclared && d != MCPDialectNone
 }
 
 // AgentConfigFields holds the config values passed to agent adapter

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -50,29 +51,29 @@ func sessionStateRoot(env func(string) string, home func() (string, error)) (str
 
 // readSessionUsage scans the session-state events journal at path and
 // returns the totals of the last line whose decoded type is
-// "session.shutdown" as current, and the totals of the line before that
-// as previous (the zero value when at most one such record exists).
-// model names the model [shutdownModelName] selects between those two
-// records, empty whenever found is false or err is non-nil. found is
-// false when the file holds no session.shutdown record.
+// "session.shutdown" as current, and its per-model split as byModel, nil
+// when its modelMetrics is empty. model names the model
+// [shutdownModelName] selects between that record and the one before it,
+// empty whenever found is false or err is non-nil. found is false when the
+// file holds no session.shutdown record.
 //
 // The read is abandoned and err is non-nil when the file exceeds 64 MB
 // or a single line exceeds 10 MB. A line that fails to decode is
 // skipped without failing the read. readSessionUsage never logs the
 // file's contents.
-func readSessionUsage(path string) (current, previous domain.TokenUsage, model string, found bool, err error) {
+func readSessionUsage(path string) (current domain.TokenUsage, byModel map[string]domain.TokenUsage, model string, found bool, err error) {
 	info, statErr := os.Stat(path)
 	if statErr != nil {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, statErr
+		return domain.TokenUsage{}, nil, "", false, statErr
 	}
 	if info.Size() > maxSessionStateFileBytes {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false,
+		return domain.TokenUsage{}, nil, "", false,
 			fmt.Errorf("session-state events file exceeds %d bytes: %w", maxSessionStateFileBytes, errSessionStateCapExceeded)
 	}
 
 	f, openErr := os.Open(path) //nolint:gosec // path is derived from a validated session id, not user input
 	if openErr != nil {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, openErr
+		return domain.TokenUsage{}, nil, "", false, openErr
 	}
 	defer f.Close() //nolint:errcheck // read-only handle
 
@@ -95,24 +96,21 @@ func readSessionUsage(path string) (current, previous domain.TokenUsage, model s
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		if errors.Is(scanErr, bufio.ErrTooLong) {
-			return domain.TokenUsage{}, domain.TokenUsage{}, "", false,
+			return domain.TokenUsage{}, nil, "", false,
 				fmt.Errorf("session-state events file line exceeds %d bytes: %w", maxSessionStateLineBytes, errSessionStateCapExceeded)
 		}
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, fmt.Errorf("scan session-state events file: %w", scanErr)
+		return domain.TokenUsage{}, nil, "", false, fmt.Errorf("scan session-state events file: %w", scanErr)
 	}
 
 	if len(records) == 0 {
-		return domain.TokenUsage{}, domain.TokenUsage{}, "", false, nil
+		return domain.TokenUsage{}, nil, "", false, nil
 	}
 	last := records[len(records)-1]
 	var prevRecord shutdownEvent
 	if len(records) == 2 {
 		prevRecord = records[0]
-		previous = shutdownTotals(prevRecord)
 	}
-	current = shutdownTotals(last)
-	model = shutdownModelName(last, prevRecord)
-	return current, previous, model, true, nil
+	return shutdownTotals(last), shutdownByModel(last), shutdownModelName(last, prevRecord), true, nil
 }
 
 // shutdownModelName returns the trimmed modelMetrics key of current
@@ -140,6 +138,32 @@ func shutdownModelName(current, previous shutdownEvent) string {
 	return best
 }
 
+// modelMetricsUsage maps one modelMetrics entry to a [domain.TokenUsage],
+// counting its input tokens as reported.
+func modelMetricsUsage(model shutdownModel) domain.TokenUsage {
+	usage := domain.TokenUsage{
+		InputTokens:      model.Usage.InputTokens,
+		OutputTokens:     model.Usage.OutputTokens,
+		CacheReadTokens:  model.Usage.CacheReadTokens,
+		CacheWriteTokens: model.Usage.CacheWriteTokens,
+	}
+	usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	return usage
+}
+
+// shutdownByModel returns the modelMetrics entries of evt by model name,
+// mapped as [shutdownTotals] maps them, or nil when there are none.
+func shutdownByModel(evt shutdownEvent) map[string]domain.TokenUsage {
+	if len(evt.Data.ModelMetrics) == 0 {
+		return nil
+	}
+	byModel := make(map[string]domain.TokenUsage, len(evt.Data.ModelMetrics))
+	for name, model := range evt.Data.ModelMetrics {
+		byModel[name] = modelMetricsUsage(model)
+	}
+	return byModel
+}
+
 // shutdownTotals extracts token totals from one session.shutdown
 // record, preferring data.modelMetrics summed across model entries and
 // falling back to data.tokenDetails when modelMetrics is absent or
@@ -148,12 +172,8 @@ func shutdownTotals(evt shutdownEvent) domain.TokenUsage {
 	if len(evt.Data.ModelMetrics) > 0 {
 		var usage domain.TokenUsage
 		for _, model := range evt.Data.ModelMetrics {
-			usage.InputTokens += model.Usage.InputTokens
-			usage.OutputTokens += model.Usage.OutputTokens
-			usage.CacheReadTokens += model.Usage.CacheReadTokens
-			usage.CacheWriteTokens += model.Usage.CacheWriteTokens
+			usage = agentcore.AddUsage(usage, modelMetricsUsage(model))
 		}
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 		return usage
 	}
 

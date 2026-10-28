@@ -270,13 +270,6 @@ func applyEscalate(state *State, identifier string, req EscalationRequest, now t
 
 	log := logging.WithIssue(p.Logger, issueID, entry.Identifier)
 	url := redact.Mask(strings.TrimSpace(req.URL))
-	body := fmt.Sprintf("The running session of %s asks for a person (%s).", entry.Identifier, kind)
-	if entry.RuleName != "" {
-		body = fmt.Sprintf("The running session of %s on rule %s asks for a person (%s).", entry.Identifier, entry.RuleName, kind)
-	}
-	if url != "" {
-		body += "\nSession: " + url
-	}
 	n := sessionEvent{
 		IssueID:    issueID,
 		Identifier: entry.Identifier,
@@ -286,7 +279,7 @@ func applyEscalate(state *State, identifier string, req EscalationRequest, now t
 		Attempt:    entry.RetryAttempt,
 		Agent:      entry.AgentKind,
 		AgentText:  redact.Mask(strings.TrimSpace(req.Message)),
-	}.notification(domain.EventSessionEscalated, "", body)
+	}.notification(domain.EventSessionEscalated, "", domain.SessionEscalatedFacts{Kind: kind, Rule: entry.RuleName, URL: url})
 	n.Envelope.Escalation = domain.SessionEscalation{Kind: kind, Rule: entry.RuleName, URL: url}
 
 	delivery := p.Router.Route(n)

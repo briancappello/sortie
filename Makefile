@@ -15,6 +15,10 @@ build: ## Compile the sortie binary into the repo root
 clean: ## Remove the binary and all coverage files
 	$(RM) $(BIN) $(COVERAGE_OUT) $(COVERAGE_HTML)
 
+.PHONY: price-table
+price-table: ## Refresh the embedded model price table from upstream LiteLLM
+	$(GO) run ./tools/pricetable
+
 ##@ Testing
 
 .PHONY: test
@@ -81,6 +85,22 @@ test-darwin: ## Run the darwin-only tests on a macOS host; fails on a skipped te
 	cat "$$tmp"/run*.json | sed -n 's/.*"Action":"pass".*"Test":"\([^"]*\)".*/\1/p'; \
 	passed=$$(cat "$$tmp"/run*.json | grep -cE '"Action":"pass".*"Test":"[^"]'); \
 	printf '$(GREEN)test-darwin: %s darwin-only tests executed$(RESET)\n' "$$passed"
+
+.PHONY: ssh-lab
+ssh-lab: ## Start an SSH lab and keep it running until interrupted (INSTALL='npm install -g <package>@<version>')
+	SORTIE_SSHLAB_KEEP=1 SORTIE_SSHLAB_INSTALL='$(subst ','\'',$(INSTALL))' $(GO) test -count=1 -timeout 0 -v -run '^TestSSHLabKeep$$' ./internal/agent/agenttest/
+
+.PHONY: ssh-lab-clean
+ssh-lab-clean: ## Remove every SSH lab container and image from the local Docker cache
+	@set -eu; \
+	containers=$$(docker ps -a --filter name=sortie-sshlab- --format '{{.Names}}'); \
+	for name in $$containers; do \
+		case "$$name" in sortie-sshlab-*) docker rm -f "$$name" >/dev/null ;; esac; \
+	done; \
+	images=$$(docker images --format '{{.Repository}}:{{.Tag}}' sortie-agenttest-sshlab); \
+	for image in $$images; do \
+		docker rmi "$$image" >/dev/null; \
+	done
 
 ##@ Quality
 
@@ -149,11 +169,47 @@ generate-check: ## Verify wire_gen.go matches what the generator emits, without 
 	fi
 
 .PHONY: check
-check: lint lint-no-tests lint-gopls lint-shell lint-docs test test-shell generate-check lint-tools lint-tools-no-tests test-tools ## Run the CI gates; shell lint covers all tracked scripts
+check: lint lint-no-tests lint-gopls lint-shell lint-docs test test-shell generate-check ui-check lint-tools lint-tools-no-tests test-tools ## Run the CI gates; shell lint covers all tracked scripts
 
 .PHONY: tidy
 tidy: ## Tidy go.sum and prune stale entries from go.mod
 	$(GO) mod tidy
+
+##@ Dashboard
+
+.PHONY: ui-install
+ui-install: ## Install the dashboard dependencies from the lockfile
+	cd web && $(NPM) ci
+
+.PHONY: ui-build
+ui-build: ## Build the dashboard into internal/server/ui/dist
+	cd web && $(NPM) run build
+
+.PHONY: ui-lint
+ui-lint: ## Lint and type-check the dashboard sources
+	cd web && $(NPM) run lint
+	cd web && $(NPM) run typecheck
+	node scripts/tailwind-canonical.mjs web
+
+.PHONY: ui-fmt
+ui-fmt: ## Format the dashboard sources
+	cd web && $(NPM) run fmt
+
+.PHONY: ui-fmt-check
+ui-fmt-check: ## Show dashboard formatting drift without rewriting any file
+	cd web && $(NPM) run fmt:check
+
+.PHONY: ui-build-check
+ui-build-check: ui-build ## Verify the committed dashboard output matches a fresh build
+	@entries=$$(git status --porcelain --untracked-files=all -- internal/server/ui/dist); \
+	if [ -n "$$entries" ]; then \
+		printf '$(RED)internal/server/ui/dist does not match a fresh build: run make ui-build, then commit internal/server/ui/dist with the sources it was built from$(RESET)\n'; \
+		printf '%s\n' "$$entries"; \
+		exit 1; \
+	fi
+
+.PHONY: ui-check
+ui-check: ui-lint ui-fmt-check ui-build-check ## Run the dashboard gates: lint, format check, output drift
 
 ##@ Qualify module
 
@@ -253,6 +309,7 @@ endif
 	@printf '  $(CYAN)%-24s$(RESET) %s\n' \
 		'PKG'      ' Package filter for test targets (default: ./...)' \
 		'RUN'      ' Test name filter, passed to -run' \
+		'INSTALL'  ' Runtime install command for ssh-lab (default: none)' \
 		'LINT_GOOS' ' GOOS values the lint targets iterate' \
 		'VERSION'  ' Override version string (default: git describe)' \
 		'NO_COLOR' ' Disable color output (https://no-color.org/)'

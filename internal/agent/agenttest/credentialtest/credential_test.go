@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -335,7 +336,7 @@ func TestVerifyLiveUsage(t *testing.T) {
 			if returned == tt.wantFatal {
 				t.Errorf("VerifyLiveUsage() returned = %v, want %v", returned, !tt.wantFatal)
 			}
-			if returned && got != tt.adapter.result {
+			if returned && !reflect.DeepEqual(got, tt.adapter.result) {
 				t.Errorf("VerifyLiveUsage() = %+v, want %+v", got, tt.adapter.result)
 			}
 		})

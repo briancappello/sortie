@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // sequentialOutputScenario is the fake runtime scenario a two-turn
@@ -283,6 +286,35 @@ func TestStartSession_DefaultCommand(t *testing.T) {
 	}
 	if agentErr.Kind != domain.ErrAgentNotFound {
 		t.Errorf("Kind = %q, want %q", agentErr.Kind, domain.ErrAgentNotFound)
+	}
+}
+
+func TestStartSession_SSHModeCarriesNoHostMCPConfigPath(t *testing.T) {
+	standIn := agenttest.NewSSHStandIn(t, t.TempDir(), agenttest.SSHStandIn{PATH: os.Getenv("PATH"), Forward: agenttest.SSHForwardAllocated})
+	t.Setenv("PATH", filepath.Dir(standIn)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	workspace := t.TempDir()
+	hostPath := agenttest.WriteSeededMCPConfig(t, workspace)
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{
+		WorkspacePath: workspace,
+		AgentConfig:   domain.AgentConfig{Command: "claude"},
+		SSHHost:       "dev-host.example.com",
+		MCPConfigPath: hostPath,
+		Settings:      map[string]any{"mcp_config": "/op/mcp.json"},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() (SSH mode) error = %v", err)
+	}
+	t.Cleanup(func() { _ = adapter.StopSession(t.Context(), session) })
+	state := session.Internal.(*sessionState)
+
+	args := buildArgs(state, 1, "do work", state.passthrough)
+
+	for _, hostFile := range []string{hostPath, "/op/mcp.json"} {
+		if i := slices.IndexFunc(args, func(arg string) bool { return strings.Contains(arg, hostFile) }); i >= 0 {
+			t.Errorf("buildArgs() (SSH mode) carries host path %q in argument %q, want none: [%s]", hostFile, args[i], strings.Join(args, " "))
+		}
 	}
 }
 
@@ -902,6 +934,42 @@ func TestRunTurn_APIDurationMS_ZeroWhenAbsent(t *testing.T) {
 	t.Error("no turn_completed event found")
 }
 
+func TestRunTurn_SyntheticMessageKeepsModel(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	script := fakeClaude(t, tmpDir, agenttest.Output{Stdout: `{"type":"system","subtype":"init","session_id":"syn-sess","cwd":"/tmp"}
+{"type":"assistant","message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"text","text":"Working."}],"usage":{"input_tokens":100,"output_tokens":10}},"session_id":"syn-sess"}
+{"type":"assistant","message":{"id":"msg_2","model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"usage":{"input_tokens":0,"output_tokens":0}},"session_id":"syn-sess"}
+{"type":"result","subtype":"success","result":"All done.","is_error":false,"usage":{"input_tokens":100,"output_tokens":10},"session_id":"syn-sess"}
+`})
+
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+		WorkspacePath: tmpDir,
+		AgentConfig:   domain.AgentConfig{Command: script},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	var models []string
+	_, err = adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
+		Prompt: "test",
+		OnEvent: func(e domain.AgentEvent) {
+			if e.Type == domain.EventTokenUsage {
+				models = append(models, e.Model)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunTurn() error = %v", err)
+	}
+	if len(models) != 2 || models[0] != "claude-opus-5-5" || models[1] != "claude-opus-5-5" {
+		t.Errorf("token_usage models = %q, want the real model on both", models)
+	}
+}
+
 // TestRunTurn_ResultOnlyFallback verifies that when no assistant message
 // carries usage, the result event's usage still settles into
 // TurnResult.Usage without emitting its own token_usage event: the
@@ -1021,6 +1089,42 @@ func TestRunTurn_ParallelToolCalls_DedupesMessageID(t *testing.T) {
 	agenttest.AssertModelReported(t, events, "claude-haiku-4-5-20251001")
 }
 
+func usageLimitRefusalCase(t *testing.T, name, stream string, wantModelOnly bool) agenttest.UsageLimitRefusalCase {
+	t.Helper()
+
+	dir := t.TempDir()
+	adapter, err := NewClaudeCodeAdapter()
+	if err != nil {
+		t.Fatalf("NewClaudeCodeAdapter: %v", err)
+	}
+	return agenttest.UsageLimitRefusalCase{
+		Name:    name,
+		Adapter: adapter,
+		Start: domain.StartSessionParams{
+			WorkspacePath: dir,
+			AgentConfig:   domain.AgentConfig{Command: fakeClaude(t, dir, agenttest.Output{Stdout: stream})},
+		},
+		Turn:          domain.RunTurnParams{Prompt: "hello"},
+		WantResetsAt:  time.Unix(4102444800, 0).UTC(),
+		WantModelOnly: wantModelOnly,
+	}
+}
+
+func TestUsageLimitRefusal(t *testing.T) {
+	t.Parallel()
+
+	recorded := string(loadFixture(t, "usage_limit_rejected.jsonl"))
+	opusScoped := strings.ReplaceAll(recorded, `"rateLimitType":"five_hour"`, `"rateLimitType":"seven_day_opus"`)
+	if opusScoped == recorded {
+		t.Fatal("fixture carries no five_hour rateLimitType to derive the model-scoped variant from")
+	}
+
+	agenttest.AssertUsageLimitRefusal(t, "claude-code", []agenttest.UsageLimitRefusalCase{
+		usageLimitRefusalCase(t, "recorded five_hour refusal", recorded, false),
+		usageLimitRefusalCase(t, "seven_day_opus refusal is model-scoped", opusScoped, true),
+	})
+}
+
 // TestAssertUsageReporting proves claude-code's registered
 // usage-reporting declaration (incremental, per_model) against its
 // own real event stream: two token_usage events, one per first-seen
@@ -1107,6 +1211,15 @@ func TestRunTurn_SubAgentUsage(t *testing.T) {
 			t.Error("Usage.OutputTokens = 0, want non-zero even though the top-level usage object reports zero")
 		}
 		agenttest.AssertUsageContract(t, events)
+
+		wantByModel := map[string]domain.TokenUsage{
+			"claude-sonnet-4-5-20250929": {InputTokens: 6200, OutputTokens: 800, TotalTokens: 7000, CacheReadTokens: 1000, CacheWriteTokens: 200},
+			"claude-haiku-4-5-20251001":  {InputTokens: 3600, OutputTokens: 1200, TotalTokens: 4800, CacheReadTokens: 500, CacheWriteTokens: 100},
+		}
+		terminal := events[len(events)-1]
+		if !maps.Equal(terminal.UsageByModel, wantByModel) {
+			t.Errorf("%s UsageByModel = %+v, want %+v", terminal.Type, terminal.UsageByModel, wantByModel)
+		}
 	})
 
 	t.Run("modelUsage removed falls back to usage", func(t *testing.T) {
@@ -1144,6 +1257,166 @@ func TestRunTurn_SubAgentUsage(t *testing.T) {
 			t.Errorf("Usage.InputTokens = %d, want 1000 (fallback to usage)", result.Usage.InputTokens)
 		}
 	})
+}
+
+func TestRunTurn_ResumedSessionUsage(t *testing.T) {
+	t.Parallel()
+
+	const sid = "5cf8c387-6196-4296-86e4-eaaf85e8b944"
+
+	usage := func(input, output, cacheWrite, cacheRead int64) domain.TokenUsage {
+		in := input + cacheWrite + cacheRead
+		return domain.TokenUsage{InputTokens: in, OutputTokens: output, TotalTokens: in + output, CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite}
+	}
+	capture := func(n string) string { return string(loadFixture(t, "usage_resume_turn"+n+".jsonl")) }
+	zeroedCrash := `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"` + sid + `","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{"claude-haiku-5-5":{"inputTokens":0,"outputTokens":0,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0}}}` + "\n"
+
+	servedFrame := `{"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg_served","type":"message","role":"assistant","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":2,"output_tokens":1}},"session_id":"` + sid + `"}` + "\n"
+
+	breakdown1, breakdown2, breakdown3 := usage(2, 53, 31381, 13787), usage(6, 136, 31597, 104230), usage(8, 141, 31635, 149614)
+	zero := domain.TokenUsage{}
+	delta2, delta3 := usage(4, 83, 216, 90443), usage(6, 88, 254, 135827)
+
+	type turn struct {
+		stdout     string
+		wantErr    bool
+		wantUsage  domain.TokenUsage
+		wantFlag   bool
+		wantResume *domain.TokenUsage
+	}
+
+	tests := []struct {
+		name         string
+		version      string
+		continuation bool
+		resume       *domain.TokenUsage
+		turns        [2]turn
+	}{
+		{"new session on a restoring release counts each turn once", "2.1.302", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &breakdown1},
+			{stdout: capture("2"), wantUsage: breakdown2, wantResume: &breakdown2},
+		}},
+		{"continuation seeded with the previous reading is exact", "2.1.302", true, &breakdown1, [2]turn{
+			{stdout: capture("2"), wantUsage: delta2, wantResume: &breakdown2},
+			{stdout: capture("3"), wantUsage: delta3, wantResume: &breakdown3},
+		}},
+		{"continuation without a reading flags only its first turn", "2.1.302", true, nil, [2]turn{
+			{stdout: capture("2"), wantUsage: delta2, wantFlag: true, wantResume: &breakdown2},
+			{stdout: capture("3"), wantUsage: delta3, wantResume: &breakdown3},
+		}},
+		{"zeroed crash result changes nothing", "2.1.302", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &breakdown1},
+			{stdout: zeroedCrash, wantErr: true, wantUsage: breakdown1},
+		}},
+		{"zeroed crash result after output on a release that saves no totals flags the turn", "2.1.276", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &zero},
+			{stdout: servedFrame + zeroedCrash, wantErr: true, wantUsage: usage(4, 54, 31381, 13787), wantFlag: true, wantResume: &zero},
+		}},
+		{"release that saves no totals adds each result", "2.1.276", false, nil, [2]turn{
+			{stdout: capture("1"), wantUsage: breakdown1, wantResume: &zero},
+			{stdout: capture("2"), wantUsage: usage(8, 189, 62978, 118017), wantResume: &zero},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			initLine := `{"type":"system","subtype":"init","session_id":"` + sid + `","claude_code_version":"` + tt.version + `","cwd":"/tmp"}` + "\n"
+			script := fakeSequentialClaude(t, tmpDir,
+				agenttest.Output{Stdout: initLine + tt.turns[0].stdout},
+				agenttest.Output{Stdout: initLine + tt.turns[1].stdout},
+			)
+			params := domain.StartSessionParams{WorkspacePath: tmpDir, AgentConfig: domain.AgentConfig{Command: script}, ResumeUsage: tt.resume}
+			if tt.continuation {
+				params.ResumeSessionID = sid
+			}
+
+			adapter, _ := NewClaudeCodeAdapter()
+			session, err := adapter.StartSession(context.Background(), params)
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+
+			for i, want := range tt.turns {
+				result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{Prompt: "turn", OnEvent: func(domain.AgentEvent) {}})
+
+				if (err != nil) != want.wantErr {
+					t.Fatalf("RunTurn(turn %d) error = %v, wantErr %v", i+1, err, want.wantErr)
+				}
+				if result.Usage != want.wantUsage || result.SpendUnaccounted != want.wantFlag || !reflect.DeepEqual(result.ResumeUsage, want.wantResume) {
+					t.Errorf("RunTurn(turn %d) = usage %+v, spendUnaccounted %v, resume %+v, want %+v, %v, %+v",
+						i+1, result.Usage, result.SpendUnaccounted, result.ResumeUsage, want.wantUsage, want.wantFlag, want.wantResume)
+				}
+			}
+		})
+	}
+}
+
+func TestRunTurn_ResumedSessionUsageByModel(t *testing.T) {
+	t.Parallel()
+
+	const sid = "5cf8c387-6196-4296-86e4-eaaf85e8b944"
+
+	usage := func(input, output int64) domain.TokenUsage {
+		return domain.TokenUsage{InputTokens: input, OutputTokens: output, TotalTokens: input + output}
+	}
+	result := func(sonnetIn, sonnetOut, haikuIn, haikuOut int) string {
+		return fmt.Sprintf(`{"type":"result","subtype":"success","is_error":false,"session_id":"%s","modelUsage":{`+
+			`"sonnet":{"inputTokens":%d,"outputTokens":%d},"haiku":{"inputTokens":%d,"outputTokens":%d}}}`+"\n",
+			sid, sonnetIn, sonnetOut, haikuIn, haikuOut)
+	}
+	seed := map[string]domain.TokenUsage{"sonnet": usage(10, 5), "haiku": usage(4, 2)}
+	turns := []struct {
+		stdout     string
+		wantRun    map[string]domain.TokenUsage
+		wantResume map[string]domain.TokenUsage
+	}{
+		{
+			stdout:     result(30, 25, 9, 12),
+			wantRun:    map[string]domain.TokenUsage{"sonnet": usage(20, 20), "haiku": usage(5, 10)},
+			wantResume: map[string]domain.TokenUsage{"sonnet": usage(30, 25), "haiku": usage(9, 12)},
+		},
+		{
+			stdout:     result(31, 40, 12, 13),
+			wantRun:    map[string]domain.TokenUsage{"sonnet": usage(21, 35), "haiku": usage(8, 11)},
+			wantResume: map[string]domain.TokenUsage{"sonnet": usage(31, 40), "haiku": usage(12, 13)},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	initLine := `{"type":"system","subtype":"init","session_id":"` + sid + `","claude_code_version":"2.1.302","cwd":"/tmp"}` + "\n"
+	script := fakeSequentialClaude(t, tmpDir,
+		agenttest.Output{Stdout: initLine + turns[0].stdout},
+		agenttest.Output{Stdout: initLine + turns[1].stdout},
+	)
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+		WorkspacePath:      tmpDir,
+		AgentConfig:        domain.AgentConfig{Command: script},
+		ResumeSessionID:    sid,
+		ResumeUsage:        &domain.TokenUsage{InputTokens: 14, OutputTokens: 7, TotalTokens: 21},
+		ResumeUsageByModel: seed,
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	for i, want := range turns {
+		var terminal domain.AgentEvent
+		turnResult, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{Prompt: "turn", OnEvent: func(e domain.AgentEvent) { terminal = e }})
+		if err != nil {
+			t.Fatalf("RunTurn(turn %d) error = %v", i+1, err)
+		}
+
+		if !maps.Equal(terminal.UsageByModel, want.wantRun) {
+			t.Errorf("RunTurn(turn %d) terminal UsageByModel = %+v, want %+v", i+1, terminal.UsageByModel, want.wantRun)
+		}
+		if !maps.Equal(turnResult.ResumeUsageByModel, want.wantResume) {
+			t.Errorf("RunTurn(turn %d) ResumeUsageByModel = %+v, want %+v", i+1, turnResult.ResumeUsageByModel, want.wantResume)
+		}
+	}
 }
 
 func TestRunTurn_ErrorResult(t *testing.T) {
@@ -1189,6 +1462,40 @@ func TestRunTurn_ErrorResult(t *testing.T) {
 		ExitCode:        0,
 		Work:            agentcore.WorkAbsent,
 	}, result, err)
+}
+
+func TestRunTurn_RefusedLoginEndsAsCredentialUnverified(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := fakeSequentialClaude(t, dir,
+		agenttest.Output{Stdout: `{"type":"assistant","error":"authentication_failed","message":{"content":[]}}
+{"type":"result","subtype":"success","result":"Not logged in","is_error":true}
+`},
+		agenttest.Output{Stdout: `{"type":"result","subtype":"error_max_turns","result":"","is_error":true}
+`},
+	)
+	adapter, _ := NewClaudeCodeAdapter()
+	session, err := adapter.StartSession(t.Context(), domain.StartSessionParams{WorkspacePath: dir, AgentConfig: domain.AgentConfig{Command: script}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	turns := []struct {
+		wantKind    domain.AgentErrorKind
+		wantMessage string
+	}{
+		{domain.ErrCredentialUnverified, agentcore.CredentialRefusedMessage("Not logged in")},
+		{domain.ErrTurnFailed, "error_max_turns"},
+	}
+	for i, want := range turns {
+		_, err := adapter.RunTurn(t.Context(), session, domain.RunTurnParams{Prompt: "p", OnEvent: func(domain.AgentEvent) {}})
+
+		var agentErr *domain.AgentError
+		if !errors.As(err, &agentErr) || agentErr.Kind != want.wantKind || agentErr.Message != want.wantMessage {
+			t.Errorf("RunTurn(turn %d) error = %v, want kind %q message %q", i+1, err, want.wantKind, want.wantMessage)
+		}
+	}
 }
 
 func TestRunTurn_NonZeroExit(t *testing.T) {
@@ -1469,11 +1776,7 @@ func TestRunTurn_UsageMeasuredPersistsAcrossCancelledTurn(t *testing.T) {
 		close(done)
 	}()
 
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("RunTurn(second) did not return within 10s")
-	}
+	waittest.Receive(t, done, "RunTurn(second) return")
 
 	var agentErr *domain.AgentError
 	if !errors.As(runErr, &agentErr) || agentErr.Kind != domain.ErrTurnCancelled {
@@ -1484,6 +1787,75 @@ func TestRunTurn_UsageMeasuredPersistsAcrossCancelledTurn(t *testing.T) {
 	}
 	if result2.Usage != result1.Usage {
 		t.Errorf("RunTurn(second).Usage = %+v, want %+v (equal to the first turn's)", result2.Usage, result1.Usage)
+	}
+}
+
+func TestRunTurn_SubagentTurnWithoutResultIsFlaggedUnaccounted(t *testing.T) {
+	t.Parallel()
+
+	const wantSnapshots = 3
+
+	stream := string(loadFixture(t, "subagent_stop_no_result.jsonl"))
+	tests := []struct {
+		name         string
+		out          agenttest.Output
+		cancelOnLast bool
+	}{
+		{name: "ended by cancellation", out: agenttest.Output{Stdout: stream, Hang: true}, cancelOnLast: true},
+		{name: "ended by exit 143", out: agenttest.Output{Stdout: stream, ExitCode: 143}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			adapter, _ := NewClaudeCodeAdapter()
+			session, err := adapter.StartSession(context.Background(), domain.StartSessionParams{
+				WorkspacePath: tmpDir,
+				AgentConfig:   domain.AgentConfig{Command: fakeClaude(t, tmpDir, tt.out)},
+			})
+			if err != nil {
+				t.Fatalf("StartSession() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			snapshots := 0
+			var lastSnapshot domain.TokenUsage
+			result, _ := adapter.RunTurn(ctx, session, domain.RunTurnParams{
+				Prompt: "delegate",
+				OnEvent: func(e domain.AgentEvent) {
+					if e.Type != domain.EventTokenUsage {
+						return
+					}
+					snapshots++
+					lastSnapshot = e.Usage
+					if tt.cancelOnLast && snapshots == wantSnapshots {
+						cancel()
+					}
+				},
+			})
+
+			if snapshots != wantSnapshots {
+				t.Fatalf("RunTurn(%s) token_usage events = %d, want %d", tt.name, snapshots, wantSnapshots)
+			}
+			if !result.UsageMeasured {
+				t.Errorf("RunTurn(%s).UsageMeasured = false, want true", tt.name)
+			}
+			if !result.SpendUnaccounted {
+				t.Errorf("RunTurn(%s).SpendUnaccounted = false, want true", tt.name)
+			}
+			if result.SpendCoverable {
+				t.Errorf("RunTurn(%s).SpendCoverable = true, want false", tt.name)
+			}
+			if result.Usage == (domain.TokenUsage{}) {
+				t.Errorf("RunTurn(%s).Usage is zero, want non-zero", tt.name)
+			}
+			if result.Usage != lastSnapshot {
+				t.Errorf("RunTurn(%s).Usage = %+v, want %+v (the last token_usage snapshot)", tt.name, result.Usage, lastSnapshot)
+			}
+		})
 	}
 }
 
@@ -1595,6 +1967,9 @@ func TestRunTurn_UnknownEventType(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	script := fakeClaude(t, tmpDir, agenttest.Output{Stdout: `{"type":"unknown_future_type","data":"something"}
+{"type":"system","subtype":"task_started","task_id":"t1"}
+{"type":"another_future_type"}
+{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}
 {"type":"result","subtype":"success","result":"ok","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}}
 `})
 
@@ -1618,8 +1993,18 @@ func TestRunTurn_UnknownEventType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if events[0].Type != domain.EventOtherMessage {
-		t.Errorf("unknown type mapped to %q, want %q", events[0].Type, domain.EventOtherMessage)
+	var pings int
+	for _, e := range events {
+		if e.Type != domain.EventNotification && e.Type != domain.EventOtherMessage {
+			continue
+		}
+		pings++
+		if e.Message != "" {
+			t.Errorf("%s message = %q, want blank", e.Type, e.Message)
+		}
+	}
+	if pings != 4 {
+		t.Errorf("blank pings = %d, want 4", pings)
 	}
 }
 
@@ -2030,14 +2415,12 @@ func TestStopSession_RunningProcess(t *testing.T) {
 	<-done
 }
 
-// TestRunTurn_ToolResultInUserEvent is a regression test verifying that
-// tool_result content blocks in user-type JSONL events (not assistant)
-// produce correlated EventToolResult events with the correct ToolName.
-// Prior to the fix, user-event tool_result blocks were silently dropped.
 func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 	t.Parallel()
 
-	fixture := loadFixture(t, "tool_use_result_user_event.jsonl")
+	const argsSentinel = "SENTINEL-skill-args-must-not-leak"
+
+	fixture := loadFixture(t, "tool_use_mapped_calls.jsonl")
 
 	tmpDir := t.TempDir()
 	script := fakeClaude(t, tmpDir, agenttest.Output{Stdout: string(fixture)})
@@ -2053,7 +2436,7 @@ func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 
 	var events []domain.AgentEvent
 	result, err := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
-		Prompt: "read main.go",
+		Prompt: "map the calls",
 		OnEvent: func(e domain.AgentEvent) {
 			events = append(events, e)
 		},
@@ -2065,7 +2448,6 @@ func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 		t.Errorf("ExitReason = %q, want %q", result.ExitReason, domain.EventTurnCompleted)
 	}
 
-	// Collect all EventToolResult events.
 	var toolResults []domain.AgentEvent
 	for _, e := range events {
 		if e.Type == domain.EventToolResult {
@@ -2073,34 +2455,48 @@ func TestRunTurn_ToolResultInUserEvent(t *testing.T) {
 		}
 	}
 
-	if len(toolResults) != 1 {
-		eventTypes := make([]string, len(events))
-		for i, e := range events {
-			eventTypes[i] = string(e.Type)
+	want := []struct {
+		name     string
+		kind     domain.ToolKind
+		argument string
+	}{
+		{"Bash", domain.ToolKindShell, "go test ./..."},
+		{"Read", domain.ToolKindRead, "/workspace/internal/foo.go"},
+		{"Edit", domain.ToolKindEdit, "/workspace/internal/foo.go"},
+		{"Skill", domain.ToolKindSkill, "demo-skill"},
+		{"Grep", "", ""},
+		{"github.get_issue", "", ""},
+	}
+	if len(toolResults) != len(want) {
+		t.Fatalf("EventToolResult count = %d, want %d", len(toolResults), len(want))
+	}
+	for i, w := range want {
+		got := toolResults[i]
+		if got.ToolName != w.name || got.ToolKind != w.kind || got.ToolArgument != w.argument {
+			t.Errorf("toolResults[%d] (name, kind, argument) = (%q, %q, %q), want (%q, %q, %q)",
+				i, got.ToolName, got.ToolKind, got.ToolArgument, w.name, w.kind, w.argument)
 		}
-		t.Fatalf("EventToolResult count = %d, want 1; all events = %v", len(toolResults), eventTypes)
+		if got.ToolError {
+			t.Errorf("toolResults[%d].ToolError = true, want false", i)
+		}
+		if got.ToolDurationMS < 0 {
+			t.Errorf("toolResults[%d].ToolDurationMS = %d, want >= 0", i, got.ToolDurationMS)
+		}
 	}
 
-	got := toolResults[0]
-	if got.ToolName != "Read" {
-		t.Errorf("ToolName = %q, want %q", got.ToolName, "Read")
-	}
-	if got.ToolError {
-		t.Error("ToolError = true, want false")
-	}
-	if got.ToolDurationMS < 0 {
-		t.Errorf("ToolDurationMS = %d, want >= 0", got.ToolDurationMS)
-	}
-	if got.Message != "tool_result: Read" {
-		t.Errorf("Message = %q, want %q", got.Message, "tool_result: Read")
+	for i, e := range events {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("json.Marshal(events[%d]): %v", i, err)
+		}
+		if strings.Contains(string(raw), argsSentinel) {
+			t.Errorf("events[%d] (%s) carries the Skill args sentinel: %s", i, e.Type, raw)
+		}
 	}
 
 	dispositiontest.AssertWorkEvidenceConsistent(t, events, result, err)
 }
 
-// TestRunTurn_ToolResultInAssistantEvent validates that the original
-// assistant-only tool_result correlation path still works after the
-// user-event fix. Uses the tool_use_result_separate.jsonl fixture.
 func TestRunTurn_ToolResultInAssistantEvent(t *testing.T) {
 	t.Parallel()
 
@@ -2132,7 +2528,6 @@ func TestRunTurn_ToolResultInAssistantEvent(t *testing.T) {
 		t.Errorf("ExitReason = %q, want %q", result.ExitReason, domain.EventTurnCompleted)
 	}
 
-	// Collect all EventToolResult events.
 	var toolResults []domain.AgentEvent
 	for _, e := range events {
 		if e.Type == domain.EventToolResult {
@@ -2140,7 +2535,6 @@ func TestRunTurn_ToolResultInAssistantEvent(t *testing.T) {
 		}
 	}
 
-	// tool_use_result_separate.jsonl has 2 tool uses with results in assistant events.
 	if len(toolResults) != 2 {
 		eventTypes := make([]string, len(events))
 		for i, e := range events {
@@ -2475,7 +2869,7 @@ func TestProcessToolBlocks_XMLStripping(t *testing.T) {
 		},
 	}
 	tracker := agentcore.NewToolTracker()
-	tracker.Begin("toolu_test01", "Edit")
+	tracker.Begin("toolu_test01", agentcore.ToolCall{Name: "Edit"})
 	work := agentcore.NewWorkObserver(agentcore.WorkSignals{ToolActivity: true})
 
 	var events []domain.AgentEvent
@@ -2535,7 +2929,7 @@ func TestProcessToolBlocks_TailTruncation(t *testing.T) {
 		},
 	}
 	tracker := agentcore.NewToolTracker()
-	tracker.Begin("toolu_tail01", "Bash")
+	tracker.Begin("toolu_tail01", agentcore.ToolCall{Name: "Bash"})
 	work := agentcore.NewWorkObserver(agentcore.WorkSignals{ToolActivity: true})
 
 	var events []domain.AgentEvent

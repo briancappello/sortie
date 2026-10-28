@@ -29,7 +29,7 @@ func environmentSnapshot() orchestrator.RuntimeSnapshotResult {
 	}
 }
 
-func getJSON(t *testing.T, url string) map[string]any {
+func getJSONMap(t *testing.T, url string) map[string]any {
 	t.Helper()
 	resp, err := http.Get(url) //nolint:gosec,noctx // the test server's own URL
 	if err != nil {
@@ -71,7 +71,7 @@ func TestHandleState_Environment(t *testing.T) {
 	t.Parallel()
 
 	ts := testServer(t, fixedSnapshot(environmentSnapshot()), acceptingRefresh())
-	body := getJSON(t, ts.URL+"/api/v1/state")
+	body := getJSONMap(t, ts.URL+"/api/v1/state")
 
 	byIdentifier := map[string]map[string]any{}
 	for _, list := range []string{"running", "retrying"} {
@@ -102,7 +102,7 @@ func TestHandleIssueDetail_Environment(t *testing.T) {
 		{identifier: "ENG-2", section: "retry"},
 	}
 	for _, tt := range tests {
-		body := getJSON(t, ts.URL+"/api/v1/"+tt.identifier)
+		body := getJSONMap(t, ts.URL+"/api/v1/"+tt.identifier)
 		wantEnvironment(t, tt.identifier+" detail", body, tt.kind, tt.name)
 		section, ok := body[tt.section].(map[string]any)
 		if !ok {

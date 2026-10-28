@@ -14,6 +14,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 )
 
@@ -71,6 +72,20 @@ func WithRetiredAgents(lookup config.RetiredAgentLookup) ManagerOption {
 	return func(m *Manager) { m.retiredAgents = lookup }
 }
 
+// LoadStatus is the outcome of the workflow file's recent loads.
+type LoadStatus struct {
+	// LastLoadAt is when the latest load ended, whether it succeeded or failed.
+	LastLoadAt time.Time
+	// LastSuccessAt is when a load last succeeded and promoted its configuration.
+	LastSuccessAt time.Time
+	// ConsecutiveFailures counts the loads that failed since LastSuccessAt.
+	ConsecutiveFailures int
+	// FailingSince is when the first of those loads ended; zero while ConsecutiveFailures is 0.
+	FailingSince time.Time
+	// LastError is the latest load's error, nil when it succeeded.
+	LastError error
+}
+
 // Manager watches a workflow file for changes and maintains the current
 // effective configuration. The latest config and prompt template are
 // available via [Manager.Config] and [Manager.PromptTemplate]. Safe for
@@ -83,11 +98,21 @@ type Manager struct {
 	retiredAgents  config.RetiredAgentLookup
 	advisoryFunc   AdvisoryFunc
 
+	// promoteMu serializes every writer of currentRates, from the read of
+	// the rates in force through the swap, so a landed table never replaces
+	// the rates of a newer configuration and a reload never drops a landed
+	// table. Lock order: promoteMu, then mu, then the downloader's own lock.
+	promoteMu  sync.Mutex
+	downloader *pricing.Downloader // guarded by promoteMu
+
 	mu                   sync.RWMutex
 	currentConfig        config.ServiceConfig
 	currentPrompt        *prompt.Template
 	currentTemplateIndex map[string]*prompt.Template
+	currentRates         *pricing.Rates
 	lastLoadErr          error
+	loadStatus           LoadStatus
+	loadNotifier         func()
 
 	watcher *fsnotify.Watcher
 	done    chan struct{}
@@ -115,7 +140,7 @@ func NewManager(path string, logger *slog.Logger, opts ...ManagerOption) (*Manag
 		o(m)
 	}
 
-	cfg, tmpl, index, err := m.loadPipeline()
+	cfg, tmpl, index, rates, err := m.loadPipeline()
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +154,10 @@ func NewManager(path string, logger *slog.Logger, opts ...ManagerOption) (*Manag
 	m.currentConfig = cfg
 	m.currentPrompt = tmpl
 	m.currentTemplateIndex = index
+	m.currentRates = rates
+	m.mu.Lock()
+	m.recordLoadLocked(nil)
+	m.mu.Unlock()
 	return m, nil
 }
 
@@ -139,6 +168,16 @@ func (m *Manager) Config() config.ServiceConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentConfig
+}
+
+// Rates returns the [pricing.Rates] promoted with the current
+// configuration. If the most recent reload failed, this returns the rates
+// of the last successful load; it is never nil after [NewManager]
+// succeeds. Safe for concurrent use.
+func (m *Manager) Rates() *pricing.Rates {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentRates
 }
 
 // PromptTemplate returns the current compiled prompt template. If the
@@ -190,6 +229,32 @@ func (m *Manager) LastLoadError() error {
 	return m.lastLoadErr
 }
 
+// LoadStatus returns the outcome of the recent loads. Safe for
+// concurrent use.
+func (m *Manager) LoadStatus() LoadStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.loadStatus
+}
+
+// recordLoadLocked records one load outcome next to lastLoadErr. The
+// caller MUST hold m.mu for writing.
+func (m *Manager) recordLoadLocked(err error) {
+	now := time.Now()
+	m.loadStatus.LastLoadAt = now
+	m.loadStatus.LastError = err
+	if err == nil {
+		m.loadStatus.LastSuccessAt = now
+		m.loadStatus.ConsecutiveFailures = 0
+		m.loadStatus.FailingSince = time.Time{}
+		return
+	}
+	if m.loadStatus.ConsecutiveFailures == 0 {
+		m.loadStatus.FailingSince = now
+	}
+	m.loadStatus.ConsecutiveFailures++
+}
+
 func (m *Manager) currentLogger() *slog.Logger {
 	m.mu.RLock()
 	l := m.logger
@@ -210,25 +275,54 @@ func (m *Manager) SetLogger(logger *slog.Logger) {
 	m.mu.Unlock()
 }
 
+// SetLoadNotifier registers a function the watcher calls after each load it
+// records, whether the load succeeded or failed. The function runs after the
+// manager lock is released, so [Manager.Config] and [Manager.LoadStatus]
+// already return that load's outcome. [Manager.Reload] does not call it, and
+// loads recorded before registration notify nothing. A nil argument clears
+// the notifier. Safe for concurrent use; the file-watcher goroutine may be
+// running.
+func (m *Manager) SetLoadNotifier(notify func()) {
+	m.mu.Lock()
+	m.loadNotifier = notify
+	m.mu.Unlock()
+}
+
+func (m *Manager) notifyLoad() {
+	m.mu.RLock()
+	notify := m.loadNotifier
+	m.mu.RUnlock()
+	if notify != nil {
+		notify()
+	}
+}
+
 // Reload synchronously re-reads the workflow file, parses config and
 // prompt, and swaps the effective values. On error the previous config
 // is retained and the error is returned. This supports the orchestrator's
 // defensive re-validation before dispatch. Safe for concurrent use.
 func (m *Manager) Reload() error {
-	cfg, tmpl, index, err := m.loadPipeline()
+	_, err := m.load()
+	return err
+}
+
+// load runs one reload under the promotion mutex and records its outcome.
+// rejected reports that the validation callback, not the load, returned err.
+// The mutex is released before the caller logs or notifies.
+func (m *Manager) load() (rejected bool, err error) {
+	m.promoteMu.Lock()
+	defer m.promoteMu.Unlock()
+
+	cfg, tmpl, index, rates, err := m.loadPipeline()
 	if err != nil {
-		m.mu.Lock()
-		m.lastLoadErr = err
-		m.mu.Unlock()
-		return err
+		m.recordFailure(err)
+		return false, err
 	}
 
 	if m.validateFunc != nil {
 		if err := m.validateFunc(cfg); err != nil {
-			m.mu.Lock()
-			m.lastLoadErr = err
-			m.mu.Unlock()
-			return err
+			m.recordFailure(err)
+			return true, err
 		}
 	}
 
@@ -236,9 +330,64 @@ func (m *Manager) Reload() error {
 	m.currentConfig = cfg
 	m.currentPrompt = tmpl
 	m.currentTemplateIndex = index
+	m.currentRates = rates
 	m.lastLoadErr = nil
+	m.recordLoadLocked(nil)
 	m.mu.Unlock()
-	return nil
+
+	if m.downloader != nil {
+		m.downloader.Want(rates.Downloads())
+	}
+	return false, nil
+}
+
+func (m *Manager) recordFailure(err error) {
+	m.mu.Lock()
+	m.lastLoadErr = err
+	m.recordLoadLocked(err)
+	m.mu.Unlock()
+}
+
+// SetDownloader attaches the downloader whose tables the rates take from now
+// on, puts its kept tables in force for the current configuration, and tells
+// it which downloads to keep fresh. It MUST be called at most once, before
+// the downloader's Run starts, and never blocks on the network.
+func (m *Manager) SetDownloader(d *pricing.Downloader) {
+	m.promoteMu.Lock()
+	defer m.promoteMu.Unlock()
+	m.downloader = d
+	d.Want(m.promoteDownloaded().Downloads())
+}
+
+// RefreshRates puts the tables the downloader holds in force for the current
+// configuration. It does nothing before [Manager.SetDownloader]. It never
+// re-reads the workflow file or a replace_file table and never changes the
+// configuration, the prompt, the load status, or the load notifier. Safe for
+// concurrent use.
+func (m *Manager) RefreshRates() {
+	m.promoteMu.Lock()
+	defer m.promoteMu.Unlock()
+	if m.downloader == nil {
+		return
+	}
+	m.promoteDownloaded()
+}
+
+// promoteDownloaded swaps in the current rates with the downloader's tables
+// and returns them. The caller MUST hold promoteMu and have set the
+// downloader. The tables are looked up outside mu because a first lookup
+// reads a file.
+func (m *Manager) promoteDownloaded() *pricing.Rates {
+	m.mu.RLock()
+	rates := m.currentRates
+	m.mu.RUnlock()
+
+	rates = rates.WithDownloaded(m.downloader.Table)
+
+	m.mu.Lock()
+	m.currentRates = rates
+	m.mu.Unlock()
+	return rates
 }
 
 // Start begins watching the workflow file for changes. It spawns a
@@ -328,50 +477,34 @@ func (m *Manager) watch(ctx context.Context) {
 
 func (m *Manager) reload() {
 	logger := m.currentLogger()
-	cfg, tmpl, index, err := m.loadPipeline()
-	if err != nil {
+	rejected, err := m.load()
+	switch {
+	case rejected:
+		logger.Error("workflow reload rejected by validation",
+			slog.Any("error", err), slog.String("path", m.path))
+	case err != nil:
 		logger.Error("workflow reload failed", slog.Any("error", err), slog.String("path", m.path))
-		m.mu.Lock()
-		m.lastLoadErr = err
-		m.mu.Unlock()
-		return
+	default:
+		logger.Info("workflow reloaded", slog.String("path", m.path))
 	}
-
-	if m.validateFunc != nil {
-		if err := m.validateFunc(cfg); err != nil {
-			logger.Error("workflow reload rejected by validation",
-				slog.Any("error", err), slog.String("path", m.path))
-			m.mu.Lock()
-			m.lastLoadErr = err
-			m.mu.Unlock()
-			return
-		}
-	}
-
-	m.mu.Lock()
-	m.currentConfig = cfg
-	m.currentPrompt = tmpl
-	m.currentTemplateIndex = index
-	m.lastLoadErr = nil
-	m.mu.Unlock()
-	logger.Info("workflow reloaded", slog.String("path", m.path))
+	m.notifyLoad()
 }
 
 // loadPipeline runs the full Load -> NewServiceConfig -> dispatch
 // build -> partials -> Parse pipeline. Returns the parsed service config, the
 // body template, and the per-template index keyed by resolved
-// absolute path (empty key holds the body template). On any error
-// the caller retains the previous values and surfaces the error via
-// [Manager.LastLoadError].
-func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[string]*prompt.Template, error) {
+// absolute path (empty key holds the body template), and the price rates.
+// On any error the caller retains the previous values and surfaces the
+// error via [Manager.LastLoadError].
+func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[string]*prompt.Template, *pricing.Rates, error) {
 	wf, err := Load(m.path)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	cfg, err := config.NewServiceConfig(wf.Config, config.WithRetiredAgents(m.retiredAgents))
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	probe := m.agentKindProbe
@@ -384,67 +517,54 @@ func (m *Manager) loadPipeline() (config.ServiceConfig, *prompt.Template, map[st
 
 	dispatchCfg, err := config.BuildDispatchConfig(wf.Config, filepath.Dir(m.path), probe, cfg.Agent.Kind)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 	cfg.SetDispatch(dispatchCfg)
 	if err := config.ValidateNextRequiresHandoff(dispatchCfg, cfg.Tracker.HandoffState); err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 	if err := config.ValidatePlanReviewGates(dispatchCfg, cfg.Tracker.PlanControl()); err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	partials, err := loadPartials(dispatchCfg.Partials)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	tmpl, err := prompt.ParseWithPartials(wf.PromptTemplate, m.path, wf.FrontMatterLines, partials)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	index, err := loadPerRuleTemplates(dispatchCfg, tmpl, partials)
 	if err != nil {
-		return config.ServiceConfig{}, nil, nil, err
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
-	// Advisory: a label-review dispatch renders the frozen work template, so
-	// without a {{ if .label_review }} branch it posts no review. This scan
-	// is best-effort and never fails the load.
-	if cfg.LabelCommands.Provider != "" && cfg.LabelCommands.ReviewLabel != "" && !tmpl.Mentions("label_review") {
-		cfg.AddAdvisories(config.Advisory{
-			Check:   "reactions.label_commands.review_branch_missing",
-			Text:    "reactions.label_commands is active with a review label, but the prompt template has no {{ if .label_review }} branch; a label-review dispatch posts no review",
-			Message: "label_commands active but prompt template has no label_review branch",
-			Attrs: []slog.Attr{
-				slog.String("workflow", m.path),
-				slog.String("hint", "add a {{ if .label_review }} branch so label-review dispatches post a review"),
-			},
-		})
+	m.mu.RLock()
+	inForce := m.currentRates
+	m.mu.RUnlock()
+	var downloaded func(pricing.Download) *pricing.Table
+	if m.downloader != nil {
+		downloaded = m.downloader.Table
 	}
-
-	// Advisory: a label-fix dispatch clones the workspace and carries
-	// content-write scope, so without a {{ if .label_fix }} branch it runs
-	// the normal work prompt against a real checkout with push capability.
-	// This scan is best-effort and never fails the load.
-	if cfg.LabelCommands.Provider != "" && cfg.LabelCommands.FixLabel != "" && !tmpl.Mentions("label_fix") {
-		cfg.AddAdvisories(config.Advisory{
-			Check:   "reactions.label_commands.fix_branch_missing",
-			Text:    "reactions.label_commands is active with a fix label, but the prompt template has no {{ if .label_fix }} branch; a label-fix dispatch runs the normal work prompt against a checkout that can push",
-			Message: "label_commands active but prompt template has no label_fix branch",
-			Attrs: []slog.Attr{
-				slog.String("workflow", m.path),
-				slog.String("hint", "add a {{ if .label_fix }} branch so label-fix dispatches check out the branch, push fixes, and post a summary"),
-			},
-		})
+	rates, rateAdvisories, err := pricing.LoadRates(cfg, pricing.LoadInput{
+		WorkflowDir: filepath.Dir(m.path),
+		IsKind:      probe,
+		InForce:     inForce,
+		Downloaded:  downloaded,
+	})
+	if err != nil {
+		return config.ServiceConfig{}, nil, nil, nil, err
 	}
 
 	if m.advisoryFunc != nil {
 		cfg.AddAdvisories(m.advisoryFunc(cfg)...)
 	}
+	cfg.AddAdvisories(rateAdvisories...)
 
-	return cfg, tmpl, index, nil
+	return cfg, tmpl, index, rates, nil
 }
 
 // loadPartials reads and compiles every partial of the dispatch config.

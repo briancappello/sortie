@@ -15,7 +15,7 @@
 
 # Run the builder on the host architecture; Go cross-compiles natively
 # via GOOS/GOARCH, so there is no need for QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS builder
 
 ARG VERSION=dev
 ARG REVISION=unknown
@@ -62,6 +62,7 @@ LABEL org.opencontainers.image.source="https://github.com/sortie-ai/sortie" \
     org.opencontainers.image.revision="${REVISION}"
 
 COPY --from=builder /sortie /usr/bin/sortie
+COPY --from=builder /src/NOTICE /usr/share/doc/sortie/NOTICE
 
 ENTRYPOINT ["/usr/bin/sortie"]
 CMD ["--version"]

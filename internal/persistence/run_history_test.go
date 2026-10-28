@@ -3,12 +3,14 @@ package persistence
 import (
 	"context"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
-// tokenRun returns a run_history row for the given issue carrying the
-// given total_tokens, with the remaining fields from newTestRun.
 func tokenRun(i int, issueID string, totalTokens int64) RunHistory {
 	run := newTestRun(i)
 	run.IssueID = issueID
@@ -16,8 +18,22 @@ func tokenRun(i int, issueID string, totalTokens int64) RunHistory {
 	return run
 }
 
-// assertTokenFields verifies the four token counters and the measurement
-// flag of a RunHistory row.
+func queryAllRuns(t *testing.T, s *Store, limit int) []RunHistory {
+	t.Helper()
+	rows, err := s.QueryRunHistory(context.Background(), RunHistoryFilter{Limit: limit})
+	if err != nil {
+		t.Fatalf("QueryRunHistory(limit=%d): %v", limit, err)
+	}
+	return rows
+}
+
+func triggerText(trigger *string) string {
+	if trigger == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%q", *trigger)
+}
+
 func assertTokenFields(t *testing.T, reader string, got RunHistory, wantIn, wantOut, wantTotal, wantCache int64, wantMeasured bool) {
 	t.Helper()
 	if got.InputTokens != wantIn {
@@ -37,63 +53,144 @@ func assertTokenFields(t *testing.T, reader string, got RunHistory, wantIn, want
 	}
 }
 
+func appendWithPartsOrFatal(t *testing.T, s *Store, run RunHistory) RunHistory {
+	t.Helper()
+	dispatchID := "dispatch-" + run.IssueID
+	run.DispatchID = &dispatchID
+	got, err := s.AppendRunHistoryWithEvents(context.Background(), run, nil, unboundedRunEvents)
+	if err != nil {
+		t.Fatalf("AppendRunHistoryWithEvents: %v", err)
+	}
+	return got
+}
+
+func queryModelUsage(t *testing.T, s *Store, runID int64) map[string]ModelTokens {
+	t.Helper()
+	got, err := s.QueryRunModelUsage(context.Background(), []int64{runID})
+	if err != nil {
+		t.Fatalf("QueryRunModelUsage(%d): %v", runID, err)
+	}
+
+	parts := map[string]ModelTokens{}
+	for _, part := range got[runID] {
+		parts[part.Model] = part.Tokens
+	}
+	return parts
+}
+
+func TestQueryRunModelUsage(t *testing.T) {
+	t.Parallel()
+
+	usage := map[string]ModelTokens{"m": {InputTokens: 10, OutputTokens: 5}}
+	part := RunModelPart{Model: "m", Tokens: usage["m"]}
+	classes := []string{"output", "cache_write"}
+
+	tests := []struct {
+		name  string
+		usage map[string]ModelTokens
+		costs map[string]ModelCost
+		want  []RunModelPart
+	}{
+		{"classes read back in order", usage, map[string]ModelCost{"m": {CostStatus: "partial", UnratedClasses: classes}},
+			[]RunModelPart{{Model: "m", Tokens: usage["m"], CostStatus: "partial", UnratedClasses: classes, UnratedRecorded: true}}},
+		{"status without classes reads recorded-empty", usage, map[string]ModelCost{"m": {CostStatus: "estimated"}},
+			[]RunModelPart{{Model: "m", Tokens: usage["m"], CostStatus: "estimated", UnratedRecorded: true}}},
+		{"no status reads not recorded", usage, map[string]ModelCost{"m": {UnratedClasses: classes}}, []RunModelPart{part}},
+		{"run without parts has no key", nil, nil, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			run := newTestRun(1)
+			run.ModelUsage, run.ModelCosts = tt.usage, tt.costs
+			inserted := appendWithPartsOrFatal(t, s, run)
+			want := map[int64][]RunModelPart{}
+			if tt.want != nil {
+				want[inserted.ID] = tt.want
+			}
+
+			got, err := s.QueryRunModelUsage(context.Background(), []int64{inserted.ID})
+			if err != nil {
+				t.Fatalf("QueryRunModelUsage(%d): %v", inserted.ID, err)
+			}
+
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("QueryRunModelUsage(%d) = %+v, want %+v", inserted.ID, got, want)
+			}
+		})
+	}
+}
+
 // TestRunHistoryTokenColumns_RoundTrip reads one row back through every
 // reader, because a token column missed in one reader's SELECT or Scan
 // compiles cleanly and fails only at runtime.
 func TestRunHistoryTokenColumns_RoundTrip(t *testing.T) {
 	t.Parallel()
 
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
+	twoModels := map[string]ModelTokens{
+		"model-a": {InputTokens: 600, OutputTokens: 1200, CacheReadTokens: 200, CacheWriteTokens: 30},
+		"model-b": {InputTokens: 500, OutputTokens: 1000, CacheReadTokens: 240},
+	}
 
-	run := newTestRun(1)
-	run.InputTokens = 1100
-	run.OutputTokens = 2200
-	run.TotalTokens = 3300
-	run.CacheReadTokens = 440
-	run.TokensMeasured = true
-	inserted := appendOrFatal(t, s, run)
+	tests := []struct {
+		name                  string
+		in, out, total, cache int64
+		measured              bool
+		parts                 map[string]ModelTokens
+		wantParts             map[string]ModelTokens
+	}{
+		{name: "measured", in: 1100, out: 2200, total: 3300, cache: 440, measured: true},
+		{name: "unmeasured"},
+		{name: "parts land with the row", in: 1100, out: 2200, total: 3300, cache: 440, measured: true, parts: twoModels, wantParts: twoModels},
+	}
 
-	assertTokenFields(t, "AppendRunHistory", inserted, 1100, 2200, 3300, 440, true)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	byIssue, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
-	}
-	if len(byIssue) != 1 {
-		t.Fatalf("QueryRunHistoryByIssue returned %d entries, want 1", len(byIssue))
-	}
-	assertTokenFields(t, "QueryRunHistoryByIssue", byIssue[0], 1100, 2200, 3300, 440, true)
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			ctx := context.Background()
 
-	recent, err := s.QueryRecentRunHistory(ctx, 1, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if len(recent) != 1 {
-		t.Fatalf("QueryRecentRunHistory returned %d entries, want 1", len(recent))
-	}
-	assertTokenFields(t, "QueryRecentRunHistory", recent[0], 1100, 2200, 3300, 440, true)
+			run := newTestRun(1)
+			run.InputTokens, run.OutputTokens, run.TotalTokens, run.CacheReadTokens = tt.in, tt.out, tt.total, tt.cache
+			run.TokensMeasured = tt.measured
+			run.ModelUsage = tt.parts
+			appendRun := appendOrFatal
+			if tt.parts != nil {
+				appendRun = appendWithPartsOrFatal
+			}
+			inserted := appendRun(t, s, run)
 
-	// The paginated branch uses a separate SELECT; exercise it with a
-	// cursor past the inserted row.
-	paginated, err := s.QueryRecentRunHistory(ctx, 1, inserted.ID+1)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory(afterID): %v", err)
+			byIssue, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
+			if err != nil {
+				t.Fatalf("QueryRunHistoryByIssue: %v", err)
+			}
+			recovery, err := s.LoadLatestSuccessfulRunsForReactionRecovery(ctx, time.Time{}, 10)
+			if err != nil {
+				t.Fatalf("LoadLatestSuccessfulRunsForReactionRecovery: %v", err)
+			}
+			readers := map[string][]RunHistory{
+				"AppendRunHistory":                            {inserted},
+				"QueryRunHistoryByIssue":                      byIssue,
+				"QueryRunHistory":                             queryAllRuns(t, s, 1),
+				"LoadLatestSuccessfulRunsForReactionRecovery": recovery,
+			}
+			for name, rows := range readers {
+				if len(rows) != 1 {
+					t.Fatalf("%s returned %d entries, want 1", name, len(rows))
+				}
+				assertTokenFields(t, name, rows[0], tt.in, tt.out, tt.total, tt.cache, tt.measured)
+			}
+			if got := queryModelUsage(t, s, inserted.ID); !maps.Equal(got, tt.wantParts) {
+				t.Errorf("run_model_usage of run %d = %+v, want %+v", inserted.ID, got, tt.wantParts)
+			}
+		})
 	}
-	if len(paginated) != 1 {
-		t.Fatalf("QueryRecentRunHistory(afterID) returned %d entries, want 1", len(paginated))
-	}
-	assertTokenFields(t, "QueryRecentRunHistory(afterID)", paginated[0], 1100, 2200, 3300, 440, true)
-
-	recovery, err := s.LoadLatestSuccessfulRunsForReactionRecovery(ctx, time.Time{}, 10)
-	if err != nil {
-		t.Fatalf("LoadLatestSuccessfulRunsForReactionRecovery: %v", err)
-	}
-	if len(recovery) != 1 {
-		t.Fatalf("LoadLatestSuccessfulRunsForReactionRecovery returned %d entries, want 1", len(recovery))
-	}
-	assertTokenFields(t, "LoadLatestSuccessfulRunsForReactionRecovery", recovery[0], 1100, 2200, 3300, 440, true)
 }
 
 func TestRunHistoryConfiguredSettingsColumns_RoundTrip(t *testing.T) {
@@ -106,12 +203,14 @@ func TestRunHistoryConfiguredSettingsColumns_RoundTrip(t *testing.T) {
 	run := newTestRun(1)
 	run.ConfiguredModel, run.ConfiguredEffort, run.ReportedModel = "provider/cheap", "low", "provider/cheap-20260101"
 	run.ChainID, run.StagePrevious, run.StageTarget, run.StageResult = "chain-1", "specify", "plan", "advanced"
+	run.IssueTitle, run.IssueURL = "Fix the login redirect", "https://example.atlassian.net/browse/PROJ-1"
+	run.DispatchedAt = "2026-03-19T09:00:00Z"
+	run.Trigger, run.ReactionKind, run.SessionID, run.SSHHost = new("ci_fix"), "ci", "s-1", "worker-1"
 	inserted := appendOrFatal(t, s, run)
 
 	readers := map[string]func() ([]RunHistory, error){
-		"QueryRunHistoryByIssue":         func() ([]RunHistory, error) { return s.QueryRunHistoryByIssue(ctx, run.IssueID) },
-		"QueryRecentRunHistory":          func() ([]RunHistory, error) { return s.QueryRecentRunHistory(ctx, 1, 0) },
-		"QueryRecentRunHistory(afterID)": func() ([]RunHistory, error) { return s.QueryRecentRunHistory(ctx, 1, inserted.ID+1) },
+		"QueryRunHistoryByIssue": func() ([]RunHistory, error) { return s.QueryRunHistoryByIssue(ctx, run.IssueID) },
+		"QueryRunHistory":        func() ([]RunHistory, error) { return s.QueryRunHistory(ctx, RunHistoryFilter{Limit: 1}) },
 		"LoadLatestSuccessfulRunsForReactionRecovery": func() ([]RunHistory, error) {
 			return s.LoadLatestSuccessfulRunsForReactionRecovery(ctx, time.Time{}, 10)
 		},
@@ -134,9 +233,8 @@ func TestRunHistoryConfiguredSettingsColumns_RoundTrip(t *testing.T) {
 	type stageCols struct{ chain, previous, target, result string }
 	full := stageCols{"chain-1", "specify", "plan", "advanced"}
 	wantStage := map[string]stageCols{
-		"AppendRunHistory":                            full,
-		"QueryRecentRunHistory":                       full,
-		"QueryRecentRunHistory(afterID)":              full,
+		"AppendRunHistory": full,
+		"QueryRunHistory":  full,
 		"LoadLatestSuccessfulRunsForReactionRecovery": {chain: "chain-1", previous: "specify"},
 	}
 	for name, want := range wantStage {
@@ -144,6 +242,74 @@ func TestRunHistoryConfiguredSettingsColumns_RoundTrip(t *testing.T) {
 		if gotCols := (stageCols{r.ChainID, r.StagePrevious, r.StageTarget, r.StageResult}); gotCols != want {
 			t.Errorf("%s chain, previous, target, result = %+v, want %+v", name, gotCols, want)
 		}
+	}
+
+	if r := got["QueryRunHistory"][0]; r.Trigger == nil || *r.Trigger != "ci_fix" || r.ReactionKind != "ci" || r.SessionID != "s-1" || r.SSHHost != "worker-1" || !r.OriginRecorded {
+		t.Errorf("QueryRunHistory trigger, reaction_kind, session_id, ssh_host, origin recorded = %s, %q, %q, %q, %v, want %q, %q, %q, %q, true",
+			triggerText(r.Trigger), r.ReactionKind, r.SessionID, r.SSHHost, r.OriginRecorded, "ci_fix", "ci", "s-1", "worker-1")
+	}
+
+	if r := got["LoadLatestSuccessfulRunsForReactionRecovery"][0]; r.IssueTitle != run.IssueTitle || r.IssueURL != run.IssueURL || r.DispatchedAt != run.DispatchedAt {
+		t.Errorf("LoadLatestSuccessfulRunsForReactionRecovery title, url, dispatched_at = %q, %q, %q, want %q, %q, %q", r.IssueTitle, r.IssueURL, r.DispatchedAt, run.IssueTitle, run.IssueURL, run.DispatchedAt)
+	}
+}
+
+func TestListReportedModels(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	for i, model := range []string{"model-a", "model-a", "", "model-b"} {
+		run := newTestRun(i + 1)
+		run.ReportedModel = model
+		appendOrFatal(t, s, run)
+	}
+	spent := newTestRun(5)
+	spent.ModelUsage = map[string]ModelTokens{"model-a": {}, "model-c": {}, "": {}}
+	appendWithPartsOrFatal(t, s, spent)
+
+	got, err := s.ListReportedModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListReportedModels: %v", err)
+	}
+
+	slices.Sort(got)
+	if want := []string{"model-a", "model-b", "model-c"}; !slices.Equal(got, want) {
+		t.Errorf("ListReportedModels() = %q, want %q", got, want)
+	}
+}
+
+func TestListModelUse(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	runs := []struct {
+		kind, completedAt string
+	}{
+		{"kind-a", "2026-03-19T10:00:00Z"},
+		{"kind-a", "2026-03-19T11:30:00+03:00"},
+		{"kind-b", "2026-03-19T09:00:00Z"},
+	}
+	for i, r := range runs {
+		run := newTestRun(i + 1)
+		run.AgentAdapter, run.CompletedAt = r.kind, r.completedAt
+		run.ModelUsage = map[string]ModelTokens{"shared-model": {}}
+		appendWithPartsOrFatal(t, s, run)
+	}
+
+	got, err := s.ListModelUse(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelUse: %v", err)
+	}
+
+	slices.SortFunc(got, func(a, b ModelUse) int { return strings.Compare(a.AgentKind, b.AgentKind) })
+	want := []ModelUse{
+		{AgentKind: "kind-a", Model: "shared-model", Runs: 2, LastUsedAt: time.Date(2026, 3, 19, 10, 0, 0, 0, time.UTC)},
+		{AgentKind: "kind-b", Model: "shared-model", Runs: 1, LastUsedAt: time.Date(2026, 3, 19, 9, 0, 0, 0, time.UTC)},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListModelUse() = %+v, want %+v", got, want)
 	}
 }
 
@@ -162,9 +328,9 @@ func TestRecordRunStageResult(t *testing.T) {
 		t.Errorf("RecordRunStageResult(missing id) = %v, want nil", err)
 	}
 
-	rows, err := s.QueryRecentRunHistory(ctx, 2, 0)
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("QueryRecentRunHistory = %+v, %v, want two rows", rows, err)
+	rows := queryAllRuns(t, s, 2)
+	if len(rows) != 2 {
+		t.Fatalf("QueryRunHistory = %+v, want two rows", rows)
 	}
 	for _, r := range rows {
 		want := [2]string{}
@@ -175,47 +341,6 @@ func TestRecordRunStageResult(t *testing.T) {
 			t.Errorf("row %d (the untouched one is %d) target, result = %q, want %q", r.ID, first.ID, got, want)
 		}
 	}
-}
-
-func TestRunHistoryTokenColumns_UnmeasuredRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	s := openTestStore(t)
-	migrateOrFatal(t, s)
-	ctx := context.Background()
-
-	run := newTestRun(1)
-	run.TokensMeasured = false
-	inserted := appendOrFatal(t, s, run)
-
-	assertTokenFields(t, "AppendRunHistory", inserted, 0, 0, 0, 0, false)
-
-	byIssue, err := s.QueryRunHistoryByIssue(ctx, run.IssueID)
-	if err != nil {
-		t.Fatalf("QueryRunHistoryByIssue: %v", err)
-	}
-	if len(byIssue) != 1 {
-		t.Fatalf("QueryRunHistoryByIssue returned %d entries, want 1", len(byIssue))
-	}
-	assertTokenFields(t, "QueryRunHistoryByIssue", byIssue[0], 0, 0, 0, 0, false)
-
-	recent, err := s.QueryRecentRunHistory(ctx, 1, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
-	if len(recent) != 1 {
-		t.Fatalf("QueryRecentRunHistory returned %d entries, want 1", len(recent))
-	}
-	assertTokenFields(t, "QueryRecentRunHistory", recent[0], 0, 0, 0, 0, false)
-
-	recovery, err := s.LoadLatestSuccessfulRunsForReactionRecovery(ctx, time.Time{}, 10)
-	if err != nil {
-		t.Fatalf("LoadLatestSuccessfulRunsForReactionRecovery: %v", err)
-	}
-	if len(recovery) != 1 {
-		t.Fatalf("LoadLatestSuccessfulRunsForReactionRecovery returned %d entries, want 1", len(recovery))
-	}
-	assertTokenFields(t, "LoadLatestSuccessfulRunsForReactionRecovery", recovery[0], 0, 0, 0, 0, false)
 }
 
 func TestRunHistoryErrorAndReviewMetadata_RoundTrip(t *testing.T) {
@@ -229,20 +354,19 @@ func TestRunHistoryErrorAndReviewMetadata_RoundTrip(t *testing.T) {
 	run := newTestRun(1)
 	run.Error = new("transient network error")
 	run.ReviewMetadata = &meta
+	skills := `[{"skill":"ce-plan"},{"skill":"ce-work","tool_error":true}]`
+	run.Skills = &skills
 	appendOrFatal(t, s, run)
 
-	recent, err := s.QueryRecentRunHistory(ctx, 1, 0)
-	if err != nil {
-		t.Fatalf("QueryRecentRunHistory: %v", err)
-	}
+	recent := queryAllRuns(t, s, 1)
 	if len(recent) != 1 {
-		t.Fatalf("QueryRecentRunHistory returned %d entries, want 1", len(recent))
+		t.Fatalf("QueryRunHistory returned %d entries, want 1", len(recent))
 	}
 	if recent[0].Error == nil || *recent[0].Error != "transient network error" {
-		t.Errorf("QueryRecentRunHistory Error = %v, want %q", recent[0].Error, "transient network error")
+		t.Errorf("QueryRunHistory Error = %v, want %q", recent[0].Error, "transient network error")
 	}
 	if recent[0].ReviewMetadata == nil || *recent[0].ReviewMetadata != meta {
-		t.Errorf("QueryRecentRunHistory ReviewMetadata = %v, want %q", recent[0].ReviewMetadata, meta)
+		t.Errorf("QueryRunHistory ReviewMetadata = %v, want %q", recent[0].ReviewMetadata, meta)
 	}
 
 	recovery, err := s.LoadLatestSuccessfulRunsForReactionRecovery(ctx, time.Time{}, 10)
@@ -258,11 +382,28 @@ func TestRunHistoryErrorAndReviewMetadata_RoundTrip(t *testing.T) {
 	if recovery[0].ReviewMetadata == nil || *recovery[0].ReviewMetadata != meta {
 		t.Errorf("LoadLatestSuccessfulRunsForReactionRecovery ReviewMetadata = %v, want %q", recovery[0].ReviewMetadata, meta)
 	}
+
+	byIssue, err := s.QueryRunHistoryByIssue(ctx, "ISS-1")
+	if err != nil {
+		t.Fatalf("QueryRunHistoryByIssue(ISS-1): %v", err)
+	}
+	for name, rows := range map[string][]RunHistory{
+		"QueryRunHistory":                             recent,
+		"QueryRunHistoryByIssue":                      byIssue,
+		"LoadLatestSuccessfulRunsForReactionRecovery": recovery,
+	} {
+		if len(rows) != 1 || rows[0].Skills == nil || *rows[0].Skills != skills {
+			t.Errorf("%s Skills = %+v, want %q", name, rows, skills)
+		}
+	}
+
+	appendOrFatal(t, s, newTestRun(2))
+	none, err := s.QueryRunHistoryByIssue(ctx, "ISS-2")
+	if err != nil || len(none) != 1 || none[0].Skills != nil {
+		t.Errorf("QueryRunHistoryByIssue(ISS-2) = %+v, %v, want one row with nil Skills", none, err)
+	}
 }
 
-// TestRunHistoryTokenColumns_LegacyRowsReadZero verifies rows written
-// without token values scan as zero, relying on the NOT NULL DEFAULT 0
-// column definition.
 func TestRunHistoryTokenColumns_LegacyRowsReadZero(t *testing.T) {
 	t.Parallel()
 
@@ -354,6 +495,78 @@ func TestTokenUsageByIssue(t *testing.T) {
 		}
 		if usage.UnmeasuredSessions != 2 {
 			t.Errorf("TokenUsageByIssue(ISS-MIXED).UnmeasuredSessions = %d, want 2", usage.UnmeasuredSessions)
+		}
+	})
+
+	t.Run("class sums count measured rows only", func(t *testing.T) {
+		t.Parallel()
+		s := openTestStore(t)
+		migrateOrFatal(t, s)
+
+		const issueID = "ISS-CLASSES"
+		rows := []RunHistory{
+			{InputTokens: 100, CacheReadTokens: 30, CacheWriteTokens: 20, OutputTokens: 10, TotalTokens: 160, TokensMeasured: true},
+			{InputTokens: 10, CacheReadTokens: 40, OutputTokens: 5, TotalTokens: 55, TokensMeasured: true},
+			{InputTokens: 500, CacheReadTokens: 7, CacheWriteTokens: 3, OutputTokens: 50},
+			{TokensMeasured: true},
+		}
+		for i, row := range rows {
+			run := tokenRun(i+1, issueID, row.TotalTokens)
+			run.InputTokens, run.OutputTokens = row.InputTokens, row.OutputTokens
+			run.CacheReadTokens, run.CacheWriteTokens = row.CacheReadTokens, row.CacheWriteTokens
+			run.TokensMeasured = row.TokensMeasured
+			appendOrFatal(t, s, run)
+		}
+
+		usage, err := s.TokenUsageByIssue(context.Background(), issueID)
+		if err != nil {
+			t.Fatalf("TokenUsageByIssue(%s) unexpected error: %v", issueID, err)
+		}
+
+		wantTotals := IssueTokenUsage{
+			TotalTokens: 215, UncachedTokens: 145, Sessions: 4, UnmeasuredSessions: 1,
+			InputTokens: 110, OutputTokens: 15, CacheReadTokens: 70, CacheWriteTokens: 20,
+			UnpricedSessions: 3,
+		}
+		if usage != wantTotals {
+			t.Errorf("TokenUsageByIssue(%s) = %+v, want totals %+v", issueID, usage, wantTotals)
+		}
+	})
+
+	t.Run("recorded cost aggregates count only rows that spent tokens", func(t *testing.T) {
+		t.Parallel()
+		s := openTestStore(t)
+		migrateOrFatal(t, s)
+
+		cost := func(v float64) *float64 { return &v }
+		rows := []struct {
+			cost   *float64
+			status string
+			tokens int64
+		}{
+			{cost(15), "estimated", 100},
+			{cost(0), "estimated", 0},
+			{cost(12), "partial", 100},
+			{nil, "unpriced", 100},
+			{nil, "", 100},
+			{nil, "", 0},
+		}
+		for i, row := range rows {
+			run := tokenRun(i+1, "ISS-COST", row.tokens)
+			run.TokensMeasured = true
+			run.EstimatedCostUSD, run.CostStatus = row.cost, row.status
+			appendOrFatal(t, s, run)
+		}
+
+		usage, err := s.TokenUsageByIssue(context.Background(), "ISS-COST")
+		if err != nil {
+			t.Fatalf("TokenUsageByIssue(ISS-COST) unexpected error: %v", err)
+		}
+
+		got := []float64{usage.RecordedCostUSD, float64(usage.PricedSessions), float64(usage.PartialSessions), float64(usage.UnpricedSessions)}
+		want := []float64{27, 2, 1, 2}
+		if !slices.Equal(got, want) {
+			t.Errorf("TokenUsageByIssue(ISS-COST) (RecordedCostUSD, PricedSessions, PartialSessions, UnpricedSessions) = %v, want %v", got, want)
 		}
 	})
 }
@@ -506,39 +719,8 @@ func TestQueryTokenBudgetUsage(t *testing.T) {
 			t.Errorf("result = %v, want empty (outside issue not in candidate list)", result)
 		}
 	})
-
-	// The advisory tool reads TokenUsageByIssue while enforcement reads
-	// QueryTokenBudgetUsage; both must agree on the same ledger value.
-	t.Run("completed-session sum matches across both queries", func(t *testing.T) {
-		t.Parallel()
-		s := openTestStore(t)
-		migrateOrFatal(t, s)
-		ctx := context.Background()
-
-		appendOrFatal(t, s, tokenRun(1, "ISS-PARITY", 123))
-		appendOrFatal(t, s, tokenRun(2, "ISS-PARITY", 456))
-		appendOrFatal(t, s, tokenRun(3, "ISS-PARITY", 789))
-
-		usage, err := s.TokenUsageByIssue(ctx, "ISS-PARITY")
-		if err != nil {
-			t.Fatalf("TokenUsageByIssue(ISS-PARITY) unexpected error: %v", err)
-		}
-
-		budget, err := s.QueryTokenBudgetUsage(ctx, []string{"ISS-PARITY"})
-		if err != nil {
-			t.Fatalf("QueryTokenBudgetUsage unexpected error: %v", err)
-		}
-		if budget["ISS-PARITY"].TotalTokens != usage.TotalTokens {
-			t.Errorf("QueryTokenBudgetUsage total = %d, want %d (parity with TokenUsageByIssue)",
-				budget["ISS-PARITY"].TotalTokens, usage.TotalTokens)
-		}
-	})
 }
 
-// TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity seeds a
-// mix of statuses, including a plain "cancelled" row the StoppedInFlight
-// count must ignore, and asserts both queries report the identical
-// IssueTokenUsage.
 func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testing.T) {
 	t.Parallel()
 	s := openTestStore(t)
@@ -547,31 +729,28 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 
 	const issueID = "ISS-STOPPED-PARITY"
 
-	stopped1 := tokenRun(1, issueID, 500)
-	stopped1.Status = "budget_stopped"
-	stopped1.TokensMeasured = true
-	appendOrFatal(t, s, stopped1)
-
-	stopped2 := tokenRun(2, issueID, 300)
-	stopped2.Status = "budget_stopped"
-	stopped2.TokensMeasured = true
-	appendOrFatal(t, s, stopped2)
-
-	// A plain cancellation, not a ceiling stop.
-	cancelled := tokenRun(3, issueID, 200)
-	cancelled.Status = "cancelled"
-	cancelled.TokensMeasured = true
-	appendOrFatal(t, s, cancelled)
-
-	succeeded := tokenRun(4, issueID, 400)
-	succeeded.Status = "succeeded"
-	succeeded.TokensMeasured = true
-	appendOrFatal(t, s, succeeded)
-
-	unmeasured := tokenRun(5, issueID, 0)
-	unmeasured.Status = "succeeded"
-	unmeasured.TokensMeasured = false
-	appendOrFatal(t, s, unmeasured)
+	cost := func(v float64) *float64 { return &v }
+	fixture := []struct {
+		totalTokens, cacheReadTokens int64
+		agentAdapter, status         string
+		measured                     bool
+		cost                         *float64
+		costStatus                   string
+	}{
+		{totalTokens: 1500, cacheReadTokens: 900, agentAdapter: "claude", status: "budget_stopped", measured: true, cost: cost(0.5), costStatus: "estimated"},
+		{totalTokens: 100, cacheReadTokens: 150, agentAdapter: "claude", status: "budget_stopped", measured: true},
+		{totalTokens: 2500, cacheReadTokens: 1400, agentAdapter: "codex", status: "cancelled", measured: true, cost: cost(0.25), costStatus: "partial"},
+		{agentAdapter: "mock", status: "succeeded"},
+	}
+	for i, row := range fixture {
+		run := tokenRun(i+1, issueID, row.totalTokens)
+		run.CacheReadTokens = row.cacheReadTokens
+		run.AgentAdapter = row.agentAdapter
+		run.Status = row.status
+		run.TokensMeasured = row.measured
+		run.EstimatedCostUSD, run.CostStatus = row.cost, row.costStatus
+		appendOrFatal(t, s, run)
+	}
 
 	byIssue, err := s.TokenUsageByIssue(ctx, issueID)
 	if err != nil {
@@ -587,24 +766,26 @@ func TestTokenUsageByIssue_QueryTokenBudgetUsage_StoppedInFlightParity(t *testin
 	}
 
 	want := IssueTokenUsage{
-		TotalTokens:        1400,
-		Sessions:           5,
+		TotalTokens:        4100,
+		UncachedTokens:     1700,
+		Sessions:           4,
 		UnmeasuredSessions: 1,
 		StoppedInFlight:    2,
+		RecordedCostUSD:    0.75,
+		PricedSessions:     2,
+		PartialSessions:    1,
+		UnpricedSessions:   1,
 	}
-	if byIssue != want {
-		t.Errorf("TokenUsageByIssue(%s) = %+v, want %+v", issueID, byIssue, want)
+	wantByIssue := want
+	wantByIssue.CacheReadTokens = 2450
+	if byIssue != wantByIssue {
+		t.Errorf("TokenUsageByIssue(%s) = %+v, want %+v", issueID, byIssue, wantByIssue)
 	}
 	if budgetUsage != want {
 		t.Errorf("QueryTokenBudgetUsage()[%s] = %+v, want %+v", issueID, budgetUsage, want)
 	}
-	if byIssue != budgetUsage {
-		t.Errorf("TokenUsageByIssue = %+v, QueryTokenBudgetUsage = %+v, want identical", byIssue, budgetUsage)
-	}
 }
 
-// completionRun returns a run_history row for identifier carrying
-// completedAt, with the remaining fields from newTestRun.
 func completionRun(i int, identifier, completedAt string) RunHistory {
 	run := newTestRun(i)
 	run.Identifier = identifier
@@ -696,8 +877,6 @@ func TestLatestRunCompletionByIdentifier(t *testing.T) {
 	})
 }
 
-// countRun returns a run_history row for issueID carrying status and
-// completedAt, with the remaining fields from newTestRun.
 func countRun(i int, issueID, status, completedAt string) RunHistory {
 	run := newTestRun(i)
 	run.IssueID = issueID
@@ -706,7 +885,6 @@ func countRun(i int, issueID, status, completedAt string) RunHistory {
 	return run
 }
 
-// mustParseRFC3339 parses s as RFC3339 or fails the test.
 func mustParseRFC3339(t *testing.T, s string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339, s)
@@ -725,11 +903,11 @@ func TestCountWorkerRunsCompletedSince(t *testing.T) {
 	s := openTestStore(t)
 	migrateOrFatal(t, s)
 
-	appendOrFatal(t, s, countRun(1, issueID, "succeeded", "2026-04-01T09:00:00Z")) // at bound, counts
+	appendOrFatal(t, s, countRun(1, issueID, "succeeded", "2026-04-01T09:00:00Z"))
 	appendOrFatal(t, s, countRun(2, issueID, "failed", "2026-04-01T10:00:00Z"))
 	appendOrFatal(t, s, countRun(3, issueID, "cancelled", "2026-04-01T11:00:00Z"))
-	appendOrFatal(t, s, countRun(4, issueID, "ci_failed", "2026-04-01T10:30:00Z")) // excluded by status
-	appendOrFatal(t, s, countRun(5, issueID, "succeeded", "2026-03-31T23:59:59Z")) // before bound, excluded
+	appendOrFatal(t, s, countRun(4, issueID, "ci_failed", "2026-04-01T10:30:00Z"))
+	appendOrFatal(t, s, countRun(5, issueID, "succeeded", "2026-03-31T23:59:59Z"))
 	appendOrFatal(t, s, countRun(6, "ISS-CWR-OTHER", "succeeded", "2026-04-01T12:00:00Z"))
 
 	got, err := s.CountWorkerRunsCompletedSince(context.Background(), issueID, since)
@@ -774,8 +952,6 @@ func TestCountWorkerRunsCompletedSince(t *testing.T) {
 	})
 }
 
-// TestLoadLatestSuccessfulRunsForReactionRecovery_ExcludesNeedsPerson pins
-// that a needs_person row is not a success and is excluded from recovery.
 func TestLoadLatestSuccessfulRunsForReactionRecovery_ExcludesNeedsPerson(t *testing.T) {
 	t.Parallel()
 
@@ -801,5 +977,211 @@ func TestLoadLatestSuccessfulRunsForReactionRecovery_ExcludesNeedsPerson(t *test
 	}
 	if got[0].IssueID != eligible.IssueID {
 		t.Errorf("LoadLatestSuccessfulRunsForReactionRecovery().IssueID = %q, want %q", got[0].IssueID, eligible.IssueID)
+	}
+}
+
+func dispatchRun(i int, issueID, adapter string) RunHistory {
+	run := RunHistory{
+		IssueID: issueID, AgentAdapter: adapter, RuleName: fmt.Sprintf("rule-%d", i), ConfiguredModel: fmt.Sprintf("model-%d", i),
+		StagePrevious: fmt.Sprintf("previous-%d", i), StagePreviousOutcome: fmt.Sprintf("outcome-%d", i),
+		ChainID: fmt.Sprintf("chain-%d", i), DispatchedAt: fmt.Sprintf("2026-03-19T09:%02d:00Z", i),
+	}
+	if adapter == "" {
+		run.Status = "ci_failed"
+	}
+	return run
+}
+
+func TestLatestAgentRuns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		seed []RunHistory
+		ask  []string
+		want []int
+	}{
+		{
+			name: "newest agent run per issue, skipping ci_failed, agentless, and unasked issues",
+			seed: []RunHistory{
+				dispatchRun(1, "ISS-A", "mock"),
+				dispatchRun(2, "ISS-A", "mock"),
+				dispatchRun(3, "ISS-A", ""),
+				dispatchRun(4, "ISS-B", ""),
+				dispatchRun(5, "ISS-E", "mock"),
+				dispatchRun(6, "ISS-UNASKED", "mock"),
+			},
+			ask:  []string{"ISS-A", "ISS-B", "ISS-E", "ISS-NO-ROWS"},
+			want: []int{1, 4},
+		},
+		{
+			name: "empty ask",
+			seed: []RunHistory{dispatchRun(1, "ISS-A", "mock")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			appended := make([]RunHistory, len(tt.seed))
+			for i, run := range tt.seed {
+				appended[i] = appendOrFatal(t, s, run)
+			}
+			want := map[string]RunHistory{}
+			for _, i := range tt.want {
+				want[appended[i].IssueID] = appended[i]
+			}
+
+			got, err := s.LatestAgentRuns(context.Background(), tt.ask)
+
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("LatestAgentRuns(%v) = %+v, %v, want %+v, nil", tt.ask, got, err, want)
+			}
+		})
+	}
+}
+
+func TestLatestResumeUsage(t *testing.T) {
+	t.Parallel()
+
+	older := &ResumeUsage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 30, CacheWriteTokens: 40}
+	newer := &ResumeUsage{InputTokens: 11, OutputTokens: 22, CacheReadTokens: 33, CacheWriteTokens: 44}
+	foreign := &ResumeUsage{InputTokens: 99, OutputTokens: 98, CacheReadTokens: 97, CacheWriteTokens: 96}
+	split := map[string]ModelTokens{
+		"model-a": {InputTokens: 6, OutputTokens: 12, CacheReadTokens: 20, CacheWriteTokens: 40},
+		"model-b": {InputTokens: 5, OutputTokens: 10, CacheReadTokens: 13, CacheWriteTokens: 4},
+	}
+	withSplit := &ResumeUsage{InputTokens: 11, OutputTokens: 22, CacheReadTokens: 33, CacheWriteTokens: 44, ByModel: split}
+	run := func(issueID, sessionID string, usage *ResumeUsage) RunHistory {
+		r := newTestRun(1)
+		r.IssueID, r.SessionID, r.ResumeUsage = issueID, sessionID, usage
+		return r
+	}
+
+	tests := []struct {
+		name string
+		seed []RunHistory
+		want *ResumeUsage
+	}{
+		{"newest matching row wins", []RunHistory{run("ISS-A", "sess-1", older), run("ISS-A", "sess-1", newer)}, newer},
+		{"newest row without a figure hides an older figure", []RunHistory{run("ISS-A", "sess-1", older), run("ISS-A", "sess-1", nil)}, nil},
+		{"newer rows of another session and another issue are ignored", []RunHistory{
+			run("ISS-A", "sess-1", older), run("ISS-A", "sess-2", foreign), run("ISS-B", "sess-1", foreign),
+		}, older},
+		{"only another session has rows", []RunHistory{run("ISS-A", "sess-2", foreign)}, nil},
+		{"per-model split round-trips", []RunHistory{run("ISS-A", "sess-1", withSplit)}, withSplit},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := openTestStore(t)
+			migrateOrFatal(t, s)
+			for _, r := range tt.seed {
+				appendOrFatal(t, s, r)
+			}
+
+			got, err := s.LatestResumeUsage(context.Background(), "ISS-A", "sess-1")
+
+			if err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("LatestResumeUsage(ISS-A, sess-1) = %+v, %v, want %+v, nil", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadLatestSuccessfulRunsForIssues(t *testing.T) {
+	t.Parallel()
+
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	ctx := context.Background()
+
+	old := appendRecoveryRun(t, s, "ISS-OLD", "PROJ-1", 1, recentCompletedAt(400))
+	appendRecoveryRun(t, s, "ISS-LATER", "PROJ-2", 1, recentCompletedAt(5))
+	latest := appendRecoveryRun(t, s, "ISS-LATER", "PROJ-2", 2, recentCompletedAt(4))
+	appendOrFatal(t, s, RunHistory{
+		IssueID: "ISS-LATER", Identifier: "PROJ-2", Attempt: 3,
+		AgentAdapter: "mock", Workspace: "/ws/PROJ-2",
+		StartedAt: recentCompletedAt(3), CompletedAt: recentCompletedAt(3), Status: "failed",
+	})
+	appendOrFatal(t, s, RunHistory{
+		IssueID: "ISS-NOPATH", Identifier: "PROJ-3", Attempt: 1,
+		AgentAdapter: "mock", StartedAt: recentCompletedAt(2), CompletedAt: recentCompletedAt(2), Status: "succeeded",
+	})
+	appendRecoveryRun(t, s, "ISS-OTHER", "PROJ-4", 1, recentCompletedAt(2))
+
+	tests := []struct {
+		name     string
+		issueIDs []string
+		want     []int64
+	}{
+		{"run older than any recovery lookback", []string{"ISS-OLD"}, []int64{old.ID}},
+		{"latest successful run beats a later failed one", []string{"ISS-LATER"}, []int64{latest.ID}},
+		{"empty workspace and unrequested issues are absent", []string{"ISS-NOPATH", "ISS-OLD"}, []int64{old.ID}},
+		{"no issues", nil, []int64{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rows, err := s.LoadLatestSuccessfulRunsForIssues(ctx, tt.issueIDs)
+			if err != nil {
+				t.Fatalf("LoadLatestSuccessfulRunsForIssues(%v): %v", tt.issueIDs, err)
+			}
+
+			got := []int64{}
+			for _, row := range rows {
+				got = append(got, row.ID)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("LoadLatestSuccessfulRunsForIssues(%v) run ids = %v, want %v", tt.issueIDs, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsageCompletedBetween(t *testing.T) {
+	t.Parallel()
+
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	until := since.AddDate(0, 0, 1)
+	s := openTestStore(t)
+	migrateOrFatal(t, s)
+	for i, completedAt := range []string{"2026-03-31T23:59:59Z", "2026-04-01T00:00:00Z", "2026-04-01T23:59:59Z", "2026-04-02T00:00:00Z"} {
+		run := tokenRun(i+1, "ISS-WINDOW", 100)
+		run.TokensMeasured, run.EstimatedCostUSD, run.CostStatus, run.CompletedAt = true, new(float64(int(1)<<i)), "estimated", completedAt
+		appendOrFatal(t, s, run)
+	}
+	inWindow := IssueTokenUsage{TotalTokens: 200, UncachedTokens: 200, Sessions: 2, RecordedCostUSD: 6, PricedSessions: 2}
+
+	tests := []struct {
+		name         string
+		since, until time.Time
+		want         IssueTokenUsage
+	}{
+		{"includes since and excludes until", since, until, inWindow},
+		{"binds bounds given in another zone as UTC", since.In(time.FixedZone("UTC+2", 2*60*60)), until.In(time.FixedZone("UTC+2", 2*60*60)), inWindow},
+		{"empty window returns zero usage", until.Add(time.Hour), until.Add(2 * time.Hour), IssueTokenUsage{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := s.UsageCompletedBetween(context.Background(), tt.since, tt.until)
+			if err != nil {
+				t.Fatalf("UsageCompletedBetween(%v, %v): %v", tt.since, tt.until, err)
+			}
+
+			if got != tt.want {
+				t.Errorf("UsageCompletedBetween(%v, %v) = %+v, want %+v", tt.since, tt.until, got, tt.want)
+			}
+		})
 	}
 }

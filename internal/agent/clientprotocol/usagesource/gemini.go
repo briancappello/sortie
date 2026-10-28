@@ -6,14 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 const geminiAgentName = "gemini-cli"
@@ -23,10 +24,6 @@ const geminiAgentName = "gemini-cli"
 const geminiExecutableName = "gemini"
 
 const geminiPackageName = "@google/gemini-cli"
-
-// geminiExecutableSuffixes are the platform-specific extensions a launcher may
-// append to the executable name; namesGeminiCLI strips at most one.
-var geminiExecutableSuffixes = []string{".cmd", ".ps1", ".exe", ".js"}
 
 const (
 	geminiSourceTelemetry = "telemetry"
@@ -85,9 +82,11 @@ type geminiJournalTokens struct {
 
 // geminiFigure is one source's whole reading of this run. basis counts input
 // plus output and no reasoning, matching the wire bound's basis; measured
-// separates a real zero from the absence of a figure.
+// separates a real zero from the absence of a figure. byModel splits usage by
+// model; a record naming none adds to no entry.
 type geminiFigure struct {
 	usage    domain.TokenUsage
+	byModel  map[string]domain.TokenUsage
 	model    string
 	basis    int64
 	measured bool
@@ -113,9 +112,10 @@ type geminiReader struct {
 	// records contribute nothing.
 	offset int64
 
-	total     domain.TokenUsage
-	reasoning int64
-	model     string
+	total        domain.TokenUsage
+	totalByModel map[string]domain.TokenUsage
+	reasoning    int64
+	model        string
 
 	// blocks counts telemetry records that carried a counter block; counted
 	// counts the ones that carried a figure. The figure alone tells neither
@@ -155,64 +155,7 @@ func newGeminiReader() *geminiReader {
 
 func init() {
 	Sources.Register(geminiAgentName, func() Reader { return newGeminiReader() })
-}
-
-// namesGeminiCLI reports whether target's command line identifies Gemini
-// CLI, checked by an empty-runtime Claim before it arms anything. The tokens
-// are target.Command and every element of target.Args: a token naming the
-// gemini executable (bare, or the last path element after one platform
-// launcher suffix is stripped) claims the launch unless it is the value of a
-// preceding option flag with nothing to identify it as a path; a token naming
-// the @google/gemini-cli npm package, standalone, versioned, or inside a
-// node_modules path, always claims it.
-func namesGeminiCLI(target agentcore.LaunchTarget) bool {
-	tokens := append([]string{target.Command}, target.Args...)
-	for i, token := range tokens {
-		var optionValue bool
-		if i > 0 {
-			prev := tokens[i-1]
-			optionValue = strings.HasPrefix(prev, "-") && prev != "--"
-		}
-		if geminiToken(token, optionValue) {
-			return true
-		}
-	}
-	return false
-}
-
-// geminiToken reports whether one command-line token, given whether it is the
-// value of a preceding option flag, identifies Gemini CLI.
-func geminiToken(token string, optionValue bool) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(token, `\`, "/"))
-	if geminiExecutableToken(normalized, optionValue) {
-		return true
-	}
-	if normalized == geminiPackageName || strings.HasPrefix(normalized, geminiPackageName+"@") {
-		return true
-	}
-	return strings.Contains(normalized, "/"+geminiPackageName+"/") || strings.HasSuffix(normalized, "/"+geminiPackageName)
-}
-
-// geminiExecutableToken reports whether a normalized token names the gemini
-// executable itself, bare or as a path. A bare option value with no path
-// separator is ambiguous with an unrelated flag argument and is not matched.
-func geminiExecutableToken(normalized string, optionValue bool) bool {
-	hasPathSeparator := strings.Contains(normalized, "/")
-	if !hasPathSeparator && optionValue {
-		return false
-	}
-
-	base := normalized
-	if idx := strings.LastIndex(normalized, "/"); idx >= 0 {
-		base = normalized[idx+1:]
-	}
-	for _, suffix := range geminiExecutableSuffixes {
-		if trimmed, ok := strings.CutSuffix(base, suffix); ok {
-			base = trimmed
-			break
-		}
-	}
-	return base == geminiExecutableName
+	VerificationAdditions.Register(geminiAgentName, func() VerificationAddition { return &geminiVerification{} })
 }
 
 // Claim arms the source for a local launch, taking a session-private directory
@@ -230,7 +173,7 @@ func (r *geminiReader) Claim(target agentcore.LaunchTarget, runtime string) ([]s
 		if !r.Recognize(runtime) {
 			return nil, false
 		}
-	} else if !namesGeminiCLI(target) {
+	} else if !namesRuntime(target, geminiExecutableName, geminiPackageName) {
 		return nil, false
 	}
 
@@ -267,6 +210,7 @@ func (r *geminiReader) Open(sessionID string) {
 
 	r.sessionID = sessionID
 	r.total = domain.TokenUsage{}
+	r.totalByModel = nil
 	r.reasoning = 0
 	r.model = ""
 	r.blocks = 0
@@ -382,7 +326,7 @@ func (r *geminiReader) waitForNextPoll(ctx context.Context) bool {
 func (r *geminiReader) answer(figure geminiFigure, source string, completeness Completeness, lowerBound int64) (agentcore.RecoveredUsage, string, bool) {
 	r.completeness = completeness
 	r.settle(figure.basis, lowerBound)
-	return agentcore.RecoveredUsage{Run: figure.usage, Model: figure.model}, source, true
+	return agentcore.RecoveredUsage{Run: figure.usage, Model: figure.model, ByModel: figure.byModel}, source, true
 }
 
 // settle moves the position the next turn is measured from and carries the part
@@ -430,6 +374,7 @@ func (r *geminiReader) clock() time.Time {
 func (r *geminiReader) telemetryFigure(lowerBound int64, blocksBefore, countedBefore int) geminiFigure {
 	return geminiFigure{
 		usage:    r.total,
+		byModel:  maps.Clone(r.totalByModel),
 		model:    r.model,
 		basis:    r.total.InputTokens + r.total.OutputTokens - r.reasoning,
 		measured: r.counted > countedBefore || (r.blocks > blocksBefore && lowerBound <= 0),
@@ -497,6 +442,7 @@ func (r *geminiReader) fold(record geminiRecord) {
 	r.total.OutputTokens += output + thoughts
 	r.total.CacheReadTokens += cached
 	r.total.TotalTokens = r.total.InputTokens + r.total.OutputTokens
+	r.totalByModel = addModelUsage(r.totalByModel, attrs.Model, geminiUsage(input, output, cached, thoughts))
 	r.reasoning += thoughts
 	r.blocks++
 	if input > 0 || output > 0 || cached > 0 || thoughts > 0 {
@@ -505,6 +451,30 @@ func (r *geminiReader) fold(record geminiRecord) {
 	if attrs.Model != "" {
 		r.model = attrs.Model
 	}
+}
+
+// geminiUsage maps one record's counters to token classes: thought tokens are
+// output, and the cached read is a subset of input.
+func geminiUsage(input, output, cached, thoughts int64) domain.TokenUsage {
+	return domain.TokenUsage{
+		InputTokens:     input,
+		OutputTokens:    output + thoughts,
+		TotalTokens:     input + output + thoughts,
+		CacheReadTokens: cached,
+	}
+}
+
+// addModelUsage adds usage to model's entry of byModel; an empty model adds
+// nothing.
+func addModelUsage(byModel map[string]domain.TokenUsage, model string, usage domain.TokenUsage) map[string]domain.TokenUsage {
+	if model == "" {
+		return byModel
+	}
+	if byModel == nil {
+		byModel = map[string]domain.TokenUsage{}
+	}
+	byModel[model] = agentcore.AddUsage(byModel[model], usage)
+	return byModel
 }
 
 // readJournal sums the token-bearing messages this session appended after the
@@ -559,6 +529,7 @@ func (r *geminiReader) readJournal(lowerBound int64) geminiFigure {
 		figure.usage.InputTokens += input
 		figure.usage.OutputTokens += output + thoughts
 		figure.usage.CacheReadTokens += cached
+		figure.byModel = addModelUsage(figure.byModel, e.model, geminiUsage(input, output, cached, thoughts))
 		figure.basis += input + output
 		if input > 0 || output > 0 || cached > 0 || thoughts > 0 {
 			figure.measured = true
@@ -657,4 +628,53 @@ func (r *geminiReader) journalNames(path string) bool {
 		return false
 	}
 	return header.SessionID == r.sessionID
+}
+
+// geminiVerification replaces the runtime's built-in system prompt for a
+// verification session. The runtime reads the replacement from a file named by
+// an environment variable and fails its handshake when the file is missing, so
+// the file is written here, on the launching host, and removed with the
+// session.
+type geminiVerification struct {
+	dir string
+}
+
+func (v *geminiVerification) Claim(target agentcore.LaunchTarget) (VerificationSwitches, bool) {
+	if !namesRuntime(target, geminiExecutableName, geminiPackageName) {
+		return VerificationSwitches{}, false
+	}
+
+	dir, err := os.MkdirTemp("", "sortie-verification-")
+	if err != nil {
+		return VerificationSwitches{}, false
+	}
+	path := filepath.Join(dir, "system.md")
+	if err := os.WriteFile(path, []byte(agentcore.VerificationSystemPrompt), 0o600); err != nil {
+		_ = os.RemoveAll(dir) //nolint:errcheck // best-effort; the claim is refused either way
+		return VerificationSwitches{}, false
+	}
+
+	v.dir = dir
+	return VerificationSwitches{Env: []string{"GEMINI_SYSTEM_MD=" + path}}, true
+}
+
+// Context keeps tools and instruction files because the runtime offers no
+// switch that drops them.
+func (v *geminiVerification) Context() registry.VerificationContext {
+	return registry.DeclareVerificationContext(
+		registry.VerificationKeepsAllTools,
+		registry.VerificationKeepsProjectInstructions,
+		registry.VerificationKeepsUserInstructions,
+	)
+}
+
+// Close retries a removal that failed on its next call.
+func (v *geminiVerification) Close() {
+	if v.dir == "" {
+		return
+	}
+	if err := os.RemoveAll(v.dir); err != nil {
+		return
+	}
+	v.dir = ""
 }

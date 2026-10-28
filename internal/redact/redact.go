@@ -1,10 +1,9 @@
 // Package redact masks secret values Sortie has learned about in text it
 // logs, stores, or shows an operator. Every credential a launch, a log
-// record, or a stored row can carry is registered here once known, and
-// [Mask] replaces every registered value wherever it later occurs. A
-// credential stays registered for the life of the process, except a
-// short-lived one whose owner withdraws it with [Remove] once it can no
-// longer be used.
+// record, or a stored row can carry is registered here once known and
+// kept for the life of the process, except a per-session credential its
+// owner removes when the session ends, and [Mask] replaces every
+// registered value wherever it later occurs.
 package redact
 
 import (
@@ -69,6 +68,20 @@ func Add(source, value string) {
 	addPieces(source, selectPieces(value), hasNonSpace(value))
 }
 
+// Remove unregisters the pieces [Add] registered for value. It is for a
+// credential whose lifetime ended, such as a per-session token, so the
+// registry does not grow with every session.
+func Remove(value string) {
+	pieces := selectPieces(value)
+	if len(pieces) == 0 {
+		return
+	}
+	registerMu.Lock()
+	defer registerMu.Unlock()
+	kept := slices.DeleteFunc(currentValuesLocked(), func(v string) bool { return slices.Contains(pieces, v) })
+	registered.Store(&kept)
+}
+
 // AddNamed registers value as a credential when name follows the
 // [IsSecretName] convention, and as URL credentials otherwise.
 func AddNamed(source, name, value string) {
@@ -80,8 +93,9 @@ func AddNamed(source, name, value string) {
 }
 
 // AddURLCredentials registers the userinfo of value, a URL, and, when
-// that userinfo holds a colon, the part after its first colon. A value
-// holding no "://" contributes nothing.
+// that userinfo holds a colon, the parts before and after its first
+// colon: Go's URL errors print the username beside a "***" password.
+// A value holding no "://" contributes nothing.
 func AddURLCredentials(source, value string) {
 	if !strings.Contains(value, "://") {
 		return
@@ -95,8 +109,8 @@ func AddURLCredentials(source, value string) {
 		return
 	}
 	pieces := []string{userinfo}
-	if _, password, found := strings.Cut(userinfo, ":"); found {
-		pieces = append(pieces, password)
+	if username, password, found := strings.Cut(userinfo, ":"); found {
+		pieces = append(pieces, username, password)
 	}
 	addPieces(source, pieces, hasNonSpace(userinfo))
 }
@@ -192,22 +206,6 @@ func addPieces(source string, pieces []string, credentialHasContent bool) {
 
 	if warn {
 		warnTooShort(source)
-	}
-}
-
-// Remove withdraws every piece [Add] would register for value, so a
-// short-lived credential that has expired stops costing every later
-// [Mask] call. Only the owner of a value it registered itself may
-// remove it: a piece another source also registered is withdrawn too.
-func Remove(value string) {
-	pieces := selectPieces(value)
-	registerMu.Lock()
-	defer registerMu.Unlock()
-	current := currentValuesLocked()
-	before := len(current)
-	kept := slices.DeleteFunc(current, func(v string) bool { return slices.Contains(pieces, v) })
-	if len(kept) != before {
-		registered.Store(&kept)
 	}
 }
 

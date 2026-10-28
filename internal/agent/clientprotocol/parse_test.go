@@ -7,11 +7,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestQuoteJSONRPCError(t *testing.T) {
@@ -97,13 +97,8 @@ func TestHandshake_ErrorQuotesData(t *testing.T) {
 			id := out.awaitMethod(t, tt.method)
 			sendLine(t, inPw, `{"jsonrpc":"2.0","id":`+string(id)+`,"error":{"code":`+tt.code+`,"message":"internal error","data":"the invalid bearer token"}}`)
 
-			select {
-			case err := <-ch:
-				if err == nil || err.Message != tt.wantMessage {
-					t.Errorf("%s error = %v, want message %q", tt.method, err, tt.wantMessage)
-				}
-			case <-time.After(awaitTimeout):
-				t.Fatalf("timed out waiting for %s to return", tt.method)
+			if err := waittest.Receive(t, ch, tt.method+" return"); err == nil || err.Message != tt.wantMessage {
+				t.Errorf("%s error = %v, want message %q", tt.method, err, tt.wantMessage)
 			}
 		})
 	}

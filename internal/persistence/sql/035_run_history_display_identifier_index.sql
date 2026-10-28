@@ -1,0 +1,1 @@
+CREATE INDEX idx_run_history_display_identifier ON run_history(display_identifier);

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -14,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // Compile-time assertion: Server satisfies orchestrator.Observer.
@@ -52,19 +52,6 @@ func TestNew(t *testing.T) {
 	})
 }
 
-func TestOnStateChange(t *testing.T) {
-	t.Parallel()
-
-	srv := New(Params{
-		SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
-		RefreshFn:  acceptingRefresh(),
-		Logger:     slog.New(slog.DiscardHandler),
-	})
-
-	// OnStateChange is a no-op; just verify it does not panic.
-	srv.OnStateChange()
-}
-
 func TestServerLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -91,10 +78,7 @@ func TestServerLifecycle(t *testing.T) {
 	}()
 
 	// Gracefully shut down.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(waittest.Context(t)); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
@@ -167,15 +151,35 @@ func TestServeMethod(t *testing.T) {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(waittest.Context(t)); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 
 	serveErr := <-errCh
 	if serveErr != http.ErrServerClosed {
 		t.Errorf("Serve error = %v, want %v", serveErr, http.ErrServerClosed)
+	}
+}
+
+func TestServedHandlerRejectsCrossOrigin(t *testing.T) {
+	srv := New(Params{SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}), RefreshFn: acceptingRefresh(), Logger: slog.New(slog.DiscardHandler)})
+	for _, tt := range []struct {
+		name, origin, site string
+		want               int
+	}{
+		{"cross-origin", "https://evil.example", "", http.StatusForbidden},
+		{"dashboard", "", "same-origin", http.StatusAccepted},
+		{"non-browser client", "", "", http.StatusAccepted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/refresh", nil)
+			req.Header = http.Header{"Origin": {tt.origin}, "Sec-Fetch-Site": {tt.site}}
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			if rejected := strings.Contains(rec.Body.String(), "cross_origin_request_rejected"); rec.Code != tt.want || rejected != (tt.want == http.StatusForbidden) {
+				t.Errorf("POST /api/v1/refresh Origin=%q Sec-Fetch-Site=%q = %d %q, want %d", tt.origin, tt.site, rec.Code, rec.Body.String(), tt.want)
+			}
+		})
 	}
 }
 
@@ -315,10 +319,7 @@ func TestSetDrainingThenShutdown(t *testing.T) {
 	}
 
 	// Shutdown should succeed even after draining.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(waittest.Context(t)); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
 

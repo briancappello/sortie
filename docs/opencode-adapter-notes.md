@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's OpenCode adapter in `internal/agent/opencode`.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-28
 
 ## Where to get the volatile facts
 
@@ -33,15 +33,25 @@ On every launch the runtime imports sessions stored by older releases, in the ba
 
 A fresh data root has a one-time race: the first launch wins a schema-creation lock, and every concurrent launch on the same root exits early. At the adapter this looks like any other early exit. It goes away on retry once the schema exists.
 
-## Why this adapter owns its own loop
+## Turn lifecycle
 
-Every other fork-per-turn adapter uses `agentcore.ForkPerTurnSession`. This one starts the process itself and runs its own reader, wait goroutine, and select loop. It needs two things the skeleton does not offer: a deadline on the first JSON event, and a query against the same binary after exit to recover usage.
+Turns run on `agentcore.ForkPerTurnSession`, the skeleton Claude Code and Copilot CLI use. Launch, output reading, the reap, the stop, the order in which a turn's possible endings win, and the logger belong to the skeleton, so a lifecycle change goes there and reaches every kind. This package supplies only what is OpenCode's own, through the skeleton's hooks:
 
-This is a maintenance hazard. Fixes to the shared skeleton do not reach this adapter, so where the two should behave alike, keep them alike by hand. The terminal decision is still shared through `agentcore.FinalizeTurn`.
+- `BuildArgs` returns the run argument vector. The prompt is not an argument, so `PromptOnStdin` is set and the skeleton writes the prompt to standard input after the SSH preamble on a remote launch.
+- `FirstEventTimeout` is `agentcore.FirstResponseTimeout` of the agent configuration.
+- `TurnEnv` returns the scrubbed environment for a local launch and, for a remote one, the managed variables with the inline configuration document.
+- `ParseLine` maps each envelope to events. A line that is not JSON is malformed. A session ID that differs from the adopted one returns `agentcore.EndTurn` with `response_error`. A turn-ending `step_finish` and an `error` event return a non-nil result.
+- `SettleUsage` runs the session export and hands the figure to the turn-end report. The skeleton calls it on every ending of a started turn except the mismatch, so a cancelled turn, a read failure, and a missed deadline recover usage like a clean exit does.
+- `OnFinalize` raises the permission notices from standard error, settles the spend on a clean exit, and builds the turn evidence, including the free-tier refusal clause.
+- `GetUsage` and `GetSessionID` read the session state. `EmitSessionStartID` is nil because `ParseLine` emits `session_started` itself on the first envelope that carries an ID.
 
-The first-JSON deadline is the larger of the read timeout and `agentcore.CredentialExchangeBound`. OpenCode prints nothing until the provider starts answering, and the free hosted model can take much longer than the 5-second default read timeout. The deadline stops at the first envelope, so it catches a process that never talks, not a stall in the middle of a turn. Stalls belong to the orchestrator.
+`StopSession` calls the skeleton's stop, then deletes the verification session when the session is a credential verification.
 
-The adapter owns both pipe read ends, so the reap does not depend on the stdout reader. The wait goroutine reaps first and only then waits, bounded, for stderr. A descendant that holds stderr open cannot delay the reap. It can delay the published turn result, and if the bound fires, the permission-refusal warning is lost. For that reason nothing that must react to process exit reads the result channel; the stdout reader's own bound starts from the reap. The early-return paths also bound their drain of the stdout reader, so a descendant holding only stdout cannot block them.
+The verification request carries a deny-all permission policy, and on 2.2.0 it still declares the `skill` tool: the runtime's browser plugin appends a `skill` rule after every configuration source, so no configuration removes the definition. The deny-all rules leave the tool unusable, and the adapter declares that the verification request keeps some tools.
+
+The first-event deadline is the larger of the read timeout and `agentcore.CredentialExchangeBound`. OpenCode prints nothing until the provider starts answering, and the free hosted model can take much longer than the 5-second default read timeout. The deadline stops at the first envelope, so it catches a process that never talks, not a stall in the middle of a turn. Stalls belong to the orchestrator.
+
+The export runs after the reap, on a context that outlives the turn's cancellation, and bounds itself with `agentcore.AuxiliaryTimeout`. A slow export delays the turn's result, never the stop.
 
 ## Session identity and the dir-scoped resume
 
@@ -55,7 +65,7 @@ Sessions are persisted in one global database under the user's home directory, n
 
 ## Permissions
 
-OpenCode's permission control is config-driven. Each key resolves to allow, ask, or deny through an ordered rule list; the last matching rule wins, and the default is ask.
+OpenCode's permission control is config-driven. Each key resolves to allow, ask, or deny through an ordered rule list; the last matching rule wins. The documented default is ask, but OpenCode 2.x does not apply it to `external_directory`: with no rule for that key, the runtime reads outside the workspace without asking. So when bypass is off and the tool lists leave `external_directory` undecided, the adapter writes `ask` for it itself, and `opencode run` refuses the access and reports it like any other refused call. A list that names the key sets its action as written.
 
 The adapter sends its policy in the inline configuration document. OpenCode deep-merges that document into the rules from every other configuration source; it does not replace them. So a value inherited from the operator's shell would leak into the result. The adapter removes every variable it manages from the inherited environment before adding its own. Keep that scrub in step with the managed set: a new managed variable that is not scrubbed is a leak.
 
@@ -71,7 +81,7 @@ The hosted free-tier model refuses any request whose tool set lacks its shell to
 
 Step-scoped token counts on the stream are not a running total. Between the tool step and the final text step of one turn the numbers move in both directions, so summing them across steps is wrong and taking the last one is wrong too.
 
-The kind declares `turn_end` arrival and `per_model` attribution. After the subprocess exits, `queryExportUsage` runs a sanitized session export and reports the figure through the shared turn-end report, with the model of the last kept message. The export also runs over SSH, so remote launches are measured too, unlike `copilot-cli`. The export is sanitized so tool output never reaches a log.
+The kind declares `turn_end` arrival and `per_model` attribution. After the subprocess exits, `queryExportUsage` runs a sanitized session export and reports the figure through the shared turn-end report, with the model of the last kept message. The export also runs over SSH, so remote launches are measured too, unlike `copilot-cli`. The export is sanitized so tool output never reaches a log. The figure also carries a per-model split, each kept message counting under its provider and model.
 
 The adapter sums per-message figures and ignores the export's session aggregate, for two reasons. The aggregate covers the whole session, including earlier runs, while Sortie reports per run. And its total also includes cache and reasoning tokens, so it is not input plus output. The adapter selects assistant messages by session ID and, on a resumed session, by creation time at or after the run start.
 
@@ -79,7 +89,43 @@ A message counts only once its `finish` field is set. The runtime saves an assis
 
 The configuration document disables the runtime's title agent. Its request is billed but recorded in no message, so the sum would miss it.
 
-A failed or empty export must never lower a figure the run has already reported. The finalize path skips the update entirely rather than replacing a settled value with zero.
+A failed or empty export must never lower a figure the run has already reported. The settle step skips the update entirely rather than replacing a settled value with zero.
+
+## Usage limits
+
+The run stream carries no subscription window. Two other places do.
+
+The pull runs `opencode api experimental.usage.limits` once a turn that reached the runtime has ended, through the same auxiliary launch the export uses, locally or over the session's SSH launch. It runs on empty stdin. A cancelled turn and a credential-verification session do not pull. The command exists only on releases that ship the usage-limits subsystem. On an older build it fails or hangs until the bound, and a command that fails to start, exits non-zero, outlives the bound, or prints no object ends the session's pulls. Do not gate the pull on a version check.
+
+The answer is a JSON object, with the payload under `data` next to a `location` member. Trimmed:
+
+```json
+{
+  "data": {
+    "workspace": { "id": "wrk_...", "name": "...", "usageURL": "..." },
+    "go": {
+      "rolling": { "percent": 37.5, "limited": false, "resetsAt": 1793199600000 },
+      "weekly": { "percent": 12, "limited": false, "resetsAt": 1793577600000 },
+      "monthly": { "percent": 100, "limited": true, "resetsAt": 1794700800000 }
+    },
+    "budgets": []
+  }
+}
+```
+
+`percent` is the share used, from 0 to 100. `limited` marks an exhausted window. `resetsAt` is epoch milliseconds, so convert before comparing it with Unix seconds. A member of `go` can be null, and it yields no reading. The `budgets` list holds spend budgets in dollars and is not read.
+
+The command answers only for a runtime signed in to the OpenCode console. Without that sign-in the payload is `{"data":null}`, which carries no `go` and ends the session's pulls. The runtime makes the console calls itself with the console credential it holds; Sortie neither reads nor sends that credential.
+
+The command goes through the runtime's background service, not through an in-process server. That is the service every launch avoids with `--standalone`, so this is the one invocation that uses it, and it starts the service when none is running. Two consequences follow. The service keeps the environment of whichever client started it first and outlives Sortie, so a service an operator already runs answers for its own state. And a service from another release already holding the default port makes the command collide with it until the port is changed with `opencode service set port`. A plain `opencode serve` route returns 401 without the service credential that `api` supplies, so do not call the HTTP route directly.
+
+The free hosted model reports its limit in the stream instead. When the limit is hit the run prints an error envelope with `type` set to `provider.free-limit`, status 429, and `retryAfterMs`:
+
+```json
+{"type":"error","error":{"type":"provider.free-limit","status":429,"retryAfterMs":3600000}}
+```
+
+`retryAfterMs` is milliseconds, relative to the moment of the failure. It derives from the response's `retry-after-ms` or `retry-after` header, which is why a header of 3600 seconds arrives as 3600000. The adapter turns it into one exhausted window that resets that long after the observation. The envelope is also the free-tier refusal described under failure detection, and reading the delay changes nothing about how that failure is reported. Other quota errors, such as `provider.budget-limit` and `provider.quota`, carry no usable window. The same run over the protocol surface drops the delay, which is why only the native kind reads it.
 
 ## Failure detection
 
@@ -93,11 +139,12 @@ Work evidence for the turn is this turn's own parsed assistant parts, text, reas
 
 ## Sortie's own tools
 
-`StartSession` translates the worker-generated MCP configuration into OpenCode's own server entries under the `mcp` key of the inline configuration document. The runtime rejects the standard `mcpServers` key, so the generated file cannot be handed over as is. The entries add to whatever the operator's own configuration declares.
+`StartSession` translates the worker-generated MCP configuration into OpenCode's own server entries under the `mcp` key of the inline configuration document. The runtime rejects the standard `mcpServers` key, so the generated file cannot be handed over as is. The entries add to whatever the operator's own configuration declares. An operator header value is carried by reference: the `mcp` member names the environment variable that carries it, and Sortie sets that variable in the runtime's environment, so the document never holds the value.
 
 The document is set only in the turn's own environment (local), on the SSH carrier, or on an execution environment's carrier, never in the shared managed-environment builder. So the export and delete helper invocations never carry it and never start a tool server of their own.
 
-Tool servers reach a local launch and a launch in an execution environment's VM. In the VM the document's `sortie-tools` entry is the relay, `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, and the document travels on the carrier's argv as `-e OPENCODE_CONFIG_CONTENT=...`. An SSH turn carries the document without the `mcp` member, so an SSH session has no tools.
+On an SSH launch the `mcp` member names Sortie's tool server by the address of the launch's reverse forward and each operator HTTP server by its URL, with header values carried by reference to environment variables Sortie sets, and operator stdio servers are left out. The document depends on the forward's outcome, so it travels on the SSH carrier. A refused or unconfirmed forward carries the document without Sortie's entry, and the session opens with the gap declared.
+In an execution environment's VM the document's `sortie-tools` entry is the relay, `/opt/sortie/sortie mcp-relay /run/sortie/tools.sock`, and the document travels on the carrier's argv as `-e OPENCODE_CONFIG_CONTENT=...`.
 
 The `run` output has no MCP startup status. A server that fails to start shows up only as failing tool calls. The runtime starts each server in the background and does not wait for it before the turn begins.
 

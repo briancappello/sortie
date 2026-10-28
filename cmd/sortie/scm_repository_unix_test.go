@@ -68,9 +68,7 @@ func runFor(t *testing.T, path string) (int, string) {
 	t.Helper()
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-	code := run(ctx, []string{"--port", "0", path}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--port", "0", path}, &stdout, &stderr)
 	return code, stderr.String()
 }
 

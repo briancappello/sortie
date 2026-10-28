@@ -2,7 +2,7 @@
 
 The `smolvm` execution environment runs each issue in its own microVM. The agent, the hooks, the verification commands, reaction triage, and Sortie's `git` inspection all run in the VM. The VM sees only the hosts you allow, sees API keys only as placeholders, and has no git credentials. With a `repository`, Sortie itself clones, pushes, and opens the pull request.
 
-This guide is for operators. For every setting and error, see [the `environment` block](workflow-reference.md#212-environment--execution-environment) in the workflow reference. For the design, see [Execution Environments](architecture/09-workspace-management-and-safety.md#97-execution-environments) and [Execution Environment Isolation](architecture/20-security-and-operational-safety.md#158-execution-environment-isolation).
+This guide is for operators. For every setting and error, see [the `environment` block](workflow-reference.md#212-environment--execution-environment) in the workflow reference. For the design, see [Execution Environments](architecture/09-workspace-management-and-safety.md#97-execution-environments) and [Execution Environment Isolation](architecture/20-security-and-operational-safety.md#159-execution-environment-isolation).
 
 ## Requirements
 

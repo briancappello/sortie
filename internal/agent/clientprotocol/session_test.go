@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
@@ -15,6 +16,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 	"github.com/sortie-ai/sortie/internal/typeutil"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestStartSessionWrongTypedMCPConfigFailsBeforeLaunch(t *testing.T) {
@@ -72,7 +74,7 @@ func TestRunTurnFinalize(t *testing.T) {
 				promptID := out.awaitMethod(t, methodSessionPrompt)
 				respondLine(t, inPw, promptID, promptResponse{StopReason: tt.reason})
 
-				outcome := awaitOutcome(t, outcomeCh)
+				outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 				want := stopReasonEvidence(tt.reason)
 				dispositiontest.AssertDispositionContract(t, want, outcome.result, outcome.err)
 				agenttest.AssertSessionIDContract(t, []string{fakeSession(state).ID}, events, outcome.result)
@@ -97,7 +99,7 @@ func TestRunTurnFinalize(t *testing.T) {
 
 		respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonCancelled})
 
-		outcome := awaitOutcome(t, outcomeCh)
+		outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 		dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 			Terminal: agentcore.TerminalCancelled,
 			Work:     agentcore.WorkAbsent,
@@ -135,7 +137,7 @@ func TestRunTurnFinalize(t *testing.T) {
 		}
 
 		respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-		firstOutcome := awaitOutcome(t, firstOutcomeCh)
+		firstOutcome := waittest.Receive(t, firstOutcomeCh, "turn outcome")
 		if firstOutcome.err != nil {
 			t.Fatalf("first RunTurn() error = %v, want nil: the rejected concurrent call must not disturb it", firstOutcome.err)
 		}
@@ -169,7 +171,7 @@ func TestRunTurnPreTurnWaits(t *testing.T) {
 			state := &sessionState{
 				agentConfig: domain.AgentConfig{ReadTimeoutMS: 50},
 				inbox:       jsonrpc.NewInbox[pumpItem](),
-				caps:        newCapabilityRecord(false, false),
+				caps:        newCapabilityRecord(false),
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
@@ -182,7 +184,7 @@ func TestRunTurnPreTurnWaits(t *testing.T) {
 				cancel()
 			}
 
-			outcome := awaitOutcome(t, outcomeCh)
+			outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 			if tt.wantErr != nil {
 				if !errors.Is(outcome.err, tt.wantErr) {
@@ -198,14 +200,8 @@ func TestRunTurnPreTurnWaits(t *testing.T) {
 				}
 			}
 
-			select {
-			case <-state.inbox.Ready():
-				item, ok := state.inbox.Take()
-				if !ok || item.control == nil || item.control.startTurn == nil {
-					t.Fatalf("runTurn() queued item = %+v, ok=%v, want a startTurn control", item, ok)
-				}
-			case <-time.After(awaitTimeout):
-				t.Fatal("runTurn() queued no startTurn control, want it put before the verdict wait")
+			if item := takeQueuedItem(t, state); item.control == nil || item.control.startTurn == nil {
+				t.Fatalf("runTurn() queued item = %+v, want a startTurn control", item)
 			}
 		})
 	}
@@ -213,11 +209,7 @@ func TestRunTurnPreTurnWaits(t *testing.T) {
 
 func takeQueuedItem(t *testing.T, state *sessionState) pumpItem {
 	t.Helper()
-	select {
-	case <-state.inbox.Ready():
-	case <-time.After(awaitTimeout):
-		t.Fatal("nothing was queued in the session inbox within awaitTimeout, want the startTurn control")
-	}
+	waittest.Receive(t, state.inbox.Ready(), "the startTurn control in the session inbox")
 	item, ok := state.inbox.Take()
 	if !ok {
 		t.Fatal("Take() ok = false, want the queued startTurn control")
@@ -232,13 +224,13 @@ func TestDelayedTurnVerdictCannotBlockPump(t *testing.T) {
 		agentConfig: domain.AgentConfig{ReadTimeoutMS: 20},
 		inbox:       jsonrpc.NewInbox[pumpItem](),
 		logger:      discardLogger(),
-		caps:        newCapabilityRecord(false, false),
+		caps:        newCapabilityRecord(false),
 	}
 
-	outcome := awaitOutcome(t, runTurnAsyncCtx(context.Background(), state, domain.RunTurnParams{
+	outcome := waittest.Receive(t, runTurnAsyncCtx(context.Background(), state, domain.RunTurnParams{
 		Prompt:  "go",
 		OnEvent: func(domain.AgentEvent) {},
-	}))
+	}), "turn outcome")
 	var agentErr *domain.AgentError
 	if !errors.As(outcome.err, &agentErr) || agentErr.Kind != domain.ErrResponseTimeout {
 		t.Fatalf("runTurn() error = %v, want *domain.AgentError kind %q", outcome.err, domain.ErrResponseTimeout)
@@ -256,11 +248,7 @@ func TestDelayedTurnVerdictCannotBlockPump(t *testing.T) {
 		close(delivered)
 	}()
 
-	select {
-	case <-delivered:
-	case <-time.After(awaitTimeout):
-		t.Fatal("handleStartTurn() blocked delivering a delayed verdict, want capacity-one reply delivery")
-	}
+	waittest.Receive(t, delivered, "handleStartTurn() to deliver a delayed verdict on a capacity-one reply")
 }
 
 func TestAbandonedTurnIsNotStarted(t *testing.T) {
@@ -270,13 +258,13 @@ func TestAbandonedTurnIsNotStarted(t *testing.T) {
 		agentConfig: domain.AgentConfig{ReadTimeoutMS: 20},
 		inbox:       jsonrpc.NewInbox[pumpItem](),
 		logger:      discardLogger(),
-		caps:        newCapabilityRecord(false, false),
+		caps:        newCapabilityRecord(false),
 	}
 
-	outcome := awaitOutcome(t, runTurnAsyncCtx(context.Background(), state, domain.RunTurnParams{
+	outcome := waittest.Receive(t, runTurnAsyncCtx(context.Background(), state, domain.RunTurnParams{
 		Prompt:  "go",
 		OnEvent: func(domain.AgentEvent) {},
-	}))
+	}), "turn outcome")
 	var agentErr *domain.AgentError
 	if !errors.As(outcome.err, &agentErr) || agentErr.Kind != domain.ErrResponseTimeout {
 		t.Fatalf("runTurn() error = %v, want *domain.AgentError kind %q", outcome.err, domain.ErrResponseTimeout)
@@ -309,7 +297,7 @@ func TestNoCounterSessionReportsUnmeasured(t *testing.T) {
 	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"usage_update","used":12000,"size":200000}}}`)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -420,11 +408,7 @@ func TestCloseSessionSkipsWhenIdentifierEmpty(t *testing.T) {
 
 	closeSession(context.Background(), context.Background(), time.Second)(state)
 
-	select {
-	case line := <-out.ch:
-		t.Errorf("closeSession() wrote %s, want no bytes written when closeSessionID is empty", line)
-	case <-time.After(100 * time.Millisecond):
-	}
+	waittest.Never(t, out.ch, 100*time.Millisecond, "a line written by closeSession() when closeSessionID is empty")
 
 	if buf.Len() != 0 {
 		t.Errorf("closeSession() logged %q, want no record when closeSessionID is empty", buf.String())
@@ -434,23 +418,24 @@ func TestCloseSessionSkipsWhenIdentifierEmpty(t *testing.T) {
 func TestCloseSessionBoundedWhenAgentNeverAnswers(t *testing.T) {
 	t.Parallel()
 
-	state, outPr, _ := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
-	out := newOutboundReader(outPr)
-	state.closeSessionID = "sess-test"
+	synctest.Test(t, func(t *testing.T) {
+		state, outPr, _ := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
+		out := newOutboundReader(outPr)
+		state.closeSessionID = "sess-test"
 
-	const grace = 200 * time.Millisecond
-	bound := closeCallBound(grace)
+		const grace = 200 * time.Millisecond
+		bound := closeCallBound(grace)
 
-	start := time.Now()
-	closeSession(context.Background(), context.Background(), grace)(state)
-	elapsed := time.Since(start)
+		start := time.Now()
+		closeSession(context.Background(), context.Background(), grace)(state)
+		elapsed := time.Since(start)
 
-	out.awaitMethod(t, methodSessionClose)
+		out.awaitMethod(t, methodSessionClose)
 
-	const schedulingOverhead = time.Second
-	if wantBound := bound + schedulingOverhead; elapsed > wantBound {
-		t.Errorf("closeSession() step took %v, want at most %v (closeCallBound(%v) plus scheduling overhead)", elapsed, wantBound, grace)
-	}
+		if elapsed > bound {
+			t.Errorf("closeSession() step took %v, want at most %v (closeCallBound(%v))", elapsed, bound, grace)
+		}
+	})
 }
 
 func TestDoInitializeVersionPin(t *testing.T) {
@@ -471,15 +456,11 @@ func TestDoInitializeVersionPin(t *testing.T) {
 	id := out.awaitMethod(t, methodInitialize)
 	respondLine(t, inPw, id, initializeResponse{ProtocolVersion: protocolVersion(2)})
 
-	select {
-	case outcome := <-ch:
-		if outcome.err == nil {
-			t.Fatal("doInitialize() error = nil, want an error for an unpinned protocol version")
-		}
-		if outcome.err.Kind != domain.ErrResponseError {
-			t.Errorf("doInitialize() error kind = %q, want %q", outcome.err.Kind, domain.ErrResponseError)
-		}
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for doInitialize to return")
+	outcome := waittest.Receive(t, ch, "doInitialize to return")
+	if outcome.err == nil {
+		t.Fatal("doInitialize() error = nil, want an error for an unpinned protocol version")
+	}
+	if outcome.err.Kind != domain.ErrResponseError {
+		t.Errorf("doInitialize() error kind = %q, want %q", outcome.err.Kind, domain.ErrResponseError)
 	}
 }

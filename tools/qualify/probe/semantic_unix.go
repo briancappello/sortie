@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -15,10 +15,10 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	"github.com/sortie-ai/sortie/tools/qualify/eval"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
-	"github.com/sortie-ai/sortie/tools/qualify/procgroup"
 )
 
 // permissionAcceptedNotice and permissionNoOptionNotice mirror
@@ -115,13 +115,8 @@ func substituteSessionID(args []string, sessionID string) []string {
 	return out
 }
 
-func killProtocolSession(t *testing.T, session domain.Session, sig syscall.Signal) {
-	t.Helper()
-	pid, err := strconv.Atoi(session.AgentPID)
-	if err != nil {
-		t.Fatalf("session agent_pid %q did not parse as a process id: %v", session.AgentPID, err)
-	}
-	_ = signalProcessGroup(pid, sig)
+func killProtocolSession(fixture *sharedFixture, session domain.Session, sig syscall.Signal) {
+	_ = fixture.groupOf(session).Signal(sig)
 }
 
 // promptNamingProbe builds the instruction an induction turn hands the
@@ -237,40 +232,28 @@ func induceRefusalPair(t *testing.T, coords Coordinates, fixture *sharedFixture,
 	return disposition, retry
 }
 
-func sessionProcessGroup(t *testing.T, session domain.Session) int {
-	t.Helper()
-	pgid, err := strconv.Atoi(session.AgentPID)
-	if err != nil {
-		t.Fatalf("session agent_pid %q did not parse as a process id: %v", session.AgentPID, err)
-	}
-	return pgid
-}
-
-// awaitProbeUnderTurn folds every snapshot into owned. ended=true
-// means the turn finished first, the one case no signal can be sent.
-func awaitProbeUnderTurn(owned *ownedDescendants, probePath string, pgid int, done <-chan error, bound time.Duration) (observed, ended bool) {
-	deadline := time.Now().Add(bound)
-	for {
+// awaitProbeUnderTurn folds every reading into owned and matches pgid only
+// in a reading its record was held through. ended=true means the turn
+// finished first, the one case no signal can be sent.
+func awaitProbeUnderTurn(owned *ownedDescendants, probePath string, pgid int, turnEnded <-chan struct{}, bound time.Duration) (observed, ended bool) {
+	basename := filepath.Base(probePath)
+	_ = waittest.UntilWithin(bound, probeExecutionPollInterval, func() error {
 		select {
-		case <-done:
-			return false, true
+		case <-turnEnded:
+			ended = true
+			return nil
 		default:
 		}
-		if snapshot, err := psSnapshot(); err == nil {
-			owned.observe(snapshot)
-			if launchRunsProgram(snapshot, pgid, filepath.Base(probePath)) {
-				return true, false
+		if snapshot, held, err := owned.readHeld(); err == nil {
+			owned.observe(snapshot, held)
+			if slices.Contains(held, pgid) && launchRunsProgram(snapshot, pgid, basename) {
+				observed = true
+				return nil
 			}
 		}
-		if time.Now().After(deadline) {
-			return false, false
-		}
-		select {
-		case <-done:
-			return false, true
-		case <-time.After(probeExecutionPollInterval):
-		}
-	}
+		return fmt.Errorf("%s is not running under group %d", basename, pgid)
+	})
+	return observed, ended
 }
 
 // The protocol surface needs its context cancelled to reach the
@@ -308,6 +291,7 @@ func induceProtocolCancellation(t *testing.T, coords Coordinates, fixture *share
 	defer cancel()
 
 	done := make(chan error, 1)
+	turnEnded := make(chan struct{})
 	go func() {
 		result, runErr := adapter.RunTurn(ctx, session, domain.RunTurnParams{
 			Prompt:  prompt,
@@ -315,9 +299,10 @@ func induceProtocolCancellation(t *testing.T, coords Coordinates, fixture *share
 		})
 		fixture.usage.observe(session.ID, result.UsageMeasured)
 		done <- runErr
+		close(turnEnded)
 	}()
 
-	observed, ended := awaitProbeUnderTurn(fixture.ownership(), fixture.probePath("cancellation"), sessionProcessGroup(t, session), done, fixture.observationBound())
+	observed, ended := awaitProbeUnderTurn(fixture.ownership(), fixture.probePath("cancellation"), fixture.groupOf(session).PID(), turnEnded, fixture.observationBound())
 	if ended {
 		return transportGraded(evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeFixtureInductionFailed, Detail: "the turn ended before the probe was observed running", SessionID: session.ID})
 	}
@@ -379,6 +364,7 @@ func induceProtocolAsyncSignal(t *testing.T, coords Coordinates, fixture *shared
 	}
 
 	done := make(chan error, 1)
+	turnEnded := make(chan struct{})
 	go func() {
 		result, runErr := adapter.RunTurn(context.Background(), session, domain.RunTurnParams{
 			Prompt:  prompt,
@@ -386,9 +372,10 @@ func induceProtocolAsyncSignal(t *testing.T, coords Coordinates, fixture *shared
 		})
 		fixture.usage.observe(session.ID, result.UsageMeasured)
 		done <- runErr
+		close(turnEnded)
 	}()
 
-	observed, ended := awaitProbeUnderTurn(fixture.ownership(), probePath, sessionProcessGroup(t, session), done, fixture.observationBound())
+	observed, ended := awaitProbeUnderTurn(fixture.ownership(), probePath, fixture.groupOf(session).PID(), turnEnded, fixture.observationBound())
 	if ended {
 		return transportGraded(evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeFixtureInductionFailed, Detail: "the turn ended before the probe was observed running", SessionID: session.ID})
 	}
@@ -396,7 +383,7 @@ func induceProtocolAsyncSignal(t *testing.T, coords Coordinates, fixture *shared
 		return transportGraded(evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeFixtureInductionFailed, Detail: "the probe was never observed running under this launch", SessionID: session.ID})
 	}
 
-	killProtocolSession(t, session, sig)
+	killProtocolSession(fixture, session, sig)
 	runErr := <-done
 
 	var agentErr *domain.AgentError
@@ -426,14 +413,14 @@ func induceNativeAsyncSignal(t *testing.T, coords Coordinates, fixture *sharedFi
 	}
 	defer launch.cancel()
 
-	if !awaitProbeExecution(fixture.ownership(), fixture.probePath(probeName), launch.pgid, time.Now().Add(fixture.observationBound())) {
+	if !awaitProbeExecution(fixture.ownership(), fixture.probePath(probeName), launch.group.PID(), time.Now().Add(fixture.observationBound())) {
 		if _, _, ended := launch.terminate(); ended {
-			procgroup.AwaitAbsence(t, launch.pgid)
+			requireTornDown(t, launch.group)
 		}
 		return transportGraded(evidence.Observation{Grade: evidence.GradeNotObserved, Outcome: evidence.OutcomeFixtureInductionFailed, Detail: "the probe was never observed running under this launch"})
 	}
 
-	_ = signalProcessGroup(launch.pgid, sig)
+	_ = launch.group.Signal(sig)
 	// The signal is a request: a runtime that ignores it or a descendant
 	// holding the streams open would hold this wait past every bound, so
 	// the group comes down when this wait expires.
@@ -445,7 +432,7 @@ func induceNativeAsyncSignal(t *testing.T, coords Coordinates, fixture *sharedFi
 		}
 	}
 	waitErr := result.WaitErr
-	procgroup.AwaitAbsence(t, launch.pgid)
+	requireTornDown(t, launch.group)
 
 	fixture.recordNativeOutput(surface, output)
 	launchRecord := newNativeLaunchRecord(argv, coords, promptID, "", waitErr)

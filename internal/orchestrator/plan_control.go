@@ -303,8 +303,8 @@ func handleCriteriaFailure(ctx context.Context, state *State, params HandleWorke
 		Attempt:    entry.RetryAttempt,
 		Agent:      entry.AgentKind,
 		AgentText:  summary,
-	}.notification(domain.EventSessionEscalated, "", fmt.Sprintf("The acceptance-criteria check of %s (rule %s) did not pass.", entry.Identifier, rule.Name))
-	n.Envelope.Escalation = domain.SessionEscalation{Kind: "criteria_failed", Rule: rule.Name}
+	}.notification(domain.EventSessionEscalated, "", domain.SessionEscalatedFacts{Kind: domain.SessionEscalationCriteriaFailed, Rule: rule.Name})
+	n.Envelope.Escalation = domain.SessionEscalation{Kind: domain.SessionEscalationCriteriaFailed, Rule: rule.Name}
 	if params.Router == nil {
 		log.Info("criteria check failed, escalation had no router")
 		return

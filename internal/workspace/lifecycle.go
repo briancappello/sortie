@@ -380,6 +380,9 @@ type FinishParams struct {
 	// Environment is the execution environment the hook runs in. Nil
 	// runs it as a host process in the workspace directory.
 	Environment environment.Environment
+	// RunOutcome is how the attempt ended, exported to the hook as
+	// SORTIE_RUN_OUTCOME: "succeeded", "stopped", "failed", or "cancelled".
+	RunOutcome string
 }
 
 // Finish runs the after_run hook if configured. Failure is logged and
@@ -407,6 +410,7 @@ func Finish(ctx context.Context, params FinishParams) {
 		reviewStatus = "disabled"
 	}
 	env["SORTIE_SELF_REVIEW_STATUS"] = reviewStatus
+	env["SORTIE_RUN_OUTCOME"] = params.RunOutcome
 	target := NewTarget(params.Environment, filepath.Base(params.Path), params.Path, params.IssueID, params.Identifier)
 	if summary := params.SelfReviewSummaryPath; summary != "" {
 		// A hook that runs elsewhere reads the summary at its path

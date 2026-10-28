@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
@@ -131,7 +132,7 @@ func GenerateMCPConfig(params MCPConfigParams) (string, error) {
 	if params.OperatorMCPConfigPath == "" {
 		merged = map[string]any{
 			"mcpServers": map[string]any{
-				"sortie-tools": entry,
+				mcpconfig.ToolServerName: entry,
 			},
 		}
 	} else {
@@ -157,11 +158,11 @@ func GenerateMCPConfig(params MCPConfigParams) (string, error) {
 			servers = make(map[string]any)
 		}
 
-		if _, exists := servers["sortie-tools"]; exists {
-			return "", fmt.Errorf("operator MCP config contains reserved server name %q", "sortie-tools")
+		if _, exists := servers[mcpconfig.ToolServerName]; exists {
+			return "", fmt.Errorf("operator MCP config contains reserved server name %q", mcpconfig.ToolServerName)
 		}
 
-		servers["sortie-tools"] = entry
+		servers[mcpconfig.ToolServerName] = entry
 		parsed["mcpServers"] = servers
 		merged = parsed
 	}

@@ -3,7 +3,7 @@
 ### 16.1 Service Startup
 
 ```text
-function start_service():
+function start_service(once_mode):
   configure_logging()
   start_observability_outputs()
   start_workflow_watch(on_change=reload_and_reapply_workflow)
@@ -15,8 +15,12 @@ function start_service():
 
   open_or_create_sqlite_db()
   run_schema_migrations()
+  load_rate_layers()                                     // token_rates, the operator table, the last good fetched table beside the database, the embedded table
+  price_unrecorded_runs_once()                           // rows written before costs were recorded, under the rates in force now; a failure is logged, startup continues, and the next start retries
+  start_price_table_fetch_unless_disabled(refresh_every=24h)  // on unless price_table.fetch is false; a failure never blocks startup
 
   persisted_retries = sqlite.load_retry_entries()
+  sqlite.delete_all_live_passes()                        // a failure is logged; startup continues
 
   state = {
     poll_interval_ms: get_config_poll_interval_ms(),
@@ -26,44 +30,108 @@ function start_service():
     retry_attempts: {},
     completed: set(),
     agent_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    agent_rate_limits: null
+    usage_windows: {}
   }
 
   for entry in persisted_retries:
     state = reconstruct_retry_timer(state, entry)
 
   startup_terminal_workspace_cleanup()
+
+  // Null without --once. Owned by the event loop, like state.
+  once = null
+  if once_mode:
+    once = {polled: false, poll_failed: false, interrupted: false, candidates: {}, deferred: {}, outcomes: {}}  // deferred: issue_id -> slot or tick; outcomes: issue_id -> (identifier, run outcome)
+    if cfg.agent.max_sessions == 0 and cfg.agent.max_tokens == 0 and cfg.agent.max_cost_usd == 0:
+      log_warn("--once keeps starting sessions for an issue until it leaves the active states because agent.max_sessions, agent.max_tokens, and agent.max_cost_usd are all 0; set one of them to cap the run")
+
   schedule_tick(delay_ms=0)
 
-  event_loop(state)
+  event_loop(state, once)
+  return once_result(once)                               // the exit status is decided from it (Section 8.1)
+
+function event_loop(state, once):
+  loop:
+    event = wait_for_next_event()
+
+    if event is shutdown_request:
+      if once != null:
+        once.interrupted = true
+      shutdown(state)
+      return
+
+    if event is retry_timer(issue_id):
+      identifier = state.retry_attempts[issue_id].identifier or ""   // read before the handler pops the entry
+      state, released = on_retry_timer(issue_id, state, release_held=(once != null))
+      if released and issue_id not in once.outcomes:
+        once.outcomes[issue_id] = (identifier, stopped)
+    else if event is worker_exit(issue_id, reason, worker_result):
+      state, outcome = on_worker_exit(issue_id, reason, worker_result, state)    // outcome: the run outcome of the attempt it recorded, empty when no running entry existed
+      if once != null and outcome != "":
+        once.outcomes[issue_id] = (worker_result.identifier, outcome)
+    else:
+      state = handle_event(state, event)                 // tick, agent update, reaction continuation, and the rest, unchanged
+
+    // A pending shutdown request wins over the settled check, so an interruption is never reported as a settled run.
+    if once != null and no_shutdown_requested() and once_settled(state, once):
+      shutdown(state)
+      return
+
+function once_settled(state, once):
+  return once.polled and once.deferred is empty
+    and state.running is empty and state.claimed is empty and state.retry_attempts is empty   // pending reactions do not count
+
+function shutdown(state):                                 // the one body both exits share
+  mark_draining()
+  stop_tick_timer()
+  drain_running_workers(state)                            // each drained exit goes through on_worker_exit and records its outcome in once mode
+  stop_event_retry()
+  drain_triage_runs()
+  drain_tracker_ops()                                     // delivers the final comments and notifications before the process exits
+  cancel_retry_timers()
 ```
 
 ### 16.2 Poll-and-Dispatch Tick
 
 ```text
-on_tick(state):
+on_tick(state, once):
   # Preflight forces a defensive reload, so it runs before every step
   # that reads config, not only before dispatch.
   validation = validate_dispatch_config()
   state = apply_config_to_state(state, current_config())
   report_new_advisories(current_config().advisories() + worker_config().advisories())
 
-  state = reconcile_running_issues(state)
+  state = reconcile_running_issues(state, skip_reactions=(once != null))   // once mode runs no reaction or label-command step on any path
 
   state.sweep_tick_counter += 1
   if state.sweep_tick_counter >= sweep_every_n_ticks:
     state.sweep_tick_counter = 0
     sweep_workspaces(state)
 
+  # Runs whether or not validation passed, so the figures and the hold
+  # edges stay current; reads nothing while no ceiling is above 0.
+  spend_hold = evaluate_spend_ceiling(state, now())    // Section 8.4: none, daily_spend_ceiling, weekly_spend_ceiling, or monthly_spend_ceiling
+
   if validation is not ok:
     log_validation_error(validation)
+    if once != null and not once.polled:
+      once.polled = true
+      once.poll_failed = true                            // a later tick keeps once.deferred and tries again
     notify_observers()
+    schedule_tick(state.poll_interval_ms)
+    return state
+
+  if once != null and once.polled and once.deferred is empty:
+    notify_observers()                                   // nothing waits for a later tick: fetch nothing, dispatch nothing
     schedule_tick(state.poll_interval_ms)
     return state
 
   issues = tracker.fetch_candidate_issues()
   if issues failed:
     log_tracker_error()
+    if once != null and not once.polled and not cancelled_by_shutdown(error):
+      once.polled = true
+      once.poll_failed = true
     notify_observers()
     schedule_tick(state.poll_interval_ms)
     return state
@@ -71,22 +139,94 @@ on_tick(state):
   sorted = sort_for_dispatch(issues)
 
   state = rebuild_budget_exhausted(state, sorted)
+  # A release by a person's gesture moves the park from state.parked to
+  # state.park_releases and keeps its persisted row; a release by a worker
+  # exit that observed work deletes the row (Section 14.2).
   state = refresh_parked_issues(state, sorted)
   state = park_exhausted_absences(state, sorted)
 
+  # The first tick dispatches every candidate and remembers their IDs. A later
+  # tick dispatches only the candidates of that poll still waiting in
+  # once.deferred, evaluated against this fetch; a deferred ID this fetch did
+  # not return is dropped, and a candidate it returns that the poll did not is
+  # never dispatched.
+  if once != null:
+    if not once.polled:
+      once.candidates = ids(sorted)
+    sorted = once.dispatch_input(sorted)
+
   for issue in sorted:
     if no_available_slots(state):
+      if once != null:
+        once.defer_from(issue, sorted, slot)            // this candidate and every later one wait for capacity
       break
 
     if should_dispatch(issue, state):
+      # A candidate that failed a gate of its own keeps that reason; this
+      # one passed them all and only the hold keeps it from starting.
+      if spend_hold != none:
+        record_candidate_hold(state, issue, spend_hold)        // counts the reason; logs nothing
+        if once != null:
+          once.drop(issue.id)                            // the run does not wait for the window to reset
+          once.outcomes[issue.id] = (issue.identifier, stopped)
+        continue
+      # Right after rule resolution and before the adapter lookup.
+      # The model is the one the dispatch is configured with, not the runtime's
+      # default when the settings name none.
+      (agent_kind, template_id, rule_name) = resolve_rule(issue, state.dispatch_cfg, hop_route_of(state, issue.id), state.default_agent_kind, state.default_template_id)
+      model = configured_model(state.cfg, (agent_kind, rule_name))
+      held, hold = usage_limit_gate(state, agent_kind, model, own_retry=false, grace=state.poll_interval_ms, now())
+      if held:
+        record_candidate_hold(state, issue, usage_limit, hold)   // the candidate takes no slot; later candidates are still evaluated
+        if once != null:
+          once.drop(issue.id)                            // the run does not wait for the reset
+        continue
       issue, dispatchable = hold_for_stage_hop(issue, state)   // Section 16.4
       if not dispatchable:
+        if once != null:
+          once.defer(issue.id, tick)                     // evaluated again on the next tick
         continue
+      # An issue with a pending park release reads its comments once its
+      # agent kind, template, and attempt settings pass (Section 16.4). A
+      # failed read holds the issue and keeps the release, so no run starts
+      # on a partial view.
+      release = state.park_releases[issue.id]
+      if release != null:
+        comments, err = tracker.fetch_issue_comments(issue.id)
+        if err != null:
+          release_host(issue.id)
+          hold(issue, park_comments_unread)
+          if once != null:
+            once.defer(issue.id, tick)                   // the next tick reads again
+          continue
+        issue.comments = comments                        // every other field stays the candidate's
       # The seed holds the pull request's review comments no run of the
       # issue was given, per configured kind without a triage block; nil
       # dispatches as before.
       seed = fresh_run_seed(issue, state)
-      state = dispatch_issue(issue, state, attempt=null, continuation_context=seed)
+      # A candidate that holds a standing escalation is read against the
+      # handoff state before it is claimed (Section 16.3).
+      state = end_outside_handoff(state, issue.id, issue.state)
+      state = dispatch_issue(issue, state, attempt=null, continuation_context=seed, release=release)
+      if release != null and issue.id in state.running:
+        consume_park_release(state, issue.id)            // deletes the pending release and its row
+      if once != null:
+        once.dispatched(issue.id)                        // an agent kind, template, or attempt setting dispatch_issue refuses drops the ID and records failed
+    else if once != null:
+      // No slot for the issue's state: defer(slot). Blocker read failed or
+      // not budgeted: defer(tick). Ineligible, blocked, or blockers
+      // incomplete: drop; no later tick dispatches it.
+      once.note_skip(issue, skip_reason)
+
+  # No session can free a slot once nothing runs.
+  if once != null and state.running is empty:
+    once.drop_slot_waiters()
+
+  # Reached only when the candidate fetch succeeded; §13.7.2 states the rule.
+  state = prune_acknowledgements(state)
+
+  if once != null:
+    once.polled = true                                   // set once a tick has reached the dispatch loop
 
   notify_observers()
   schedule_tick(state.poll_interval_ms)
@@ -105,7 +245,8 @@ function reconcile_running_issues(state):
     state = reconcile_review_comments(state)
     return state
 
-  refreshed = tracker.fetch_issue_states_by_ids(running_ids)
+  read_started_at = now()                              // kept as taken, so reads compare by elapsed time
+  refreshed = tracker.fetch_issue_states_and_labels_by_ids(running_ids)
   if refreshed failed:
     log_debug("keep workers running")
     state = reconcile_ci_status(state)
@@ -124,7 +265,7 @@ function reconcile_running_issues(state):
     if issue.state in terminal_states:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
     else if issue.state in active_states:
-      entry.issue = issue
+      record_issue_read(entry, issue, read_started_at)
     else:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
 
@@ -133,7 +274,69 @@ function reconcile_running_issues(state):
   return state
 ```
 
+```text
+function record_issue_read(entry, read, started_at):
+  if started_at is not after entry.issue_read_at:
+    return                                             // an older read never replaces a newer one
+  entry.issue.state = read.state
+  entry.issue.labels = read.labels
+  entry.issue_read_at = started_at                     // zero while the entry holds the dispatch read
+
+function read_keeps_run(entry, state):
+  if state is empty:
+    return false
+  if state in active_states:
+    return true
+  return state equals tracker.handoff_state (case-insensitive) and entry.reaction_kind is a known kind
+
+function on_issue_read(state, msg):                    // the event loop's handling of the worker's post-transition read
+  entry = state.running[msg.issue_id]
+  if entry is absent or entry.dispatch_id != msg.dispatch_id or entry.pending_cleanup:
+    return                                             // dropped without a log
+  if not read_keeps_run(entry, msg.read.state):
+    return                                             // only reconciliation stops a run
+  record_issue_read(entry, msg.read, msg.started_at)
+```
+
+After dispatch, `record_issue_read` is the only writer of the entry's state and labels. A read queued ahead of its run's exit is applied before the exit identity is built. The entry also holds `dispatch_labels`, a copy of the dispatch read's labels that no later read changes.
+
 The refresh also reads every issue that holds a stage hop record (§8.5), and a hop record decides a no-state reading through `confirm_no_state` on its own flag: the first reading keeps the record, its count, and its hold, and the second resets it with the `not_active` trigger. A reading in a configured state clears the flag, and an issue missing from the response leaves every flag as it is. A run that ends before the second reading takes the exit disposition of its last configured state, because the exit reads the entry's issue snapshot, which a no-state reading never updates.
+
+For an issue the refresh reads in a non-terminal state while Sortie does not drive it, and which holds a standing escalation, the refresh ends each standing escalation of the issue and drops its entry and counter (§8.5 Part B). The dispatch loop of Section 16.2 applies the same reading to a candidate that holds a standing escalation before it claims the candidate, because the release of a park can dispatch the issue on the tick that releases it.
+
+```text
+function end_outside_handoff(state, issue_id, listed_state):
+  escalated = [entry for entry in state.pending_reactions of issue_id if entry.escalated_at is set]
+  if handoff_state is empty or escalated is empty:
+    return state
+  if listed_state is not empty:
+    clear no_state_observed on every entry of escalated
+    if listed_state equals handoff_state, case-insensitively:
+      return state
+  if issue_id in state.running, state.retry_attempts, state.claimed, or state.parked:
+    return state
+
+  # A search can trail Sortie's own handoff write, so a listing never decides alone.
+  read, err = tracker.fetch_issue_by_id(issue_id)
+  if err:
+    return state                                      # never a no-state reading
+  if read.state is empty:
+    confirmed = [confirm_no_state(entry.no_state_observed) for entry in escalated]
+    if not all(confirmed):
+      return state
+  else:
+    clear no_state_observed on every entry of escalated
+    if read.state equals handoff_state, case-insensitively, or read.state in terminal_states:
+      return state
+
+  for entry in escalated:
+    end_escalation(entry)                             # the record keeps its subject
+    delete(state.pending_reactions, entry.key)
+    delete(state.reaction_attempts, entry.key)
+    if entry.kind == "bot-review":
+      delete(state.reaction_reported_comments, entry.key)
+  return state
+```
 
 ```text
 function reconcile_ci_status(state):
@@ -154,9 +357,16 @@ function reconcile_ci_status(state):
     switch result.status:
       case "passing":
         delete(state.reaction_attempts, key)
+        end_escalation(pending)            # a passing verdict ends a standing escalation
       case "pending":
         state.pending_reactions[key] = pending
       case "failing":
+        if pending.escalated_at is set:
+          if pending.escalation_trigger == "budget_exhausted" and not fixes_spent(state, pending):
+            end_escalation(pending)
+          else:
+            state.pending_reactions[key] = pending   # a standing escalation dispatches nothing
+            continue
         handle_ci_failure(state, pending, result)
 
   return state
@@ -175,8 +385,10 @@ function reconcile_review_comments(state):
     rkey = reaction_key(pending.issue_id, "review")
 
     # Watch window; a spent counter survives the drop. The cached
-    # handed-off set is dropped at any counter value, its rows are kept
-    if review_config.watch_window_ms > 0 and now - pending.created_at > review_config.watch_window_ms:
+    # handed-off set is dropped at any counter value, its rows are kept.
+    # watch_start is watch_restarted_at when a retry-slot deferral set it,
+    # else created_at. A standing escalation is never aged out.
+    if review_config.watch_window_ms > 0 and pending.escalated_at is not set and now - watch_start(pending) > review_config.watch_window_ms:
       cancel_triage(pending)
       if state.reaction_attempts[rkey] < review_config.max_continuation_turns:
         delete(state.reaction_attempts, rkey)
@@ -209,6 +421,9 @@ function reconcile_review_comments(state):
     max_time = max(c.submitted_at for c in actionable)
 
     if len(actionable) == 0:
+      if pending.escalated_at is set:
+        end_escalation(pending)
+        delete(state.reaction_attempts, rkey)
       cancel_triage(pending)
       pending.pending_retry_at = now + poll_interval
       state.pending_reactions[key] = pending
@@ -236,6 +451,21 @@ function reconcile_review_comments(state):
         state.pending_reactions[key] = pending
         continue
       state.handed_off_comments[rkey] = set(ids)
+    # A standing escalation dispatches nothing. A budget escalation ends
+    # when no comment is new; a triage escalation ends when the set the
+    # command judged changed (Section 11B.4)
+    if pending.escalated_at is set:
+      if pending.escalation_trigger == "budget_exhausted":
+        ends = not any(is_new_comment(state, pending.issue_id, "review", c) for c in actionable)
+      else:
+        ends = fingerprint != pending.escalation_subject
+      if not ends:
+        pending.pending_retry_at = now + poll_interval
+        state.pending_reactions[key] = pending
+        continue
+      end_escalation(pending)
+      delete(state.reaction_attempts, rkey)
+
     if not any(is_new_comment(state, pending.issue_id, "review", c) for c in actionable):
       if all(c.id in state.handed_off_comments[rkey] for c in actionable):
         store.mark_reaction_dispatched(pending.issue_id, "review")
@@ -251,12 +481,13 @@ function reconcile_review_comments(state):
 
     # Retry slot arbitration
     if retry_slot_incumbent(state, pending.issue_id) is not nil:
-      pending.created_at = now
+      pending.watch_restarted_at = now
       state.pending_reactions[key] = pending
       continue
 
     # Continuation budget; a set reaching this point holds a new comment
     turn_count = state.reaction_attempts[rkey]
+    # The escalation keeps the entry pending with the escalation recorded
     if turn_count >= review_config.max_continuation_turns:
       escalate_review_failure(state, pending, turn_count)
       continue
@@ -291,14 +522,14 @@ function reconcile_review_comments(state):
 ### 16.4 Dispatch One Issue
 
 ```text
-function dispatch_issue(issue, state, attempt):
+function dispatch_issue(issue, state, attempt, release):
   (agent_kind, template_id, rule_name) = resolve_rule(
     issue, state.dispatch_cfg, hop_route_of(state, issue.id),
     state.default_agent_kind, state.default_template_id
   )
-  // The lineage holds the stage.previous pair and the chain identifier. A
-  // dispatch no hop reached starts a chain; a retry passes the lineage it
-  // froze instead (Section 16.6).
+  // The lineage holds the stage.previous pair, the chain identifier, and the
+  // pass dispatch time. A dispatch no hop reached starts a chain; a retry
+  // passes the lineage it froze instead (Section 16.6).
   stage_lineage = with_chain_id(fresh_lineage(state, issue.id, rule_name))
 
   // The selection is frozen per claim; the settings are resolved for every attempt.
@@ -308,8 +539,18 @@ function dispatch_issue(issue, state, attempt):
     log_error("agent settings refused")
     return state
 
+  // A release hands the run its park context and, when the selection still
+  // names the kind and template the parked run used, its session. The worker
+  // renders the context as `park` on turn 1 and on no later turn.
+  park_context = null
+  resume_session_id = null
+  if release != null:
+    park_context = park_context_of(release, issue.comments)
+    resume_session_id = resume_session_for(release.session_id,
+      (release.agent_kind, release.template_id), (agent_kind, template_id))
+
   worker = spawn_worker(
-    fn -> run_agent_attempt(issue, attempt, attempt_settings.settings, parent_orchestrator_pid) end
+    fn -> run_agent_attempt(issue, attempt, attempt_settings.settings, parent_orchestrator_pid, park_context, resume_session_id) end
   )
 
   if worker spawn failed:
@@ -323,6 +564,8 @@ function dispatch_issue(issue, state, attempt):
     monitor_handle,
     identifier: issue.identifier,
     issue,
+    dispatch_id,                                         // minted per dispatch, never reused
+    events: register_event_buffer(state, dispatch_id),   // bounded buffer of the run's retained agent events (Section 13.9)
     agent_kind,
     template_id,
     rule_name,
@@ -344,6 +587,11 @@ function dispatch_issue(issue, state, attempt):
     retry_attempt: normalize_attempt(attempt),
     started_at: now_utc()
   }
+  entry = state.running[issue.id]
+  if entry.stage_lineage.dispatched_at is zero:
+    entry.stage_lineage.dispatched_at = entry.started_at   // the first run of a pass dates the pass
+  mark_stage_hop_dispatched(state, issue.id)
+  record_running_pass(issue.id, entry)                   // only with a rule, a chain, and no reaction kind; a failure is logged
 
   state.claimed.add(issue.id)
   state.retry_attempts.remove(issue.id)
@@ -420,12 +668,29 @@ function mark_observed(state, issue_id):
   persist_stage_hop_observed(issue_id)                   // a failure is logged; the runtime value stands
 ```
 
-The hold reads at most once per hop and only when the listing lacks the target label. A held issue the listing omits is never read here; reconciliation reads it every tick (§16.3). The retry lane needs no hold, because a made hop leaves the issue with no queued retry. The dispatch records the frozen stage lineage the render reads: `fresh_lineage(state, issue_id, rule_name)` returns the hop's source rule, outcome, and chain identifier when the issue holds a hop record whose target is `rule_name`, and an empty lineage otherwise, and `with_chain_id(lineage)` fills an empty chain identifier with a fresh random value that is never a dispatch or session identifier. A retry that keeps its frozen rule reuses the lineage it froze, an empty chain from a row written before chains were recorded included; a retry routed afresh computes it as a poll tick does. Every worker prompt render passes the pair with `stage.current`, which is the rule name when the rule carries a stage label and empty otherwise (§12.1).
+The hold reads at most once per hop and only when the listing lacks the target label. A held issue the listing omits is never read here; reconciliation reads it every tick (§16.3). The retry lane needs no hold, because a made hop leaves the issue with no queued retry. The dispatch records the frozen stage lineage the render reads: `fresh_lineage(state, issue_id, rule_name)` returns the hop's source rule, outcome, chain identifier, and pass dispatch time when the issue holds a hop record whose target is `rule_name`, and an empty lineage otherwise, and `with_chain_id(lineage)` fills an empty chain identifier with a fresh random value that is never a dispatch or session identifier. A retry that keeps its frozen rule reuses the lineage it froze, an empty chain from a row written before chains were recorded included, and with it the pass dispatch time; a retry routed afresh computes it as a poll tick does. Every worker prompt render passes the pair with `stage.current`, which is the rule name when the rule carries a stage label and empty otherwise (§12.1).
+
+The dispatch records the pass dispatch time on the lineage as its own start when the lineage holds none, so the first run of a pass dates the pass and every later run of it keeps that time. It then marks the issue's hop record dispatched, which ends the issue's listing between stages, the interval from the hop until a run of the issue is dispatched (§13.7.2). Poll-tick dispatches and retry dispatches both pass through this step. A poll-tick dispatch whose lineage the hop record supplies reads, before the mark, whether the record's `run_dispatched` was still false, and records that as its run's `first_after_hop`; a retry dispatch records false:
+
+```text
+function mark_stage_hop_dispatched(state, issue_id):
+  hop = state.stage_hops[issue_id]
+  if hop is absent or hop.run_dispatched:
+    return
+  hop.run_dispatched = true
+  persist_stage_hop_dispatched(issue_id)                 // a failure is logged; the runtime value stands
+```
 
 ### 16.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
 function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
+  // Every after_run call below passes SORTIE_RUN_OUTCOME. run_outcome(worker_ctx,
+  // kind, err, declared) groups the status the exit that follows the hook
+  // reports into succeeded, stopped, failed, or cancelled (Section 8.1), with
+  // the ceiling-stop cause read from worker_ctx. It is decided before the
+  // handoff evidence verdict, so a handoff the policy later withholds still
+  // reads succeeded here.
   cfg = current_config()
   turn_timeout_ms = cfg.agent.turn_timeout_ms  // snapshot at attempt start; bounds every turn below, including the self-review phase's turns (not re-read per turn)
 
@@ -442,6 +707,13 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
       else:
         log_info("dispatch in-progress transition succeeded", issue.id)
         metrics.inc_dispatch_transitions("success")
+        // The run continues on every outcome of this read, and the worker's local issue keeps the dispatch read.
+        read_started_at = now()
+        reads, read_err = tracker.fetch_issue_states_and_labels_by_ids([issue.id])
+        if read_err:
+          log_warn("issue read after in-progress transition failed", issue.id, read_err)
+        else if reads[issue.id] is present:
+          send(orchestrator_channel, {issue_read, issue.id, dispatch_id, reads[issue.id], read_started_at})
 
   // Every hook, verification command, triage run, git inspection, and
   // agent launch below goes through the workflow's execution environment
@@ -456,21 +728,48 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  // Credential-verification step (§10.9): a separate session, one
-  // fixed request, stopped, before the working session starts.
-  notify("verifying the agent credential")
-  verify_result, verify_err = agent_adapter.verify_credential(workspace=workspace.path, settings=settings.passthrough)
-  fold verify_result into the run's usage mirror
-  offset = the mirror's componentwise watermark
-  if verify_err failed:
-    run_hook_best_effort("after_run", workspace.path)
-    fail_worker("agent session start error", verify_err)
-  log_info("agent credential verified", duration_ms)
+  // Credential-verification step (§10.9): a separate session, one fixed
+  // request, stopped, before the working session starts, unless the
+  // process-lifetime cache holds a fresh proof of the same agent setup.
+  // The key digests the setup and never reaches a log, an event, or an error.
+  key, keyed = verification_key(agent_kind, settings)
+  skipped = false
+  if keyed and verification_cache.fresh(key, now()):
+    log_info("agent credential verification skipped", proven_at)
+    verify_result = zero usage  // no verification event, no request count, a zero offset
+    skipped = true
+  else:
+    notify("verifying the agent credential")
+    verify_result, verify_err = agent_adapter.verify_credential(workspace=workspace.path, settings=settings.passthrough)
+    fold verify_result into the run's usage mirror
+    offset = the mirror's componentwise watermark
+    if verify_err failed:
+      if keyed and worker_ctx is not done:
+        verification_cache.evict(key)  // a failure is never cached
+      run_hook_best_effort("after_run", workspace.path, {
+        SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, worker_ctx is done), verify_err)
+      })
+      fail_worker("agent session start error", verify_err)
+    log_info("agent credential verified", duration_ms)
+    if keyed:
+      verification_cache.record(key, now())
+
+  // Every later fail_worker with an error exit evicts the key when keyed and
+  // either no working turn of this run has succeeded or the error carries
+  // kind credential_unverified. A cancelled run evicts nothing.
+  proven = false
 
   session = agent_adapter.start_session(workspace=workspace.path, settings=settings.passthrough)
   if session failed:
-    run_hook_best_effort("after_run", workspace.path)
+    run_hook_best_effort("after_run", workspace.path, {
+      SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, worker_ctx is done), "agent session startup error")
+    })
     fail_worker("agent session startup error")
+
+  if skipped:
+    // A skipped run has no verification request to mark its local usage as
+    // measured, so under usage arrival "none" it reports unmeasured.
+    run_measured_locally = false
 
   max_turns = config.agent.max_turns
   turn_number = 1
@@ -483,20 +782,30 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
       // the ceiling's own stop: without it, a persistent-session kind would
       // start a runtime turn on an already-cancelled worker context.
       agent_adapter.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", workspace.path, {
+        SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_cancelled)
+      })
       exit_cancelled()
 
-    if turn_number == 1:
+    if reaction_kind != "":
+      # a reaction run gets the operator's branch for its continuation key
+      # or the key's built-in prompt, on every turn
+      prompt = build_reaction_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns, continuation_context)
+      if turn_number == 1:
+        presented = the IDs of every comment continuation_context carries, per review kind
+    else if turn_number == 1:
       # presented holds, per review kind, the comment IDs this render showed
-      # the agent; a fresh run keeps a seeded render only when it contains
+      # the agent; a new run keeps a seeded render only when it contains
       # every line of the unseeded one, in order
-      prompt, presented = render_first_turn_prompt(workflow_template, issue, attempt, max_turns, continuation_context, fresh_run)
+      prompt, presented = render_first_turn_prompt(workflow_template, issue, attempt, max_turns, continuation_context)
     else:
       prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
     cancelled_at_ending = worker_ctx is done  // read immediately after the call, before any teardown below
     if prompt failed:
       agent_adapter.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", workspace.path, {
+        SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, cancelled_at_ending), "prompt error")
+      })
       fail_worker(exit_kind_at_ending(worker_ctx, cancelled_at_ending), "prompt error")
 
     // The derived turn context bounds only this call; worker_ctx itself is
@@ -518,8 +827,17 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
 
     if turn_result failed:
       agent_adapter.stop_session(session)  // on worker_ctx, never the derived turn context
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", workspace.path, {
+        SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, cancelled_at_ending), turn_err)
+      })
       fail_worker(exit_kind_at_ending(worker_ctx, cancelled_at_ending), turn_err)
+
+    // A turn proves the setup when it returned no error and ended as
+    // completed; a turn that returned no error with another ending does not.
+    if turn_err == null AND turn_result.exit_reason == turn_completed:
+      proven = true
+      if keyed:
+        verification_cache.record(key, now())
 
     status = read_sortie_status(workspace.path)  // token, plus the statement when the token is recognized
     if status.token in ["blocked", "needs-human-review", "no-change-needed"]:
@@ -534,7 +852,9 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
     cancelled_at_ending = worker_ctx is done
     if refreshed_issue failed:
       agent_adapter.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", workspace.path, {
+        SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, cancelled_at_ending), "issue state refresh error")
+      })
       fail_worker(exit_kind_at_ending(worker_ctx, cancelled_at_ending), "issue state refresh error")
 
     if refreshed_issue[0] is present and refreshed_issue[0].state is not empty:
@@ -563,7 +883,7 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
   review_metadata = null
   phase_err = null
   phase_cut = false
-  cfg = current_config()  // re-read for dynamic reload; NOT the source of turn_timeout_ms (R-9)
+  cfg = current_config()  // re-read for dynamic reload; NOT the source of turn_timeout_ms
   signal_admits = pending_reason == "" OR pending_reason == "needs-human-review" OR pending_reason == "no-change-needed"
   admitted = cfg.self_review.enabled AND issue.state is active AND deps.Posture.DrivesIssueState() AND signal_admits
   if admitted AND worker_ctx is not done:
@@ -616,14 +936,16 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
   if phase_err != null:
     agent_adapter.stop_session(session)  // on worker_ctx, never the derived turn context
     run_hook_best_effort("after_run", workspace.path, {
+      SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_kind_at_ending(worker_ctx, cancelled_at_ending), phase_err),
       SORTIE_SELF_REVIEW_STATUS: self_review_status,
       SORTIE_SELF_REVIEW_SUMMARY_PATH: workspace.path + "/.sortie/review_summary.md"
     })
     fail_worker(exit_kind_at_ending(worker_ctx, cancelled_at_ending), phase_err, review_metadata=review_metadata)
 
-  if phase_cut AND cancellation_cause(worker_ctx) == token_ceiling_stop:
+  if phase_cut AND cancellation_cause(worker_ctx) == ceiling_stop:
     agent_adapter.stop_session(session)
     run_hook_best_effort("after_run", workspace.path, {
+      SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_cancelled),
       SORTIE_SELF_REVIEW_STATUS: self_review_status,
       SORTIE_SELF_REVIEW_SUMMARY_PATH: workspace.path + "/.sortie/review_summary.md"
     })
@@ -631,6 +953,7 @@ function run_agent_attempt(issue, attempt, settings, orchestrator_channel):
 
   agent_adapter.stop_session(session)
   run_hook_best_effort("after_run", workspace.path, {
+    SORTIE_RUN_OUTCOME: run_outcome(worker_ctx, exit_normal, declared=pending_reason),
     SORTIE_SELF_REVIEW_STATUS: self_review_status,
     SORTIE_SELF_REVIEW_SUMMARY_PATH: workspace.path + "/.sortie/review_summary.md"
   })
@@ -660,10 +983,29 @@ on_worker_exit(issue_id, reason, worker_result, state):
 
   // A stop request the run's own cancellation confirms gets its own
   // status, distinct from a stall, terminal-state, or shutdown cancel.
-  if reason == cancelled AND worker_result.stopped_by_token_ceiling AND running_entry.token_ceiling_stop_request is not null:
+  if reason == cancelled AND worker_result.stopped_by_ceiling AND running_entry.ceiling_stop_request is not null:
     status = "budget_stopped"
-    run_error = token_ceiling_stop_error(running_entry.issue_tokens_completed + running_entry.agent_total_tokens, running_entry.token_ceiling_stop_request.budget_tokens)
-    report_token_ceiling_stop(log, metrics, running_entry.token_ceiling_stop_request)
+    if running_entry.ceiling_stop_request.reason == token_budget:
+      // uncached_tokens: the entry's total tokens less its cache-read tokens, floored at zero
+      run_error = token_ceiling_stop_error(running_entry.issue_tokens_completed + uncached_tokens(running_entry), running_entry.ceiling_stop_request.budget_tokens)
+    else:  // money_budget
+      run_error = money_ceiling_stop_error(issue_cost(running_entry), running_entry.ceiling_stop_request.budget_usd)
+    report_ceiling_stop(log, metrics, running_entry.ceiling_stop_request)
+  else if reason == cancelled AND cancel_cause(worker_result) is not null:
+    // The reason the orchestrator cancelled the run: stall detection, a terminal
+    // or inactive tracker state, or shutdown. It replaces any error the worker
+    // reported while the cancellation landed.
+    run_error = cancel_cause(worker_result)
+
+  # A provider usage-limit refusal. The status is usage_limited
+  # only for an accepted reset on a run whose token figure is measured with
+  # zero output tokens, so the agent did nothing. Every other refusal records
+  # the status above and counts toward agent.max_sessions.
+  refused = reason == error and run_error is a usage_limit error
+  reset, limit, waits = usage_limit_reset(run_error, now()) if refused else (none, none, false)   // accepts an instant after now, capped at 7 days; the only validation of an agent-reported instant
+  no_work = running_entry.token_figure_measured and running_entry.agent_output_tokens == 0
+  if waits and no_work:
+    status = "usage_limited"
 
   handoff_path = false
   evidence_withheld = false
@@ -733,7 +1075,28 @@ on_worker_exit(issue_id, reason, worker_result, state):
       elif evidence.verdict == "work observed":
         evidence_work_observed = true
 
-  sqlite.persist_run_attempt(running_entry, status, run_error)
+  # A session that failed to start, without a startup_failed event from its
+  # adapter, gets one from Sortie whose message is the start error. A start
+  # that ended in cancellation gets none.
+  if worker_result.startup_error is not null and reason == error
+      and not running_entry.events.has_startup_failed:
+    retain_event(running_entry, startup_failed(worker_result.startup_error))
+
+  # The retained events are stored with the run's row in one transaction.
+  # When only the events fail to store, the row stays and the events are held
+  # in memory for a bounded retry off the event loop (Section 13.9).
+  events_result = sqlite.persist_run_attempt_with_events(running_entry, status, run_error, running_entry.events)
+  if events_result is events_failed:
+    log_warn("failed to persist run events")
+    hold_events_for_retry(running_entry.dispatch_id, running_entry.events)
+  release_event_buffer(state, running_entry.dispatch_id)   // after the write, whatever it returned
+
+  # A run of kind K on model M that exits normally proves the window open: it
+  # clears the kind-wide hold of K and the hold of K on M, each only when the
+  # run started after the hold began. A failed store write is logged and the
+  # clear stands in memory.
+  if reason == normal:
+    clear_usage_limit_holds(state, running_entry)
 
   # The absence sequence is reconstructed from run_history rather than
   # from a verdict column (Section 19.2), so both steps below follow the
@@ -752,6 +1115,10 @@ on_worker_exit(issue_id, reason, worker_result, state):
       # The sequence stops at the ceiling: parking cancels the retry,
       # releases the claim, and holds the issue out of dispatch until a
       # later tick observes a release (Section 14.2).
+      # The park records the session, template, and stop statement of this
+      # run; the session and template only when the run had no reaction kind
+      # and ended normally, so the first run after a release resumes a
+      # trustworthy session (Section 14.2).
       park_issue(state, issue_id, reason="handoff_absence")
       absence_parked = true
 
@@ -779,6 +1146,7 @@ on_worker_exit(issue_id, reason, worker_result, state):
       else:
         cancel_retry(state, issue_id)
         state.claimed.remove(issue_id)
+      delete_live_pass(issue_id, "running")           // a failure is logged
       notify_observers()
       return state
 
@@ -792,6 +1160,7 @@ on_worker_exit(issue_id, reason, worker_result, state):
       state.claimed.remove(issue_id)
       reset_stage_hop(state, issue_id, "terminal")
       log_info("handoff suppressed for terminal issue", observation)
+      delete_live_pass(issue_id, "running")           // a failure is logged
       notify_observers()
       return state
 
@@ -948,14 +1317,38 @@ on_worker_exit(issue_id, reason, worker_result, state):
             issue_id, identifier, display_id, attempt, kind
           }
   else:
-    if retry_slot_incumbent(state, issue_id) is nil:
+    # session.failed is published as for any failed exit, except that a
+    # refused exit of a run dispatched with usage_limit_notified publishes
+    # none. The first refusal of an episode publishes; a retry inside the
+    # episode publishes no session.started either.
+    if waits:
+      key = (running_entry.agent_kind, limit.model_only, running_entry.configured_model if limit.model_only else "")
+      hold = record_usage_limit_hold(state, key, reset, now())   // saved when it changed
+      if once != null:
+        state.claimed.remove(issue_id)                 // the next run meets the persisted hold
+        log_warn("worker run refused by usage limit, releasing claim", reset)
+      elif retry_slot_incumbent(state, issue_id) is nil:
+        attempt = next_attempt_from(running_entry)
+        state = schedule_retry(state, issue_id, attempt, {
+          identifier: running_entry.identifier,
+          error: format("worker exited: %reason"),
+          due_at: max(hold.resets_at, now() + backoff_delay(attempt)),
+          trigger: "usage_limit",
+          usage_limit_notified: true
+        })
+      # else: an incumbent retry takes usage_limit_notified: true
+    elif retry_slot_incumbent(state, issue_id) is nil:
       state = schedule_retry(state, issue_id, next_attempt_from(running_entry), {
         identifier: running_entry.identifier,
-        error: format("worker exited: %reason")
+        error: format("worker exited: %reason"),
+        usage_limit_notified: refused                  // a refusal with no usable reset keeps the ordinary backoff
       })
     # else: the retry slot (Section 7.5) is occupied, so this exit defers
     # to the incumbent instead of scheduling a backoff retry.
 
+  // After the run's row, its hop result, and any retry row the exit saved,
+  // on every exit kind, so a finished pass never reads as still in its stage.
+  delete_live_pass(issue_id, "running")                 // a failure is logged
   notify_observers()
   return state
 ```
@@ -987,8 +1380,13 @@ function advance_stage(state, entry, result, declared) -> decision:
     count: count + 1, source_rule: source.name, target_rule: target.name,
     target_label: target.stage,
     previous_outcome: "no_change" if declared else "succeeded",
-    source_dispatch_id: entry.dispatch_id, target_observed: false,
-    chain_id: entry.stage_lineage.chain_id
+    source_dispatch_id: entry.dispatch_id, target_observed: false, run_dispatched: false,
+    chain_id: entry.stage_lineage.chain_id,
+    dispatched_at: entry.stage_lineage.dispatched_at,
+    display_identifier: entry.issue.display_id,
+    issue_title: entry.issue.title, issue_url: entry.issue.url,
+    issue_type: entry.issue.issue_type, issue_state: entry.issue.state,
+    issue_labels: labels_after_hop(entry.dispatch_labels, cfg.dispatch.rules, target.stage)
   }
   persist_stage_hop(state.stage_hops[issue_id])        // a failure is logged; the runtime record stands
 
@@ -999,7 +1397,7 @@ function advance_stage(state, entry, result, declared) -> decision:
 
   left = []
   for label in configured_stage_labels(cfg.dispatch):  // list order, deduplicated case-insensitively
-    if label equals target.stage or entry.issue.labels does not contain label:
+    if label equals target.stage or entry.dispatch_labels does not contain label:
       continue                                         // only labels the dispatch read showed
     err = tracker.remove_label(issue_id, label)
     if err: left.append(label)
@@ -1017,21 +1415,38 @@ function report_stage_hop(state, entry, run_id, hop):
   deliver_detached(route(event))                       // on a failed tracker_comment send: log_warn("stage event comment failed")
 ```
 
+`labels_after_hop` returns the labels the removal loop below leaves on the issue: the dispatch read's labels in order, without each stage label of the configured rules other than `target.stage`, followed by `target.stage` lowercased when no kept label matches it. The hop reads `entry.dispatch_labels` and never `entry.issue.labels`, so a stage label added during the run is neither removed nor recorded. The record is written before the removals run, so a removal that fails leaves a stage label on the issue that the record lacks until a run is dispatched.
+
 `advance_stage` returns a decision whose result is `advanced`, `partial`, `failed`, `ceiling`, or empty when no hop was due, and `made` holds for `advanced` and `partial`. The exit calls `report_stage_hop` for every non-empty result: for a hop not made it records the result and routes the event before the handoff write, and for a made hop after the label removals.
 
 The hop leaves the issue in its active tracker state with the target's stage label added and the source's label removed, does not increment `sortie_handoff_transitions_total`, and writes no state; the next dispatch performs the in-progress transition like any dispatch. A run that never reaches the handoff arm (a blocked soft stop, a terminal exit, a withheld verdict, an abnormal exit, a label-command dispatch, or an unset handoff state) never reaches `advance_stage`.
 
 ```text
-on_retry_timer(issue_id, state):
+on_retry_timer(issue_id, state, release_held=false):
+  // reports true as a second result only where it released a retry the spend ceiling or a usage-limit hold held; every other return reports false
+  // every schedule_retry here records the trigger "timer"
+  // a fire an operator request brought forward puts the retry back at retry_entry.attempt and the due time the request replaced (§8.4), in place of the attempt number and delay each put-back below sets
   retry_entry = state.retry_attempts.pop(issue_id)
   if missing:
     return state
+
+  # After the parked and handoff-absence gates, before the budget gates (§8.4).
+  # Touches no persisted entry and no claim, increments no retry counter, and
+  # keeps the attempt number, error, and continuation fields.
+  spend_hold = evaluate_spend_ceiling(state, now())
+  if spend_hold != none:
+    if release_held:                             // --once: the run does not wait for the window to reset
+      state.claimed.remove(issue_id)                   // the persisted retry entry stays as it is for the next process
+      log_warn("retry held by spend ceiling, releasing claim", reason=spend_hold, attempt=retry_entry.attempt)
+      return state, true
+    log_debug("retry held by spend ceiling, rechecking")
+    return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, hold_rearmed=true)
 
   issue, err = tracker.fetch_issue_by_id(issue_id)
   if err:
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
       identifier: retry_entry.identifier,
-      error: "retry poll failed",
+      error: "retry issue fetch failed",
       session_id: retry_entry.session_id
     })
 
@@ -1055,6 +1470,8 @@ on_retry_timer(issue_id, state):
     })
 
   if available_slots(state) == 0:
+    if retry_entry.hold_rearmed:                         // a held retry keeps its attempt number until a slot frees; the same holds when no SSH host is free
+      return rearm_retry(state, issue_id, retry_entry.attempt, state.poll_interval_ms, retry_entry, hold_rearmed=true)
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
       identifier: issue.identifier,
       error: "no available orchestrator slots",
@@ -1065,6 +1482,23 @@ on_retry_timer(issue_id, state):
   selection = retry_selection(state.cfg, template_held, frozen, issue, hop_route_of(state, issue_id))
   if selection != frozen:
     log_info("retry dispatching on the selection the configuration in force gives it")
+
+  # After the selection settles the agent kind and before the adapter lookup.
+  # A fire an operator request brought forward is not gated here; the spend
+  # gate above still holds it. The gate runs on the configured model of the
+  # selection, so a retry routed to another model of a held kind passes a
+  # model hold.
+  if retry_entry.due_before_request is empty:
+    model = configured_model(state.cfg, selection)
+    held, hold, release_at = usage_limit_gate(state, selection.agent_kind, model,
+      own_retry=(retry_entry.origin_trigger == "usage_limit"), grace=state.poll_interval_ms, now())
+    if held:
+      release_host(issue_id)
+      if release_held:                                 // --once: the run does not wait for the reset
+        state.claimed.remove(issue_id)                 // the persisted retry entry stays as it is for the next process
+        return state, true
+      log_debug("retry held by usage limit, rechecking at release")
+      return rearm_retry(state, issue_id, retry_entry.attempt, release_at, retry_entry, hold_rearmed=true)
   lineage = retry_entry.stage_lineage
   if selection.rule_name != frozen.rule_name:
     lineage = fresh_lineage(state, issue_id, selection.rule_name)
@@ -1072,6 +1506,9 @@ on_retry_timer(issue_id, state):
   resume_session_id = retry_entry.session_id
   if selection.agent_kind != frozen.agent_kind or selection.template_id != frozen.template_id:
     resume_session_id = null
+  resume_usage = null
+  if resume_session_id is not null:
+    resume_usage = store.latest_resume_usage(issue_id, resume_session_id)   // newest run_history row for the pair; null when none or its columns are NULL; a lookup error is logged and leaves null
 
   if agent_adapter(selection.agent_kind) is unavailable:
     return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
@@ -1092,11 +1529,13 @@ on_retry_timer(issue_id, state):
     log_info("rule settings no longer present, attempt runs on the kind's top-level settings")
 
   return dispatch_issue(issue, state, attempt=retry_entry.attempt,
-    resume_session_id=resume_session_id, selection=selection, attempt_settings=attempt_settings,
-    stage_lineage=lineage)
+    resume_session_id=resume_session_id, resume_usage=resume_usage, selection=selection,
+    attempt_settings=attempt_settings, stage_lineage=lineage)
 ```
 
 A changed settings result never clears `resume_session_id`; only a changed kind or template does.
+
+`rearm_retry` arms the retry timer for the entry's own fields at the instant the caller passes, one poll interval ahead for a spend hold and the hold's release instant for a usage-limit hold, with the attempt number and error the caller passes. It writes no persisted entry, deletes none, and counts no retry. While a spend window holds, a retry whose timer fires, a pull request reaction continuation included, therefore returns to the retry slot unchanged except for its due time, and the first fire after the hold ends dispatches with the attempt number the retry had. The entry carries `hold_rearmed` only until a fire takes any other path.
 
 `retry_selection` keeps the frozen triple, with a retired kind replaced by its replacement kind, while the kind is still reachable through `agent.kind`, `dispatch.default.agent`, or a rule and the template is still held, and otherwise returns `resolve_rule` over the configuration in force, passing the issue's hop route (§5.3.9, §8.4). A retry that finds its issue terminal or no longer active ends the issue's hop count. A retry that finds its issue in no state never touches the hop record.
 

@@ -165,6 +165,7 @@ func allReactionsExitParams(t *testing.T, cfg config.EnvironmentConfig) HandleWo
 	params.SCMAdapter = &scmAdapterStubExit{}
 	params.SCMMetadata = SCMMetadataSource(cfg)
 	params.AutoMergeReactionConfigured = true
+	params.ReviewReactionConfigured = true
 	params.BotReviewReactionConfigured = true
 	params.MergeConflictReactionConfigured = true
 	params.LabelReviewReactionConfigured = true
@@ -247,6 +248,7 @@ func TestRecoverPendingReactions_IgnoresAForgedSCMFileUnderARepository(t *testin
 		params := defaultRecoveryParams(wsRoot, tracker)
 		params.SCMMetadata = SCMMetadataSource(smolvmRepositoryEnvironment())
 		params.AutoMergeReactionConfigured = true
+		params.ReviewReactionConfigured = true
 		params.BotReviewReactionConfigured = true
 		params.MergeConflictReactionConfigured = true
 		params.LabelReviewReactionConfigured = true

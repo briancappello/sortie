@@ -3,15 +3,14 @@ package persistence
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// createLegacyRunHistoryTable creates a run_history table carrying only
-// the migration-001 columns, with no schema_migrations tracking and none
-// of the optional column groups.
 func createLegacyRunHistoryTable(t *testing.T, s *Store) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(), `CREATE TABLE run_history (
@@ -30,10 +29,6 @@ func createLegacyRunHistoryTable(t *testing.T, s *Store) {
 	}
 }
 
-// createPartialRunHistoryTable creates a run_history table carrying
-// turns_completed and review_metadata but neither rule_name/template_id
-// nor the four token columns, matching this repository's own .sortie.db
-// shape (schema version 9).
 func createPartialRunHistoryTable(t *testing.T, s *Store) {
 	t.Helper()
 	createLegacyRunHistoryTable(t, s)
@@ -176,19 +171,34 @@ func TestRunHistoryCapabilities_Breakdowns(t *testing.T) {
 	withSettings.HasConfiguredSettings = true
 	withChains := withSettings
 	withChains.HasStageChains = true
+	withTrigger := withChains
+	withTrigger.HasTrigger = true
 	chainsWithoutSettings := full
 	chainsWithoutSettings.HasStageChains = true
+	recorded := withTrigger
+	recorded.HasFirstAfterHop, recorded.HasAgentBlocked, recorded.HasRecordedCost = true, true, true
+	withSkills := recorded
+	withSkills.HasSkills = true
+	skillsWithoutCost := withTrigger
+	skillsWithoutCost.HasSkills = true
 	tests := []struct {
-		name      string
-		caps      RunHistoryCapabilities
-		wantModel bool
-		wantChain bool
+		name        string
+		caps        RunHistoryCapabilities
+		wantModel   bool
+		wantChain   bool
+		wantTrigger bool
+		wantSkills  bool
 	}{
-		{"full tier with configured settings and stage chains", withChains, true, true},
-		{"full tier with configured settings", withSettings, true, false},
-		{"full tier without configured settings", full, false, false},
-		{"stage chains without configured settings", chainsWithoutSettings, false, false},
-		{"configured settings without the full tier", RunHistoryCapabilities{HasConfiguredSettings: true, HasStageChains: true}, false, false},
+		{"recorded cost and the skills column", withSkills, true, true, true, true},
+		{"recorded cost without the skills column", recorded, true, true, true, false},
+		{"skills column without recorded cost", skillsWithoutCost, true, true, true, false},
+		{"full tier with settings, stage chains and trigger", withTrigger, true, true, true, false},
+		{"full tier with configured settings and stage chains", withChains, true, true, false, false},
+		{"full tier with configured settings", withSettings, true, false, false, false},
+		{"full tier without configured settings", full, false, false, false, false},
+		{"stage chains without configured settings", chainsWithoutSettings, false, false, false, false},
+		{"trigger without stage chains", RunHistoryCapabilities{HasTrigger: true}, false, false, false, false},
+		{"configured settings without the full tier", RunHistoryCapabilities{HasConfiguredSettings: true, HasStageChains: true, HasTrigger: true}, false, false, false, false},
 	}
 
 	for _, tt := range tests {
@@ -201,13 +211,16 @@ func TestRunHistoryCapabilities_Breakdowns(t *testing.T) {
 			if got := tt.caps.ChainBreakdown(); got != tt.wantChain {
 				t.Errorf("%+v.ChainBreakdown() = %v, want %v", tt.caps, got, tt.wantChain)
 			}
+			if got := tt.caps.TriggerBreakdown(); got != tt.wantTrigger {
+				t.Errorf("%+v.TriggerBreakdown() = %v, want %v", tt.caps, got, tt.wantTrigger)
+			}
+			if got := tt.caps.SkillBreakdown(); got != tt.wantSkills {
+				t.Errorf("%+v.SkillBreakdown() = %v, want %v", tt.caps, got, tt.wantSkills)
+			}
 		})
 	}
 }
 
-// runAt returns a minimal RunHistory whose StartedAt and CompletedAt are
-// both completedAt, for tests that only care about the completed_at
-// range filter.
 func runAt(id, completedAt string) RunHistory {
 	return RunHistory{
 		IssueID:      id,
@@ -501,6 +514,58 @@ func TestScanRunHistoryRange(t *testing.T) {
 			t.Errorf("RunStatsRow.CacheWriteTokens = %d, want 38948", got[0].CacheWriteTokens)
 		}
 	})
+
+	t.Run("each run is visited once with its parts ordered by model and its unaccounted turns", func(t *testing.T) {
+		t.Parallel()
+
+		s := openTestStore(t)
+		migrateOrFatal(t, s)
+		ctx := context.Background()
+
+		withParts := runAt("with-parts", "2026-01-01T00:00:00Z")
+		withParts.DispatchID, withParts.UnaccountedTurns = new("dispatch-1"), 3
+		withParts.ModelUsage = map[string]ModelTokens{
+			"model-b": {InputTokens: 200, OutputTokens: 20},
+			"model-a": {InputTokens: 100, OutputTokens: 10, CacheReadTokens: 50, CacheWriteTokens: 5},
+		}
+		withParts.ModelCosts = map[string]ModelCost{
+			"model-b": {CostStatus: "unpriced"},
+			"model-a": {EstimatedCostUSD: new(1.5), CostStatus: "estimated"},
+		}
+		if _, err := s.AppendRunHistoryWithEvents(ctx, withParts, nil, unboundedRunEvents); err != nil {
+			t.Fatalf("AppendRunHistoryWithEvents: %v", err)
+		}
+		appendOrFatal(t, s, runAt("no-parts", "2026-01-02T00:00:00Z"))
+
+		caps, err := s.RunHistoryCapabilities(ctx)
+		if err != nil {
+			t.Fatalf("RunHistoryCapabilities: %v", err)
+		}
+		var got []RunStatsRow
+		if err := s.ScanRunHistoryRange(ctx, caps, nil, nil, func(row RunStatsRow) error {
+			got = append(got, row)
+			return nil
+		}); err != nil {
+			t.Fatalf("ScanRunHistoryRange: %v", err)
+		}
+
+		if len(got) != 2 || got[0].IssueID != "with-parts" || got[1].IssueID != "no-parts" {
+			t.Fatalf("ScanRunHistoryRange visited %+v, want with-parts then no-parts, once each", got)
+		}
+		wantParts := []RunModelPart{
+			{Model: "model-a", Tokens: ModelTokens{InputTokens: 100, OutputTokens: 10, CacheReadTokens: 50, CacheWriteTokens: 5}, EstimatedCostUSD: new(1.5), CostStatus: "estimated"},
+			{Model: "model-b", Tokens: ModelTokens{InputTokens: 200, OutputTokens: 20}, CostStatus: "unpriced"},
+		}
+		if !reflect.DeepEqual(got[0].Parts, wantParts) {
+			t.Errorf("RunStatsRow{with-parts}.Parts = %+v, want %+v", got[0].Parts, wantParts)
+		}
+		if got[0].UnaccountedTurns != 3 {
+			t.Errorf("RunStatsRow{with-parts}.UnaccountedTurns = %d, want 3", got[0].UnaccountedTurns)
+		}
+		if got[1].Parts != nil || got[1].UnaccountedTurns != 0 {
+			t.Errorf("RunStatsRow{no-parts} Parts, UnaccountedTurns = %+v, %d, want nil, 0", got[1].Parts, got[1].UnaccountedTurns)
+		}
+	})
 }
 
 func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
@@ -516,17 +581,84 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 			row := runAt("with-model", "2026-01-01T00:00:00Z")
 			row.ConfiguredModel, row.DisplayID = "provider/cheap", "PROJ-1"
 			row.ChainID, row.StagePrevious, row.StageResult = "chain-1", "specify", "advanced"
+			row.Trigger, row.ReactionKind = new("ci_fix"), "review"
 			appendOrFatal(t, s, row)
 			appendOrFatal(t, s, runAt("no-model", "2026-01-02T00:00:00Z"))
-		}, []string{"provider/cheap|with-model|PROJ-1|chain-1|specify|advanced", "|no-model||||"}},
+			empty := runAt("empty-trigger", "2026-01-03T00:00:00Z")
+			empty.Trigger = new("")
+			appendOrFatal(t, s, empty)
+			first := runAt("first-after-hop", "2026-01-04T00:00:00Z")
+			first.FirstAfterHop = true
+			appendOrFatal(t, s, first)
+		}, []string{
+			"with-model|provider/cheap|with-model|PROJ-1|chain-1|specify|advanced|\"ci_fix\"|review|false|false|false|true",
+			"no-model||no-model|||||<nil>||false|false|false|true",
+			"empty-trigger||empty-trigger|||||\"\"||false|false|false|true",
+			"first-after-hop||first-after-hop|||||<nil>||true|false|false|true",
+		}},
+		{"origin left empty without error on a database upgraded from before migration 028", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 27)
+			insertBareRun(t, s, "pre-028")
+			migrateOrFatal(t, s)
+		}, []string{"pre-028||MT-1|||||<nil>||false|false|false|true"}},
+		{"first_after_hop left false without error on a database before migration 032", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 31)
+			insertBareRun(t, s, "pre-032")
+		}, []string{"pre-032||MT-1|||||<nil>||false|false|false|false"}},
+		{"trigger left nil without error on a database before migration 028", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 27)
+			insertBareRun(t, s, "pre-028")
+		}, []string{"pre-028||MT-1|||||<nil>||false|false|false|false"}},
 		{"left empty without error on a database before migration 021", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 20)
 			insertBareRun(t, s, "old")
-		}, []string{"|||||"}},
+		}, []string{"old|||||||<nil>||false|false|false|false"}},
 		{"chain columns left empty without error on a database before migration 024", func(t *testing.T, s *Store) {
 			migrateToVersion(t, s, 23)
 			insertBareRun(t, s, "old")
-		}, []string{"|||||"}},
+		}, []string{"old|||||||<nil>||false|false|false|false"}},
+		{"funnel columns hidden without error on a database before migration 037", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 36)
+			insertBareRun(t, s, "pre-037")
+		}, []string{"pre-037||MT-1|||||<nil>||false|false|false|false"}},
+		{"a row from before migration 037 reads as not blocked after migrating", func(t *testing.T, s *Store) {
+			migrateToVersion(t, s, 36)
+			insertBareRun(t, s, "pre-037")
+			migrateOrFatal(t, s)
+		}, []string{"pre-037||MT-1|||||<nil>||false|false|false|true"}},
+		{"blocked run and handoff-withheld failure flagged by status and error prefix", func(t *testing.T, s *Store) {
+			migrateOrFatal(t, s)
+			withError := func(id, completedAt, status string, errText *string) RunHistory {
+				row := runAt(id, completedAt)
+				row.Status, row.Error = status, errText
+				return row
+			}
+			blocked := runAt("blocked", "2026-01-01T00:00:00Z")
+			blocked.AgentBlocked = true
+			appendOrFatal(t, s, blocked)
+			appendOrFatal(t, s, withError("withheld", "2026-01-02T00:00:00Z", "failed", new(HandoffAbsenceErrorPrefix+"no label")))
+			appendOrFatal(t, s, withError("other-error", "2026-01-03T00:00:00Z", "failed", new("agent crashed")))
+			appendOrFatal(t, s, withError("no-error", "2026-01-04T00:00:00Z", "failed", nil))
+			appendOrFatal(t, s, withError("not-failed", "2026-01-05T00:00:00Z", "succeeded", new(HandoffAbsenceErrorPrefix+"no label")))
+		}, []string{
+			"blocked||blocked|||||<nil>||false|true|false|true",
+			"withheld||withheld|||||<nil>||false|false|true|true",
+			"other-error||other-error|||||<nil>||false|false|false|true",
+			"no-error||no-error|||||<nil>||false|false|false|true",
+			"not-failed||not-failed|||||<nil>||false|false|false|true",
+		}},
+		{"skills read back as stored, and NULL as nil, beside the model column", func(t *testing.T, s *Store) {
+			migrateOrFatal(t, s)
+			stored := runAt("stored", "2026-01-01T00:00:00Z")
+			stored.ConfiguredModel, stored.Skills = "provider/cheap", new(`[{"skill":"plan"}]`)
+			unrecorded := runAt("unrecorded", "2026-01-02T00:00:00Z")
+			unrecorded.ConfiguredModel = "provider/cheap"
+			appendOrFatal(t, s, stored)
+			appendOrFatal(t, s, unrecorded)
+		}, []string{
+			`stored|provider/cheap|stored|||||<nil>||false|false|false|true|[{"skill":"plan"}]`,
+			"unrecorded|provider/cheap|unrecorded|||||<nil>||false|false|false|true",
+		}},
 		{"a legacy table with only the base columns still scans", createLegacyRunHistoryTable, nil},
 	}
 
@@ -544,7 +676,15 @@ func TestScanRunHistoryRange_OptionalColumns(t *testing.T) {
 
 			var got []string
 			err = s.ScanRunHistoryRange(ctx, caps, nil, nil, func(row RunStatsRow) error {
-				got = append(got, strings.Join([]string{row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult}, "|"))
+				trigger := "<nil>"
+				if row.Trigger != nil {
+					trigger = strconv.Quote(*row.Trigger)
+				}
+				entry := strings.Join([]string{row.IssueID, row.ConfiguredModel, row.Identifier, row.DisplayID, row.ChainID, row.StagePrevious, row.StageResult, trigger, row.ReactionKind, strconv.FormatBool(row.FirstAfterHop), strconv.FormatBool(row.AgentBlocked), strconv.FormatBool(row.HandoffWithheld), strconv.FormatBool(caps.FunnelBreakdown())}, "|")
+				if row.Skills != nil {
+					entry += "|" + *row.Skills
+				}
+				got = append(got, entry)
 				return nil
 			})
 

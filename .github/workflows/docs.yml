@@ -18,7 +18,6 @@ on:
       - Makefile
       - default.mk
       - .github/workflows/docs.yml
-  # External pages change without a commit here, and only this run checks them.
   schedule:
     - cron: '23 5 * * 1'
   workflow_dispatch:
@@ -27,7 +26,6 @@ permissions:
   contents: read
 
 concurrency:
-  # A push to main must not cancel the scheduled run and trigger a false alarm.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
@@ -44,10 +42,8 @@ jobs:
           persist-credentials: false
 
       - name: Install lychee
-        uses: sortie-ai/shared-workflows/.github/actions/setup-lychee@12099056fde09c3b1ef701128316e9fb883eba90 # v1.1.0
+        uses: sortie-ai/shared-workflows/.github/actions/setup-lychee@6d471deb70b0fee52d42366fb84f76b95d8f957a # v1.2.0
 
-      # Pushes and pull requests keep the Makefile's offline default, so a
-      # third-party outage cannot block a merge.
       - name: Check links and anchors
         env:
           EVENT: ${{ github.event_name }}
@@ -62,7 +58,6 @@ jobs:
     name: Notify Discord
     runs-on: ubuntu-latest
     needs: [links]
-    # Pushes and pull requests already show their result to whoever made them.
     if: >-
       (failure() || cancelled())
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')

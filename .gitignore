@@ -39,3 +39,8 @@ __pycache__
 
 # Recorded CI job logs used as test fixtures; a global *.log rule must not hide them.
 !**/testdata/*.log
+
+# Frontend dependencies, and the committed dashboard build output re-included last so no earlier pattern or global excludes file can hide it.
+/web/node_modules/
+!/internal/server/ui/dist/
+!/internal/server/ui/dist/**

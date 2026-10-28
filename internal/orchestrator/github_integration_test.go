@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	_ "github.com/sortie-ai/sortie/internal/agent/mock"
 	_ "github.com/sortie-ai/sortie/internal/scm/github"
@@ -317,47 +319,10 @@ func TestGitHubIntegration_FullDispatchCycle(t *testing.T) {
 	// Poll the GitHub issue for the handoff transition to complete.
 	// HandleWorkerExit persists run history before calling TransitionIssue,
 	// so we cannot rely on run history alone; we must wait for the actual
-	// label swap and state change on GitHub.
+	// label swap on GitHub. The swap adds the new label before removing the
+	// old one, so 'review' alone is an intermediate state, not completion.
 	t.Logf("waiting for orchestrator to dispatch and complete issue #%s...", issueNumber)
 	var issue githubIssueResponse
-	deadline := time.After(60 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			orchCancel()
-			<-done
-			t.Fatalf("timed out waiting for issue #%s to transition to 'review'", issueNumber)
-		default:
-		}
-
-		issue = ghClient.fetchIssue(t, issueNumber)
-		hasReview := false
-		for _, l := range issue.Labels {
-			if strings.EqualFold(l.Name, "review") {
-				hasReview = true
-				break
-			}
-		}
-		if hasReview {
-			t.Logf("issue #%s transitioned: state=%q, labels include 'review'", issueNumber, issue.State)
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-
-	orchCancel()
-	select {
-	case <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("orchestrator did not shut down within 15 seconds")
-	}
-
-	// handoff_state="review" is neither active nor terminal, so the handoff
-	// parks the issue for a reviewer instead of closing it.
-	if issue.State != "open" {
-		t.Errorf("issue state = %q, want %q", issue.State, "open")
-	}
-
 	hasLabel := func(name string) bool {
 		for _, l := range issue.Labels {
 			if strings.EqualFold(l.Name, name) {
@@ -366,15 +331,32 @@ func TestGitHubIntegration_FullDispatchCycle(t *testing.T) {
 		}
 		return false
 	}
-	if !hasLabel("review") {
+	if err := waittest.UntilWithin(60*time.Second, 2*time.Second, func() error {
+		issue = ghClient.fetchIssue(t, issueNumber)
+		if !hasLabel("review") || hasLabel("backlog") {
+			return errors.New("'backlog' is not yet swapped for 'review'")
+		}
+		return nil
+	}); err != nil {
+		orchCancel()
+		<-done
 		labels := make([]string, len(issue.Labels))
 		for i, l := range issue.Labels {
 			labels[i] = l.Name
 		}
-		t.Errorf("issue labels = %v, want 'review' present", labels)
+		t.Fatalf("timed out waiting for issue #%s to swap 'backlog' for 'review'; last labels = %v", issueNumber, labels)
 	}
-	if hasLabel("backlog") {
-		t.Error("issue still has 'backlog' label after handoff to 'review'")
+	t.Logf("issue #%s transitioned: state=%q, 'backlog' swapped for 'review'", issueNumber, issue.State)
+
+	orchCancel()
+	if _, ok := waittest.ReceiveWithin(done, 15*time.Second); !ok {
+		t.Fatal("orchestrator did not shut down within 15 seconds")
+	}
+
+	// handoff_state="review" is neither active nor terminal, so the handoff
+	// parks the issue for a reviewer instead of closing it.
+	if issue.State != "open" {
+		t.Errorf("issue state = %q, want %q", issue.State, "open")
 	}
 
 	entries, err := store.QueryRunHistoryByIssue(ctx, issueNumber)

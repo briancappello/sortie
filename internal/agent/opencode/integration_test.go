@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,9 +104,9 @@ func collectAllEvents(t *testing.T, a domain.AgentAdapter, session domain.Sessio
 	return events, result
 }
 
-// The key is an {env:} reference because opencode 2.x does not read the
-// provider's key variable on its own.
 func scriptedProviderDocument(url string) string {
+	// The key is an {env:} reference because opencode 2.x does not read the
+	// provider's key variable on its own.
 	return fmt.Sprintf(`{"$schema":"https://opencode.ai/config.json","provider":{"scripted":{"npm":"@ai-sdk/google","name":"scripted","options":{"baseURL":"%s/v1beta","apiKey":"{env:GOOGLE_GENERATIVE_AI_API_KEY}"},"models":{"scripted-model":{"name":"scripted-model"}}}}}`, url)
 }
 
@@ -120,11 +121,17 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		}
 	}
 
-	fakemodel.AssertConformance(t, fakemodel.Binding{
-		Kind:          "opencode",
-		Passthrough:   scriptedSettings(true),
-		CredentialEnv: []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
-		Read:          fakemodel.ReadFile,
+	binding := fakemodel.Binding{
+		Kind:                "opencode",
+		Passthrough:         scriptedSettings(true),
+		CredentialEnv:       []string{"GOOGLE_GENERATIVE_AI_API_KEY"},
+		Read:                fakemodel.ReadFile,
+		ReportedModelPrefix: "scripted/",
+		SSH: &fakemodel.SSHVariant{
+			Package:       "@opencode/cli",
+			HostCommand:   integrationCommand(),
+			RemoteCommand: func(fakemodel.Environment) string { return "opencode" },
+		},
 		PermissionRefusal: &fakemodel.PermissionRefusal{
 			Passthrough: scriptedSettings(false),
 			Guarded:     fakemodel.ReadFile,
@@ -150,6 +157,34 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 				Env: map[string]string{"OPENCODE_CONFIG": document},
 			}
 		},
+	}
+
+	fakemodel.AssertConformance(t, binding)
+
+	t.Run("free usage limit", func(t *testing.T) {
+		run := fakemodel.RunCustomTurn(t, binding, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{{
+				Status: http.StatusTooManyRequests,
+				Header: http.Header{"Retry-After": {"3600"}},
+				Body:   []byte(`{"type": "error", "error": {"type": "FreeUsageLimitError", "message": "Rate limit exceeded. Please try again later."}}`),
+			}},
+			Prompt: "Reply with the word ok.",
+		})
+
+		var windows []domain.UsageWindow
+		for _, e := range run.Events {
+			windows = append(windows, e.UsageWindows...)
+		}
+		if len(windows) != 1 {
+			t.Fatalf("usage windows of the refused turn = %+v, want exactly one", windows)
+		}
+		w := windows[0]
+		if w.Label != "Free usage limit" || w.Status != domain.UsageWindowExhausted {
+			t.Errorf("window = {Label %q, Status %q}, want {%q, %q}", w.Label, w.Status, "Free usage limit", domain.UsageWindowExhausted)
+		}
+		if got := w.ResetsAt.Sub(w.ReportedAt); got != time.Hour {
+			t.Errorf("window ResetsAt - ReportedAt = %v, want %v", got, time.Hour)
+		}
 	})
 }
 

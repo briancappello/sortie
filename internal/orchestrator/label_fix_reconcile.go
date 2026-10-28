@@ -52,10 +52,12 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 
 		// A human gesture stays actionable regardless of age, so this kind
 		// has no TTL and no drop-on-age branch.
-		if now.Before(pending.PendingRetryAt) {
+		if reactionWaits(pending, now) {
 			state.PendingReactions[key] = pending
 			continue
 		}
+
+		readPullRequestURL(ctx, params.SCMAdapter, pending, entryLog)
 
 		// The dispatched flag is not consulted for this kind. The read error
 		// is: at-most-once rests solely on the mark, and this kind has no
@@ -67,7 +69,7 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 			pending.PendingAttempts++
 			delay := max(computeReactionPendingDelay(pending.PendingAttempts), pollInterval)
 			pending.PendingRetryAt = now.Add(delay)
-			state.PendingReactions[key] = pending
+			requeueReaction(state, key, pending, waitBackoff)
 			entryLog.Warn("label-fix fingerprint read failed, backing off without dispatch",
 				slog.Int("pr_number", data.PRNumber),
 				slog.Any("error", fpErr),
@@ -82,7 +84,7 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 			pending.PendingAttempts++
 			delay := max(computeReactionPendingDelay(pending.PendingAttempts), pollInterval)
 			pending.PendingRetryAt = now.Add(delay)
-			state.PendingReactions[key] = pending
+			requeueReaction(state, key, pending, waitBackoff)
 			entryLog.Warn("label-fix journal fetch failed, retrying with backoff",
 				slog.Int("pr_number", data.PRNumber),
 				slog.Any("error", err),
@@ -102,7 +104,7 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 		}
 		if len(newEvents) == 0 {
 			pending.PendingRetryAt = now.Add(pollInterval)
-			state.PendingReactions[key] = pending
+			requeueReaction(state, key, pending, waitPollInterval)
 			continue
 		}
 
@@ -123,20 +125,24 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 		labelPresentNow := labelPresent(events, params.LabelFixConfig.FixLabel)
 		commandConfirmed := len(matches) > 0 && labelPresentNow
 
-		running := state.Running[pending.IssueID] != nil
+		running := state.Running[pending.IssueID]
 		incumbent := retrySlotIncumbent(state, pending.IssueID)
 
-		// A foreign incumbent defers before the same-kind collapse check
-		// runs: evaluating the collapse arm first would advance the mark
-		// past the labeling event and swallow the gesture.
+		// A session or retry of another kind defers before the same-kind
+		// collapse check runs: evaluating the collapse arm first would
+		// advance the mark past the labeling event and swallow the gesture.
 		if commandConfirmed && incumbent != nil && incumbent.ReactionKind != ReactionKindLabelFix {
 			logRetrySlotDeferral(entryLog, ReactionKindLabelFix, incumbent)
-			pending.CreatedAt = now
-			state.PendingReactions[key] = pending
+			requeueReaction(state, key, pending, waitRetrySlot)
+			continue
+		}
+		if commandConfirmed && running != nil && running.ReactionKind != ReactionKindLabelFix {
+			requeueReaction(state, key, pending, waitRetrySlot)
 			continue
 		}
 
-		sameKindQueuedOrRunning := running || (incumbent != nil && incumbent.ReactionKind == ReactionKindLabelFix)
+		sameKindQueuedOrRunning := (running != nil && running.ReactionKind == ReactionKindLabelFix) ||
+			(incumbent != nil && incumbent.ReactionKind == ReactionKindLabelFix)
 
 		if commandConfirmed && !sameKindQueuedOrRunning {
 			// Advance the mark BEFORE scheduling: at-most-once rests on the
@@ -155,7 +161,7 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 			data.HighWaterMark = newestMark
 			data.LastActor = newestMatch.Actor
 
-			ScheduleRetry(state, ScheduleRetryParams{
+			scheduleReactionContinuation(ctx, state, params.Store, ScheduleRetryParams{
 				IssueID:    pending.IssueID,
 				Identifier: pending.Identifier,
 				DisplayID:  pending.DisplayID,
@@ -165,13 +171,17 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 					"label_fix": buildLabelFixMap(data, newestMatch.Actor, newestMatch.At),
 				},
 				ReactionKind:        ReactionKindLabelFix,
+				Continuation:        continuationTargetOf(pending, 0),
 				AgentKind:           pending.AgentKind,
+				ConfiguredModel:     pending.ConfiguredModel,
 				RuleName:            pending.RuleName,
 				StageLineage:        pending.StageLineage,
 				RuleSettingsApplied: pending.RuleSettingsApplied,
 				TemplateID:          pending.TemplateID,
 				Logger:              entryLog,
-			}, params.OnRetryFire)
+
+				IssueIdentity: pending.IssueIdentity,
+			}, params.OnRetryFire, now)
 
 			// Best-effort acknowledgment: the label's disappearance tells the
 			// operator the command was accepted. A failure does not affect
@@ -192,7 +202,7 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 			// Re-enqueue so the detection loop survives the dispatch,
 			// decoupled from the per-issue workspace the session runs in.
 			pending.PendingRetryAt = now.Add(pollInterval)
-			state.PendingReactions[key] = pending
+			requeueReaction(state, key, pending, waitPollInterval)
 			continue
 		}
 
@@ -206,7 +216,7 @@ func reconcileLabelFixCommands(state *State, params ReconcileParams, log *slog.L
 		}
 		data.HighWaterMark = newestMark
 		pending.PendingRetryAt = now.Add(pollInterval)
-		state.PendingReactions[key] = pending
+		requeueReaction(state, key, pending, waitPollInterval)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // mgcTransitionCall records one TransitionIssue invocation.
@@ -32,7 +33,6 @@ type mgcLabelCall struct {
 type mgcCommentCall struct {
 	issueID string
 	text    string
-	literal string
 }
 
 // mgcTrackerFake is a fully controllable domain.TrackerAdapter for
@@ -42,6 +42,8 @@ type mgcCommentCall struct {
 type mgcTrackerFake struct {
 	states    map[string]string
 	statesErr error
+
+	directStates map[string]string
 
 	statesCalls atomic.Int32
 
@@ -71,14 +73,19 @@ func (f *mgcTrackerFake) FetchCandidateIssues(context.Context) ([]domain.Issue, 
 }
 
 func (f *mgcTrackerFake) SetTrackerStates(func() domain.TrackerStates) {}
-func (f *mgcTrackerFake) FetchIssueByID(context.Context, string) (domain.Issue, error) {
-	return domain.Issue{}, nil
+func (f *mgcTrackerFake) FetchIssueByID(_ context.Context, issueID string) (domain.Issue, error) {
+	return domain.Issue{State: f.directStates[issueID]}, nil
 }
 func (f *mgcTrackerFake) FetchIssueStatesByIdentifiers(context.Context, []string) (map[string]string, error) {
 	return nil, nil
 }
 func (f *mgcTrackerFake) FetchIssueComments(context.Context, string) ([]domain.Comment, error) {
 	return nil, nil
+}
+
+func (f *mgcTrackerFake) FetchIssueStatesAndLabelsByIDs(ctx context.Context, ids []string) (map[string]domain.IssueStateAndLabels, error) {
+	states, err := f.FetchIssueStatesByIDs(ctx, ids)
+	return statesWithLabels(states, nil), err
 }
 
 func (f *mgcTrackerFake) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
@@ -99,12 +106,6 @@ func (f *mgcTrackerFake) TransitionIssue(_ context.Context, issueID, target stri
 
 func (f *mgcTrackerFake) CommentIssue(ctx context.Context, issueID, text string) error {
 	f.commentCalls = append(f.commentCalls, mgcCommentCall{issueID: issueID, text: text})
-	f.commentCtx = ctx
-	return f.commentErr
-}
-
-func (f *mgcTrackerFake) CommentIssueWithLiteral(ctx context.Context, issueID, text, literal string) error {
-	f.commentCalls = append(f.commentCalls, mgcCommentCall{issueID: issueID, text: text, literal: literal})
 	f.commentCtx = ctx
 	return f.commentErr
 }
@@ -168,6 +169,9 @@ type mgcFingerprintRecord struct {
 // cross-kind-clear interaction are exercised against real stored
 // state rather than canned values.
 type mgcStoreFake struct {
+	reactionActivityLog
+	noopOutcomeRecorder
+	noEscalationRecords
 	fingerprints map[string]mgcFingerprintRecord
 
 	upsertErr          error
@@ -338,6 +342,15 @@ func newMGCPending(issueID string, prNumber int) *PendingReaction {
 			Repo:     "repo",
 		},
 	}
+}
+
+func restoredMGCPending(issueID string, prNumber int, trigger ReactionEscalationTrigger, subject string) *PendingReaction {
+	pending := newMGCPending(issueID, prNumber)
+	pending.EscalatedAt = mgcBaseTime
+	pending.EscalationTrigger = trigger
+	pending.EscalationSubject = subject
+	pending.resumeAfterRestart = true
+	return pending
 }
 
 // mgcStateWithPending creates a State with one merge-completion
@@ -816,7 +829,7 @@ func TestReconcileMergeCompletion_TransitionFailurePreservesObservationUntilLatc
 	}
 }
 
-func TestReconcileMergeCompletion_MissingSHAExpiryEscalatesOnceAndStops(t *testing.T) {
+func TestReconcileMergeCompletion_MissingSHAExpiryEscalatesOnceAndKeepsWatching(t *testing.T) {
 	t.Parallel()
 
 	issueID := "MGC-MISSING-EXPIRED"
@@ -839,8 +852,8 @@ func TestReconcileMergeCompletion_MissingSHAExpiryEscalatesOnceAndStops(t *testi
 	state.TrackerOpsWg.Wait()
 
 	rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry remains after missing-SHA grace expiry, want removed")
+	if entry := assertEscalationBegan(t, state, rkey, EscalationTriggerMissingMergeCommit); entry.EscalationSubject != "owner/repo#34" {
+		t.Errorf("EscalationSubject = %q, want %q", entry.EscalationSubject, "owner/repo#34")
 	}
 	if len(tracker.transitionCalls) != 0 {
 		t.Errorf("TransitionIssue calls = %d, want 0 for missing-SHA expiry", len(tracker.transitionCalls))
@@ -859,8 +872,8 @@ func TestReconcileMergeCompletion_MissingSHAExpiryEscalatesOnceAndStops(t *testi
 		t.Errorf("missing-SHA observation = %+v, ok=%v, want dispatched=true after escalation delivery", observation, ok)
 	}
 	if !strings.Contains(buf.String(), "level=ERROR") ||
-		!strings.Contains(buf.String(), "merge_completion stopped after merge commit identifier remained missing") {
-		t.Errorf("log output = %q, want an ERROR naming the permanent polling stop", buf.String())
+		!strings.Contains(buf.String(), "merge_completion escalated after merge commit identifier remained missing, still watching") {
+		t.Errorf("log output = %q, want an ERROR naming the escalation that keeps watching", buf.String())
 	}
 	for _, want := range []string{"repository=owner/repo", "pr_number=34", "waited=31m0s", "manual_action="} {
 		if !strings.Contains(buf.String(), want) {
@@ -868,21 +881,22 @@ func TestReconcileMergeCompletion_MissingSHAExpiryEscalatesOnceAndStops(t *testi
 		}
 	}
 
-	// A fresh pending entry for the same PR stops from the durable marker and
-	// never emits the escalation twice.
+	now = now.Add(time.Hour)
+	reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+	state.TrackerOpsWg.Wait()
+	assertEscalationBegan(t, state, rkey, EscalationTriggerMissingMergeCommit)
+
 	state.PendingReactions[rkey] = newMGCPending(issueID, 34)
-	now = now.Add(time.Minute)
+	now = now.Add(time.Hour)
 	reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 	state.TrackerOpsWg.Wait()
 	if len(tracker.commentCalls) != 1 {
-		t.Errorf("CommentIssue calls after fresh pending = %d, want 1 total", len(tracker.commentCalls))
+		t.Errorf("CommentIssue calls after standing and fresh passes = %d, want 1 total", len(tracker.commentCalls))
 	}
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("fresh PendingReactions entry remains after already-delivered escalation, want stopped")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerMissingMergeCommit)
 }
 
-func TestReconcileMergeCompletion_MissingSHAEscalationFailureStopsAndFreshPendingRetriesDelivery(t *testing.T) {
+func TestReconcileMergeCompletion_MissingSHAEscalationFailureKeepsWatchingAndRestoredEntryRetriesDelivery(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -920,9 +934,7 @@ func TestReconcileMergeCompletion_MissingSHAEscalationFailureStopsAndFreshPendin
 			state.TrackerOpsWg.Wait()
 
 			rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
-			if _, ok := state.PendingReactions[rkey]; ok {
-				t.Error("PendingReactions entry remains after failed escalation call, want stopped")
-			}
+			assertEscalationBegan(t, state, rkey, EscalationTriggerMissingMergeCommit)
 			observation, ok := store.missingSHAObservation(issueID)
 			if !ok || observation.dispatched {
 				t.Errorf("missing-SHA observation = %+v, ok=%v, want dispatched=false after failed delivery", observation, ok)
@@ -938,11 +950,10 @@ func TestReconcileMergeCompletion_MissingSHAEscalationFailureStopsAndFreshPendin
 				t.Fatalf("external escalation calls after failure = %d, want 1", got)
 			}
 
-			// A later fresh entry in a new State simulates restart recovery and
-			// retries only the undelivered operator signal.
 			tracker.addLabelErr = nil
 			tracker.commentErr = nil
-			restartedState := mgcStateWithPending(issueID, 35)
+			restartedState := NewState(5000, 4, 0, nil, AgentTotals{})
+			restartedState.PendingReactions[rkey] = restoredMGCPending(issueID, 35, EscalationTriggerMissingMergeCommit, "owner/repo#35")
 			now = now.Add(time.Minute)
 			reconcileMergeCompletion(restartedState, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 			restartedState.TrackerOpsWg.Wait()
@@ -957,9 +968,7 @@ func TestReconcileMergeCompletion_MissingSHAEscalationFailureStopsAndFreshPendin
 				t.Errorf("first observation after delivery retry = %v, want unchanged %v", observation.updatedAt, mgcBaseTime)
 			}
 
-			// Once delivery is recorded, another fresh entry stops without a
-			// third tracker write.
-			restartedState.PendingReactions[rkey] = newMGCPending(issueID, 35)
+			makeDue(t, restartedState, rkey)
 			now = now.Add(time.Minute)
 			reconcileMergeCompletion(restartedState, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 			restartedState.TrackerOpsWg.Wait()
@@ -970,7 +979,7 @@ func TestReconcileMergeCompletion_MissingSHAEscalationFailureStopsAndFreshPendin
 	}
 }
 
-func TestReconcileMergeCompletion_MissingSHADeliveryMarkerFailureStillStops(t *testing.T) {
+func TestReconcileMergeCompletion_MissingSHADeliveryMarkerFailureKeepsWatching(t *testing.T) {
 	t.Parallel()
 
 	issueID := "MGC-MISSING-MARK-FAIL"
@@ -991,9 +1000,7 @@ func TestReconcileMergeCompletion_MissingSHADeliveryMarkerFailureStillStops(t *t
 	state.TrackerOpsWg.Wait()
 
 	rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry remains after delivery marker write failed, want stopped")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerMissingMergeCommit)
 	observation, ok := store.missingSHAObservation(issueID)
 	if !ok || observation.dispatched {
 		t.Errorf("missing-SHA observation = %+v, ok=%v, want dispatched=false after mark failure", observation, ok)
@@ -1009,9 +1016,7 @@ func TestReconcileMergeCompletion_MissingSHADeliveryMarkerFailureStillStops(t *t
 	if len(tracker.addLabelCalls) != 2 {
 		t.Errorf("AddLabel calls after fresh pending = %d, want 2 because delivery was not durably marked", len(tracker.addLabelCalls))
 	}
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("fresh PendingReactions entry remains after repeated delivery marker failure, want stopped")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerMissingMergeCommit)
 }
 
 func TestReconcileMergeCompletion_MissingSHAObservationSurvivesRestart(t *testing.T) {
@@ -1050,31 +1055,55 @@ func TestReconcileMergeCompletion_MissingSHAObservationSurvivesRestart(t *testin
 func TestReconcileMergeCompletion_RealSHAAfterEscalationTransitionsNormally(t *testing.T) {
 	t.Parallel()
 
-	issueID := "MGC-SHA-AFTER-ESCALATION"
-	state := mgcStateWithPending(issueID, 37)
-	store := newMGCStore()
-	store.fingerprints[issueID+":"+mergeCompletionMissingSHAObservationKind] = mgcFingerprintRecord{
-		fingerprint: "owner/repo#37",
-		dispatched:  true,
-		updatedAt:   mgcBaseTime.Add(-time.Hour),
+	tests := []struct {
+		name      string
+		escalated bool
+	}{
+		{name: "an escalation delivered earlier"},
+		{name: "a standing missing-commit escalation", escalated: true},
 	}
-	tracker := &mgcTrackerFake{states: map[string]string{issueID: "In Review"}}
-	scm := &mgcSCMFake{fn: func(int, string, string) (domain.PRMergeStatus, error) {
-		return mergedStatus("sha-late"), nil
-	}}
-	params := mgcParams(store, scm, tracker)
 
-	reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if len(tracker.transitionCalls) != 1 {
-		t.Errorf("TransitionIssue calls = %d, want 1 after a real SHA appears", len(tracker.transitionCalls))
-	}
-	if _, ok := store.missingSHAObservation(issueID); ok {
-		t.Error("escalated missing-SHA observation remains after real SHA appears, want cleaned")
-	}
-	record, ok := store.has(issueID)
-	if !ok || record.fingerprint != "sha-late" || !record.dispatched {
-		t.Errorf("normal merge fingerprint = %+v, ok=%v, want sha-late dispatched=true", record, ok)
+			issueID := "MGC-SHA-AFTER-ESCALATION"
+			state := mgcStateWithPending(issueID, 37)
+			rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
+			pending := state.PendingReactions[rkey]
+			if tt.escalated {
+				pending.EscalatedAt = mgcBaseTime
+				pending.EscalationTrigger = EscalationTriggerMissingMergeCommit
+				pending.EscalationSubject = "owner/repo#37"
+			}
+			store := newMGCStore()
+			store.fingerprints[issueID+":"+mergeCompletionMissingSHAObservationKind] = mgcFingerprintRecord{
+				fingerprint: "owner/repo#37",
+				dispatched:  true,
+				updatedAt:   mgcBaseTime.Add(-time.Hour),
+			}
+			tracker := &mgcTrackerFake{states: map[string]string{issueID: "In Review"}}
+			scm := &mgcSCMFake{fn: func(int, string, string) (domain.PRMergeStatus, error) {
+				return mergedStatus("sha-late"), nil
+			}}
+			params := mgcParams(store, scm, tracker)
+
+			reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+
+			if len(tracker.transitionCalls) != 1 {
+				t.Errorf("TransitionIssue calls = %d, want 1 after a real SHA appears", len(tracker.transitionCalls))
+			}
+			if !pending.EscalatedAt.IsZero() {
+				t.Errorf("EscalatedAt = %v, want zero (the forge reports the merge commit)", pending.EscalatedAt)
+			}
+			if _, ok := store.missingSHAObservation(issueID); ok {
+				t.Error("escalated missing-SHA observation remains after real SHA appears, want cleaned")
+			}
+			record, ok := store.has(issueID)
+			if !ok || record.fingerprint != "sha-late" || !record.dispatched {
+				t.Errorf("normal merge fingerprint = %+v, ok=%v, want sha-late dispatched=true", record, ok)
+			}
+		})
 	}
 }
 
@@ -1217,10 +1246,19 @@ func TestReconcileMergeCompletion_TransportErrorRetriesThenEscalates(t *testing.
 	if len(tracker.addLabelCalls) != 1 {
 		t.Errorf("after tick 3: AddLabel calls = %d, want 1 (escalation once attempts exceed max_retries)", len(tracker.addLabelCalls))
 	}
-}
+	rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
+	assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
+	if state.ReactionAttempts[rkey] != 3 {
+		t.Errorf("ReactionAttempts[%s] = %d, want 3 (kept while the escalation stands)", rkey, state.ReactionAttempts[rkey])
+	}
 
-// Auth and payload transition failures escalate immediately, consuming
-// no retry budget and leaving no re-enqueued entry.
+	now = now.Add(10 * time.Minute)
+	reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+	state.TrackerOpsWg.Wait()
+	if len(tracker.transitionCalls) != 3 || len(tracker.addLabelCalls) != 1 {
+		t.Errorf("standing pass: TransitionIssue calls = %d, AddLabel calls = %d, want 3, 1", len(tracker.transitionCalls), len(tracker.addLabelCalls))
+	}
+}
 
 func TestReconcileMergeCompletion_AuthAndPayloadEscalateImmediately(t *testing.T) {
 	t.Parallel()
@@ -1257,11 +1295,11 @@ func TestReconcileMergeCompletion_AuthAndPayloadEscalateImmediately(t *testing.T
 				t.Errorf("AddLabel calls = %d, want 1 (immediate escalation)", len(tracker.addLabelCalls))
 			}
 			rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
-			if _, ok := state.PendingReactions[rkey]; ok {
-				t.Error("PendingReactions entry present after escalation, want dropped (no re-enqueue)")
+			if entry := assertEscalationBegan(t, state, rkey, EscalationTriggerRefused); entry.EscalationSubject != "sha-9" {
+				t.Errorf("EscalationSubject = %q, want the merge commit %q", entry.EscalationSubject, "sha-9")
 			}
-			if _, ok := state.ReactionAttempts[rkey]; ok {
-				t.Error("ReactionAttempts counter present after escalation, want cleared")
+			if state.ReactionAttempts[rkey] != 1 {
+				t.Errorf("ReactionAttempts[%s] = %d, want 1 (kept while the escalation stands)", rkey, state.ReactionAttempts[rkey])
 			}
 		})
 	}
@@ -1269,6 +1307,62 @@ func TestReconcileMergeCompletion_AuthAndPayloadEscalateImmediately(t *testing.T
 
 // A not-found transition stops without escalating, marks the
 // fingerprint dispatched, and drops the entry.
+
+func TestReconcileMergeCompletion_RestoredEscalationRunsNormalPathOnce(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		transitionErr error
+		wantStands    bool
+	}{
+		{name: "a transition that succeeds ends the escalation"},
+		{name: "a transition that fails leaves it standing", transitionErr: mgcTransportError(), wantStands: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			const issueID = "MGC-RESUME"
+			rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
+			state := NewState(5000, 4, 0, nil, AgentTotals{})
+			pending := restoredMGCPending(issueID, 21, EscalationTriggerBudget, "sha-resume")
+			state.PendingReactions[rkey] = pending
+			state.ReactionAttempts[rkey] = 3
+			tracker := &mgcTrackerFake{states: map[string]string{issueID: "In Review"}, transitionErr: tt.transitionErr}
+			scm := &mgcSCMFake{fn: func(int, string, string) (domain.PRMergeStatus, error) { return mergedStatus("sha-resume"), nil }}
+			params := mgcParams(newMGCStore(), scm, tracker)
+			now := mgcBaseTime
+			params.NowFunc = func() time.Time { return now }
+
+			reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+			state.TrackerOpsWg.Wait()
+
+			if len(tracker.transitionCalls) != 1 {
+				t.Errorf("TransitionIssue calls after the first pass = %d, want 1", len(tracker.transitionCalls))
+			}
+			if stands := !pending.EscalatedAt.IsZero(); stands != tt.wantStands {
+				t.Errorf("escalation stands after the first pass = %t, want %t", stands, tt.wantStands)
+			}
+			if len(tracker.addLabelCalls) != 0 {
+				t.Errorf("AddLabel calls = %d, want 0 (the restored escalation applies no second action)", len(tracker.addLabelCalls))
+			}
+			if !tt.wantStands {
+				return
+			}
+
+			now = now.Add(time.Hour)
+			reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+			state.TrackerOpsWg.Wait()
+
+			if len(tracker.transitionCalls) != 1 {
+				t.Errorf("TransitionIssue calls after the second pass = %d, want 1 (later passes make no call)", len(tracker.transitionCalls))
+			}
+			assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
+		})
+	}
+}
 
 func TestReconcileMergeCompletion_NotFoundStopsWithoutEscalating(t *testing.T) {
 	t.Parallel()
@@ -1414,7 +1508,37 @@ func TestReconcileMergeCompletion_DropConditions(t *testing.T) {
 		}
 	})
 
-	t.Run("terminal state drops with the terminal-specific log message", func(t *testing.T) {
+	t.Run("a standing escalation survives a listing that trails the handoff write", func(t *testing.T) {
+		t.Parallel()
+
+		issueID := "MGC-13-LAGGING-LISTING"
+		state := mgcStateWithPending(issueID, 25)
+		rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
+		state.PendingReactions[rkey].EscalatedAt = mgcBaseTime
+		state.PendingReactions[rkey].EscalationTrigger = EscalationTriggerBudget
+		state.PendingReactions[rkey].EscalationSubject = "sha-lag"
+		state.ReactionAttempts[rkey] = 3
+		tracker := &mgcTrackerFake{
+			states:       map[string]string{issueID: "In Progress"},
+			directStates: map[string]string{issueID: "In Review"},
+		}
+		params := mgcParams(newMGCStore(), &mgcSCMFake{}, tracker)
+
+		reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+
+		entry, ok := state.PendingReactions[rkey]
+		if !ok {
+			t.Fatal("PendingReactions entry missing, want the standing escalation kept (the direct read shows the handoff state)")
+		}
+		if !entry.escalationStands() {
+			t.Error("escalation ended, want it standing (the direct read shows the handoff state)")
+		}
+		if got := state.ReactionAttempts[rkey]; got != 3 {
+			t.Errorf("ReactionAttempts[%s] = %d, want 3 (kept while the escalation stands)", rkey, got)
+		}
+	})
+
+	t.Run("terminal state drops the entry after one release read", func(t *testing.T) {
 		t.Parallel()
 
 		issueID := "MGC-13-TERMINAL"
@@ -1427,21 +1551,14 @@ func TestReconcileMergeCompletion_DropConditions(t *testing.T) {
 		scm := &mgcSCMFake{}
 		params := mgcParams(store, scm, tracker)
 
-		log, buf := logCapture()
-		reconcileMergeCompletion(state, params, log, context.Background(), &domain.NoopMetrics{})
+		reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 
-		if got := scm.calls.Load(); got != 0 {
-			t.Errorf("GetMergeability calls = %d, want 0", got)
+		if got := scm.calls.Load(); got != 1 {
+			t.Errorf("GetMergeability calls = %d, want 1", got)
 		}
 		rkey := ReactionKey(issueID, ReactionKindMergeCompletion)
 		if _, ok := state.PendingReactions[rkey]; ok {
 			t.Error("PendingReactions entry present, want dropped (issue already terminal)")
-		}
-		if !strings.Contains(buf.String(), "merge_completion issue already terminal, dropping") {
-			t.Errorf("log output = %q, want the terminal-specific message", buf.String())
-		}
-		if strings.Contains(buf.String(), "left the handoff state") {
-			t.Errorf("log output = %q, want the terminal message, not the left-the-handoff-state message", buf.String())
 		}
 		if _, ok := store.missingSHAObservation(issueID); ok {
 			t.Error("missing-SHA observation remains after issue became terminal, want cleaned")
@@ -1710,7 +1827,7 @@ func TestReconcileTrackerState_TerminalReleasePreservesFingerprints(t *testing.T
 	scm := &mgcSCMFake{}
 	params := mgcParams(store, scm, tracker)
 
-	reconcileTrackerState(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
+	reconcileTrackerState(state, params, discardLogger(), context.Background(), time.Now(), &domain.NoopMetrics{})
 
 	if store.upsertCalls != 0 || store.getCalls != 0 || store.markCalls != 0 || store.deleteCalls != 0 {
 		t.Errorf("fingerprint store calls = upsert:%d get:%d mark:%d delete:%d, want all zero",
@@ -1842,11 +1959,7 @@ func TestReconcileMergeCompletion_MissingSHAMarkerDoesNotWaitForOtherDestination
 	now = now.Add(31 * time.Minute)
 	reconcileMergeCompletion(state, params, discardLogger(), context.Background(), &domain.NoopMetrics{})
 
-	select {
-	case <-store.marked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("observation marker not written while the Slack send is in flight, want it decided by the tracker comment alone")
-	}
+	waittest.Receive(t, store.marked, "observation marker written while the Slack send is in flight")
 	release()
 	state.TrackerOpsWg.Wait()
 

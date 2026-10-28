@@ -1,18 +1,24 @@
-// Package usagesource holds the measurement sources this transport reads
-// outside the protocol wire, for runtimes whose protocol carries no spend
-// counter.
+// Package usagesource holds the per-runtime parts of this transport that the
+// protocol cannot express: measurement sources read outside the wire,
+// credential-verification additions that drop a runtime's agent context, and
+// usage declarations (what a runtime's protocol messages report about provider
+// usage windows, and how to pull those windows when a turn ends).
 //
-// Every source here is vendor-specific by construction; the transport names
-// none of them and asks each the same three questions in order: does it claim
-// this launch, does the handshake report the runtime's name, and what has it
-// read for this session so far. A no to either of the first two leaves the
-// session unmeasured.
+// The transport names no runtime. It asks each source three questions in
+// order: does it claim this launch, does the handshake report the runtime's
+// name, and what has it read for this session. A no to either of the first two
+// leaves the session unmeasured. An addition is asked only whether it claims
+// the launch.
 package usagesource
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -23,6 +29,74 @@ type Constructor func() Reader
 // init function in its own file. The key is the name of the runtime the
 // source reads, a name its Recognize accepts.
 var Sources = registry.NewRegistry[Constructor, struct{}]("usage source")
+
+// Declaration is one runtime's usage declaration on the generic protocol kind,
+// selected from the name the runtime gives in its handshake, or by Launches
+// when no declaration is registered under that name.
+type Declaration struct {
+	// Live is the runtime's live source: its protocol messages and what they
+	// mean.
+	Live usage.Source
+
+	// UsageUpdateWindows reads the usage windows one usage_update session
+	// update reports in its _meta object. Nil when the runtime reports none
+	// there. A _meta without the runtime's member returns nil, nil.
+	UsageUpdateWindows func(meta json.RawMessage) ([]usage.WindowReading, error)
+
+	// Pull is the runtime's pull source; its Strategy is usage.StrategyPull
+	// whenever PullWindows is non-nil.
+	Pull usage.Source
+
+	// PullWindows makes one pull when a turn ends and returns the windows it
+	// read. Nil when the runtime has no pull source. It returns
+	// usage.ErrPullUnsupported when the runtime cannot answer in this session.
+	PullWindows func(ctx context.Context, rt PullRuntime) ([]usage.WindowReading, error)
+
+	// Launches reports whether target starts this runtime. It selects the
+	// declaration for a launch whose handshake name matches no registered
+	// declaration, including a handshake that reports no name. Nil when the
+	// handshake name alone selects the runtime.
+	Launches func(target agentcore.LaunchTarget) bool
+}
+
+// PullRuntime is what a pull may use to reach one session's runtime. The
+// transport implements it.
+type PullRuntime interface {
+	// SessionID returns the protocol session's ID when the pull started.
+	SessionID() string
+
+	// Request sends one request on the session's own connection and returns its
+	// result. An error response whose code is the JSON-RPC method-not-found
+	// code wraps ErrMethodNotFound.
+	Request(ctx context.Context, method string, params any) (json.RawMessage, error)
+
+	// LaunchEnv returns a variable as the runtime receives it from Sortie.
+	LaunchEnv(name string) (string, bool)
+
+	// ReadHomeFile reads rel under the runtime's home on its host, which is
+	// the value of homeVar in the launch environment, else the user's home
+	// directory. A missing file wraps fs.ErrNotExist; a file above limit
+	// bytes is an error.
+	ReadHomeFile(ctx context.Context, homeVar, rel string, limit int64) ([]byte, error)
+
+	// RemoteHost reports whether the runtime runs on another host, reached
+	// over SSH, rather than on Sortie's own.
+	RemoteHost() bool
+
+	// RunHostCommand runs one command on the runtime's host, locally or
+	// through the session's SSH launch, and returns its standard output. A
+	// command that does not start or does not exit zero wraps
+	// agentcore.ErrHostCommandFailed.
+	RunHostCommand(ctx context.Context, name string, args ...string) ([]byte, error)
+}
+
+// ErrMethodNotFound marks a request the runtime does not implement.
+var ErrMethodNotFound = errors.New("method not found")
+
+// Declarations is the registry every runtime's declaration adds itself to,
+// exactly once, from an init function in its own file. The key is the
+// runtime's name exactly as its handshake reports it.
+var Declarations = registry.NewRegistry[Declaration, struct{}]("usage declaration")
 
 // Reader is one measurement source. The transport declares its own interface
 // with this method set and holds values of it.
@@ -91,3 +165,102 @@ const (
 	// CompletenessAccounted is a figure that reached the turn's own bound.
 	CompletenessAccounted
 )
+
+// VerificationAddition is one protocol runtime's verification-context
+// switches. The transport holds values of it and names no runtime.
+//
+// An addition is used from the session's own goroutine only: Claim at start,
+// Close at teardown.
+type VerificationAddition interface {
+	// Claim reports whether the addition applies to target and, when it does,
+	// creates the file its switches name and returns them. It refuses a remote
+	// launch, whose host and command line are not Sortie's to extend, and a
+	// command line that does not name its runtime; a refusal creates nothing.
+	Claim(target agentcore.LaunchTarget) (VerificationSwitches, bool)
+
+	// Context reports which agent context components the verification request
+	// still carries when the switches apply.
+	Context() registry.VerificationContext
+
+	// Close removes what Claim created. It is safe to call on an addition that
+	// never claimed and more than once.
+	Close()
+}
+
+// VerificationSwitches are the launch changes one addition makes.
+type VerificationSwitches struct {
+	// Env holds "NAME=value" entries appended to the launch environment.
+	Env []string
+
+	// Args are appended after the operator's command line.
+	Args []string
+}
+
+// VerificationAdditions is the registry every addition adds itself to,
+// exactly once, from an init function in its own file. The key is the name of
+// the runtime the addition serves.
+var VerificationAdditions = registry.NewRegistry[func() VerificationAddition, struct{}]("verification addition")
+
+// executableSuffixes are the platform-specific extensions a launcher may
+// append to an executable name; namesRuntime strips at most one.
+var executableSuffixes = []string{".cmd", ".ps1", ".exe", ".js"}
+
+// namesRuntime reports whether the tokens of target's command line name the
+// executable or one of the npm packages. A remote launch names nothing: its
+// command line is a string the remote shell parses, not tokens Sortie owns,
+// and a launch in an execution environment runs where no source reads.
+func namesRuntime(target agentcore.LaunchTarget, executable string, packages ...string) bool {
+	if target.Remote() {
+		return false
+	}
+	tokens := append([]string{target.Command}, target.Args...)
+	for i, token := range tokens {
+		var optionValue bool
+		if i > 0 {
+			prev := tokens[i-1]
+			optionValue = strings.HasPrefix(prev, "-") && prev != "--"
+		}
+		if runtimeToken(token, optionValue, executable, packages) {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeToken(token string, optionValue bool, executable string, packages []string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(token, `\`, "/"))
+	if executableToken(normalized, optionValue, executable) {
+		return true
+	}
+	for _, pkg := range packages {
+		if normalized == pkg || strings.HasPrefix(normalized, pkg+"@") {
+			return true
+		}
+		if strings.Contains(normalized, "/"+pkg+"/") || strings.HasSuffix(normalized, "/"+pkg) {
+			return true
+		}
+	}
+	return false
+}
+
+// executableToken reports whether a normalized token names the executable
+// itself, bare or as a path. A bare option value with no path separator is
+// ambiguous with an unrelated flag argument and is not matched.
+func executableToken(normalized string, optionValue bool, executable string) bool {
+	hasPathSeparator := strings.Contains(normalized, "/")
+	if !hasPathSeparator && optionValue {
+		return false
+	}
+
+	base := normalized
+	if idx := strings.LastIndex(normalized, "/"); idx >= 0 {
+		base = normalized[idx+1:]
+	}
+	for _, suffix := range executableSuffixes {
+		if trimmed, ok := strings.CutSuffix(base, suffix); ok {
+			base = trimmed
+			break
+		}
+	}
+	return base == executable
+}

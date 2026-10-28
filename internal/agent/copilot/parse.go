@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
@@ -56,6 +58,8 @@ type rawToolRequest struct {
 type toolExecutionData struct {
 	ToolCallID    string              `json:"toolCallId"`
 	ToolName      string              `json:"toolName"`
+	MCPServerName string              `json:"mcpServerName,omitempty"`
+	MCPToolName   string              `json:"mcpToolName,omitempty"`
 	Arguments     json.RawMessage     `json:"arguments,omitempty"`
 	Model         string              `json:"model,omitempty"`
 	InteractionID string              `json:"interactionId,omitempty"`
@@ -63,6 +67,26 @@ type toolExecutionData struct {
 	Result        json.RawMessage     `json:"result,omitempty"`
 	Error         *toolExecutionError `json:"error,omitempty"`
 	ToolTelemetry json.RawMessage     `json:"toolTelemetry,omitempty"`
+}
+
+// toolMappings gives the kind and main-argument member of each Copilot CLI
+// tool the adapter reports an argument for.
+var toolMappings = map[string]agentcore.ToolMapping{
+	"bash":   {Kind: domain.ToolKindShell, Key: "command"},
+	"view":   {Kind: domain.ToolKindRead, Key: "path"},
+	"create": {Kind: domain.ToolKindEdit, Key: "path"},
+	"edit":   {Kind: domain.ToolKindEdit, Key: "path"},
+	"skill":  {Kind: domain.ToolKindSkill, Key: "skill"},
+}
+
+// toolCall maps a tool.execution_start payload to a tool call. An MCP call
+// is named from the server and tool members because toolName joins them
+// lossily.
+func (d toolExecutionData) toolCall() agentcore.ToolCall {
+	if d.MCPServerName != "" && d.MCPToolName != "" {
+		return agentcore.ToolCall{Name: agentcore.QualifiedToolName(d.MCPServerName, d.MCPToolName)}
+	}
+	return agentcore.MapToolCall(toolMappings, d.ToolName, d.Arguments)
 }
 
 // toolExecutionError is the error payload a tool.execution_complete event
@@ -218,19 +242,9 @@ func completionFailureMessage(summary string) string {
 	return redact.Truncate(summary, 500)
 }
 
-// summarizeAssistantMessage produces a human-readable summary from an
-// [assistantMessageData]. If content is non-empty it is truncated to
-// 200 runes; otherwise tool requests are listed by name.
+// summarizeAssistantMessage returns the message content truncated to 200
+// runes, or "" when there is none. Tool requests are reported as tool_result
+// events, so listing them here would only repeat them in the run timeline.
 func summarizeAssistantMessage(data assistantMessageData) string {
-	if data.Content != "" {
-		return redact.Truncate(strings.TrimSpace(data.Content), 200)
-	}
-	if len(data.ToolRequests) > 0 {
-		names := make([]string, len(data.ToolRequests))
-		for i, tr := range data.ToolRequests {
-			names[i] = tr.Name
-		}
-		return fmt.Sprintf("requesting %d tool(s): %s", len(data.ToolRequests), strings.Join(names, ", "))
-	}
-	return "assistant message"
+	return redact.Truncate(strings.TrimSpace(data.Content), 200)
 }

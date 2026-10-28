@@ -66,11 +66,8 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 			}
 			state := session.Internal.(*sessionState)
 			doc := decodeConfigDocument(t, state.turnConfigContent)
-			if _, ok := doc["mcp"]; ok != tt.wantMCP {
-				t.Errorf("turn configuration mcp present = %v, want %v (content %q)", ok, tt.wantMCP, state.turnConfigContent)
-			}
-			if tt.wantMCP && !strings.Contains(string(doc["mcp"]), "sortie-tools") {
-				t.Errorf("turn configuration mcp = %s, want the servers read from the host copy %s", doc["mcp"], mcpPath)
+			if got := strings.Contains(string(doc["mcp"]), "sortie-tools"); got != tt.wantMCP {
+				t.Errorf("turn configuration mcp = %s, names sortie-tools = %v, want %v (the servers read from the host copy %s)", doc["mcp"], got, tt.wantMCP, mcpPath)
 			}
 			if carrier == nil {
 				return
@@ -80,8 +77,8 @@ func TestMCPServersByLaunchTarget(t *testing.T) {
 			// the configuration as an agent variable.
 			_, _ = a.RunTurn(context.Background(), session, domain.RunTurnParams{Prompt: "hi", OnEvent: func(domain.AgentEvent) {}})
 			launches := carrier.Launches()
-			if len(launches) != 2 {
-				t.Fatalf("carrier launches = %d, want the version query and the turn", len(launches))
+			if len(launches) < 2 {
+				t.Fatalf("carrier launches = %d (%+v), want the version query and the turn first", len(launches), launches)
 			}
 			if got := launches[0].Argv; !slices.Equal(got, []string{command, "--version"}) {
 				t.Errorf("version query argv = %q, want %q", got, []string{command, "--version"})

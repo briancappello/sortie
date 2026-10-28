@@ -9,6 +9,7 @@ Operational safety requirements:
 - Deployments should state clearly whether they are intended for trusted environments, more restrictive environments, or both.
 - Deployments should state clearly whether they rely on auto-approved actions, operator approvals, stricter sandboxing, or some combination of those controls.
 - Workspace isolation and path validation are important baseline controls, but they are not a substitute for whatever approval and sandbox policy a deployment chooses.
+- The HTTP server has no authentication. A page served from another origin cannot change state through it: the server refuses such a state-changing request. DNS rebinding is outside this protection. Any other client that reaches the port can change state, so a deployment others can reach sits behind an authenticating reverse proxy or a VPN.
 
 ### 15.2 Filesystem Safety Requirements
 
@@ -29,6 +30,9 @@ Recommended additional hardening:
 - Support `$VAR` indirection in workflow config.
 - Validate presence of secrets without printing them.
 - Every log record and every runtime-derived text Sortie stores or shows an operator has each secret value it holds replaced by a fixed marker. The values are those Sortie holds under a name that marks a credential (its environment variables and environment file, configuration keys, and the environment entries and headers of the tool servers it hands a runtime), the tracker API key, the credentials in a URL's userinfo, and notification endpoint URLs, which grant access to whoever holds them. A value too short to mask is named in a warning, never shown. Matching is exact, and every bound that cuts such text applies after masking. The one exception is the agent's stop statement, which Sortie reads only up to a byte bound before it can mask anything; there masking also removes a trailing fragment that is a prefix of a held value, so the cut cannot leave the start of one behind. A value Sortie never held, one it holds under a name no convention marks as a credential, or one its producer transforms before printing it, is outside what masking recognizes.
+- The workflow shape the state API serves is an allowlist of settings that hold no credential. It carries no endpoint, key, command, hook or triage script, settings block, reaction extra key, or notification destination, and its configuration strings are served unmasked.
+- A pending reaction row of the state API carries CI check names and outcome counts, never a log excerpt or a check's details link, because a log excerpt is not safe to expose through an unauthenticated API. Every runtime-derived string of the row (the issue's title, link, type, labels, and state, the repository, the pull request link, the head branch, the head commits, and each failing check name) is masked as above, in the snapshot rather than in the state it is copied from.
+- The prices route serves a price-table address as its scheme, host, and path only, serves `price_table.replace_file` as the setting value (after `$VAR` resolution, before `~` expansion and path joining), and masks every error as the Health workflow check's error is masked, so it serves no credential and no path Sortie resolved.
 
 ### 15.4 Hook Script Safety
 
@@ -37,7 +41,7 @@ Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
 Implications:
 
 - Hooks are fully trusted configuration.
-- Hooks run inside the workspace directory, through the execution environment: on the host under `local`, in the issue's VM under `smolvm` (Section 15.8). A hook in a VM still runs code from the repository, such as a package install script, but that code then runs in the VM.
+- Hooks run inside the workspace directory, through the execution environment: on the host under `local`, in the issue's VM under `smolvm` (Section 15.9). A hook in a VM still runs code from the repository, such as a package install script, but that code then runs in the VM.
 - Hook output should be truncated in logs.
 - Hook timeouts are required to avoid hanging the orchestrator.
 
@@ -56,6 +60,7 @@ Possible hardening measures include:
 - Using `tracker.query_filter` to restrict which issues are eligible for dispatch (e.g., by label, component, epic, or other tracker-native criteria) so untrusted or out-of-scope tasks do not automatically reach the agent.
 - Scoping the `tracker_api` tool (Section 10.4.5) so it can only read or mutate data inside the intended project scope, rather than exposing general tracker access.
 - Reducing the set of registered tools, credentials, filesystem paths, and network destinations available to the agent to the minimum needed for the workflow.
+- Bounding what an unattended deployment spends with the per-issue ceilings (`agent.max_sessions`, `agent.max_tokens`, `agent.max_cost_usd`) and the instance-wide ceilings on a UTC calendar day, a UTC week from Monday, and a UTC calendar month (`agent.max_daily_cost_usd`, `agent.max_weekly_cost_usd`, `agent.max_monthly_cost_usd`). An instance ceiling starts no new agent session while its window's estimated spend stands at the ceiling, and it stops no running session, so a window's final spend can pass the ceiling by what running sessions spend. The figure is Sortie's estimate, not the provider's bill.
 
 The correct controls are deployment-specific, but deployments should document them clearly and treat harness hardening as part of the core safety model rather than an optional afterthought.
 
@@ -77,15 +82,26 @@ The sandbox does not help in either case. It governs filesystem and network reac
 
 Two credentials of Sortie's own HTTP control surface (§13.7) are bounded on purpose. The operator's `server.control_token` never reaches an agent: every variable of the orchestrator's environment holding its value is removed at startup. Each work session instead receives `SORTIE_SESSION_TOKEN`, a token that authorizes only the per-issue control routes of its own issue and stops working when its run ends. A local agent can read that token, as it can read anything its wrapper holds, so the worst a leaked session token does is act on its own run, in ways the run's limits still bound and the run's state shows.
 
-The `smolvm` execution environment (Section 15.8) moves this exposure off the host: the runtime, its configuration loader, and every helper it starts run in the issue's VM, with only the variables Sortie gives the VM.
+The `smolvm` execution environment (Section 15.9) moves this exposure off the host: the runtime, its configuration loader, and every helper it starts run in the issue's VM, with only the variables Sortie gives the VM.
 
-### 15.7 Control API Exposure
+### 15.7 Outbound Requests on Sortie's Own Account
+
+Every destination Sortie reaches belongs to an integration the workflow configures (the tracker, the forge and CI provider, the notification backends, and the agent runtimes) except one: the price-table download (Section 13.5). It is on by default: a default install contacts `price_table.fetch_url` at startup and once every 24 hours. A download that fails is tried again after 1 minute, and each further failure doubles the wait up to 1 hour, so a deployment whose network returns has a table within the hour; while tries keep failing, a download sends at most 29 requests in its first 24 hours and 24 a day after. Its default address, the published LiteLLM price file, is the only endpoint literal compiled into the binary that does not belong to a configured integration.
+
+- An operator in an audited or network-restricted environment turns the download of the shared table off with `price_table.fetch: false` in WORKFLOW.md, or with `SORTIE_PRICE_TABLE_FETCH=false` in the process environment, which overrides the workflow file. With it off and no `price_table.replace_url`, Sortie makes no request on its own account, and runs are priced from `token_rates` and the embedded table; a table kept from an earlier download never prices a run while the download is off. The download of the shared table runs whenever `price_table.fetch` is on, whether or not an operator table is configured. A download of an operator table happens only when the operator names one with `price_table.replace_url`, which is that operator's explicit choice of destination and is not gated by `price_table.fetch`.
+- The request is a download of a public file, not a reporting feature: it sends no run data, no configuration, and no operator-authored string, in its address, its headers, or anywhere else, beyond the address the operator wrote into `price_table.fetch_url` or `price_table.replace_url`.
+- A failed or unanswered download never blocks or fails startup, dispatch, or a workflow reload; it is logged, and a deployment without network access keeps pricing from the last table that passed validation, stored beside the database, or from the embedded table.
+- Sortie checks a downloaded table's shape, not its truth: it authenticates the publishing host through HTTPS for an `https` address and does not authenticate the content. A redirect from an `https` address to a target that is not `https` fails the try, so the default address cannot be downgraded; an `http` address is requested as written. A table that parses with false but plausible rates is accepted, and because money ceilings enforce on the recorded estimate, a forged lower rate lets spend pass a ceiling before it holds. An operator who needs reviewed prices points `price_table.fetch_url` at a pinned revision or an internal mirror, names a table of their own with `price_table.replace_file`, or turns the download off.
+- A log line about a download carries the address's scheme, host, and path only, never its userinfo or query, and the table kept beside the database records the address as a digest, so a credential the operator writes into an address reaches neither.
+- It goes through the standard proxy settings, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, like every other client Sortie builds.
+
+### 15.8 Control API Exposure
 
 The state-changing HTTP endpoints accept requests without a token only while no control token is set, and Sortie then refuses any bind address that is not a loopback address. A deployment that exposes the server, a container bound to `0.0.0.0` among them, sets `server.control_token`. Read-only endpoints keep no authentication: put the server behind a network boundary or an authenticating proxy when the dashboard, the runtime snapshot, or the metrics must not be readable.
 
 Which runtimes read workspace configuration, which files they key on, and how any of this differs between their releases are adapter concerns and belong in the adapter notes.
 
-### 15.8 Execution Environment Isolation
+### 15.9 Execution Environment Isolation
 
 `environment.kind: smolvm` (Section 9.7) is Sortie's built-in sandbox. Its goal: no code from the workspace or the agent runs on the host, and that includes `git` reading a repository the guest controls. The `local` kind keeps the host-execution model of the sections above.
 

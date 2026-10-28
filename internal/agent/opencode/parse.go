@@ -10,12 +10,8 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
+	"github.com/sortie-ai/sortie/internal/domain"
 )
-
-type parsedLine struct {
-	Event     *rawRunEvent
-	PlainText string
-}
 
 type rawRunEvent struct {
 	Type      string          `json:"type"`
@@ -29,6 +25,10 @@ type rawRunError struct {
 	Type    string `json:"type,omitempty"`
 	Message string `json:"message,omitempty"`
 	Status  any    `json:"status,omitempty"` // a JSON number when present
+
+	// RetryAfterMs is the delay in milliseconds after the failure at which
+	// the runtime expects a retry to succeed.
+	RetryAfterMs *int64 `json:"retryAfterMs"`
 }
 
 const (
@@ -87,14 +87,24 @@ type rawToolPart struct {
 	State     rawToolState `json:"state"`
 }
 
+// toolMappings gives the kind and main-argument member of each OpenCode 2.x
+// tool the adapter reports an argument for.
+var toolMappings = map[string]agentcore.ToolMapping{
+	"shell": {Kind: domain.ToolKindShell, Key: "command"},
+	"read":  {Kind: domain.ToolKindRead, Key: "path"},
+	"write": {Kind: domain.ToolKindEdit, Key: "path"},
+	"edit":  {Kind: domain.ToolKindEdit, Key: "path"},
+	"skill": {Kind: domain.ToolKindSkill, Key: "id"},
+}
+
 type rawToolState struct {
-	Status   string      `json:"status"`
-	Input    any         `json:"input,omitempty"`
-	Output   any         `json:"output,omitempty"`
-	Metadata any         `json:"metadata,omitempty"`
-	Error    string      `json:"error,omitempty"`
-	Title    string      `json:"title,omitempty"`
-	Time     rawPartTime `json:"time,omitempty"`
+	Status   string          `json:"status"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Output   any             `json:"output,omitempty"`
+	Metadata any             `json:"metadata,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	Title    string          `json:"title,omitempty"`
+	Time     rawPartTime     `json:"time,omitempty"`
 }
 
 type rawStepFinishPart struct {
@@ -120,12 +130,12 @@ type rawCacheUsage struct {
 }
 
 type exportUsage struct {
-	InputTokens      int64
-	OutputTokens     int64
-	TotalTokens      int64
-	CacheReadTokens  int64
-	CacheWriteTokens int64
-	Model            string
+	Usage domain.TokenUsage
+	Model string
+
+	// ByModel splits the totals by each kept message's `providerID/modelID`;
+	// a message missing either part adds to no entry.
+	ByModel map[string]domain.TokenUsage
 
 	// Recovered reports whether the export produced a figure at all,
 	// which is not the same question as whether that figure is non-zero.
@@ -186,8 +196,7 @@ func parseStepFinishPart(raw json.RawMessage) (rawStepFinishPart, error) {
 
 // freeTierRefusalClause returns a clause naming the free-tier-required
 // tools state's policy denies, or "" when runErr does not match the
-// free-tier refusal envelope, or the policy denies neither tool. It reads no member of runErr beyond what identifies the
-// refusal shape, starts no subprocess, and emits no event.
+// free-tier refusal envelope, or the policy denies neither tool.
 func freeTierRefusalClause(runErr *rawRunError, pt passthroughConfig) string {
 	if runErr == nil || !isFreeTierRefusal(runErr) {
 		return ""
@@ -287,10 +296,13 @@ func parseSessionExport(data []byte, sessionID string, sinceUnixMS int64) export
 			}
 		}
 
-		sum.InputTokens += inputTokens + cacheReadTokens + cacheWriteTokens
-		sum.OutputTokens += outputTokens + reasoningTokens
-		sum.CacheReadTokens += cacheReadTokens
-		sum.CacheWriteTokens += cacheWriteTokens
+		messageUsage := domain.TokenUsage{
+			InputTokens:      inputTokens + cacheReadTokens + cacheWriteTokens,
+			OutputTokens:     outputTokens + reasoningTokens,
+			CacheReadTokens:  cacheReadTokens,
+			CacheWriteTokens: cacheWriteTokens,
+		}
+		sum.Usage = agentcore.AddUsage(sum.Usage, messageUsage)
 		kept = true
 
 		model := mapFromAny(message["model"])
@@ -298,13 +310,16 @@ func parseSessionExport(data []byte, sessionID string, sinceUnixMS int64) export
 		modelID := stringFromAny(model["id"])
 		if providerID != "" && modelID != "" {
 			sum.Model = providerID + "/" + modelID
+			if sum.ByModel == nil {
+				sum.ByModel = map[string]domain.TokenUsage{}
+			}
+			sum.ByModel[sum.Model] = agentcore.AddUsage(sum.ByModel[sum.Model], messageUsage)
 		}
 	}
 	if !kept {
 		return exportUsage{}
 	}
 
-	sum.TotalTokens = sum.InputTokens + sum.OutputTokens
 	sum.Recovered = true
 	return sum
 }
