@@ -89,7 +89,7 @@ Neither request makes the runtime emit agent text. The notifications seen around
 The result is the usage object under `data`, or the result itself when `data` is absent. `success` false is an error. Trimmed:
 
 ```json
-{"success": true, "message": "...", "data": {"planName": "<plan>", "billingCycleReset": "2026-11-01", "usageBreakdowns": [{"resourceType": "CREDIT", "displayName": "Credits", "used": 7.05, "limit": 1000.0, "percentage": 0.7, "hasLimit": true}], "bonusCredits": [], "addOnCredits": []}}
+{"success": true, "message": "...", "data": {"planName": "<plan>", "billingCycleReset": "<YYYY-MM-DD>", "usageBreakdowns": [{"resourceType": "CREDIT", "displayName": "Credits", "used": 7.05, "limit": 1000.0, "percentage": 0.7, "hasLimit": true}], "bonusCredits": [], "addOnCredits": []}}
 ```
 
 Each `usageBreakdowns` entry with `hasLimit` true becomes one window: `resourceType` names it, `displayName` is its scope, and `used` and `limit` are the amount in credits. Sortie computes the share from those two numbers. `percentage` is left unread because it is an integer on some engines and builds and a float on others, and it rounds to 0 below one percent.
