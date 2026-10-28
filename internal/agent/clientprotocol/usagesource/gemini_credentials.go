@@ -143,7 +143,7 @@ func geminiHostEnv(ctx context.Context, rt PullRuntime, names []string) (map[str
 	var script strings.Builder
 	script.WriteString("printf '%s\\0'")
 	for _, name := range missing {
-		script.WriteString(` "$` + name + `"`)
+		fmt.Fprintf(&script, ` "$%s"`, name)
 	}
 	out, err := rt.RunHostCommand(ctx, "sh", "-c", script.String())
 	if err != nil {
