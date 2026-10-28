@@ -255,7 +255,7 @@ environment:
   host_prefix: [acp-broker, -http, 127.0.0.1:7700, -viewer-token-file, /etc/sortie/viewer-token, --]
 ```
 
-The broker runs on the host and keeps the session token. Only the agent runs in the VM. See the [acp-broker operator guide](https://github.com/briancappello/agentic-orchestration/blob/main/acp-broker/docs/guide.md).
+The broker runs on the host and keeps the session token. Only the agent runs in the VM. See the [acp-broker operator guide](https://github.com/ortusnova/agentic-orchestration/blob/main/acp-broker/docs/guide.md).
 
 ## The repository
 
