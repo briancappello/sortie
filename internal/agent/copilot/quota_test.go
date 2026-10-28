@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -110,7 +111,7 @@ func TestPullQuota_Failures(t *testing.T) {
 			if err == nil {
 				t.Fatal("pullQuota() error = nil, want error")
 			}
-			if got := errors.Is(err, fs.ErrNotExist); got != tt.wantRoute {
+			if got := errors.Is(err, fs.ErrNotExist) || errors.Is(err, exec.ErrNotFound); got != tt.wantRoute {
 				t.Errorf("pullQuota() headless route taken = %v, want %v (error %v)", got, tt.wantRoute, err)
 			}
 			if spy.hits.Load() != tt.wantHits {
