@@ -88,3 +88,42 @@ func hasColumn(t *testing.T, s *Store, table, column string) bool {
 	}
 	return n == 1
 }
+
+// A database a fork build migrated before the merge holds upstream's
+// migrations up to 24 and the fork's from 1001. The merged build applies
+// upstream's newer migrations after the fork's, and every fork column and
+// table survives them.
+func TestMigrate_ForkDatabaseTakesLaterUpstreamMigrations(t *testing.T) {
+	t.Parallel()
+	s := openTestStore(t)
+	ctx := context.Background()
+	migrateToVersion(t, s, 24)
+	for _, m := range migrations {
+		if m.Version < 1001 {
+			continue
+		}
+		if err := s.applyMigration(ctx, m); err != nil {
+			t.Fatalf("apply fork migration %d: %v", m.Version, err)
+		}
+	}
+
+	migrateOrFatal(t, s)
+
+	applied, err := s.appliedVersions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if _, ok := applied[m.Version]; !ok {
+			t.Errorf("migration %d (%s) not applied", m.Version, m.Description)
+		}
+	}
+	for _, column := range []string{"held_ms", "environment_image_sha256", "exported_commit", "dispatch_id", "skills"} {
+		if !hasColumn(t, s, "run_history", column) {
+			t.Errorf("run_history lacks %s after the upgrade", column)
+		}
+	}
+	if !hasColumn(t, s, "plan_satisfaction", "issue_id") {
+		t.Error("plan_satisfaction lost after the upgrade")
+	}
+}
