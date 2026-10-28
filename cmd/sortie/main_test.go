@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,36 +9,66 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
-// runTestTimeout is the context timeout used by tests that exercise the
-// full run() startup sequence. These tests verify startup behavior
-// (logging, DB creation, flag parsing) and do not need to wait for a
-// poll cycle; the orchestrator shuts down as soon as the context
-// expires.
-//
-// The pure-Go SQLite driver (modernc.org/sqlite) is significantly slower
-// under the race detector and on resource-constrained CI runners, where
-// PRAGMA execution and schema migrations can exceed a sub-second budget.
-// Windows NTFS adds further disk I/O overhead.
-var runTestTimeout = func() time.Duration {
-	if runtime.GOOS == "windows" {
-		return 10 * time.Second
+// runUntilStarted runs run() and cancels it once startup has finished. It
+// fails t when startup does not finish within waittest.HangGuard.
+func runUntilStarted(t *testing.T, args []string, stdout, stderr io.Writer) int {
+	t.Helper()
+	ctx, cancel := context.WithCancel(waittest.Context(t))
+	defer cancel()
+	startupDone = cancel
+	defer func() { startupDone = nil }()
+	code := run(ctx, args, stdout, stderr)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("run() did not finish startup within %v", waittest.HangGuard)
 	}
-	return 2 * time.Second
-}()
+	return code
+}
+
+func runUntilLogged(t *testing.T, args []string, stdout io.Writer, stderr *lockedBuf, want string) int {
+	t.Helper()
+	ctx, cancel := context.WithCancel(waittest.Context(t))
+	defer cancel()
+	exit := make(chan int, 1)
+	go func() { exit <- run(ctx, args, stdout, stderr) }()
+	waitForLog(t, stderr, want, exit)
+	cancel()
+	return waittest.Receive(t, exit, "run() exit code")
+}
+
+func waitForLog[T any](t *testing.T, log fmt.Stringer, want string, exited <-chan T) {
+	t.Helper()
+	waittest.Until(t, func() error {
+		got := log.String()
+		if strings.Contains(got, want) {
+			return nil
+		}
+		select {
+		case v := <-exited:
+			t.Fatalf("exited with %v before the log held %q; log:\n%s", v, want, got)
+		default:
+		}
+		return fmt.Errorf("log does not hold %q; log:\n%s", want, got)
+	})
+}
 
 // minimalWorkflow returns a minimal valid WORKFLOW.md content that
 // includes tracker (file) and agent (mock) config needed for the
@@ -58,6 +89,8 @@ agent:
   kind: mock
 file:
   path: issues.json
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `)
@@ -73,8 +106,6 @@ func writeWorkflowFile(t *testing.T, dir string) string {
 	return p
 }
 
-// writeIssuesFixture creates a minimal issues.json fixture in dir for
-// the file tracker adapter.
 func writeIssuesFixture(t *testing.T, dir string) {
 	t.Helper()
 	issues := []map[string]any{
@@ -215,10 +246,7 @@ func TestRunTooManyArgs(t *testing.T) {
 
 func TestRunNonexistentPath(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	code := run(ctx, []string{"/nonexistent/workflow.md"}, &stdout, &stderr)
+	code := run(waittest.Context(t), []string{"/nonexistent/workflow.md"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -231,10 +259,7 @@ func TestRunMissingDefaultWorkflow(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	code := run(ctx, []string{}, &stdout, &stderr)
+	code := run(waittest.Context(t), []string{}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -247,10 +272,7 @@ func TestRunValidWorkflowWithTimeout(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -276,10 +298,7 @@ func TestRunPortFlagLogged(t *testing.T) {
 	port := freePort(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -312,6 +331,8 @@ polling:
 
 workspace:
   root: %s
+price_table:
+  fetch: false
 ---
 
 Fix the following issue.
@@ -365,20 +386,13 @@ func TestQuickStartScenario(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	// 5 seconds: mock-agent turns complete in <1 s; polling interval is
-	// 500 ms so the second tick confirming zero candidates arrives quickly.
-	// Extra headroom avoids flakiness under -race in CI.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilLogged(t, []string{wfPath}, &stdout, &stderr, `msg="tick completed" candidates=0`)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
 	}
 
 	logs := stderr.String()
 
-	// Verify key lifecycle events from the quick-start scenario.
 	checks := []struct {
 		name   string
 		substr string
@@ -494,42 +508,23 @@ func TestRunSIGINTCleanShutdown(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cmd.Start: %v", err)
 	}
+	t.Cleanup(func() { cmd.Process.Kill() }) //nolint:errcheck // best-effort cleanup
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 
-	// Poll subprocess stderr until "sortie started" appears; confirming
-	// the orchestrator event loop is running before we send SIGINT.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(subStderr.String(), "sortie started") {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !strings.Contains(subStderr.String(), "sortie started") {
-		cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
-		t.Fatalf("subprocess did not reach 'sortie started' within 5 s; stderr:\n%s", subStderr.String())
-	}
+	waitForLog(t, &subStderr, "sortie started", done)
 
-	// Send SIGINT; should trigger context cancellation and clean shutdown.
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatalf("Signal(SIGINT): %v", err)
 	}
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	select {
-	case waitErr := <-done:
-		if waitErr != nil {
-			if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-				t.Errorf("subprocess exited with code %d after SIGINT, want 0; stderr:\n%s",
-					exitErr.ExitCode(), subStderr.String())
-			} else {
-				t.Errorf("subprocess Wait: %v; stderr:\n%s", waitErr, subStderr.String())
-			}
+	if waitErr := waittest.Receive(t, done, "subprocess exit after SIGINT"); waitErr != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
+			t.Errorf("subprocess exited with code %d after SIGINT, want 0; stderr:\n%s",
+				exitErr.ExitCode(), subStderr.String())
+		} else {
+			t.Errorf("subprocess Wait: %v; stderr:\n%s", waitErr, subStderr.String())
 		}
-	case <-time.After(5 * time.Second):
-		cmd.Process.Kill() //nolint:errcheck // best-effort cleanup
-		t.Errorf("subprocess did not exit within 5 s after SIGINT; stderr:\n%s", subStderr.String())
 	}
 }
 
@@ -549,7 +544,8 @@ func TestRunServerShutdownError(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stderr lockedBuf
-	ctx, cancel := context.WithCancel(context.Background())
+	guard := waittest.Context(t)
+	ctx, cancel := context.WithCancel(guard)
 	defer cancel()
 
 	port := strconv.Itoa(freePort(t))
@@ -558,63 +554,47 @@ func TestRunServerShutdownError(t *testing.T) {
 		result <- run(ctx, []string{"--port", port, wfPath}, io.Discard, &stderr)
 	}()
 
-	// Wait until the HTTP server reports its bound address. Windows
-	// CI runners need a wider budget because the SQLite migrations and
-	// workspace cleanup that run before the listener log can take
-	// several seconds on the slow NTFS path.
-	var addr string
-	startWait := runTestTimeout
-	deadline := time.Now().Add(startWait)
-	for time.Now().Before(deadline) {
-		if log := stderr.String(); strings.Contains(log, "http server listening") {
-			if _, after, ok := strings.Cut(log, "addr="); ok {
-				rest := after
-				if end := strings.IndexAny(rest, " \t\n\r"); end >= 0 {
-					addr = rest[:end]
-				} else {
-					addr = strings.TrimSpace(rest)
-				}
-				// slog.TextHandler may quote string values (addr="host:port").
-				addr = strings.Trim(addr, "\"")
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if addr == "" {
-		cancel()
-		t.Fatalf("HTTP server did not start or log its address within %s; stderr:\n%s", startWait, stderr.String())
-	}
+	waitForLog(t, &stderr, "http server listening", result)
+	_, after, _ := strings.Cut(stderr.String(), "addr=")
+	// slog.TextHandler may quote string values (addr="host:port").
+	addr := strings.Trim(strings.Fields(after)[0], `"`)
 
-	// Open a TCP connection and send an incomplete HTTP request (no
-	// trailing \r\n\r\n). The server goroutine is waiting to finish
-	// reading the request headers, keeping the connection "active" from
-	// http.Server.Shutdown's perspective.
-	conn, dialErr := net.DialTimeout("tcp", addr, time.Second)
+	// An incomplete request (no trailing \r\n\r\n) leaves the connection
+	// waiting for the rest of its headers, so http.Server.Shutdown cannot
+	// treat it as idle.
+	var dialer net.Dialer
+	connA, dialErr := dialer.DialContext(guard, "tcp", addr)
 	if dialErr != nil {
-		cancel()
 		t.Fatalf("dial %s: %v", addr, dialErr)
 	}
-	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	defer connA.Close() //nolint:errcheck // best-effort cleanup
 	//nolint:errcheck // test write; errors are unrecoverable here
-	conn.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n"))
+	connA.Write([]byte("GET / HTTP/1.1\r\nHost: localhost\r\n"))
 
-	// Give the server goroutine time to register the connection as active.
-	time.Sleep(20 * time.Millisecond)
+	// Serve tracks each accepted connection before it accepts the next, so
+	// an answer to a second connection proves the first is already tracked.
+	connB, dialErr := dialer.DialContext(guard, "tcp", addr)
+	if dialErr != nil {
+		t.Fatalf("dial %s: %v", addr, dialErr)
+	}
+	defer connB.Close() //nolint:errcheck // best-effort cleanup
+	deadline, _ := guard.Deadline()
+	if err := connB.SetDeadline(deadline); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	if _, err := io.WriteString(connB, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write to %s: %v", addr, err)
+	}
+	if _, err := bufio.NewReader(connB).ReadString('\n'); err != nil {
+		t.Fatalf("read status line from %s: %v; stderr:\n%s", addr, err, stderr.String())
+	}
 
-	// Cancel the run context to trigger the shutdown sequence.
 	cancel()
 
-	select {
-	case code := <-result:
-		// shutdown errors are logged but do not change the exit code.
-		if code != 0 {
-			t.Errorf("run() = %d, want 0 (shutdown error is non-fatal); stderr:\n%s",
-				code, stderr.String())
-		}
-	case <-time.After(runTestTimeout):
-		t.Fatalf("run() did not return within %s after context cancel; stderr:\n%s",
-			runTestTimeout, stderr.String())
+	// shutdown errors are logged but do not change the exit code.
+	if code := waittest.Receive(t, result, "run() exit code"); code != 0 {
+		t.Errorf("run() = %d, want 0 (shutdown error is non-fatal); stderr:\n%s",
+			code, stderr.String())
 	}
 
 	if !strings.Contains(stderr.String(), "http server shutdown error") {
@@ -650,11 +630,8 @@ func TestRunReadOnlyWorkflowDir(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
 	wfPath := filepath.Join(workflowDir, "WORKFLOW.md")
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (DB must not be created in read-only dir); stderr: %s",
 			code, stderr.String())
@@ -682,6 +659,8 @@ file:
   path: issues.json
 logging:
   level: %s
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `, level)
@@ -702,10 +681,7 @@ func TestRunLogLevelDebug(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-level", "debug", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-level", "debug", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -721,10 +697,7 @@ func TestRunLogLevelWarn(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-level", "warn", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-level", "warn", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -767,10 +740,7 @@ func TestRunLogLevelFromExtension(t *testing.T) {
 	wfPath := writeWorkflowFileWithContent(t, dir, minimalWorkflowWithLogLevel("warn"))
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -788,10 +758,7 @@ func TestRunLogLevelFlagOverridesExtension(t *testing.T) {
 	wfPath := writeWorkflowFileWithContent(t, dir, minimalWorkflowWithLogLevel("error"))
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-level", "debug", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-level", "debug", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -807,10 +774,7 @@ func TestRunLogLevelExtensionInvalid(t *testing.T) {
 	wfPath := writeWorkflowFileWithContent(t, dir, minimalWorkflowWithLogLevel("bogus"))
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := run(waittest.Context(t), []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -823,11 +787,8 @@ func TestRunLogLevelDefault(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
 	// No --log-level flag and no extension; default is info.
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -877,10 +838,7 @@ func TestRunExplicitPortServerAddr(t *testing.T) {
 	port := freePort(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -895,10 +853,7 @@ func TestRunPortZeroDisablesServer(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--port", "0", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--port", "0", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -919,10 +874,7 @@ func TestRunCustomHost(t *testing.T) {
 	port := freePort(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--host", "0.0.0.0", "--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--host", "0.0.0.0", "--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -944,10 +896,7 @@ func TestRunDefaultPortInUseImplicit(t *testing.T) {
 	t.Cleanup(func() { ln.Close() }) //nolint:errcheck // best-effort cleanup
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (graceful degradation on implicit default port); stderr: %s", code, stderr.String())
 	}
@@ -968,10 +917,7 @@ func TestRunExplicitPortInUse(t *testing.T) {
 	t.Cleanup(func() { ln.Close() }) //nolint:errcheck // best-effort cleanup
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--port", strconv.Itoa(occupiedPort), wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--port", strconv.Itoa(occupiedPort), wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -985,10 +931,7 @@ func TestRunInvalidHost(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--host", "invalid", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--host", "invalid", wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -1015,6 +958,8 @@ file:
   path: issues.json
 logging:
   format: %s
+price_table:
+  fetch: false
 ---
 Do {{ .issue.title }}.
 `, format)
@@ -1024,10 +969,7 @@ func TestRunLogFormatJSON(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-format", "json", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-format", "json", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1058,10 +1000,7 @@ func TestRunLogFormatText(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-format", "text", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-format", "text", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1082,11 +1021,8 @@ func TestRunLogFormatDefault(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
 	// No --log-format flag; default is text.
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1134,10 +1070,7 @@ func TestRunLogFormatCaseInsensitive(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-format", "JSON", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-format", "JSON", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1159,10 +1092,7 @@ func TestRunLogFormatFromExtension(t *testing.T) {
 	wfPath := writeWorkflowFileWithContent(t, dir, minimalWorkflowWithLogFormat("json"))
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1185,10 +1115,7 @@ func TestRunLogFormatFlagOverridesExtension(t *testing.T) {
 	wfPath := writeWorkflowFileWithContent(t, dir, minimalWorkflowWithLogFormat("json"))
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--log-format", "text", wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--log-format", "text", wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1212,10 +1139,7 @@ func TestRunLogFormatExtensionInvalid(t *testing.T) {
 	wfPath := writeWorkflowFileWithContent(t, dir, minimalWorkflowWithLogFormat("yaml"))
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := run(waittest.Context(t), []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -1253,10 +1177,7 @@ Do {{ .issue.title }}.
 	wfPath := writeWorkflowFileWithContent(t, dir, content)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := run(waittest.Context(t), []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -1325,40 +1246,6 @@ func TestRunLongHelp(t *testing.T) {
 	}
 }
 
-// autoMergeWorkflowNoProvider returns a minimal WORKFLOW.md with
-// reactions.auto_merge but an empty provider, so the auto-merge feature is
-// disabled and no SCM adapter initialization is attempted.
-func autoMergeWorkflowNoProvider(issuesPath, workspaceRoot string) []byte {
-	return fmt.Appendf(nil, `---
-tracker:
-  kind: file
-  project: DEMO
-  active_states:
-    - "To Do"
-  handoff_state: Done
-
-file:
-  path: %s
-
-agent:
-  kind: mock
-  max_turns: 1
-
-polling:
-  interval_ms: 500
-
-workspace:
-  root: %s
-
-reactions:
-  auto_merge:
-    provider: ""
----
-
-Fix issue {{ .issue.identifier }}.
-`, issuesPath, workspaceRoot)
-}
-
 // autoMergeWorkflowUnknownProvider returns a WORKFLOW.md with an unknown SCM
 // provider, which should cause startup to fail with exit code 1.
 func autoMergeWorkflowUnknownProvider(issuesPath, workspaceRoot string) []byte {
@@ -1386,6 +1273,8 @@ workspace:
 reactions:
   auto_merge:
     provider: nonexistent-scm
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1422,6 +1311,8 @@ reactions:
     provider: github
   auto_merge:
     provider: nonexistent-scm
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1463,6 +1354,8 @@ reactions:
     provider: github
     max_retries: 2
     escalation: label
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1506,6 +1399,8 @@ reactions:
     provider: github
     max_retries: 2
     escalation: label
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1544,10 +1439,7 @@ func TestRunCIFailureOnly_ConstructsSCMAdapter(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
 	}
@@ -1591,10 +1483,7 @@ func TestRunCIFailure_MismatchedProviders(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (mismatched providers); stderr:\n%s", code, stderr.String())
 	}
@@ -1605,36 +1494,6 @@ func TestRunCIFailure_MismatchedProviders(t *testing.T) {
 	}
 	if !strings.Contains(logs, "ci_failure") {
 		t.Errorf("expected the conflicting kinds to name ci_failure, got:\n%s", logs)
-	}
-}
-
-// TestRunAutoMerge_EmptyProvider verifies that when reactions.auto_merge.provider
-// is empty, the server starts normally and does NOT log "auto_merge reaction
-// enabled" (spec Test 6 at the wiring layer).
-func TestRunAutoMerge_EmptyProvider(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	wsRoot := filepath.Join(dir, "workspaces")
-
-	issuesPath := filepath.Join(dir, "issues.json")
-	if err := os.WriteFile(issuesPath, quickStartIssues(), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	wfPath := writeCustomWorkflowFile(t, dir, autoMergeWorkflowNoProvider(issuesPath, wsRoot))
-
-	var stdout bytes.Buffer
-	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
-	}
-
-	logs := stderr.String()
-	if strings.Contains(logs, "auto_merge reaction enabled") {
-		t.Error(`"auto_merge reaction enabled" logged despite empty provider; want absent`)
 	}
 }
 
@@ -1659,10 +1518,7 @@ func TestRunAutoMerge_UnknownProvider(t *testing.T) {
 	// on a contended Windows runner. The startup error returns in
 	// milliseconds once reached, so the wider budget is a hang-guard
 	// only and never slows the happy path.
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (unknown SCM provider); stderr:\n%s", code, stderr.String())
 	}
@@ -1694,10 +1550,7 @@ func TestRunAutoMerge_MismatchedProviders(t *testing.T) {
 	// on a contended Windows runner. The startup error returns in
 	// milliseconds once reached, so the wider budget is a hang-guard
 	// only and never slows the happy path.
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (mismatched providers); stderr:\n%s", code, stderr.String())
 	}
@@ -1738,6 +1591,8 @@ reactions:
     provider: nonexistent-scm
     review_label: ""
     fix_label: "sortie:fix"
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1776,42 +1631,8 @@ reactions:
     provider: nonexistent-scm
     review_label: ""
     fix_label: "sortie:fix"
----
-
-Fix issue {{ .issue.identifier }}.
-`, issuesPath, workspaceRoot)
-}
-
-// labelCommandsProviderEmptyWorkflow returns a WORKFLOW.md with an inert
-// label_commands block (provider empty). Both command labels are set to
-// prove they are ignored when the provider is empty.
-func labelCommandsProviderEmptyWorkflow(issuesPath, workspaceRoot string) []byte {
-	return fmt.Appendf(nil, `---
-tracker:
-  kind: file
-  project: DEMO
-  active_states:
-    - "To Do"
-  handoff_state: Done
-
-file:
-  path: %s
-
-agent:
-  kind: mock
-  max_turns: 1
-
-polling:
-  interval_ms: 500
-
-workspace:
-  root: %s
-
-reactions:
-  label_commands:
-    provider: ""
-    review_label: "sortie:review"
-    fix_label: "sortie:fix"
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -1840,10 +1661,7 @@ func TestLabelFixOnly_ConstructsSCMAdapter(t *testing.T) {
 	// run() rejects the unknown SCM provider only after opening and
 	// migrating the database, so the timeout must outlast a slow DB open
 	// on a contended Windows runner (see TestRunAutoMerge_UnknownProvider).
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (unknown SCM adapter for fix-only label_commands); stderr:\n%s", code, stderr.String())
 	}
@@ -1871,10 +1689,7 @@ func TestLabelFixOnly_JoinsProviderConflictCheck(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (mismatched providers); stderr:\n%s", code, stderr.String())
 	}
@@ -1882,52 +1697,6 @@ func TestLabelFixOnly_JoinsProviderConflictCheck(t *testing.T) {
 	logs := stderr.String()
 	if !strings.Contains(logs, "must use the same provider") {
 		t.Errorf("expected 'must use the same provider' in error log, got:\n%s", logs)
-	}
-}
-
-// TestLabelFixInactive_NothingFires verifies that with label_commands
-// absent or its provider empty, neither label reaction activates and
-// startup proceeds normally.
-// No t.Parallel: subtests call t.Chdir.
-func TestLabelFixInactive_NothingFires(t *testing.T) {
-	tests := []struct {
-		name       string
-		workflowFn func(issuesPath, workspaceRoot string) []byte
-	}{
-		{"block absent", quickStartWorkflow},
-		{"provider empty", labelCommandsProviderEmptyWorkflow},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			t.Chdir(dir)
-			wsRoot := filepath.Join(dir, "workspaces")
-
-			issuesPath := filepath.Join(dir, "issues.json")
-			if err := os.WriteFile(issuesPath, quickStartIssues(), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			wfPath := writeCustomWorkflowFile(t, dir, tt.workflowFn(issuesPath, wsRoot))
-
-			var stdout bytes.Buffer
-			var stderr lockedBuf
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			code := run(ctx, []string{wfPath}, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
-			}
-
-			logs := stderr.String()
-			if strings.Contains(logs, "label fix reaction enabled") {
-				t.Error(`"label fix reaction enabled" logged despite inactive label_commands; want absent`)
-			}
-			if strings.Contains(logs, "label review reaction enabled") {
-				t.Error(`"label review reaction enabled" logged despite inactive label_commands; want absent`)
-			}
-		})
 	}
 }
 
@@ -1987,10 +1756,7 @@ func TestRunLabelCommandsBothLabelsEmpty_ConfigRejected(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (label_commands both labels empty); stderr:\n%s", code, stderr.String())
 	}
@@ -2068,6 +1834,8 @@ reactions:
     provider: github
     review_label: "sortie:review"
     fix_label: ""
+price_table:
+  fetch: false
 ---
 
 Fix issue {{ .issue.identifier }}.
@@ -2095,10 +1863,7 @@ func TestRunFiveKindsWiring_AllEnablementRecordsLogged(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr lockedBuf
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr.String())
 	}
@@ -2117,25 +1882,6 @@ func TestRunFiveKindsWiring_AllEnablementRecordsLogged(t *testing.T) {
 	}
 }
 
-// lockedBuffer serializes writes so the signal goroutine and the test
-// goroutine can share one log sink under the race detector.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 // TestHandleSignals pins what a repeated interrupt does: the first
 // signal reports shutdown and closes nothing, the second closes the
 // abandon channel, and a third neither panics nor closes it again.
@@ -2143,22 +1889,10 @@ func (b *lockedBuffer) String() string {
 // double close, which panics in the goroutine and takes the process down
 // during the very shutdown the operator asked to hurry.
 func TestHandleSignals(t *testing.T) {
-	sink := &lockedBuffer{}
+	sink := &lockedBuf{}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	waitForLog := func(substr string) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if strings.Contains(sink.String(), substr) {
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-		t.Fatalf("handleSignals() log = %q, want it to contain %q", sink.String(), substr)
-	}
 
 	sigCh := make(chan os.Signal, 3)
 	abandon := make(chan struct{})
@@ -2169,7 +1903,7 @@ func TestHandleSignals(t *testing.T) {
 	}()
 
 	sigCh <- syscall.SIGINT
-	waitForLog("initiating shutdown")
+	waitForLog(t, sink, "initiating shutdown", done)
 	select {
 	case <-abandon:
 		t.Fatal("handleSignals() closed the abandon channel on the first signal, want it left open")
@@ -2177,22 +1911,106 @@ func TestHandleSignals(t *testing.T) {
 	}
 
 	sigCh <- syscall.SIGINT
-	waitForLog("abandoning in-flight shutdown work")
-	select {
-	case <-abandon:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleSignals() left the abandon channel open after the second signal, want it closed")
-	}
+	waitForLog(t, sink, "abandoning in-flight shutdown work", done)
+	waittest.Receive(t, abandon, "abandon channel closing after the second signal")
 
 	sigCh <- syscall.SIGTERM
 	close(sigCh)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleSignals() did not return after sigCh closed")
-	}
+	waittest.Receive(t, done, "handleSignals() return after sigCh closed")
 
 	if got := strings.Count(sink.String(), "abandoning in-flight shutdown work"); got != 1 {
 		t.Errorf("handleSignals() logged the abandon warning %d times, want 1", got)
+	}
+}
+
+func TestOnceExitCode(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		res  orchestrator.OnceResult
+		want int
+	}{
+		"settled":                          {orchestrator.OnceResult{Issues: 1}, 0},
+		"interrupted":                      {orchestrator.OnceResult{Interrupted: true}, 2},
+		"poll failed":                      {orchestrator.OnceResult{PollFailed: true}, 1},
+		"interrupted outranks poll failed": {orchestrator.OnceResult{Interrupted: true, PollFailed: true}, 2},
+		"work did not succeed":             {orchestrator.OnceResult{Issues: 1, NotSucceeded: []string{"PROJ-1"}}, 2},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := onceExitCode(tt.res); got != tt.want {
+				t.Errorf("onceExitCode(%+v) = %d, want %d", tt.res, got, tt.want)
+			}
+		})
+	}
+}
+
+func appendRunOutcomeHook(path string) string {
+	if runtime.GOOS == "windows" {
+		// exec escapes an embedded quote as \", which cmd.exe keeps literally,
+		// so a quoted redirection target becomes an invalid file name.
+		return `echo %SORTIE_RUN_OUTCOME%>> ` + path
+	}
+	return `echo "$SORTIE_RUN_OUTCOME" >> "` + path + `"`
+}
+
+func TestRunOnce(t *testing.T) {
+	tests := []struct {
+		name        string
+		agent       string
+		wantCode    int
+		wantOutcome string
+	}{
+		{name: "succeeding session", agent: "agent:\n  kind: mock", wantCode: 0, wantOutcome: "succeeded"},
+		{name: "failing session", agent: "agent:\n  kind: mock\n  max_sessions: 1\n  max_retry_backoff_ms: 50\nmock:\n  turn_outcomes: [failed]", wantCode: 2, wantOutcome: "failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeIssuesFixture(t, dir)
+			workflow := fmt.Sprintf(`---
+tracker:
+  kind: file
+  active_states: [To Do]
+  handoff_state: In Review
+file:
+  path: %[1]s/issues.json
+%[2]s
+workspace:
+  root: %[1]s/workspaces
+hooks:
+  after_run: '%[3]s'
+price_table:
+  fetch: false
+---
+Do {{ .issue.title }}.
+`, dir, tt.agent, appendRunOutcomeHook(filepath.Join(dir, "outcomes.txt")))
+			wfPath := writeCustomWorkflowFile(t, dir, []byte(workflow))
+			var stderr lockedBuf
+
+			resultPath := filepath.Join(dir, "result.json")
+			code := run(waittest.Context(t), []string{"--once", "--once-result", resultPath, "--port", "0", wfPath}, io.Discard, &stderr)
+
+			recorded, _ := os.ReadFile(filepath.Join(dir, "outcomes.txt"))
+			if got := strings.TrimSpace(string(recorded)); code != tt.wantCode || got != tt.wantOutcome {
+				t.Errorf("run(--once) = %d with after_run outcome %q, want %d and %q; stderr:\n%s", code, got, tt.wantCode, tt.wantOutcome, stderr.String())
+			}
+			raw, err := os.ReadFile(resultPath)
+			if err != nil {
+				t.Fatalf("run(--once) result file: %v; stderr:\n%s", err, stderr.String())
+			}
+			var result map[string][]map[string]string
+			if err := json.Unmarshal(raw, &result); err != nil {
+				t.Fatalf("decoding result file %s: %v", raw, err)
+			}
+			want := map[string]string{"identifier": "PROJ-1", "outcome": tt.wantOutcome}
+			if !slices.ContainsFunc(result["issues"], func(entry map[string]string) bool { return maps.Equal(entry, want) }) {
+				t.Errorf("run(--once) result file = %s, want an issues entry %v", raw, want)
+			}
+		})
 	}
 }

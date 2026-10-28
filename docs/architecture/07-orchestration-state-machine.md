@@ -57,8 +57,9 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Validate config, which forces a defensive reload, then apply the result to runtime state.
   - Reconcile active runs.
   - Run the periodic workspace sweep when due (Section 8.7).
+  - Evaluate the instance spend ceiling (Section 8.4), whether or not validation succeeded.
   - Fetch candidate issues.
-  - Dispatch until slots are exhausted. Dispatch is the only step gated on validation success.
+  - Dispatch until slots are exhausted, unless a spend window holds dispatch (Section 8.4). Dispatch is the only step gated on validation success.
   - Dispatched workers perform the optional dispatch-time in-progress transition (via `tracker.in_progress_state`) as their first step, before workspace preparation.
 
 - `Worker Exit (normal)`
@@ -67,7 +68,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - The exit then takes exactly one disposition. The conditions are evaluated in the order below and the first match wins, so an earlier disposition overrides every later one:
 
     1. The agent reported itself blocked through a soft stop. Suppress the continuation retry. Where the dispatch drives issue state, park the issue instead of merely releasing the claim: cancel any pending retry, release the claim, record a durable park keyed by issue ID, and apply the configured parking label to the issue through the tracker adapter. The park holds the issue out of dispatch until a later poll tick observes either a change in the issue's tracker state or the removal of a parking label the orchestrator has confirmed reached the tracker (§14.2). Where the dispatch does not drive issue state, cancel any pending retry and release the claim without recording a park. Blocked work has nowhere to continue to either way.
-    2. The freshest tracker observation for the issue reports a terminal state, resolved with precedence reconciliation's observation, then the worker's own per-turn observation, then the dispatch-time snapshot, or the withheld path's own verification read below reports one instead. Suppress the handoff transition and the continuation retry, cancel any pending retry, and release the claim. A terminal state is a decision already made about this issue; overwriting it with the handoff state would undo it.
+    2. The freshest tracker observation for the issue reports a terminal state, resolved with precedence reconciliation's observation, then the worker's own per-turn observation, then the dispatch-time snapshot, or the withheld path's own verification read below reports one instead. Suppress the handoff transition and the continuation retry, cancel any pending retry, record the terminal outcome (Section 4.1.8), and release the claim. A terminal state is a decision already made about this issue; overwriting it with the handoff state would undo it.
     3. A handoff state is configured, the issue is still in an active state, the exit is not a blocked soft stop, and the dispatch drives issue state. Only where all four conditions hold, apply the run's frozen `tracker.handoff_evidence` policy as a fifth condition:
        - Under `off`, compute no verdict and preserve the previous handoff behavior.
        - `Work observed` permits the handoff. It also resets the issue's consecutive-absence count to zero immediately, even if the later tracker write fails.
@@ -87,7 +88,7 @@ A verdict that permits the write first tries the hop when the run's rule carries
 
 The consecutive hop count resets when the handoff transition succeeds, when the exit takes disposition 2 or the issue is no longer active at exit, when a park is recorded, and when a park is released. Reconciliation, the retry handler, and the dispatch hold reset it when they observe the issue in a terminal state or in any state outside the active states (Section 8.5). A stage label change while the issue stays active, a failed handoff write, a withheld verdict, and a reload do not reset it.
 
-On a successful handoff transition, release the claim, unless the retry slot (Section 7.5) is occupied by an incumbent, in which case the incumbent is kept and the claim stays so the poll loop cannot clear it. On transition failure, a soft-stop exit releases the claim; a non-soft-stop exit schedules the continuation retry instead, unless the retry slot is already occupied, in which case the exit defers to the incumbent.
+A successful handoff transition records the handoff outcome with the state it wrote, or the terminal outcome when that target is a configured terminal state (Section 4.1.8). On a successful handoff transition, release the claim, unless the retry slot (Section 7.5) is occupied by an incumbent, in which case the incumbent is kept and the claim stays so the poll loop cannot clear it. On transition failure, a soft-stop exit releases the claim; a non-soft-stop exit schedules the continuation retry instead, unless the retry slot is already occupied, in which case the exit defers to the incumbent.
 
 A verdict that withholds the write is, immediately before any of its effects, checked once more against the tracker: a `fetch_issue_states_by_ids` read for the issue, gated the same way the permit path's own pre-write read is gated. When that read reports a terminal state, the exit takes disposition 2 above instead. Only when it does not—because no terminal states are configured, the read reports an active state, the issue is absent from the response, or the read fails—does the withheld verdict make no tracker transition and leave the issue in its active state. Record the unsuccessful attempt, increment the consecutive-absence count, and use the ordinary failure path with exponential backoff and retry-slot arbitration—not the short continuation path. When the count reaches its ceiling, park the issue and stop the sequence as specified in §14.2.
     4. Any other soft stop. Suppress the continuation retry, cancel any pending retry, and release the claim. An unrecognized soft-stop reason is logged before taking this path.
@@ -103,11 +104,12 @@ A verdict that withholds the write is, immediately before any of its effects, ch
   - Schedule an exponential-backoff retry when the retry slot (Section 7.5) is free; defer to the incumbent already occupying it otherwise, keeping the claim.
 
 - `Agent Update Event`
-  - Update live session fields, token counters, and rate limits.
-  - Every agent update and self-review progress message a worker delivered before its exit is applied before that exit is handled, so no message from one run is applied after its exit or to a later run of the same issue. A usage figure applied this way for a run whose exit is being handled or already waiting is evaluated against neither the in-flight token ceiling nor the token warning threshold, because that run has already ended; the run's recorded total carries the figure to the next dispatch decision.
+  - Update live session fields, token counters, and the agent kind's usage windows.
+  - Every agent update and self-review progress message a worker delivered before its exit is applied before that exit is handled, so no message from one run is applied after its exit or to a later run of the same issue. A usage figure applied this way for a run whose exit is being handled or already waiting is evaluated against neither an in-flight ceiling (token or money) nor the token warning threshold, because that run has already ended; the run's recorded total carries the figure to the next dispatch decision.
 
 - `Retry Timer Fired`
-  - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
+  - While an instance spend window holds dispatch, re-arm the retry one `polling.interval_ms` ahead and start nothing, leaving its attempt count, claim, and persisted entry unchanged (Section 8.4).
+  - Otherwise re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
 
 - `Reconciliation State Refresh`
   - Stop runs whose issue states are terminal or no longer active.
@@ -116,10 +118,11 @@ A verdict that withholds the write is, immediately before any of its effects, ch
   - Kill the worker unconditionally, then either schedule an exponential-backoff retry when the retry slot (Section 7.5) is free, or defer to the incumbent already occupying it.
 
 - `CI Status Failing`
-  - Consult the retry slot (Section 7.5) first. If an incumbent occupies it, defer: re-enqueue the pending entry with a refreshed `CreatedAt` and take none of the actions below on this tick — no run-history row, no counter increment, no dispatch, and no escalation.
-  - On a free slot: persist CI failure run history and increment the CI fix attempt counter.
-  - If within `reactions.ci_failure.max_retries`: schedule a CI-fix dispatch with failure context injected into the prompt.
-  - If retries exhausted: escalate (apply the label or emit the escalation event per the `escalation` posture, Section 5.3.8), cancel retry, release claim.
+  - If an escalation stands on the entry (Section 11A.7), re-enqueue it with backoff and take none of the actions below: no retry-slot consult, run-history row, counter increment, dispatch, or escalation action. The escalation ends on a passing verdict, a new head, a `reactions.ci_failure.max_retries` reloaded above the fixes dispatched, a merge, a close, a missing pull request, or a person's answer (the issue moved out of `tracker.handoff_state`, or its park released so Sortie runs it again). Only a budget escalation ended by a reload goes on to the steps below on that pass.
+  - Consult the retry slot (Section 7.5) first. If an incumbent occupies it, defer: re-enqueue the pending entry with backoff, leaving its creation time unchanged, and take none of the actions below on this tick: no run-history row, no counter increment, no dispatch, and no escalation.
+  - On a free slot: persist CI failure run history (Section 11A.6).
+  - If the CI fix counter is below `reactions.ci_failure.max_retries`: increment it and schedule a CI-fix dispatch with failure context injected into the prompt.
+  - If the counter has reached `reactions.ci_failure.max_retries`: escalate with that count of fixes dispatched (apply the label or emit the escalation event per the `escalation` posture, Section 5.3.8), cancel retry, release the claim unless a worker runs for the issue (that worker's exit decides it). The entry stays pending with the escalation recorded on it, and the counter stays at the budget while the escalation stands.
 
 - `Review Comments Detected`
   - Compute fingerprint from non-outdated review comment IDs.
@@ -128,14 +131,14 @@ A verdict that withholds the write is, immediately before any of its effects, ch
   - If within debounce window: defer to next tick.
   - If the retry slot is occupied by an incumbent, defer instead (Section 7.5).
   - On a free slot, decide the continuation budget after the slot arbitration. Below `reactions.review_comments.max_continuation_turns`, schedule a review-fix dispatch with review comment context injected into the prompt.
-  - If continuation turns are exhausted: escalate (apply the label or emit the escalation event per the `escalation` posture, Section 5.3.8), cancel retry, release claim, recording nothing in the handed-off set. The set holds a new comment, because the check above settles every other set. For `reactions.bot_review`, only a new inline comment escalates, and its escalation leaves the claim and the retry in place (Section 11D.5).
+  - If continuation turns are exhausted: escalate (apply the label or emit the escalation event per the `escalation` posture, Section 5.3.8), cancel retry, release the claim unless a worker runs for the issue (that worker's exit decides it), recording nothing in the handed-off set. The entry stays pending with the escalation recorded on it, and so does its counter, until the escalation ends (Section 11B.6); a standing escalation dispatches nothing and is never aged out. The set holds a new comment, because the check above settles every other set. For `reactions.bot_review`, only a new inline comment escalates, and its escalation leaves the claim and the retry in place (Section 11D.5).
 
 - `Merge Completion Observed`
   - Observed on the reconcile tick for an issue still parked in `tracker.handoff_state` and not currently claimed by the orchestrator.
-  - While the pull request remains unmerged, wait without aging the missing-identifier condition. The first `Merged == true` response without a commit identifier starts a persisted thirty-minute grace period; retry that condition with pending backoff, then stop polling and attempt the configured escalation if it remains unresolved. Successful delivery is recorded once; a failed delivery can be retried only by a later fresh pending entry, not by restoring the stopped loop.
+  - While the pull request remains unmerged, wait without aging the missing-identifier condition. The first `Merged == true` response without a commit identifier starts a persisted thirty-minute grace period; retry that condition with pending backoff, then, if it remains unresolved, begin a `missing_merge_commit` escalation: attempt the configured escalation and keep the entry pending, watching for the commit identifier, with no transition. Successful delivery is recorded once; a failed delivery is retried once by the first pass after a restart or by a later fresh pending entry, and never by restarting the grace period.
   - Latch idempotency on the merge commit identifier; a commit already latched and dispatched is dropped without a transition.
   - Transition the issue to `reactions.merge_completion.target_state`, the last orchestrator-driven tracker-state write in an issue's life, after the optional dispatch-time in-progress transition and the handoff transition on worker exit (§11G).
-  - On failure, route by tracker error kind (§11G.5): a transport or API failure, or any other kind, retries with backoff bounded by `reactions.merge_completion.max_retries`, then escalates; an auth or payload failure escalates immediately, consuming no retry budget; a not-found issue stops, marks the fingerprint dispatched, and logs a warning, with no escalation.
+  - On failure, route by tracker error kind (§11G.5): a transport or API failure, or any other kind, retries with backoff bounded by `reactions.merge_completion.max_retries`, then escalates; an auth or payload failure escalates immediately, consuming no retry budget, and an escalation keeps the entry pending and makes no further transition call until it ends (a restart resumes one call, Section 11G.6); a not-found issue stops, marks the fingerprint dispatched, and logs a warning, with no escalation.
   - No orchestration-state transition occurs: the claim was already released when the issue entered the handoff state.
 
 ### 7.4 Idempotency and Recovery Rules
@@ -143,7 +146,7 @@ A verdict that withholds the write is, immediately before any of its effects, ch
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are required before launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery uses persisted state from SQLite for retry queues, session metadata, parked issues, and budget-hold notice records (the durable record that a `budget.held` notice reached at least one destination; a hold with no destination records nothing and is routed again on a later pass), supplemented by tracker polling for current issue states and filesystem inspection for workspace existence.
+- Restart recovery uses persisted state from SQLite for retry queues, session metadata, parked issues (including a park a person released that the issue's next primary dispatch has not yet consumed), budget-hold notice records (the durable record that a `budget.held` notice reached at least one destination; a hold with no destination records nothing and is routed again on a later pass), and attention acknowledgements (the durable record that a person has seen an attention item), supplemented by tracker polling for current issue states and filesystem inspection for workspace existence.
 - Startup pending reaction recovery uses `run_history`, tracker state, and `.sortie/scm.json` to reconstruct runtime `pending_reactions` for recent handoff-stage runs before the first poll tick. The scan is bounded by `PendingReactionRecoveryLookback` and a fixed candidate cap.
 - Startup terminal cleanup maps existing workspace directories to issue identifiers, queries the tracker for the states of those specific issues, and removes the ones in terminal states. An issue that reaches a terminal state through the merge-completion transition (§11G) becomes eligible for this same cleanup without a human relabeling it first.
 
@@ -152,13 +155,15 @@ A verdict that withholds the write is, immediately before any of its effects, ch
 1. Open or create the SQLite database and run schema migrations.
 2. Load persisted retry entries from SQLite.
 3. Reconstruct retry timers from persisted `due_at` timestamps.
-4. Load persisted park records from SQLite and reconstruct the runtime park set before the event loop starts, so a parked issue stays out of dispatch across the restart.
+4. Load persisted park records from SQLite and reconstruct the runtime park set before the event loop starts, so a parked issue stays out of dispatch across the restart. A record a person already released loads as a pending release instead, so the issue stays dispatchable and its next primary dispatch carries the hand-over (Section 14.2).
    Then load persisted stage hop records and reconstruct each issue's hop count, latest hop, and hold flag, so the count and the hold survive the restart. A record with an empty issue ID is skipped with a warning, and a failed load starts with none.
 5. Load persisted budget-hold notice records from SQLite and reconstruct the runtime notice memory before the event loop starts, so a hold already announced to its destinations before the restart is not announced again after it. A record exists only for a notice that had at least one destination.
-6. Map existing workspace directories to issue identifiers, query the tracker for the states of those specific issues, and clean the ones in terminal states.
-7. Construct reaction providers and call `RecoverPendingReactions` to restore eligible CI and review pending entries for handoff-stage issues.
-8. Query tracker for active issues and reconcile with persisted state.
-9. Begin normal polling loop.
+6. Load persisted attention acknowledgements from SQLite before the event loop starts, so an attention item whose `id` survives the restart keeps its acknowledgement (§13.7.2). A record that does not parse is skipped with a warning, and a failed load starts with none.
+7. Load persisted usage-limit holds from SQLite before the first tick, so a hold a provider usage limit began before the restart still stops new sessions of its agent kind, or of that kind on one model, until its reset. A hold whose reset has passed loads and has no effect, and a failed load starts with none. The restored retry entries keep the reset as their due time and their `usage_limit` origin trigger, so a refused issue's retry is still the first dispatch the hold admits.
+8. Map existing workspace directories to issue identifiers, query the tracker for the states of those specific issues, and clean the ones in terminal states.
+9. Construct reaction providers and call `RecoverPendingReactions` to restore eligible CI and review pending entries for handoff-stage issues.
+10. Query tracker for active issues and reconcile with persisted state.
+11. Begin normal polling loop.
 
 ### 7.5 Retry-Slot Arbitration
 
@@ -166,7 +171,7 @@ Retry staleness is measured from a monotonic timestamp captured before arming th
 
 `retry_attempts` holds at most one entry per issue: the retry slot. The entry's reaction kind records the owner, with the empty string meaning the orchestrator's own continuation lane. Every code path that wants to schedule a retry for an issue (a challenger) checks whether the slot is occupied before writing. A non-nil occupant (the incumbent) means another unit of work already owns the issue's next dispatch; the challenger defers instead of overwriting it, leaving the incumbent untouched and making no other state mutation. The rule keys on occupancy alone: it does not compare owners, rank reaction kinds, or preempt.
 
-Only two writers are exempt from checking first, because each frees the slot itself immediately before writing back into it: the retry-timer handler's inner reschedule, which pops and deletes the entry it is replacing before rescheduling it, and the overdue-retry re-arm pass (below), which cancels the same entry before re-arming it with a zero delay. Every other writer is admitted only into a free slot.
+Only two writers are exempt from checking first, because each frees the slot itself immediately before writing back into it: the retry-timer handler's inner reschedule and its re-arm under a spend hold (Section 8.4), which pop and delete the entry they are replacing before rescheduling it, and the overdue-retry re-arm pass (below), which cancels the same entry before re-arming it with a zero delay. Every other writer is admitted only into a free slot.
 
 Two liveness bounds keep an arbitrated slot from being held for the process lifetime:
 

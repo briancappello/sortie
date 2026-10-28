@@ -20,7 +20,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
-var recordGolden = flag.Bool("record-golden", false, "rewrite the golden notification fixtures instead of comparing against them")
+var recordGolden = flag.Bool("record-golden", false, "rewrite the golden fixtures instead of comparing against them")
 
 const goldenNotifyDir = "testdata/golden_notify"
 

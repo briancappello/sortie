@@ -1277,6 +1277,36 @@ func TestStageCandidates(t *testing.T) {
 	}
 }
 
+func TestLabelsAfterHop(t *testing.T) {
+	t.Parallel()
+
+	rules := stageWorkflow().Rules
+
+	tests := []struct {
+		name   string
+		labels []string
+		target string
+		want   []string
+	}{
+		{"source stage label dropped and target appended lowercased", []string{"bug", "stage-implement"}, "Stage-Plan", []string{"bug", "stage-plan"}},
+		{"target carried in another case stays in place", []string{"Stage-Implement", "bug", "stage-plan"}, "stage-implement", []string{"Stage-Implement", "bug"}},
+		{"labels no rule carries keep their order", []string{"zeta", "alpha", "bug"}, "stage-implement", []string{"zeta", "alpha", "bug", "stage-implement"}},
+		{"no labels yields the target alone", nil, "Stage-Plan", []string{"stage-plan"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := labelsAfterHop(tt.labels, rules, tt.target)
+
+			if got == nil || !slices.Equal(got, tt.want) {
+				t.Errorf("labelsAfterHop(%q, rules, %q) = %q, want %q", tt.labels, tt.target, got, tt.want)
+			}
+		})
+	}
+}
+
 func decodeLogRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	t.Helper()
 	var records []map[string]any

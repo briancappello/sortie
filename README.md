@@ -14,7 +14,7 @@ Run the coding agents you already use on tasks from your issue tracker - in para
 [![codecov](https://codecov.io/gh/sortie-ai/sortie/graph/badge.svg?token=K2TPXBCbvb)](https://codecov.io/gh/sortie-ai/sortie)
 [![Go Reference](https://pkg.go.dev/badge/github.com/sortie-ai/sortie.svg)](https://pkg.go.dev/github.com/sortie-ai/sortie)
 
-[Website](https://sortie-ai.com) · [Documentation](https://docs.sortie-ai.com) · [Discord](https://discord.gg/MCNrc8Wf9M) · [Contributing](CONTRIBUTING.md)
+[Website](https://sortie-ai.com) · [Documentation](https://docs.sortie-ai.com) · [GitHub Action](https://github.com/marketplace/actions/sortie-action) · [Discord](https://discord.gg/MCNrc8Wf9M) · [Contributing](CONTRIBUTING.md)
 
 **English | [简体中文](README.zh-CN.md)**
 
@@ -46,37 +46,40 @@ Try the [local demo](https://docs.sortie-ai.com/getting-started/quick-start/) wi
 
 ## How It Works
 
-1. Choose which issues to work on, which agent to run, and what instructions to give it in one `WORKFLOW.md` file:
+You describe the work in one `WORKFLOW.md` file: which issues to pick up, which agent to run, and what to tell it.
 
-  ```markdown
-  ---
-  tracker:
-    kind: github
-    api_key: $GITHUB_TOKEN
-    project: acme/billing-api
-    query_filter: "label:agent-ready"
-    active_states: [todo, in-progress]
-    handoff_state: review
-    terminal_states: [done]
+```markdown
+---
+tracker:
+  kind: github
+  api_key: $GITHUB_TOKEN
+  project: acme/billing-api
+  query_filter: "label:agent-ready"
+  active_states: [todo, in-progress]
+  handoff_state: review
+  terminal_states: [done]
   
-  agent:
-    kind: claude-code
-    max_concurrent_agents: 4
-  ---
+agent:
+  kind: claude-code
+  max_concurrent_agents: 4
+---
   
-  You are a senior engineer.
+You are a senior engineer.
   
-  ## {{ .issue.identifier }}: {{ .issue.title }}
+## {{ .issue.identifier }}: {{ .issue.title }}
   
-  {{ .issue.description }}
-  ```
+{{ .issue.description }}
+```
 
-2. Sortie picks up matching issues and runs agents in parallel, each in its own workspace.
-3. Failed runs are retried automatically. Enable CI and review feedback to send failures and comments back to the agent.
+Sortie polls your tracker for matching issues and runs an agent on each one in its own workspace, several at a time. A failed run is retried. Turn on CI and review feedback, and failed checks and review comments go back to the agent to fix.
 
-Run history survives restarts. You can track progress and costs, and update the workflow without restarting Sortie.
+You can edit `WORKFLOW.md` while Sortie runs, and it picks up the change without a restart. Run history survives restarts too, so progress and costs are still there afterwards.
 
-Sortie is a single binary, with no separate database or job queue to deploy. Sortie itself sends no telemetry.
+Follow along in the built-in dashboard, or connect your own tools: a JSON API with a live stream of changes, health probes, and Prometheus metrics, all on one port.
+
+Sortie runs the same way on a laptop, a VM, or a Kubernetes cluster. It ships as a container image at `ghcr.io/sortie-ai/sortie`, its health probes plug straight into liveness and readiness checks, and it shuts down cleanly when the pod stops. The [Kubernetes guide](https://docs.sortie-ai.com/guides/deploy-sortie-to-kubernetes/) walks through a full deployment.
+
+Sortie is a single binary. There's no separate database or job queue to deploy, and Sortie itself sends no telemetry.
 
 ## Documentation
 

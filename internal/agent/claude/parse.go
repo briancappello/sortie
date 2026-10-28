@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
+	"github.com/sortie-ai/sortie/internal/agent/usage"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
@@ -18,8 +21,9 @@ type rawEvent struct {
 	Subtype string `json:"subtype,omitempty"`
 
 	// System/init fields.
-	SessionID string `json:"session_id,omitempty"`
-	Cwd       string `json:"cwd,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	Cwd               string `json:"cwd,omitempty"`
+	ClaudeCodeVersion string `json:"claude_code_version,omitempty"`
 
 	// System/permission_denied fields.
 	ToolName string `json:"tool_name,omitempty"`
@@ -31,6 +35,13 @@ type rawEvent struct {
 	DurationAPI int64  `json:"duration_api_ms,omitempty"`
 	NumTurns    int    `json:"num_turns,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
+
+	// APIErrorStatus is the HTTP status of the API failure behind an
+	// error result, zero when the run met none.
+	APIErrorStatus int `json:"api_error_status,omitempty"`
+
+	// RateLimitInfo is present on rate_limit_event lines.
+	RateLimitInfo *rawRateLimitInfo `json:"rate_limit_info,omitempty"`
 
 	// Usage (present in result events).
 	Usage *rawUsage `json:"usage,omitempty"`
@@ -48,6 +59,31 @@ type rawEvent struct {
 	RetryDelayMS int    `json:"retry_delay_ms,omitempty"`
 	ErrorStatus  int    `json:"error_status,omitempty"`
 	ErrorField   string `json:"error,omitempty"`
+}
+
+// rawRateLimitInfo is the subscription allowance state a rate_limit_event
+// line reports. ResetsAt is Unix seconds.
+type rawRateLimitInfo struct {
+	Status        string `json:"status"`
+	ResetsAt      int64  `json:"resetsAt"`
+	RateLimitType string `json:"rateLimitType"`
+	OverageStatus string `json:"overageStatus"`
+
+	// Utilization is a fraction of the window; absent when the report
+	// only says the window is open.
+	Utilization *float64 `json:"utilization"`
+}
+
+func (i *rawRateLimitInfo) windowReadings() []usage.WindowReading {
+	if i == nil {
+		return nil
+	}
+	return []usage.WindowReading{{
+		Window:   i.RateLimitType,
+		Share:    i.Utilization,
+		Status:   i.Status,
+		ResetsAt: i.ResetsAt,
+	}}
 }
 
 // rawUsage holds token counts from a Claude Code result event.
@@ -74,9 +110,34 @@ type rawContentBlock struct {
 	Text      string          `json:"text,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	ID        string          `json:"id,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+}
+
+// toolMappings gives the kind and main-argument member of each Claude Code
+// tool the adapter reports an argument for.
+var toolMappings = map[string]agentcore.ToolMapping{
+	"Bash":         {Kind: domain.ToolKindShell, Key: "command"},
+	"Read":         {Kind: domain.ToolKindRead, Key: "file_path"},
+	"Write":        {Kind: domain.ToolKindEdit, Key: "file_path"},
+	"Edit":         {Kind: domain.ToolKindEdit, Key: "file_path"},
+	"NotebookEdit": {Kind: domain.ToolKindEdit, Key: "notebook_path"},
+	"Skill":        {Kind: domain.ToolKindSkill, Key: "skill"},
+}
+
+const mcpToolPrefix = "mcp__"
+
+// toolCallOf maps a tool_use block's name and input to a tool call. An MCP
+// tool is named {server}.{tool} and carries no kind or argument.
+func toolCallOf(name string, input json.RawMessage) agentcore.ToolCall {
+	if rest, ok := strings.CutPrefix(name, mcpToolPrefix); ok {
+		if server, tool, ok := strings.Cut(rest, "__"); ok {
+			return agentcore.ToolCall{Name: agentcore.QualifiedToolName(server, tool)}
+		}
+	}
+	return agentcore.MapToolCall(toolMappings, name, input)
 }
 
 // rawAssistantMessage is the nested message object inside an
@@ -123,44 +184,50 @@ func usageFromAssistant(raw *rawUsage) domain.TokenUsage {
 	}
 }
 
-// usageFromResult returns the authoritative per-turn usage and the
-// model that produced it from a result event. It prefers the
-// modelUsage map, which is present whenever the turn touched at least
-// one model and includes sub-agent activity that the top-level usage
-// object excludes; it falls back to the top-level usage object when
-// modelUsage is absent or empty. The reported model is the modelUsage
-// key with the greatest OutputTokens, ties broken by the
-// lexicographically smallest key. InputTokens includes prompt-cache
-// reads and prompt-cache writes in both cases; TotalTokens is computed
-// as InputTokens plus OutputTokens.
-func usageFromResult(event rawEvent) (usage domain.TokenUsage, model string) {
-	if len(event.ModelUsage) > 0 {
-		var bestOutput int64 = -1
-		for name, mu := range event.ModelUsage {
-			input := mu.InputTokens + mu.CacheReadInputTokens + mu.CacheCreationInputTokens
-			usage.InputTokens += input
-			usage.OutputTokens += mu.OutputTokens
-			usage.CacheReadTokens += mu.CacheReadInputTokens
-			usage.CacheWriteTokens += mu.CacheCreationInputTokens
-			if mu.OutputTokens > bestOutput || (mu.OutputTokens == bestOutput && name < model) {
-				bestOutput = mu.OutputTokens
-				model = name
-			}
-		}
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-		return usage, model
+// usageFromResult returns the usage the result event reports and its split
+// by model. It prefers the modelUsage map, which is present whenever the turn
+// touched at least one model and includes sub-agent activity that the
+// top-level usage object excludes; it falls back to the top-level usage
+// object when modelUsage is absent or empty, in which case byModel is nil.
+// InputTokens includes prompt-cache reads and prompt-cache writes in both
+// cases; TotalTokens is computed as InputTokens plus OutputTokens.
+//
+// On a process that restored its session's saved totals the figure is
+// cumulative over the whole session, so callers subtract a baseline
+// instead of adding it to a run total.
+func usageFromResult(event rawEvent) (usage domain.TokenUsage, byModel map[string]domain.TokenUsage) {
+	if len(event.ModelUsage) == 0 {
+		return usageFromAssistant(event.Usage), nil
 	}
-	return usageFromAssistant(event.Usage), ""
+	byModel = make(map[string]domain.TokenUsage, len(event.ModelUsage))
+	for name, mu := range event.ModelUsage {
+		figure := usageFromAssistant(&rawUsage{
+			InputTokens:              mu.InputTokens,
+			OutputTokens:             mu.OutputTokens,
+			CacheReadInputTokens:     mu.CacheReadInputTokens,
+			CacheCreationInputTokens: mu.CacheCreationInputTokens,
+		})
+		byModel[name] = figure
+		usage = agentcore.AddUsage(usage, figure)
+	}
+	return usage, byModel
 }
 
-// sumTurnMessages sums every stored per-message-id usage into one
-// turn-provisional [domain.TokenUsage].
-func sumTurnMessages(turnMessages map[string]domain.TokenUsage) domain.TokenUsage {
-	var sum domain.TokenUsage
-	for _, usage := range turnMessages {
-		sum = agentcore.AddUsage(sum, usage)
+// firstRestoringRelease is the first release whose resumed process
+// restores the totals its session saved.
+const firstRestoringRelease = "2.1.277"
+
+// restoresSavedTotals reports whether a process that names version on its
+// init event restores saved session totals. An absent version is an
+// older release; a version that is not valid semver is a newer one.
+func restoresSavedTotals(version string) bool {
+	if version == "" {
+		return false
 	}
-	return sum
+	if !semver.IsValid("v" + version) {
+		return true
+	}
+	return semver.Compare("v"+version, "v"+firstRestoringRelease) >= 0
 }
 
 // contentBlocks extracts the content array from an assistant message
@@ -176,34 +243,16 @@ func (e rawEvent) contentBlocks() []rawContentBlock {
 	return msg.Content
 }
 
-// summarizeAssistant extracts a human-readable summary from an
-// assistant message event's content blocks.
+// summarizeAssistant returns the text blocks of an assistant message event
+// joined by spaces, or "" when there are none. Tool calls are reported
+// separately as tool_result events, so naming them here would only repeat
+// them as noise in the run timeline.
 func summarizeAssistant(event rawEvent) string {
-	blocks := event.contentBlocks()
-	if len(blocks) == 0 {
-		return "assistant message"
-	}
-
 	var parts []string
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			if b.Text != "" {
-				parts = append(parts, redact.Truncate(b.Text, 200))
-			}
-		case "tool_use":
-			parts = append(parts, fmt.Sprintf("[tool: %s]", b.Name))
-		case "tool_result":
-			status := "ok"
-			if b.IsError {
-				status = "error"
-			}
-			parts = append(parts, fmt.Sprintf("[tool_result: %s]", status))
+	for _, b := range event.contentBlocks() {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, redact.Truncate(b.Text, 200))
 		}
-	}
-
-	if len(parts) == 0 {
-		return "assistant message"
 	}
 	return strings.Join(parts, " ")
 }
@@ -214,11 +263,4 @@ func formatAPIRetry(event rawEvent) string {
 	return fmt.Sprintf("API retry attempt %d/%d (delay %dms, status %d: %s)",
 		event.Attempt, event.MaxRetries, event.RetryDelayMS,
 		event.ErrorStatus, event.ErrorField)
-}
-
-func (e rawEvent) summary() string {
-	if e.Subtype != "" {
-		return fmt.Sprintf("%s/%s", e.Type, e.Subtype)
-	}
-	return e.Type
 }

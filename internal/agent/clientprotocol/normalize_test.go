@@ -26,7 +26,7 @@ func loadSessionUpdateFixture(t *testing.T, name string) json.RawMessage {
 func TestApplySessionUpdate(t *testing.T) {
 	t.Parallel()
 
-	t.Run("agent_message_chunk emits a notification", func(t *testing.T) {
+	t.Run("agent_message_chunk emits a liveness notification and exposes its text", func(t *testing.T) {
 		t.Parallel()
 		ev, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "agent_message_chunk.json"))
 		if !ok {
@@ -36,12 +36,15 @@ func TestApplySessionUpdate(t *testing.T) {
 		if !got.hasEvent || got.event.Type != domain.EventNotification {
 			t.Fatalf("applySessionUpdate() = %+v, want a notification event", got)
 		}
-		if got.event.Message != "Reading the file to understand its structure." {
-			t.Errorf("applySessionUpdate() Message = %q, want the chunk's text", got.event.Message)
+		if got.event.Message != "" {
+			t.Errorf("applySessionUpdate() Message = %q, want an empty liveness notification", got.event.Message)
+		}
+		if !got.messageChunk || got.messageText != "Reading the file to understand its structure." {
+			t.Errorf("applySessionUpdate() message chunk = (%t, %q), want the chunk's raw text", got.messageChunk, got.messageText)
 		}
 	})
 
-	t.Run("agent_thought_chunk emits the reasoning-block constant", func(t *testing.T) {
+	t.Run("agent_thought_chunk emits a blank other_message", func(t *testing.T) {
 		t.Parallel()
 		ev, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "agent_thought_chunk.json"))
 		if !ok {
@@ -51,8 +54,8 @@ func TestApplySessionUpdate(t *testing.T) {
 		if !got.hasEvent || got.event.Type != domain.EventOtherMessage {
 			t.Fatalf("applySessionUpdate() = %+v, want an other_message event", got)
 		}
-		if got.event.Message != reasoningBlockMessage {
-			t.Errorf("applySessionUpdate() Message = %q, want %q", got.event.Message, reasoningBlockMessage)
+		if got.event.Message != "" {
+			t.Errorf("applySessionUpdate() Message = %q, want blank", got.event.Message)
 		}
 	})
 
@@ -71,50 +74,64 @@ func TestApplySessionUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("plan emits the plan-update constant", func(t *testing.T) {
+	t.Run("plan emits a blank other_message", func(t *testing.T) {
 		t.Parallel()
 		ev, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "plan.json"))
 		if !ok {
 			t.Fatal("parseSessionUpdate() found = false, want true")
 		}
 		got := applySessionUpdate(agentcore.NewToolTracker(), ev)
-		if !got.hasEvent || got.event.Message != planUpdateMessage {
-			t.Fatalf("applySessionUpdate() = %+v, want message %q", got, planUpdateMessage)
+		if !got.hasEvent || got.event.Type != domain.EventOtherMessage || got.event.Message != "" {
+			t.Fatalf("applySessionUpdate() = %+v, want a blank other_message event", got)
 		}
 	})
 
 	t.Run("tool_call then tool_call_update completed emits a tool_result", func(t *testing.T) {
 		t.Parallel()
-		tracker := agentcore.NewToolTracker()
 
-		begin, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "tool_call.json"))
-		if !ok {
-			t.Fatal("parseSessionUpdate(tool_call) found = false, want true")
-		}
-		if got := applySessionUpdate(tracker, begin); got.hasEvent {
-			t.Fatalf("applySessionUpdate(tool_call) = %+v, want hasEvent=false", got)
+		tests := []struct {
+			name         string
+			beginFixture string
+			want         agentcore.ToolCall
+		}{
+			{"read with a location names the call read and carries the path", "tool_call.json", agentcore.ToolCall{Name: "read", Kind: domain.ToolKindRead, Argument: "src/main.go"}},
+			{"execute carries its title as a shell call", "tool_call_execute.json", agentcore.ToolCall{Name: "execute", Kind: domain.ToolKindShell, Argument: "go test ./..."}},
+			{"other names no tool", "tool_call_other.json", agentcore.ToolCall{}},
 		}
 
-		end, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "tool_call_update_completed.json"))
-		if !ok {
-			t.Fatal("parseSessionUpdate(tool_call_update) found = false, want true")
-		}
-		got := applySessionUpdate(tracker, end)
-		if !got.hasEvent || got.event.Type != domain.EventToolResult {
-			t.Fatalf("applySessionUpdate(tool_call_update completed) = %+v, want a tool_result event", got)
-		}
-		if got.event.ToolError {
-			t.Error("applySessionUpdate(tool_call_update completed) ToolError = true, want false")
-		}
-		if got.event.ToolName != "read" {
-			t.Errorf("applySessionUpdate(tool_call_update completed) ToolName = %q, want %q", got.event.ToolName, "read")
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				tracker := agentcore.NewToolTracker()
+
+				begin, ok := parseSessionUpdate(loadSessionUpdateFixture(t, tt.beginFixture))
+				if !ok {
+					t.Fatalf("parseSessionUpdate(%s) found = false, want true", tt.beginFixture)
+				}
+				if got := applySessionUpdate(tracker, begin); got.hasEvent {
+					t.Fatalf("applySessionUpdate(%s) = %+v, want hasEvent=false", tt.beginFixture, got)
+				}
+
+				end, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "tool_call_update_completed.json"))
+				if !ok {
+					t.Fatal("parseSessionUpdate(tool_call_update) found = false, want true")
+				}
+				got := applySessionUpdate(tracker, end)
+				if !got.hasEvent || got.event.Type != domain.EventToolResult {
+					t.Fatalf("applySessionUpdate(tool_call_update completed) = %+v, want a tool_result event", got)
+				}
+				gotCall := agentcore.ToolCall{Name: got.event.ToolName, Kind: got.event.ToolKind, Argument: got.event.ToolArgument}
+				if gotCall != tt.want || got.event.ToolError {
+					t.Errorf("applySessionUpdate(%s, completed) = call %+v, ToolError %v, want call %+v, ToolError false", tt.beginFixture, gotCall, got.event.ToolError, tt.want)
+				}
+			})
 		}
 	})
 
 	t.Run("tool_call_update failed reports ToolError", func(t *testing.T) {
 		t.Parallel()
 		tracker := agentcore.NewToolTracker()
-		tracker.Begin("call_002", "execute")
+		tracker.Begin("call_002", agentcore.ToolCall{Name: "execute"})
 
 		ev, ok := parseSessionUpdate(loadSessionUpdateFixture(t, "tool_call_update_failed.json"))
 		if !ok {
@@ -144,7 +161,7 @@ func TestApplySessionUpdate(t *testing.T) {
 			t.Fatal("parseSessionUpdate() found = false, want true: an unmodeled key must not fail decoding")
 		}
 		got := applySessionUpdate(agentcore.NewToolTracker(), ev)
-		if !got.hasEvent || got.event.Message != "Patching the retry loop." {
+		if !got.hasEvent || got.event.Message != "" || got.messageText != "Patching the retry loop." {
 			t.Fatalf("applySessionUpdate() = %+v, want the chunk's own text despite the extra key", got)
 		}
 	})
@@ -171,12 +188,12 @@ func TestApplySessionUpdate(t *testing.T) {
 		}
 		applySessionUpdate(tracker, begin)
 
-		name, _, ok := tracker.End("call_004")
+		call, _, ok := tracker.End("call_004")
 		if !ok {
 			t.Fatal("tracker.End(call_004) ok = false, want true")
 		}
-		if name != string(toolKindOther) {
-			t.Errorf("tracker.End(call_004) name = %q, want %q for an unrecognized kind", name, toolKindOther)
+		if call != (agentcore.ToolCall{}) {
+			t.Errorf("tracker.End(call_004) = %+v, want an other tool for an unrecognized kind", call)
 		}
 	})
 

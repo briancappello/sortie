@@ -323,7 +323,7 @@ func smolvmPathField(m map[string]any, key string) (string, error) {
 	if err != nil || !present {
 		return "", err
 	}
-	expanded, err := expandPath(s, true)
+	expanded, err := ExpandPath(s, true)
 	if err != nil {
 		return "", &ConfigError{Field: field, Message: err.Error()}
 	}

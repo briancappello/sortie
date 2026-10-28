@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -29,10 +30,7 @@ func (o *Orchestrator) resolveAttemptSettings(cfg config.ServiceConfig, selectio
 		filepath.Dir(o.workflowManager.WorkflowAbsPath()))
 	meta, registered := o.preflightParams.AgentRegistry.Meta(selection.AgentKind)
 
-	arrival, attribution := registry.UsageArrivalUndeclared, registry.UsageAttributionUndeclared
-	if registered {
-		arrival, attribution = meta.UsageDisposition(settings.Passthrough, sshHost != "")
-	}
+	arrival, attribution := usageDisposition(meta, registered, settings.Passthrough, sshHost != "")
 	refusals, _ := settingsDiagnostics(cfg, meta, registered, settings, sshHost != "")
 
 	return AttemptSettings{
@@ -41,6 +39,16 @@ func (o *Orchestrator) resolveAttemptSettings(cfg config.ServiceConfig, selectio
 		UsageAttribution: attribution,
 		Refusals:         refusals,
 	}
+}
+
+// usageDisposition returns the usage arrival and attribution a session of
+// meta reports under passthrough, the undeclared pair for a kind the
+// registry does not hold.
+func usageDisposition(meta registry.AgentMeta, registered bool, passthrough map[string]any, remote bool) (registry.UsageArrival, registry.UsageAttribution) {
+	if !registered {
+		return registry.UsageArrivalUndeclared, registry.UsageAttributionUndeclared
+	}
+	return meta.UsageDisposition(passthrough, remote)
 }
 
 // settingsDiagnostics runs every check that reads a resolved settings
@@ -55,7 +63,7 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 	var warns []PreflightWarning
 	kind := settings.Kind
 
-	if meta.MCPInjection == registry.MCPInjectionUnsupported && settings.MCPConfigPath != "" {
+	if meta.MCPDialect == registry.MCPDialectNone && settings.MCPConfigPath != "" {
 		warns = append(warns, PreflightWarning{
 			Check:   "agent.mcp_config",
 			Message: "mcp_config in the " + strconv.Quote(kind) + " block cannot reach the agent: this agent kind receives no MCP configuration",
@@ -71,7 +79,14 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 					" reports no token usage for the sessions this configuration produces: the per-issue token ceiling can never be reached for it",
 			})
 		}
-		if tokenRatesPrice(cfg, kind) {
+		for _, setting := range moneyCeilingSettings(cfg.Agent) {
+			warns = append(warns, PreflightWarning{
+				Check: setting.Key + ".no_usage_reporting",
+				Message: setting.Key + " is set but agent kind " + strconv.Quote(kind) +
+					" reports no token usage for the sessions this configuration produces: " + setting.NoUsage,
+			})
+		}
+		if rates, _ := pricing.ParseTokenRates(cfg.ExtensionValue("token_rates")); rates[kind].Complete() {
 			warns = append(warns, PreflightWarning{
 				Check: "agent.kind.no_cost_estimate",
 				Message: "token_rates prices agent kind " + strconv.Quote(kind) +
@@ -80,15 +95,16 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 		}
 	}
 
-	// Sortie re-dispatches an issue with its earlier session after every
-	// retry, continuation, stall, or restart, so a kind that cannot
+	// A continuation, including one restored after a restart, a stall retry
+	// that fires before any restart, and the first run after a person
+	// releases a park resume the earlier session, so a kind that cannot
 	// resume fails every such turn.
 	if meta.SessionResumeBlockedBy != nil {
 		if key := meta.SessionResumeBlockedBy(settings.Passthrough); key != "" {
 			errs = append(errs, PreflightError{
 				Check: "agent.kind.session_resume",
 				Message: kind + "." + key + " stops this agent kind from resuming a session across separate agent launches, " +
-					"but Sortie re-dispatches an issue with its earlier session after a retry, a continuation, a stall, or a restart, " +
+					"but Sortie resumes an issue's earlier session on a continuation, including one queued before a restart, on the retry after a stall while Sortie keeps running, and on the first run after a person releases a park, " +
 					"and every such turn fails. Change " + kind + "." + key + ", or use an agent kind that can resume a session.",
 			})
 		}
@@ -110,20 +126,4 @@ func settingsDiagnostics(cfg config.ServiceConfig, meta registry.AgentMeta, regi
 		}
 	}
 	return errs, warns
-}
-
-// tokenRatesPrice reports whether token_rates prices kind. It reads only
-// the key set because the rate values belong to internal/server, which
-// this package must not import.
-func tokenRatesPrice(cfg config.ServiceConfig, kind string) bool {
-	raw, present := cfg.ExtensionValue("token_rates")
-	if !present {
-		return false
-	}
-	rates, ok := raw.(map[string]any)
-	if !ok {
-		return false
-	}
-	_, priced := rates[kind]
-	return priced
 }

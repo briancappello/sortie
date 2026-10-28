@@ -9,11 +9,11 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // discardTestLogger returns a logger that discards every record, for a
@@ -101,6 +101,7 @@ func openEndedHandshakeState(t *testing.T, repliesByID map[int64]string) *sessio
 		acc:        agentcore.NewRunUsage(),
 	}
 	state.conn = jsonrpc.NewConn(outPw, inPr, jsonrpc.Deliver(state.inbox, identity))
+	t.Cleanup(state.conn.Close)
 	go watchTermination(state)
 
 	go func() {
@@ -491,13 +492,8 @@ func TestAuthenticateIfNeeded_ContextCancelledDuringLoginWait(t *testing.T) {
 
 	cancel()
 
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("authenticateIfNeeded() = %v, want context.Canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("authenticateIfNeeded() did not return after context cancel")
+	if err := waittest.Receive(t, done, "authenticateIfNeeded return"); !errors.Is(err, context.Canceled) {
+		t.Errorf("authenticateIfNeeded() = %v, want context.Canceled", err)
 	}
 }
 

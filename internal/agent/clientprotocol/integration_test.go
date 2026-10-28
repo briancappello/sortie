@@ -1,47 +1,66 @@
-// Integration tests for the Agent Client Protocol transport, driven
-// against a real, locally installed protocol-speaking binary.
+// Integration tests for the Agent Client Protocol transport against a locally
+// installed protocol-speaking binary.
 //
 // Required environment variables:
 //
 //	SORTIE_CLIENTPROTOCOL_TEST=1     enable this suite
-//	SORTIE_CLIENTPROTOCOL_COMMAND    the protocol-speaking binary's launch
-//	                                  command, including whatever flag
-//	                                  puts it into Agent Client Protocol
-//	                                  mode
+//	SORTIE_CLIENTPROTOCOL_COMMAND    the binary's launch command, including the
+//	                                 flag that puts it into Agent Client
+//	                                 Protocol mode
 //
-// This suite names no default binary: the kind is generic, with no
-// runtime of its own, and naming one would make a single vendor the
-// implicit reference for it. Without SORTIE_CLIENTPROTOCOL_TEST=1, or
-// without SORTIE_CLIENTPROTOCOL_COMMAND, every test in this file skips
-// rather than failing.
+// The suite names no default binary, so no single vendor becomes the implicit
+// reference for the generic kind. Without both variables every test skips.
+// The runtime must complete a turn, answer it with stop reason end_turn,
+// stream at least one text message chunk, and report agentInfo in its
+// initialize response.
 //
-// The runtime SORTIE_CLIENTPROTOCOL_COMMAND names must complete a turn,
-// answer it with a stop reason of end_turn, stream at least one text
-// message chunk, and report agentInfo in its initialize response. The
-// example commands above illustrate command shape only; neither is
-// known to satisfy that contract, since both were driven through the
-// handshake alone.
-//
-// The scripted-model cases launch the same runtime against a loopback
-// scripted model endpoint, replace every named credential with a
-// sentinel, spend no quota, and skip when either coordinate is unset.
-// They also resume a session the runtime created, so the runtime must
-// continue it through session/load or session/resume; a runtime that
-// cannot gets no scripted case:
+// The scripted-model cases launch the same runtime against a loopback scripted
+// model endpoint, replace every named credential with a sentinel, spend no
+// quota, and skip unless the model endpoint and the credential names are
+// given. They also resume a session the runtime created, so the runtime must
+// continue it through session/load or session/resume; a runtime that cannot
+// gets no scripted case:
 //
 //	SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV
-//	                                  the name of the environment variable
-//	                                  through which the runtime takes its
-//	                                  model base address
+//	                                  name of the environment variable through
+//	                                  which the runtime takes its model base
+//	                                  address
 //	SORTIE_CLIENTPROTOCOL_CREDENTIAL_ENV
-//	                                  comma-separated names of the
-//	                                  environment variables the runtime
-//	                                  reads its credential from
+//	                                  comma-separated names of the environment
+//	                                  variables the runtime reads its
+//	                                  credential from
 //	SORTIE_CLIENTPROTOCOL_ASKING_COMMAND
-//	                                  the same runtime's launch command
-//	                                  in a posture that asks before
-//	                                  running a tool; unset skips the
-//	                                  refusal case with a logged reason
+//	                                  the launch command in a posture that asks
+//	                                  before running a tool; unset skips the
+//	                                  refusal case
+//	SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS
+//	                                  path of the user-level instruction file
+//	                                  relative to the scenario home, for a
+//	                                  runtime whose verification request keeps
+//	                                  no user instructions
+//	SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT
+//	                                  provider document for a runtime that
+//	                                  takes its model endpoint from a file;
+//	                                  {url} stands for the endpoint, and the
+//	                                  path of the file written from it goes to
+//	                                  the model base address variable
+//	SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH
+//	                                  path relative to the scenario home where
+//	                                  the model document is written, for a
+//	                                  runtime that reads its endpoint from a
+//	                                  fixed location; it replaces the model
+//	                                  base address variable
+//	SORTIE_CLIENTPROTOCOL_HTTP_TOOLS  1 when the runtime advertises
+//	                                  mcpCapabilities.http: the local tool-server
+//	                                  case must then reach the relay over
+//	                                  loopback HTTP, and the SSH cases run
+//	SORTIE_CLIENTPROTOCOL_SSH_COMMAND the launch command on the SSH lab host,
+//	                                  which has only what
+//	                                  SORTIE_CLIENTPROTOCOL_SSH_INSTALL
+//	                                  installs; the SSH cases skip without it
+//	SORTIE_CLIENTPROTOCOL_SSH_INSTALL POSIX shell script that installs the
+//	                                  runtime into the lab image as root, for
+//	                                  instance with npm install -g
 //
 // Run:
 //
@@ -65,22 +84,19 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel"
+	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
 type liveProtocolCapture struct {
 	clientPath string
 	agentPath  string
+	started    time.Time
 	expect     captureExpectation
 	events     func() []domain.AgentEvent // nil for expectHandshakeOnly
 }
 
-// skipUnlessClientProtocolIntegration skips the current test unless
-// SORTIE_CLIENTPROTOCOL_TEST=1 is set and SORTIE_CLIENTPROTOCOL_COMMAND
-// names a launch command. The command variable is a fixture coordinate
-// rather than a second gate: its own absence skips exactly like an
-// absent credential does in the sibling agent packages' suites, never
-// failing.
 func skipUnlessClientProtocolIntegration(t *testing.T) {
 	t.Helper()
 	if os.Getenv("SORTIE_CLIENTPROTOCOL_TEST") != "1" {
@@ -91,9 +107,6 @@ func skipUnlessClientProtocolIntegration(t *testing.T) {
 	}
 }
 
-// integrationAgentConfig returns the [domain.AgentConfig] every test in
-// this suite launches with. Timeouts are deliberately generous to
-// accommodate a real model's latency.
 func integrationAgentConfig(t *testing.T, expect captureExpectation, events func() []domain.AgentEvent) domain.AgentConfig {
 	t.Helper()
 	config, _ := captureAgentConfig(t, os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND"), expect, events)
@@ -106,6 +119,7 @@ func captureAgentConfig(t *testing.T, command string, expect captureExpectation,
 	capture := liveProtocolCapture{
 		clientPath: filepath.Join(dir, "client.jsonl"),
 		agentPath:  filepath.Join(dir, "agent.jsonl"),
+		started:    time.Now(),
 		expect:     expect,
 		events:     events,
 	}
@@ -117,7 +131,8 @@ func captureAgentConfig(t *testing.T, command string, expect captureExpectation,
 	t.Cleanup(func() { assertLiveProtocolConformance(t, capture) })
 
 	return domain.AgentConfig{
-		Command:       wrapperPath + " " + command,
+		Command: wrapperPath + " " + command,
+		// Generous for a real model's latency.
 		TurnTimeoutMS: 300000,
 		ReadTimeoutMS: 30000,
 	}, capture
@@ -129,8 +144,18 @@ func capturedJSONLines(t *testing.T, path string) [][]byte {
 	if err != nil {
 		t.Fatalf("capturedJSONLines(%q) error = %v", path, err)
 	}
+	return splitCapturedFrames(raw)
+}
+
+func splitCapturedFrames(raw []byte) [][]byte {
+	// Stopping the session kills the capture's tee mid-copy, so a final line
+	// without its newline is a torn copy, not a frame the agent sent.
+	text := string(raw)
+	if end := strings.LastIndexByte(text, '\n'); end < len(text)-1 {
+		text = text[:end+1]
+	}
 	var lines [][]byte
-	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
 		if line != "" {
 			lines = append(lines, []byte(line))
 		}
@@ -144,6 +169,13 @@ func jsonRPCIDKey(raw json.RawMessage) string {
 
 func assertLiveProtocolConformance(t *testing.T, capture liveProtocolCapture) {
 	t.Helper()
+
+	defer func() {
+		if t.Failed() {
+			logCapturedFrames(t, "client", capture.clientPath, capture.started)
+			logCapturedFrames(t, "agent", capture.agentPath, capture.started)
+		}
+	}()
 
 	requestMethods := make(map[string]string)
 	for _, line := range capturedJSONLines(t, capture.clientPath) {
@@ -227,12 +259,28 @@ func assertLiveProtocolConformance(t *testing.T, capture liveProtocolCapture) {
 	t.Logf("live shape observation: %+v", observed)
 }
 
-// gitInitWorkspace creates a temp directory and runs git init inside
-// it, matching the sibling agent packages' own integration fixture:
-// several protocol-speaking runtimes expect a git repository by
-// default.
+func logCapturedFrames(t *testing.T, side, path string, started time.Time) {
+	t.Helper()
+	if info, err := os.Stat(path); err == nil {
+		t.Logf("%s capture: last write %v after StartSession began", side, info.ModTime().Sub(started).Round(100*time.Millisecond))
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // path is created under this test's temp directory
+	if err != nil {
+		t.Logf("%s capture: %v", side, err)
+		return
+	}
+	const maxFrameBytes = 400
+	for i, line := range splitCapturedFrames(raw) {
+		if len(line) > maxFrameBytes {
+			line = append(line[:maxFrameBytes:maxFrameBytes], "..."...)
+		}
+		t.Logf("%s frame %d: %s", side, i, line)
+	}
+}
+
 func gitInitWorkspace(t *testing.T) string {
 	t.Helper()
+	// Several protocol-speaking runtimes expect a git repository by default.
 	dir := t.TempDir()
 	cmd := exec.CommandContext(context.Background(), "git", "-C", dir, "init")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -250,9 +298,6 @@ func mustNewClientProtocolAdapter(t *testing.T) *ClientProtocolAdapter {
 	return a.(*ClientProtocolAdapter)
 }
 
-// mustStartClientProtocolSession calls StartSession with the standard
-// integration config and registers a StopSession cleanup. It fails the
-// test immediately on error.
 func mustStartClientProtocolSession(t *testing.T, ctx context.Context, adapter *ClientProtocolAdapter, workspace string, expect captureExpectation, events func() []domain.AgentEvent) domain.Session {
 	t.Helper()
 	session, err := adapter.StartSession(ctx, domain.StartSessionParams{
@@ -266,9 +311,6 @@ func mustStartClientProtocolSession(t *testing.T, ctx context.Context, adapter *
 	return session
 }
 
-// makeEventCollector returns an OnEvent callback and a snapshot
-// function. The snapshot function returns a copy of every event
-// collected so far and is safe to call from any goroutine.
 func makeEventCollector(t *testing.T) (onEvent func(domain.AgentEvent), collected func() []domain.AgentEvent) {
 	t.Helper()
 	var mu sync.Mutex
@@ -331,9 +373,6 @@ func TestIntegration_StartSession(t *testing.T) {
 	}
 }
 
-// TestIntegration_StopSession verifies that StopSession terminates the
-// subprocess cleanly when called after a successful StartSession but
-// before any RunTurn, and that a second call is idempotent.
 func TestIntegration_StopSession(t *testing.T) {
 	skipUnlessClientProtocolIntegration(t)
 
@@ -473,18 +512,60 @@ func TestIntegration_EarlyExit(t *testing.T) {
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+func claimedVerificationContext(command string) registry.VerificationContext {
+	words := strings.Fields(command)
+	if len(words) == 0 {
+		return registry.VerificationContext{}
+	}
+	addition, _, claimed := usagesource.ClaimVerification(agentcore.LaunchTarget{Command: words[0], Args: words[1:]}, os.Environ())
+	if !claimed {
+		return registry.VerificationContext{}
+	}
+	defer addition.Close()
+	return addition.Context()
+}
+
+func writeModelDocument(t *testing.T, path, template, url string) string {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("create %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(template, "{url}", url)), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+func sshVariant() *fakemodel.SSHVariant {
+	variant := &fakemodel.SSHVariant{
+		Install: os.Getenv("SORTIE_CLIENTPROTOCOL_SSH_INSTALL"),
+		RemoteCommand: func(fakemodel.Environment) string {
+			return os.Getenv("SORTIE_CLIENTPROTOCOL_SSH_COMMAND")
+		},
+	}
+	switch {
+	case os.Getenv("SORTIE_CLIENTPROTOCOL_HTTP_TOOLS") != "1":
+		variant.Skip = "set SORTIE_CLIENTPROTOCOL_HTTP_TOOLS=1 when the runtime advertises mcpCapabilities.http; without the advertisement Sortie declares a tool-server gap and delivers nothing"
+	case os.Getenv("SORTIE_CLIENTPROTOCOL_SSH_COMMAND") == "":
+		variant.Skip = "the runtime's launch command on the lab host is unset: set SORTIE_CLIENTPROTOCOL_SSH_COMMAND"
+	}
+	return variant
+}
+
 func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessClientProtocolIntegration(t)
 
 	baseURLEnv := os.Getenv("SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV")
-	if baseURLEnv == "" {
-		t.Skip("skipping scripted model cases: SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV must name the variable through which the runtime takes its model base address")
+	documentPath := os.Getenv("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH")
+	if baseURLEnv == "" && documentPath == "" {
+		t.Skip("skipping scripted model cases: SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV must name the variable through which the runtime takes its model base address, or SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH the file it reads it from")
 	}
 	credentialNames := credentialtest.CredentialNames("SORTIE_CLIENTPROTOCOL_CREDENTIAL_ENV")
 	if len(credentialNames) == 0 {
 		t.Skip("skipping scripted model cases: SORTIE_CLIENTPROTOCOL_CREDENTIAL_ENV must name the credential variables, or a real key in the environment would reach the endpoint")
 	}
-	if !environmentNamePattern.MatchString(baseURLEnv) {
+	if baseURLEnv != "" && !environmentNamePattern.MatchString(baseURLEnv) {
 		t.Fatalf("SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV = %q, want a name matching %s", baseURLEnv, environmentNamePattern)
 	}
 
@@ -494,11 +575,21 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		skipRefusal = "skipping permission refusal: SORTIE_CLIENTPROTOCOL_ASKING_COMMAND must name the runtime's launch command in a posture that asks before running a tool"
 	}
 
-	fakemodel.AssertConformance(t, fakemodel.Binding{
-		Kind:          "agent-client-protocol",
-		Passthrough:   map[string]any{},
-		CredentialEnv: credentialNames,
-		Read:          fakemodel.ReadFile,
+	modelDocument := os.Getenv("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT")
+	if documentPath != "" && (modelDocument == "" || !filepath.IsLocal(documentPath)) {
+		t.Fatalf("SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH = %q, want a path inside the scenario home and a non-empty SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT", documentPath)
+	}
+
+	turnExpect := expectScriptedToolTurn
+	binding := fakemodel.Binding{
+		Kind:                "agent-client-protocol",
+		LocalToolsOverHTTP:  os.Getenv("SORTIE_CLIENTPROTOCOL_HTTP_TOOLS") == "1",
+		SSH:                 sshVariant(),
+		Passthrough:         map[string]any{},
+		CredentialEnv:       credentialNames,
+		UserInstructions:    os.Getenv("SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS"),
+		VerificationContext: claimedVerificationContext(os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND")),
+		Read:                fakemodel.ReadFile,
 		PermissionRefusal: &fakemodel.PermissionRefusal{
 			Guarded: fakemodel.CatFile,
 			Notice:  agentcore.DecideHumanRequest(agentcore.ClassPermission, true, agentcore.AnswerPending).Notice,
@@ -506,21 +597,64 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 		},
 		Launch: func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
 			command := os.Getenv("SORTIE_CLIENTPROTOCOL_COMMAND")
-			expect := expectScriptedToolTurn
+			expect := turnExpect
 			switch env.Scenario {
-			case fakemodel.ScenarioExhaustion, fakemodel.ScenarioCancellation, fakemodel.ScenarioStop:
+			case fakemodel.ScenarioExhaustion, fakemodel.ScenarioCancellation, fakemodel.ScenarioCancellationAfterOutput, fakemodel.ScenarioStop:
 				expect = expectHandshakeOnly
-			case fakemodel.ScenarioContinuation:
+			case fakemodel.ScenarioContinuation, fakemodel.ScenarioVerificationContext:
 				expect = expectCompletedTurn
 			case fakemodel.ScenarioPermissionRefusal:
 				command = askingCommand
 			}
+			launchEnv := map[string]string{}
+			switch {
+			case documentPath != "":
+				writeModelDocument(t, filepath.Join(env.Home, documentPath), modelDocument, env.URL)
+			case modelDocument != "":
+				launchEnv[baseURLEnv] = writeModelDocument(t, filepath.Join(env.Home, "model-document.json"), modelDocument, env.URL)
+			default:
+				launchEnv[baseURLEnv] = env.URL
+			}
+			if env.Remote {
+				return fakemodel.Launch{
+					Config: domain.AgentConfig{TurnTimeoutMS: 300000, ReadTimeoutMS: 30000},
+					Env:    launchEnv,
+				}
+			}
 			config, capture := captureAgentConfig(t, command, expect, env.Events)
 			return fakemodel.Launch{
 				Config:  config,
-				Env:     map[string]string{baseURLEnv: env.URL},
+				Env:     launchEnv,
 				Streams: []string{capture.clientPath, capture.agentPath},
 			}
 		},
+	}
+
+	fakemodel.AssertConformance(t, binding)
+
+	t.Run("tool-forcing turn", func(t *testing.T) {
+		turnExpect = expectToolForcingTurn
+		workspace := gitInitWorkspace(t)
+		target := filepath.Join(workspace, "greeting.txt")
+		usage := fakemodel.Usage{Prompt: 101, Candidates: 7}
+
+		run := fakemodel.RunCustomTurn(t, binding, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{
+				{Call: fakemodel.WriteFile(target, "hello from sortie"), Usage: usage},
+				{Call: fakemodel.ReadFile(target), Usage: usage},
+				{Text: "The file holds: hello from sortie", Usage: usage},
+			},
+			Prompt:    "Create a file at " + target + " containing exactly the text: hello from sortie. After writing it, read the file back and report exactly what it contains.",
+			Workspace: workspace,
+		})
+
+		assertCapabilityGapLabelsMatchProfile(t, run.Events, run.Result)
+		if run.Result.SessionID != run.Session.ID {
+			t.Errorf("TurnResult.SessionID = %q, want %q", run.Result.SessionID, run.Session.ID)
+		}
+		if run.Result.ExitReason != domain.EventTurnCompleted {
+			t.Errorf("TurnResult.ExitReason = %q, want %q", run.Result.ExitReason, domain.EventTurnCompleted)
+		}
+		assertContainsEventType(t, run.Events, domain.EventSessionStarted)
 	})
 }

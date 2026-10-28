@@ -12,17 +12,21 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/dispositiontest"
+	"github.com/sortie-ai/sortie/internal/agent/clientprotocol/usagesource"
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestRefusalNoticesUseSharedNotificationEmitter(t *testing.T) {
@@ -82,18 +86,48 @@ func TestPumpStreamEndCleanExit(t *testing.T) {
 
 	state, outPr, inPw := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
 	out := newOutboundReader(outPr)
-	outcomeCh := startTurnAwaitingPrompt(t, state, out)
+	markSessionKnown(state)
+	var events []domain.AgentEvent
+	outcomeCh := runTurnAsync(state, domain.RunTurnParams{
+		Prompt: "do something",
+		OnEvent: func(e domain.AgentEvent) {
+			events = append(events, e)
+		},
+	})
+	out.awaitMethod(t, methodSessionPrompt)
+
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"partial assistant message"},"messageId":"message-1"}}}`)
 
 	if err := inPw.Close(); err != nil {
 		t.Fatalf("close the simulated agent stream: %v", err)
 	}
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrPortExit,
 		TerminalMessage:   streamEndedMessage,
 	}, outcome.result, outcome.err)
+
+	emptyNotifications := 0
+	completeMessages := 0
+	for _, event := range events {
+		if event.Type != domain.EventNotification {
+			continue
+		}
+		switch event.Message {
+		case "":
+			emptyNotifications++
+		case "partial assistant message":
+			completeMessages++
+		}
+	}
+	if emptyNotifications != 1 {
+		t.Errorf("empty liveness notifications = %d, want 1", emptyNotifications)
+	}
+	if completeMessages != 1 {
+		t.Errorf("completed message notifications = %d, want 1", completeMessages)
+	}
 }
 
 func TestPumpStreamEndReadFailure(t *testing.T) {
@@ -107,7 +141,7 @@ func TestPumpStreamEndReadFailure(t *testing.T) {
 		t.Fatalf("CloseWithError: %v", err)
 	}
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrPortExit,
@@ -129,12 +163,11 @@ func TestFinalizeStreamEndLineBound(t *testing.T) {
 		oversized[i] = 'a'
 	}
 	oversized = append(oversized, '\n')
-	// The scanner abandons the read once it exceeds the bound without
-	// draining the rest, so a synchronous Write here would block forever;
-	// writing from a goroutine lets the too-long condition end the stream.
+	// The scanner stops reading past the bound, so a synchronous Write would
+	// block forever.
 	go func() { _, _ = inPw.Write(oversized) }()
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrTurnOutcomeUnknown,
@@ -183,36 +216,31 @@ func TestSessionUpdateBeforeAnyPromptNotLost(t *testing.T) {
 		OnEvent: func(e domain.AgentEvent) { eventCh <- e },
 	})
 
-	first := waitEvent(t, eventCh)
+	first := waittest.Receive(t, eventCh, "an agent event")
 	if first.Type != domain.EventSessionStarted {
 		t.Fatalf("first event type = %q, want %q", first.Type, domain.EventSessionStarted)
 	}
-	second := waitEvent(t, eventCh)
+	second := waittest.Receive(t, eventCh, "an agent event")
 	if second.Type != domain.EventNotification {
 		t.Fatalf("second event type = %q, want %q (the once-per-session capability notice)", second.Type, domain.EventNotification)
 	}
-	third := waitEvent(t, eventCh)
-	if third.Type != domain.EventNotification || third.Message != "queued before any turn" {
-		t.Fatalf("third event = %+v, want the queued notification flushed after session_started and the capability notice", third)
+	third := waittest.Receive(t, eventCh, "an agent event")
+	if third.Type != domain.EventNotification || third.Message != "" {
+		t.Fatalf("third event = %+v, want the queued chunk's liveness notification", third)
 	}
-
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
-}
-
-func waitEvent(t *testing.T, ch <-chan domain.AgentEvent) domain.AgentEvent {
-	t.Helper()
-	select {
-	case ev := <-ch:
-		return ev
-	case <-time.After(awaitTimeout):
-		t.Fatal("timed out waiting for an event")
-		return domain.AgentEvent{}
+	fourth := waittest.Receive(t, eventCh, "an agent event")
+	if fourth.Type != domain.EventNotification || fourth.Message != "queued before any turn" {
+		t.Fatalf("fourth event = %+v, want the queued message", fourth)
+	}
+	if !fourth.Timestamp.Equal(third.Timestamp) {
+		t.Errorf("queued message timestamp = %v, want %v, when its chunk arrived before the turn", fourth.Timestamp, third.Timestamp)
 	}
 }
 
@@ -297,7 +325,7 @@ func TestToolDeliveryReportSkippedDuringWindDownAndTeardown(t *testing.T) {
 		}
 
 		respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonCancelled})
-		awaitOutcome(t, outcomeCh)
+		waittest.Receive(t, outcomeCh, "turn outcome")
 
 		if got := countToolDeliveryNotifications(events); got != 0 {
 			t.Errorf("tool delivery uncallable notifications during wind-down = %d, want 0", got)
@@ -307,11 +335,8 @@ func TestToolDeliveryReportSkippedDuringWindDownAndTeardown(t *testing.T) {
 		}
 	})
 
-	// handlePermissionRequest and answerMethodNotFound each delete their own
-	// openRequests entry via defer, and the pump handles one inbox item to
-	// completion before the next, so a live pump can never observe
-	// handleAnswerOpen's defensive walk find a still-open entry. Exercising
-	// that path needs a pumpState with an open entry constructed directly.
+	// A live pump never leaves an openRequests entry behind, so this path needs a
+	// pumpState constructed with one.
 	t.Run("handleAnswerOpen answers a still-open permission request without reporting", func(t *testing.T) {
 		t.Parallel()
 
@@ -319,7 +344,7 @@ func TestToolDeliveryReportSkippedDuringWindDownAndTeardown(t *testing.T) {
 		inPr, _ := io.Pipe()
 		var buf bytes.Buffer
 		state := &sessionState{
-			caps:   newCapabilityRecord(false, false),
+			caps:   newCapabilityRecord(false),
 			stopCh: make(chan struct{}),
 			logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		}
@@ -372,7 +397,7 @@ func TestHandshakeToolServersDeliveredReachesPump(t *testing.T) {
 	out.next(t)
 
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
@@ -385,10 +410,24 @@ func TestHandshakeToolServersDeliveredReachesPump(t *testing.T) {
 	}
 }
 
-// stalledConsumerBurstCount is well past the capacity a bounded hand-off would
-// have held, so the write that would have parked such a reader is reached long
-// before the burst ends.
+// stalledConsumerBurstCount is well past any bounded hand-off's capacity.
 const stalledConsumerBurstCount = 4096
+
+const stalledConsumerChunkAlphabet = "!#$%&*+/:;<=>?@^~|"
+
+// Chunks avoid every character a registered secret can start with: parallel
+// tests register hex bearers process-wide, and truncating an aggregate drops a
+// trailing fragment that prefixes a registered value.
+func stalledConsumerChunkText(i int) string {
+	var text strings.Builder
+	base := len(stalledConsumerChunkAlphabet)
+	for n := i; ; n /= base {
+		text.WriteByte(stalledConsumerChunkAlphabet[n%base])
+		if n < base {
+			return text.String()
+		}
+	}
+}
 
 func TestRunTurn_StalledConsumerDoesNotParkPump(t *testing.T) {
 	t.Parallel()
@@ -406,64 +445,521 @@ func TestRunTurn_StalledConsumerDoesNotParkPump(t *testing.T) {
 			mu.Lock()
 			events = append(events, e)
 			mu.Unlock()
-			// Only a burst chunk's own event holds the gate; the turn's
-			// session-started event and capability notice must reach the caller
-			// before the prompt request is even sent.
-			if _, err := strconv.Atoi(e.Message); err == nil {
+			// Only a burst chunk's liveness event holds the gate; the session-started
+			// event and capability notice must arrive before the prompt is sent.
+			if e.Type == domain.EventNotification && e.Message == "" {
 				<-gate
 			}
 		},
 	})
 	promptID := out.awaitMethod(t, methodSessionPrompt)
 
+	var wantText strings.Builder
+	chunkTexts := make(map[string]struct{}, stalledConsumerBurstCount)
 	for i := range stalledConsumerBurstCount {
-		line := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%d"}}}}`, i)
+		chunkText := stalledConsumerChunkText(i)
+		line := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":%q}}}}`, chunkText)
+		wantText.WriteString(chunkText)
+		chunkTexts[chunkText] = struct{}{}
 		errCh := make(chan error, 1)
 		go func() {
 			_, writeErr := fmt.Fprintln(inPw, line)
 			errCh <- writeErr
 		}()
-		select {
-		case writeErr := <-errCh:
-			if writeErr != nil {
-				t.Fatalf("write session/update chunk %d: %v", i, writeErr)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("peer write %d did not return within 10s while the OnEvent gate was held, want the reader to never park behind the pump's own stalled delivery", i)
+		if writeErr := waittest.Receive(t, errCh, fmt.Sprintf("peer write %d while the OnEvent gate was held, with the reader never parked behind the pump's own stalled delivery", i)); writeErr != nil {
+			t.Fatalf("write session/update chunk %d: %v", i, writeErr)
 		}
 	}
 	close(gate)
 
 	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	if outcome.err != nil {
 		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	var texts []string
+	var emptyNotifications int
+	var partialChunks int
+	var completeMessages int
+	wantRunes := []rune(wantText.String())
+	wantMessage := string(wantRunes[:messageTruncateLimit]) + "…"
 	for _, e := range events {
-		if e.Type == domain.EventNotification {
-			if _, err := strconv.Atoi(e.Message); err == nil {
-				texts = append(texts, e.Message)
+		if e.Type != domain.EventNotification {
+			continue
+		}
+		switch e.Message {
+		case "":
+			emptyNotifications++
+		case wantMessage:
+			completeMessages++
+		default:
+			if _, isChunk := chunkTexts[e.Message]; isChunk {
+				partialChunks++
 			}
 		}
 	}
-	if len(texts) != stalledConsumerBurstCount {
-		t.Fatalf("notification events = %d, want %d", len(texts), stalledConsumerBurstCount)
+	if emptyNotifications != stalledConsumerBurstCount {
+		t.Errorf("empty liveness notifications = %d, want %d", emptyNotifications, stalledConsumerBurstCount)
 	}
-	for i, text := range texts {
-		if want := fmt.Sprintf("%d", i); text != want {
-			t.Errorf("notification %d text = %q, want %q (chunks out of order)", i, text, want)
+	if completeMessages != 1 {
+		t.Errorf("completed message notifications = %d, want 1 carrying the truncated aggregate", completeMessages)
+	}
+	if partialChunks != 0 {
+		t.Errorf("partial chunk notifications = %d, want 0", partialChunks)
+	}
+}
+
+func TestPumpAgentMessageChunksAreCoalesced(t *testing.T) {
+	t.Parallel()
+
+	state, outPr, inPw := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
+	out := newOutboundReader(outPr)
+	markSessionKnown(state)
+
+	var events []domain.AgentEvent
+	outcomeCh := runTurnAsync(state, domain.RunTurnParams{
+		Prompt: "go",
+		OnEvent: func(e domain.AgentEvent) {
+			events = append(events, e)
+		},
+	})
+	promptID := out.awaitMethod(t, methodSessionPrompt)
+
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "},"messageId":"message-1"}}}`)
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"usage_update","used":12000,"size":200000}}}`)
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"},"messageId":"message-1"}}}`)
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Next"},"messageId":"message-2"}}}`)
+	sendLine(t, inPw, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"plan","entries":[]}}}`)
+	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
+
+	if outcome := waittest.Receive(t, outcomeCh, "turn outcome"); outcome.err != nil {
+		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
+	}
+
+	var chunkNotifications []string
+	for _, event := range events {
+		isChunk := event.Type == domain.EventNotification && (event.Message == "" || event.Message == "hello world" || event.Message == "Next")
+		if isChunk || event.Type == domain.EventOtherMessage {
+			chunkNotifications = append(chunkNotifications, event.Message)
+		}
+	}
+	want := []string{"", "", "hello world", "", "Next", ""}
+	if len(chunkNotifications) != len(want) {
+		t.Fatalf("chunk notifications = %q, want %q", chunkNotifications, want)
+	}
+	for i := range want {
+		if chunkNotifications[i] != want[i] {
+			t.Errorf("chunk notification %d = %q, want %q", i, chunkNotifications[i], want[i])
 		}
 	}
 }
 
-// buildTestOwnedPipes returns pipes that satisfy StartOutputRelease's nil
-// check but are never wired to the connection under test, so the release's
-// CloseStdout cannot unpark the connection's reader; that is what proves the
-// pump reacts to abandonment on its own.
+func loadAgentInfoFixture(t *testing.T, name string) *implementation {
+	t.Helper()
+	data, err := os.ReadFile("testdata/agent_info/" + name)
+	if err != nil {
+		t.Fatalf("loadAgentInfoFixture(%q): %v", name, err)
+	}
+	var info implementation
+	if err := json.Unmarshal(data, &info); err != nil {
+		t.Fatalf("loadAgentInfoFixture(%q): %v", name, err)
+	}
+	return &info
+}
+
+func rateLimitUpdateLine(t *testing.T) string {
+	t.Helper()
+	params := strings.ReplaceAll(strings.TrimSpace(string(loadSessionUpdateFixture(t, "usage_update_rate_limit_meta.json"))), "<session>", "sess-test")
+	return `{"jsonrpc":"2.0","method":"session/update","params":` + params + `}`
+}
+
+func eventsOfTurnUnder(t *testing.T, declaration usagesource.Declaration, lines ...string) []domain.AgentEvent {
+	t.Helper()
+
+	state, outPr, inPw := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
+	out := newOutboundReader(outPr)
+	state.inbox.Put(pumpItem{control: &pumpControl{handshake: &handshakeFacts{declaration: declaration}}})
+	markSessionKnown(state)
+
+	var events []domain.AgentEvent
+	outcomeCh := runTurnAsync(state, domain.RunTurnParams{
+		Prompt:  "go",
+		OnEvent: func(e domain.AgentEvent) { events = append(events, e) },
+	})
+	promptID := out.awaitMethod(t, methodSessionPrompt)
+	for _, line := range lines {
+		sendLine(t, inPw, line)
+	}
+	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
+
+	if outcome := waittest.Receive(t, outcomeCh, "turn outcome"); outcome.err != nil {
+		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
+	}
+	return events
+}
+
+func windowEvents(events []domain.AgentEvent) []domain.AgentEvent {
+	var withWindows []domain.AgentEvent
+	for _, e := range events {
+		if len(e.UsageWindows) > 0 {
+			withWindows = append(withWindows, e)
+		}
+	}
+	return withWindows
+}
+
+func TestPumpUsageUpdateWindowsFollowTheRuntimeDeclaration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		declaration usagesource.Declaration
+		wantWindow  bool
+	}{
+		{"declared runtime name", selectDeclaration(usagesource.Declarations, loadAgentInfoFixture(t, "rate_limit_bridge.json")), true},
+		{"undeclared runtime name", selectDeclaration(usagesource.Declarations, &implementation{Name: "undeclared-runtime"}), false},
+		{"zero declaration", usagesource.Declaration{}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := windowEvents(eventsOfTurnUnder(t, tt.declaration, rateLimitUpdateLine(t)))
+
+			if !tt.wantWindow {
+				if len(got) != 0 {
+					t.Fatalf("usage_update events carrying windows = %+v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 || len(got[0].UsageWindows) != 1 {
+				t.Fatalf("usage_update events carrying windows = %+v, want one event with one window", got)
+			}
+			event, window := got[0], got[0].UsageWindows[0]
+			if event.Type != domain.EventNotification || event.Message != "" {
+				t.Errorf("window event = {Type %q, Message %q}, want an empty notification", event.Type, event.Message)
+			}
+			if window.Key != "five_hour" || window.Label != "5-hour limit" || window.Status != domain.UsageWindowWarning {
+				t.Errorf("window = {Key %q, Label %q, Status %q}, want {%q, %q, %q}", window.Key, window.Label, window.Status, "five_hour", "5-hour limit", domain.UsageWindowWarning)
+			}
+			if window.UsedPercent == nil || *window.UsedPercent != 90 {
+				t.Errorf("window UsedPercent = %v, want 90", window.UsedPercent)
+			}
+			if want := time.Unix(1700000000, 0).UTC(); !window.ResetsAt.Equal(want) {
+				t.Errorf("window ResetsAt = %v, want %v", window.ResetsAt, want)
+			}
+			if window.ReportedAt.IsZero() || !window.ReportedAt.Equal(event.Timestamp) {
+				t.Errorf("window ReportedAt = %v, want the event timestamp %v", window.ReportedAt, event.Timestamp)
+			}
+		})
+	}
+}
+
+func TestPumpWindowEventDoesNotSplitAnAgentMessage(t *testing.T) {
+	t.Parallel()
+
+	chunk := func(text string) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":%q},"messageId":"message-1"}}}`, text)
+	}
+	plan := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"plan","entries":[]}}}`
+	declaration := selectDeclaration(usagesource.Declarations, loadAgentInfoFixture(t, "rate_limit_bridge.json"))
+
+	events := eventsOfTurnUnder(t, declaration, chunk("hello "), rateLimitUpdateLine(t), chunk("world"), plan)
+
+	counts := map[string]int{}
+	for _, e := range events {
+		if e.Type == domain.EventNotification {
+			counts[e.Message]++
+		}
+	}
+	if counts["hello world"] != 1 || counts["hello "] != 0 || counts["world"] != 0 {
+		t.Errorf("agent message notifications around a window-bearing usage_update = %v, want %q once and neither half", counts, "hello world")
+	}
+	if got := len(windowEvents(events)); got != 1 {
+		t.Errorf("events carrying windows = %d, want 1", got)
+	}
+}
+
+const pulledUsageChunkLine = `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"},"messageId":"message-1"}}}`
+
+type usageReply struct {
+	method  string
+	fixture string
+}
+
+func loadPulledUsageFixture(t *testing.T, name string) json.RawMessage {
+	t.Helper()
+	data, err := os.ReadFile("testdata/pulled_usage/" + name)
+	if err != nil {
+		t.Fatalf("loadPulledUsageFixture(%q): %v", name, err)
+	}
+	return json.RawMessage(data)
+}
+
+type pulledUsageRuntime struct {
+	Launch            agentcore.LaunchTarget
+	RemoteLaunches    []string
+	OtherRemoteLaunch string
+	Execute           string
+	GetUsage          string
+}
+
+func sshLaunch(remoteCommand string) agentcore.LaunchTarget {
+	return agentcore.LaunchTarget{Command: "ssh", SSHHost: "worker", RemoteCommand: remoteCommand}
+}
+
+func loadPulledUsageRuntime(t *testing.T) pulledUsageRuntime {
+	t.Helper()
+	var runtime pulledUsageRuntime
+	if err := json.Unmarshal(loadPulledUsageFixture(t, "runtime.json"), &runtime); err != nil {
+		t.Fatalf("loadPulledUsageRuntime: %v", err)
+	}
+	return runtime
+}
+
+func newPulledUsageSession(t *testing.T, info *implementation, target agentcore.LaunchTarget) (*sessionState, *outboundReader, *io.PipeWriter) {
+	t.Helper()
+
+	state, outPr, inPw := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
+	state.sessionID = "sess-test"
+	declaration := resolveDeclaration(usagesource.Declarations, info, target)
+	facts := &handshakeFacts{declaration: declaration, puller: newSessionPuller(declaration, state, false)}
+	state.inbox.Put(pumpItem{control: &pumpControl{handshake: facts}})
+	markSessionKnown(state)
+	return state, newOutboundReader(outPr), inPw
+}
+
+func answerUsageRequests(t *testing.T, out *outboundReader, inPw io.Writer, replies []usageReply) {
+	t.Helper()
+	for _, reply := range replies {
+		id := out.awaitMethod(t, reply.method)
+		if reply.fixture == "" {
+			respondErrorLine(t, inPw, id, jsonrpc.MethodNotFoundCode, "method not found")
+			continue
+		}
+		respondLine(t, inPw, id, loadPulledUsageFixture(t, reply.fixture))
+	}
+}
+
+func runPulledUsageTurn(t *testing.T, state *sessionState, out *outboundReader, inPw io.Writer, replies ...usageReply) []domain.AgentEvent {
+	t.Helper()
+
+	var events []domain.AgentEvent
+	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&events)})
+	promptID := out.awaitMethod(t, methodSessionPrompt)
+	sendLine(t, inPw, pulledUsageChunkLine)
+	respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
+	answerUsageRequests(t, out, inPw, replies)
+
+	if outcome := waittest.Receive(t, outcomeCh, "turn outcome"); outcome.err != nil {
+		t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
+	}
+	return events
+}
+
+func assertNoOutboundLine(t *testing.T, out *outboundReader) {
+	t.Helper()
+	select {
+	case line := <-out.ch:
+		t.Errorf("outbound line after the turn = %s, want none", line)
+	default:
+	}
+}
+
+func assertMonthlyCreditWindowBeforeMessage(t *testing.T, events []domain.AgentEvent) {
+	t.Helper()
+
+	var windows []domain.UsageWindow
+	windowAt, messageAt, endAt, messages := -1, -1, -1, 0
+	for i, e := range events {
+		switch {
+		case len(e.UsageWindows) > 0:
+			windows = append(windows, e.UsageWindows...)
+			windowAt = i
+		case e.Type == domain.EventNotification && e.Message == "ok":
+			messages++
+			messageAt = i
+		case e.Type == domain.EventTurnCompleted:
+			endAt = i
+		}
+	}
+
+	if len(windows) != 1 {
+		t.Fatalf("pulled windows = %+v, want exactly one", windows)
+	}
+	window := windows[0]
+	if window.Label != "Monthly limit" {
+		t.Errorf("window Label = %q, want %q", window.Label, "Monthly limit")
+	}
+	if want := (domain.UsageWindowAmount{Used: 7.08, Limit: 1000, Unit: "credits"}); window.Amount == nil || *window.Amount != want {
+		t.Errorf("window Amount = %+v, want %+v", window.Amount, want)
+	}
+	if want := time.Date(2026, time.November, 1, 0, 0, 0, 0, time.UTC); !window.ResetsAt.Equal(want) {
+		t.Errorf("window ResetsAt = %v, want %v", window.ResetsAt, want)
+	}
+	if messages != 1 {
+		t.Errorf("agent message notifications = %d, want 1", messages)
+	}
+	if windowAt >= messageAt || messageAt >= endAt {
+		t.Errorf("event positions window=%d message=%d turn end=%d, want window < message < turn end", windowAt, messageAt, endAt)
+	}
+}
+
+func TestPumpPulledUsage(t *testing.T) {
+	t.Parallel()
+
+	runtime := loadPulledUsageRuntime(t)
+
+	t.Run("the engine named at handshake answers its usage command", func(t *testing.T) {
+		t.Parallel()
+
+		state, out, inPw := newPulledUsageSession(t, loadAgentInfoFixture(t, "pulled_usage_agent.json"), agentcore.LaunchTarget{})
+
+		events := runPulledUsageTurn(t, state, out, inPw, usageReply{runtime.Execute, "execute_result.json"})
+
+		assertMonthlyCreditWindowBeforeMessage(t, events)
+	})
+
+	nameless := []struct {
+		name   string
+		target agentcore.LaunchTarget
+		pulled bool
+	}{
+		{"a local launch", runtime.Launch, true},
+		{"an ssh launch of the bare executable", sshLaunch(runtime.RemoteLaunches[0]), true},
+		{"an ssh launch of the executable by path", sshLaunch(runtime.RemoteLaunches[1]), true},
+		{"an ssh launch of another runtime", sshLaunch(runtime.OtherRemoteLaunch), false},
+	}
+	for _, tt := range nameless {
+		t.Run("a nameless handshake and "+tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state, out, inPw := newPulledUsageSession(t, nil, tt.target)
+
+			if !tt.pulled {
+				events := runPulledUsageTurn(t, state, out, inPw)
+
+				assertNoOutboundLine(t, out)
+				if got := len(windowEvents(events)); got != 0 {
+					t.Errorf("events carrying windows for %+v = %d, want 0", tt.target, got)
+				}
+				return
+			}
+
+			events := runPulledUsageTurn(t, state, out, inPw,
+				usageReply{method: runtime.Execute},
+				usageReply{runtime.GetUsage, "get_usage_result.json"})
+
+			assertMonthlyCreditWindowBeforeMessage(t, events)
+		})
+	}
+
+	t.Run("a runtime that knows neither method is not asked again", func(t *testing.T) {
+		t.Parallel()
+
+		state, out, inPw := newPulledUsageSession(t, loadAgentInfoFixture(t, "pulled_usage_agent.json"), agentcore.LaunchTarget{})
+
+		first := runPulledUsageTurn(t, state, out, inPw, usageReply{method: runtime.Execute}, usageReply{method: runtime.GetUsage})
+		second := runPulledUsageTurn(t, state, out, inPw)
+
+		assertNoOutboundLine(t, out)
+		if got := len(windowEvents(slices.Concat(first, second))); got != 0 {
+			t.Errorf("events carrying windows = %d, want 0", got)
+		}
+	})
+
+	t.Run("an unanswered usage request keeps the turn's outcome", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			state, out, inPw := newPulledUsageSession(t, loadAgentInfoFixture(t, "pulled_usage_agent.json"), agentcore.LaunchTarget{})
+			outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: func(domain.AgentEvent) {}})
+
+			promptID := out.awaitMethod(t, methodSessionPrompt)
+			respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonEndTurn})
+			out.awaitMethod(t, runtime.Execute)
+
+			outcome := waittest.Receive(t, outcomeCh, "turn outcome")
+			if outcome.err != nil {
+				t.Fatalf("RunTurn() error = %v, want nil", outcome.err)
+			}
+			if outcome.result.ExitReason != domain.EventTurnCompleted {
+				t.Errorf("RunTurn() exit reason = %q, want %q", outcome.result.ExitReason, domain.EventTurnCompleted)
+			}
+		})
+	})
+
+	t.Run("a cancelled turn sends no usage request", func(t *testing.T) {
+		t.Parallel()
+
+		state, out, inPw := newPulledUsageSession(t, loadAgentInfoFixture(t, "pulled_usage_agent.json"), agentcore.LaunchTarget{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var events []domain.AgentEvent
+		outcomeCh := runTurnAsyncCtx(ctx, state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&events)})
+
+		promptID := out.awaitMethod(t, methodSessionPrompt)
+		cancel()
+		out.awaitMethod(t, methodSessionCancel)
+		respondLine(t, inPw, promptID, promptResponse{StopReason: stopReasonCancelled})
+		waittest.Receive(t, outcomeCh, "turn outcome")
+
+		assertNoOutboundLine(t, out)
+		if got := len(windowEvents(events)); got != 0 {
+			t.Errorf("events carrying windows = %d, want 0", got)
+		}
+	})
+}
+
+func TestPumpAgentMessageBufferIsBounded(t *testing.T) {
+	pump := &pumpState{}
+	id := messageId("message-1")
+	pump.handleAgentMessageChunk(&id, strings.Repeat("界", messageTruncateLimit+100), time.Now().UTC())
+	if got := pump.agentMessageText.Len(); got != len([]byte(strings.Repeat("界", messageTruncateLimit))) {
+		t.Fatalf("buffer bytes = %d, want %d", got, len([]byte(strings.Repeat("界", messageTruncateLimit))))
+	}
+	if !pump.agentMessageTruncated {
+		t.Fatal("buffer truncated = false, want true after the message limit")
+	}
+
+	pump.flushAgentMessage()
+	if len(pump.queued) != 1 {
+		t.Fatalf("queued events = %d, want 1 completed message", len(pump.queued))
+	}
+	if got, want := len([]rune(pump.queued[0].Message)), messageTruncateLimit+1; got != want {
+		t.Errorf("completed message rune count = %d, want %d", got, want)
+	}
+	if !strings.HasSuffix(pump.queued[0].Message, "…") {
+		t.Errorf("completed message = %q, want truncation marker", pump.queued[0].Message)
+	}
+}
+
+func TestPumpAgentMessageTruncationDoesNotLeakSecretPrefix(t *testing.T) {
+	secret := fmt.Sprintf("message-secret-%d", time.Now().UnixNano())
+	redact.Add(t.Name(), secret)
+
+	pump := &pumpState{}
+	id := messageId("message-1")
+	pump.handleAgentMessageChunk(&id, strings.Repeat("x", messageTruncateLimit-2)+secret, time.Now().UTC())
+	pump.flushAgentMessage()
+
+	if len(pump.queued) != 1 {
+		t.Fatalf("queued events = %d, want 1 completed message", len(pump.queued))
+	}
+	message := pump.queued[0].Message
+	if strings.Contains(message, secret[:2]) {
+		t.Errorf("completed message = %q, leaks a truncated prefix of the registered secret", message)
+	}
+	if !strings.HasSuffix(message, "…") {
+		t.Errorf("completed message = %q, want truncation marker", message)
+	}
+}
+
+// buildTestOwnedPipes returns pipes never wired to the connection under test,
+// so CloseStdout cannot unpark its reader and only abandonment can end the turn.
 func buildTestOwnedPipes(t *testing.T) *procutil.OwnedPipes {
 	t.Helper()
 	outRead, outWrite, err := os.Pipe()
@@ -490,7 +986,7 @@ func newTestSessionWithRelease(t *testing.T, grace time.Duration, reaped <-chan 
 	inPr, inPw := io.Pipe()
 
 	state := &sessionState{
-		caps:     newCapabilityRecord(false, false),
+		caps:     newCapabilityRecord(false),
 		usage:    agentcore.NewTurnEndUsage(),
 		stopCh:   make(chan struct{}),
 		pumpDone: make(chan struct{}),
@@ -535,9 +1031,9 @@ func TestPumpAbandonmentFinalizesActiveTurnWithoutWaitingOnConnDone(t *testing.T
 	start := time.Now()
 	close(reaped)
 
-	outcome := awaitOutcome(t, outcomeCh)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("the turn finalized after %v, want it bounded by the injected grace %v rather than the parked reader's own unbounded wait", elapsed, grace)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
+	if elapsed := time.Since(start); elapsed > procutil.DefaultDrainGrace {
+		t.Errorf("the turn finalized after %v, want it bounded by the injected grace %v rather than the default drain grace %v", elapsed, grace, procutil.DefaultDrainGrace)
 	}
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
@@ -560,21 +1056,16 @@ func TestPumpReaderDoneInsideGraceLeavesStreamEndOutcomeUntouched(t *testing.T) 
 		t.Fatalf("close the simulated agent stream: %v", err)
 	}
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal:          agentcore.TerminalFailure,
 		TerminalErrorKind: domain.ErrPortExit,
 		TerminalMessage:   streamEndedMessage,
 	}, outcome.result, outcome.err)
 
-	// Waiting out grace, rather than checking right away, proves the release's
-	// ReaderDone arm caught the close rather than the assertion simply running
-	// before an unattended timer could have fired.
-	select {
-	case <-state.release.Abandoned():
-		t.Error("the release abandoned though the reader ended inside its grace, want the latch to stay unset")
-	case <-time.After(grace + 500*time.Millisecond):
-	}
+	// Waiting out grace proves the ReaderDone arm caught the close, rather than
+	// the assertion running before the timer could fire.
+	waittest.Never(t, state.release.Abandoned(), grace+500*time.Millisecond, "the release to abandon though the reader ended inside its grace")
 }
 
 func TestPumpStartTurnAfterAbandonmentRefusedWithReleaseMessage(t *testing.T) {
@@ -586,14 +1077,10 @@ func TestPumpStartTurnAfterAbandonmentRefusedWithReleaseMessage(t *testing.T) {
 	markSessionKnown(state)
 
 	close(reaped)
-	select {
-	case <-state.release.Abandoned():
-	case <-time.After(awaitTimeout):
-		t.Fatal("the release never abandoned within the test's wait bound")
-	}
+	waittest.Receive(t, state.release.Abandoned(), "the release to abandon")
 
 	outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: func(domain.AgentEvent) {}})
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 
 	var agentErr *domain.AgentError
 	if !errors.As(outcome.err, &agentErr) {
@@ -625,7 +1112,7 @@ func TestHandleStartTurnRefusedOnceReleaseAbandonedBeforePumpHandlesIt(t *testin
 
 	p := &pumpState{
 		state: &sessionState{
-			caps:    newCapabilityRecord(false, false),
+			caps:    newCapabilityRecord(false),
 			logger:  discardLogger(),
 			usage:   agentcore.NewTurnEndUsage(),
 			release: buildAbandonedRelease(t),
@@ -680,7 +1167,7 @@ func TestPumpAbandonmentKeepsPendingCancelledOutcome(t *testing.T) {
 
 	close(reaped)
 
-	outcome := awaitOutcome(t, outcomeCh)
+	outcome := waittest.Receive(t, outcomeCh, "turn outcome")
 	dispositiontest.AssertDispositionContract(t, agentcore.TurnEvidence{
 		Terminal: agentcore.TerminalCancelled,
 	}, outcome.result, outcome.err)
@@ -694,19 +1181,11 @@ func TestPumpReturnsOnStopChAfterAbandonmentWithReaderDoneNeverClosing(t *testin
 	state, _, _ := newTestSessionWithRelease(t, grace, reaped)
 
 	close(reaped)
-	select {
-	case <-state.release.Abandoned():
-	case <-time.After(awaitTimeout):
-		t.Fatal("the release never abandoned within the test's wait bound")
-	}
+	waittest.Receive(t, state.release.Abandoned(), "the release to abandon")
 
 	state.stopOnce.Do(func() { close(state.stopCh) })
 
-	select {
-	case <-state.pumpDone:
-	case <-time.After(awaitTimeout):
-		t.Fatal("runPump did not return on state.stopCh after abandonment, though the connection's reader never ended")
-	}
+	waittest.Receive(t, state.pumpDone, "runPump to return on state.stopCh after abandonment, though the connection's reader never ended")
 }
 
 func buildAbandonedRelease(t *testing.T) *procutil.OutputRelease {
@@ -720,11 +1199,7 @@ func buildAbandonedRelease(t *testing.T) *procutil.OutputRelease {
 		Grace:      time.Millisecond,
 		Logger:     discardLogger(),
 	})
-	select {
-	case <-r.Abandoned():
-	case <-time.After(awaitTimeout):
-		t.Fatal("the release never abandoned")
-	}
+	waittest.Receive(t, r.Abandoned(), "the release to abandon")
 	return r
 }
 
@@ -756,13 +1231,9 @@ func TestStreamEndSitesReportAbandonmentMessageOnceReleaseHasGivenUp(t *testing.
 
 		p.handleStreamEnd()
 
-		select {
-		case end := <-turn.resultCh:
-			if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
-				t.Errorf("handleStreamEnd() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
-			}
-		case <-time.After(awaitTimeout):
-			t.Fatal("handleStreamEnd() did not finalize the active turn")
+		end := waittest.Receive(t, turn.resultCh, "handleStreamEnd() to finalize the active turn")
+		if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
+			t.Errorf("handleStreamEnd() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
 		}
 	})
 
@@ -781,13 +1252,9 @@ func TestStreamEndSitesReportAbandonmentMessageOnceReleaseHasGivenUp(t *testing.
 
 		p.handleStreamEndMessage(&jsonrpc.Message{Kind: jsonrpc.KindStreamEnd, Err: io.ErrUnexpectedEOF})
 
-		select {
-		case end := <-turn.resultCh:
-			if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
-				t.Errorf("handleStreamEndMessage() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
-			}
-		case <-time.After(awaitTimeout):
-			t.Fatal("handleStreamEndMessage() did not finalize the active turn")
+		end := waittest.Receive(t, turn.resultCh, "handleStreamEndMessage() to finalize the active turn")
+		if end.err == nil || end.err.Message != procutil.OutputAbandonedMessage {
+			t.Errorf("handleStreamEndMessage() turn error = %v, want message %q", end.err, procutil.OutputAbandonedMessage)
 		}
 	})
 }
@@ -817,12 +1284,45 @@ func TestHandleAbandonmentDrainsQueuedResponseBeforeFinalizing(t *testing.T) {
 
 	p.handleAbandonment()
 
-	select {
-	case end := <-turn.resultCh:
-		if end.err != nil {
-			t.Errorf("handleAbandonment() with a queued prompt response finalized the turn with error %v, want the queued response's own successful outcome (nil error): the response was already queued and must be drained before the turn is finalized as abandoned", end.err)
-		}
-	case <-time.After(awaitTimeout):
-		t.Fatal("handleAbandonment() did not finalize the active turn")
+	end := waittest.Receive(t, turn.resultCh, "handleAbandonment() to finalize the active turn")
+	if end.err != nil {
+		t.Errorf("handleAbandonment() with a queued prompt response finalized the turn with error %v, want the queued response's own successful outcome (nil error): the response was already queued and must be drained before the turn is finalized as abandoned", end.err)
+	}
+}
+
+func TestPumpPromptErrorKind(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		code     int
+		wantKind domain.AgentErrorKind
+	}{
+		{"authentication required ends as a refused credential", -32000, domain.ErrCredentialUnverified},
+		{"any other code stays a response error", -32603, domain.ErrResponseError},
+	}
+
+	const runtimeText = "API key is invalid."
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state, outPr, inPw := newTestSession(t, domain.AgentConfig{}, clientProtocolMaxLineBytes)
+			out := newOutboundReader(outPr)
+			markSessionKnown(state)
+
+			var events []domain.AgentEvent
+			outcomeCh := runTurnAsync(state, domain.RunTurnParams{Prompt: "go", OnEvent: collectEvents(&events)})
+			respondErrorLine(t, inPw, out.awaitMethod(t, methodSessionPrompt), tt.code, runtimeText)
+			outcome := waittest.Receive(t, outcomeCh, "turn outcome")
+
+			agentErr, ok := errors.AsType[*domain.AgentError](outcome.err)
+			if !ok || agentErr.Kind != tt.wantKind {
+				t.Fatalf("RunTurn(prompt error %d) error = %v, want *domain.AgentError of kind %q", tt.code, outcome.err, tt.wantKind)
+			}
+			if !strings.Contains(agentErr.Message, runtimeText) {
+				t.Errorf("RunTurn(prompt error %d) message = %q, want it to carry the runtime text %q", tt.code, agentErr.Message, runtimeText)
+			}
+		})
 	}
 }

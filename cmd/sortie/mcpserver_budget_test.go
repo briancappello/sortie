@@ -14,16 +14,15 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
+	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
-// fixtureBudgetAgentKind and fixtureBudgetTrackerKind name the agent and
-// tracker kinds this test's fixtures register. The orchestrator's
-// dispatch preflight requires cfg.Agent.Kind and cfg.Tracker.Kind to
-// resolve in their registries even though this harness supplies both
-// adapters directly, so the kinds are registered here rather than
-// depending on a real adapter package's own registration.
+// Preflight resolves configured kinds through the registries even when this
+// harness injects adapters directly.
 const (
 	fixtureBudgetAgentKind   = "mcpserver-budget-e2e-agent"
 	fixtureBudgetTrackerKind = "mcpserver-budget-e2e-tracker"
@@ -42,9 +41,6 @@ func init() {
 	}, registry.TrackerMeta{})
 }
 
-// budgetE2ETracker is a minimal domain.TrackerAdapter fixture: it
-// always reports the one configured issue as a candidate in its active
-// state, and answers every other call as a no-op.
 type budgetE2ETracker struct {
 	issueID    string
 	identifier string
@@ -81,6 +77,10 @@ func (tr *budgetE2ETracker) FetchIssueStatesByIDs(_ context.Context, ids []strin
 	return out, nil
 }
 
+func (tr *budgetE2ETracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (tr *budgetE2ETracker) FetchIssueStatesByIdentifiers(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }
@@ -91,21 +91,15 @@ func (tr *budgetE2ETracker) FetchIssueComments(_ context.Context, _ string) ([]d
 
 func (tr *budgetE2ETracker) TransitionIssue(_ context.Context, _ string, _ string) error { return nil }
 func (tr *budgetE2ETracker) CommentIssue(_ context.Context, _ string, _ string) error    { return nil }
-func (tr *budgetE2ETracker) CommentIssueWithLiteral(_ context.Context, _, _, _ string) error {
-	return nil
-}
-func (tr *budgetE2ETracker) AddLabel(_ context.Context, _ string, _ string) error { return nil }
+func (tr *budgetE2ETracker) AddLabel(_ context.Context, _ string, _ string) error        { return nil }
 
 func (tr *budgetE2ETracker) RemoveLabel(_ context.Context, _ string, _ string) error { return nil }
 
-// budgetE2EAgent is a domain.AgentAdapter fixture whose single turn
-// holds open until the test tells it to emit a usage-bearing event and,
-// separately, to complete: the test reads the tool's response between
-// those two signals so its turn genuinely straddles the assertions.
 type budgetE2EAgent struct {
-	started     chan domain.StartSessionParams
-	emitUsage   chan int64
-	proceedTurn chan struct{}
+	started         chan domain.StartSessionParams
+	emitUsage       chan int64
+	proceedTurn     chan struct{}
+	cacheReadTokens int64
 }
 
 func newBudgetE2EAgent() *budgetE2EAgent {
@@ -118,9 +112,6 @@ func newBudgetE2EAgent() *budgetE2EAgent {
 
 var _ domain.AgentAdapter = (*budgetE2EAgent)(nil)
 
-// budgetE2ESession lets RunTurn answer a credential verification
-// session immediately, never through the blocking usage/proceed
-// handshake the working turn exercises.
 type budgetE2ESession struct {
 	credentialVerification bool
 }
@@ -144,7 +135,7 @@ func (a *budgetE2EAgent) RunTurn(ctx context.Context, session domain.Session, pa
 			params.OnEvent(domain.AgentEvent{
 				Type:      domain.EventTokenUsage,
 				Timestamp: time.Now().UTC(),
-				Usage:     domain.TokenUsage{TotalTokens: total},
+				Usage:     domain.TokenUsage{TotalTokens: total, CacheReadTokens: a.cacheReadTokens},
 			})
 		case <-a.proceedTurn:
 			return domain.TurnResult{
@@ -160,8 +151,6 @@ func (a *budgetE2EAgent) RunTurn(ctx context.Context, session domain.Session, pa
 
 func (a *budgetE2EAgent) StopSession(_ context.Context, _ domain.Session) error { return nil }
 
-// budgetE2EWorkflowManager implements orchestrator.WorkflowManager with
-// a frozen configuration and one prompt template.
 type budgetE2EWorkflowManager struct {
 	config   config.ServiceConfig
 	template *prompt.Template
@@ -171,6 +160,7 @@ type budgetE2EWorkflowManager struct {
 var _ orchestrator.WorkflowManager = (*budgetE2EWorkflowManager)(nil)
 
 func (m *budgetE2EWorkflowManager) Config() config.ServiceConfig     { return m.config }
+func (m *budgetE2EWorkflowManager) Rates() *pricing.Rates            { return nil }
 func (m *budgetE2EWorkflowManager) PromptTemplate() *prompt.Template { return m.template }
 
 func (m *budgetE2EWorkflowManager) PromptTemplateByID(id string) *prompt.Template {
@@ -183,38 +173,30 @@ func (m *budgetE2EWorkflowManager) PromptTemplateByID(id string) *prompt.Templat
 func (m *budgetE2EWorkflowManager) Reload() error           { return nil }
 func (m *budgetE2EWorkflowManager) WorkflowAbsPath() string { return m.absPath }
 
-// waitForSessionMetadataTotal polls store.LoadSessionMetadata under a
-// deadline until issueID's row reports want as TotalTokens, never
-// sleeping a fixed duration.
-func waitForSessionMetadataTotal(t *testing.T, store *persistence.Store, issueID string, want int64, deadline time.Duration) persistence.SessionMetadata {
-	t.Helper()
-	ctx := context.Background()
-	timeout := time.After(deadline)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
+func (m *budgetE2EWorkflowManager) LoadStatus() workflow.LoadStatus { return workflow.LoadStatus{} }
 
-	for {
-		meta, found, err := store.LoadSessionMetadata(ctx, issueID)
+func waitForSessionMetadataTotal(t *testing.T, store *persistence.Store, issueID string, want int64) persistence.SessionMetadata {
+	t.Helper()
+	var meta persistence.SessionMetadata
+	waittest.Until(t, func() error {
+		var found bool
+		var err error
+		meta, found, err = store.LoadSessionMetadata(t.Context(), issueID)
 		if err != nil {
 			t.Fatalf("LoadSessionMetadata: %v", err)
 		}
-		if found && meta.TotalTokens == want {
-			return meta
+		if !found || meta.TotalTokens != want {
+			return fmt.Errorf("session_metadata.total_tokens: found=%v, total=%d, want %d", found, meta.TotalTokens, want)
 		}
-		select {
-		case <-ticker.C:
-		case <-timeout:
-			t.Fatalf("session_metadata.total_tokens did not reach %d within %s (last observed: found=%v, total=%d)",
-				want, deadline, found, meta.TotalTokens)
-		}
-	}
+		return nil
+	})
+	return meta
 }
 
-// costBudgetResult decodes the fields of cost_budget's response this
-// test asserts on.
 type costBudgetResult struct {
 	UsedTokens         int64  `json:"used_tokens"`
 	UsedTokensComplete bool   `json:"used_tokens_complete"`
+	RemainingTokens    *int64 `json:"remaining_tokens"`
 	WarningTokens      *int64 `json:"warning_tokens"`
 	WarningReached     *bool  `json:"warning_reached"`
 }
@@ -238,14 +220,6 @@ func executeBudgetTool(t *testing.T, tool domain.AgentTool) costBudgetResult {
 	return envelope.Data
 }
 
-// TestMCPServerBudget covers the dispatch-to-response path end to end,
-// with no dispatch ID or session ID supplied by hand at any seam.
-// It dispatches a real [orchestrator.Orchestrator] against a migrated
-// [persistence.Store], reads the dispatch ID and every other tool
-// parameter out of the [MCPConfigParams]-generated mcp.json the worker
-// actually wrote, and executes cost_budget through the same
-// [BuildSessionToolRegistry] the sidecar uses. It carries no build tag
-// and no SORTIE_*_TEST env gate, so it runs on every CI platform.
 func TestMCPServerBudget(t *testing.T) {
 	t.Parallel()
 
@@ -268,19 +242,20 @@ func TestMCPServerBudget(t *testing.T) {
 
 	const issueID = "budget-e2e-issue"
 	const identifier = "BUDGET-E2E-1"
-	const seededTotal int64 = 1000
+	const budgetTokens = 1000
 
 	if _, err := rw.AppendRunHistory(ctx, persistence.RunHistory{
-		IssueID:        issueID,
-		Identifier:     identifier,
-		Attempt:        1,
-		AgentAdapter:   fixtureBudgetAgentKind,
-		Workspace:      "/tmp/ws/BUDGET-E2E-1",
-		StartedAt:      "2026-03-19T09:00:00Z",
-		CompletedAt:    "2026-03-19T09:05:00Z",
-		Status:         "succeeded",
-		TotalTokens:    seededTotal,
-		TokensMeasured: true,
+		IssueID:         issueID,
+		Identifier:      identifier,
+		Attempt:         1,
+		AgentAdapter:    fixtureBudgetAgentKind,
+		Workspace:       "/tmp/ws/BUDGET-E2E-1",
+		StartedAt:       "2026-03-19T09:00:00Z",
+		CompletedAt:     "2026-03-19T09:05:00Z",
+		Status:          "succeeded",
+		TotalTokens:     1500,
+		CacheReadTokens: 900,
+		TokensMeasured:  true,
 	}); err != nil {
 		t.Fatalf("AppendRunHistory: %v", err)
 	}
@@ -306,6 +281,7 @@ func TestMCPServerBudget(t *testing.T) {
 			ReadTimeoutMS:       5000,
 			TurnTimeoutMS:       30000,
 			StopGraceMS:         5000,
+			MaxTokens:           budgetTokens,
 		},
 	}
 
@@ -319,7 +295,7 @@ func TestMCPServerBudget(t *testing.T) {
 		absPath:  filepath.Join(tmpDir, "WORKFLOW.md"),
 	}
 
-	state := orchestrator.NewState(cfg.Polling.IntervalMS, cfg.Agent.MaxConcurrentAgents, 0, nil, orchestrator.AgentTotals{})
+	state := orchestrator.NewState(cfg.Polling.IntervalMS, cfg.Agent.MaxConcurrentAgents, budgetTokens, nil, orchestrator.AgentTotals{})
 
 	o := orchestrator.NewOrchestrator(orchestrator.OrchestratorParams{
 		State:           state,
@@ -353,12 +329,7 @@ func TestMCPServerBudget(t *testing.T) {
 		<-runDone
 	})
 
-	var startParams domain.StartSessionParams
-	select {
-	case startParams = <-agent.started:
-	case <-time.After(15 * time.Second):
-		t.Fatal("StartSession was not called within 15 seconds")
-	}
+	startParams := waittest.Receive(t, agent.started, "StartSession call")
 	if startParams.MCPConfigPath == "" {
 		t.Fatal("StartSessionParams.MCPConfigPath is empty, want non-empty")
 	}
@@ -417,24 +388,28 @@ func TestMCPServerBudget(t *testing.T) {
 	}
 
 	before := executeBudgetTool(t, costBudget)
-	if before.UsedTokens != seededTotal {
-		t.Errorf("before the usage event: used_tokens = %d, want %d (seeded total)", before.UsedTokens, seededTotal)
+	if before.UsedTokens != 600 {
+		t.Errorf("before the usage event: used_tokens = %d, want 600 (seeded uncached)", before.UsedTokens)
 	}
 	if before.UsedTokensComplete {
 		t.Error("before the usage event: used_tokens_complete = true, want false")
 	}
 
-	const eventTotal int64 = 400
+	const eventTotal int64 = 900
+	agent.cacheReadTokens = 600
 	agent.emitUsage <- eventTotal
 
-	meta := waitForSessionMetadataTotal(t, reg.Store, issueID, eventTotal, 15*time.Second)
+	meta := waitForSessionMetadataTotal(t, reg.Store, issueID, eventTotal)
 	if meta.DispatchID != params.DispatchID {
 		t.Fatalf("session_metadata.dispatch_id = %q, want %q (the dispatch id recorded in mcp.json)", meta.DispatchID, params.DispatchID)
 	}
 
 	after := executeBudgetTool(t, costBudget)
-	if after.UsedTokens != seededTotal+eventTotal {
-		t.Errorf("after the usage event: used_tokens = %d, want %d", after.UsedTokens, seededTotal+eventTotal)
+	if after.UsedTokens != 900 {
+		t.Errorf("after the usage event: used_tokens = %d, want 900 (completed 600 + running 300 uncached)", after.UsedTokens)
+	}
+	if after.RemainingTokens == nil || *after.RemainingTokens != 100 {
+		t.Errorf("after the usage event: remaining_tokens = %v, want 100", after.RemainingTokens)
 	}
 	if !after.UsedTokensComplete {
 		t.Error("after the usage event: used_tokens_complete = false, want true")
@@ -443,15 +418,6 @@ func TestMCPServerBudget(t *testing.T) {
 	close(agent.proceedTurn)
 }
 
-// TestMCPServerBudget_WarningThreshold covers the token-warning-percent
-// dispatch-to-response path end to end. It mirrors TestMCPServerBudget's
-// harness with a threshold configured below the ceiling: a live figure
-// that stays under the threshold reports warning_reached false, and a
-// second figure arriving quickly after the first (well inside
-// sessionMetadataWriteInterval of the incremental write it triggered)
-// still reaches session_metadata and reports warning_reached true on the
-// very next cost_budget call, proving the write reached the database
-// despite the throttle window.
 func TestMCPServerBudget_WarningThreshold(t *testing.T) {
 	t.Parallel()
 
@@ -549,12 +515,7 @@ func TestMCPServerBudget_WarningThreshold(t *testing.T) {
 		<-runDone
 	})
 
-	var startParams domain.StartSessionParams
-	select {
-	case startParams = <-agent.started:
-	case <-time.After(15 * time.Second):
-		t.Fatal("StartSession was not called within 15 seconds")
-	}
+	startParams := waittest.Receive(t, agent.started, "StartSession call")
 
 	rawMCP, err := os.ReadFile(startParams.MCPConfigPath)
 	if err != nil {
@@ -597,7 +558,7 @@ func TestMCPServerBudget_WarningThreshold(t *testing.T) {
 	}
 
 	agent.emitUsage <- 600
-	meta1 := waitForSessionMetadataTotal(t, reg.Store, issueID, 600, 15*time.Second)
+	meta1 := waitForSessionMetadataTotal(t, reg.Store, issueID, 600)
 	if meta1.DispatchID != params.DispatchID {
 		t.Fatalf("session_metadata.dispatch_id = %q, want %q", meta1.DispatchID, params.DispatchID)
 	}
@@ -617,7 +578,7 @@ func TestMCPServerBudget_WarningThreshold(t *testing.T) {
 	// sessionMetadataWriteInterval of the write above: only the pending
 	// write bypassing the throttle lets it reach session_metadata at all.
 	agent.emitUsage <- 1100
-	waitForSessionMetadataTotal(t, reg.Store, issueID, 1100, 15*time.Second)
+	waitForSessionMetadataTotal(t, reg.Store, issueID, 1100)
 
 	above := executeBudgetTool(t, costBudget)
 	if above.UsedTokens != 1100 {

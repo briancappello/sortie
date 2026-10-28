@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -23,9 +24,13 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workflow"
+
+	_ "github.com/sortie-ai/sortie/internal/agent/mock"
 )
 
 type stubWorkflowManager struct {
@@ -79,6 +84,10 @@ func (s *stubWorkflowManager) WorkflowAbsPath() string {
 	return s.absPath
 }
 
+func (s *stubWorkflowManager) LoadStatus() workflow.LoadStatus { return workflow.LoadStatus{} }
+
+func (s *stubWorkflowManager) Rates() *pricing.Rates { return nil }
+
 func (s *stubWorkflowManager) setConfig(cfg config.ServiceConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -95,7 +104,24 @@ type observerFunc func()
 
 func (f observerFunc) OnStateChange() { f() }
 
+// stateChangeSignal returns an observer and the channel it signals. The send
+// never blocks because OnStateChange runs on the event loop.
+func stateChangeSignal() (Observer, <-chan struct{}) {
+	signal := make(chan struct{}, 1)
+	return observerFunc(func() {
+		select {
+		case signal <- struct{}{}:
+		default:
+		}
+	}), signal
+}
+
 type stubStore struct {
+	reactionActivityLog
+	livePassLog
+	noopOutcomeRecorder
+	noEscalationRecords
+	noUsageLimitHolds
 	unsupportedReactionObservationStore
 
 	mu              sync.Mutex
@@ -129,17 +155,28 @@ type stubStore struct {
 	// is zero.
 	tokenUnaccountedIDs []string
 
-	// tokenExhaustedUsage overrides the fixed {TotalTokens: 1000} usage
-	// for a tokenExhaustedIDs member, for a test controlling every field.
 	tokenExhaustedUsage map[string]persistence.IssueTokenUsage
 
 	upsertSessionMetadataErr error
+
+	windowUsage persistence.IssueTokenUsage
 
 	parkedIssues       []persistence.ParkedIssue
 	deletedParkedIDs   []string
 	labelAppliedIDs    []string
 	listParkedIssues   []persistence.ParkedIssue
 	listParkedIssueErr error
+
+	latestRuns      map[string]persistence.RunHistory
+	latestRunsErr   error
+	latestRunsCalls [][]string
+
+	resumeUsage    *persistence.ResumeUsage
+	resumeUsageErr error
+
+	dispatchMarked    []string
+	clearedOutcomeIDs []string
+	markDispatchedErr error
 
 	budgetHoldNotices         []persistence.BudgetHoldNotice
 	upsertBudgetHoldNoticeErr error
@@ -149,6 +186,16 @@ type stubStore struct {
 	deleteAllBudgetHoldErr    error
 	listBudgetHoldNotices     []persistence.BudgetHoldNotice
 	listBudgetHoldNoticesErr  error
+
+	storedAcknowledgements    map[string]persistence.AttentionAcknowledgement
+	savedAcknowledgements     []persistence.AttentionAcknowledgement
+	deletedAcknowledgementIDs []string
+	saveAcknowledgementErr    error
+	deleteAcknowledgementsErr error
+
+	// scopeBudgetToCandidates makes QueryBudgetExhaustedIssues answer only
+	// for the candidate IDs it receives, as persistence.Store does.
+	scopeBudgetToCandidates bool
 
 	// onAppendRunHistory and onUpsertSessionMetadata, when set, run
 	// synchronously after the write so a test can capture single-writer
@@ -169,6 +216,14 @@ func (s *stubStore) AppendRunHistory(_ context.Context, run persistence.RunHisto
 		hook(run)
 	}
 	return run, nil
+}
+
+func (s *stubStore) AppendRunHistoryWithEvents(ctx context.Context, run persistence.RunHistory, _ []persistence.RunEvent, _ persistence.RunEventLimits) (persistence.RunHistory, error) {
+	return s.AppendRunHistory(ctx, run)
+}
+
+func (s *stubStore) AppendRunEvents(context.Context, string, string, []persistence.RunEvent, persistence.RunEventLimits) error {
+	return nil
 }
 
 func (s *stubStore) UpsertAggregateMetrics(_ context.Context, m persistence.AggregateMetrics) error {
@@ -205,12 +260,23 @@ func (s *stubStore) SaveRetryEntry(_ context.Context, entry persistence.RetryEnt
 	return nil
 }
 
+func (s *stubStore) DeleteIssueOutcome(_ context.Context, issueID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clearedOutcomeIDs = append(s.clearedOutcomeIDs, issueID)
+	return nil
+}
+
 func (s *stubStore) DeleteRetryEntry(_ context.Context, issueID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deletedRetryIDs = append(s.deletedRetryIDs, issueID)
 	return nil
 }
+
+func (s *stubStore) Ping(_ context.Context) error { return nil }
+
+func (s *stubStore) ListReportedModels(context.Context) ([]string, error) { return nil, nil }
 
 func (s *stubStore) CountRunHistoryByIssue(_ context.Context, _ string) (int, error) {
 	return 0, nil
@@ -221,13 +287,20 @@ func (s *stubStore) TokenUsageByIssue(_ context.Context, _ string) (persistence.
 	defer s.mu.Unlock()
 	return persistence.IssueTokenUsage{
 		TotalTokens:        s.tokenSum,
+		UncachedTokens:     s.tokenSum,
 		Sessions:           s.tokenSessionCount,
 		UnmeasuredSessions: s.tokenUnmeasured,
 		UnaccountedTurns:   s.tokenUnaccounted,
 	}, nil
 }
 
-func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, _ []string, _ int) (map[string]int, error) {
+func (s *stubStore) UsageCompletedBetween(context.Context, time.Time, time.Time) (persistence.IssueTokenUsage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.windowUsage, nil
+}
+
+func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, candidateIDs []string, _ int) (map[string]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.budgetExhaustedErr != nil {
@@ -235,6 +308,9 @@ func (s *stubStore) QueryBudgetExhaustedIssues(_ context.Context, _ []string, _ 
 	}
 	result := make(map[string]int, len(s.budgetExhaustedIDs))
 	maps.Copy(result, s.budgetExhaustedIDs)
+	if s.scopeBudgetToCandidates {
+		maps.DeleteFunc(result, func(id string, _ int) bool { return !slices.Contains(candidateIDs, id) })
+	}
 	return result, nil
 }
 
@@ -260,9 +336,6 @@ func (s *stubStore) ResetHandoffAbsenceSequence(_ context.Context, issueID strin
 	return nil
 }
 
-// QueryTokenBudgetUsage reports a tokenExhaustedIDs member at the fixed
-// 1000 threshold every test here configures; absent candidates read as
-// zero spend.
 func (s *stubStore) QueryTokenBudgetUsage(_ context.Context, candidateIDs []string) (map[string]persistence.IssueTokenUsage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,17 +344,17 @@ func (s *stubStore) QueryTokenBudgetUsage(_ context.Context, candidateIDs []stri
 	}
 	usage := make(map[string]persistence.IssueTokenUsage, len(candidateIDs))
 	for _, id := range candidateIDs {
+		if custom, ok := s.tokenExhaustedUsage[id]; ok {
+			usage[id] = custom
+			continue
+		}
 		switch {
 		case slices.Contains(s.tokenExhaustedIDs, id):
-			if custom, ok := s.tokenExhaustedUsage[id]; ok {
-				usage[id] = custom
-				continue
-			}
-			usage[id] = persistence.IssueTokenUsage{TotalTokens: 1000}
+			usage[id] = persistence.IssueTokenUsage{TotalTokens: 1000, UncachedTokens: 1000}
 		case slices.Contains(s.tokenIncompleteIDs, id):
 			usage[id] = persistence.IssueTokenUsage{TotalTokens: 0, UnmeasuredSessions: 1}
 		case slices.Contains(s.tokenUnaccountedIDs, id):
-			usage[id] = persistence.IssueTokenUsage{TotalTokens: 500, Sessions: 1, UnaccountedTurns: 1}
+			usage[id] = persistence.IssueTokenUsage{TotalTokens: 500, UncachedTokens: 500, Sessions: 1, UnaccountedTurns: 1}
 		}
 	}
 	return usage, nil
@@ -372,6 +445,39 @@ func (s *stubStore) ListBudgetHoldNotices(_ context.Context) ([]persistence.Budg
 	out := make([]persistence.BudgetHoldNotice, len(s.listBudgetHoldNotices))
 	copy(out, s.listBudgetHoldNotices)
 	return out, nil
+}
+
+func (s *stubStore) SaveAttentionAcknowledgement(_ context.Context, ack persistence.AttentionAcknowledgement) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.saveAcknowledgementErr != nil {
+		return s.saveAcknowledgementErr
+	}
+	if s.storedAcknowledgements == nil {
+		s.storedAcknowledgements = make(map[string]persistence.AttentionAcknowledgement)
+	}
+	s.storedAcknowledgements[ack.ItemID] = ack
+	s.savedAcknowledgements = append(s.savedAcknowledgements, ack)
+	return nil
+}
+
+func (s *stubStore) DeleteAttentionAcknowledgements(_ context.Context, itemIDs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleteAcknowledgementsErr != nil {
+		return s.deleteAcknowledgementsErr
+	}
+	for _, id := range itemIDs {
+		delete(s.storedAcknowledgements, id)
+	}
+	s.deletedAcknowledgementIDs = append(s.deletedAcknowledgementIDs, itemIDs...)
+	return nil
+}
+
+func (s *stubStore) ListAttentionAcknowledgements(_ context.Context) ([]persistence.AttentionAcknowledgement, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Collect(maps.Values(s.storedAcknowledgements)), nil
 }
 
 type stubObserver struct {
@@ -903,11 +1009,7 @@ func TestMakeWorkerFn_SSHEnvNamesJoinsRegistryAndOperatorLists(t *testing.T) {
 		close(exitDone)
 	}()
 
-	select {
-	case <-exitDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("worker did not exit within 10 seconds")
-	}
+	waittest.Receive(t, exitDone, "worker exit")
 
 	if !slices.Equal(capturedSSHEnvNames, []string{"K1", "L"}) {
 		t.Errorf("StartSessionParams.SSHEnvNames = %v, want [K1 L]", capturedSSHEnvNames)
@@ -1016,11 +1118,7 @@ func TestOrchestratorShutdown(t *testing.T) {
 
 	cancel()
 
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Run did not return within 3 seconds of context cancellation")
-	}
+	waittest.Receive(t, done, "Run return")
 }
 
 // TestApplyQueued pins applyQueued's bound: it drains in receive order,
@@ -1174,14 +1272,11 @@ func TestOrchestrator_QueuedMessagesApplyAheadOfExit(t *testing.T) {
 				close(done)
 			}()
 
-			var row observedRow
-			select {
-			case row = <-captured:
-			case <-time.After(10 * time.Second):
+			t.Cleanup(func() {
 				cancel()
 				<-done
-				t.Fatalf("trial %d: timed out waiting for HandleWorkerExit's session_metadata row", trial)
-			}
+			})
+			row := waittest.Receive(t, captured, fmt.Sprintf("trial %d: HandleWorkerExit's session_metadata row", trial))
 
 			cancel()
 			<-done
@@ -1234,11 +1329,7 @@ func TestOrchestrator_QueuedMessagesApplyAheadOfExit(t *testing.T) {
 				close(done)
 			}()
 
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				t.Fatalf("trial %d: drainRunningWorkers did not return within 10 seconds", trial)
-			}
+			waittest.Receive(t, done, fmt.Sprintf("trial %d: drainRunningWorkers return", trial))
 
 			// The queued agent event's own throttled incremental write may
 			// land before HandleWorkerExit's unconditional exit-time write,
@@ -1322,11 +1413,11 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 		o, store, spy, logBuf := budgetCeilingExemptionFixture(t)
 		var cancelCalls atomic.Int32
 		o.state.Running["X"] = &RunningEntry{
-			Identifier:             "X-ident",
-			Issue:                  domain.Issue{ID: "X", Identifier: "X-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { cancelCalls.Add(1) },
+			Identifier:           "X-ident",
+			Issue:                domain.Issue{ID: "X", Identifier: "X-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { cancelCalls.Add(1) },
 		}
 		o.state.Claimed["X"] = struct{}{}
 		o.agentEventCh <- budgetCeilingCrossingEvent("X")
@@ -1346,7 +1437,7 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			t.Error(`log contains "run stopped by token ceiling", want no such record`)
 		}
 		if cancelCalls.Load() != 0 {
-			t.Errorf("TokenCeilingCancelFunc called %d times, want 0", cancelCalls.Load())
+			t.Errorf("CeilingCancelFunc called %d times, want 0", cancelCalls.Load())
 		}
 		if len(store.runHistories) != 1 {
 			t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
@@ -1366,11 +1457,11 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 		o, store, spy, logBuf := budgetCeilingExemptionFixture(t)
 		var cancelCalls atomic.Int32
 		o.state.Running["X"] = &RunningEntry{
-			Identifier:             "X-ident",
-			Issue:                  domain.Issue{ID: "X", Identifier: "X-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { cancelCalls.Add(1) },
+			Identifier:           "X-ident",
+			Issue:                domain.Issue{ID: "X", Identifier: "X-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { cancelCalls.Add(1) },
 		}
 		o.state.Claimed["X"] = struct{}{}
 		o.agentEventCh <- budgetCeilingCrossingEvent("X")
@@ -1390,7 +1481,7 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			t.Error(`log contains "run stopped by token ceiling", want no such record`)
 		}
 		if cancelCalls.Load() != 0 {
-			t.Errorf("TokenCeilingCancelFunc called %d times, want 0", cancelCalls.Load())
+			t.Errorf("CeilingCancelFunc called %d times, want 0", cancelCalls.Load())
 		}
 		if len(store.runHistories) != 1 {
 			t.Fatalf("AppendRunHistory called %d times, want 1", len(store.runHistories))
@@ -1415,11 +1506,11 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			StartedAt:  time.Now().UTC(),
 		}
 		o.state.Running["Y"] = &RunningEntry{
-			Identifier:             "Y-ident",
-			Issue:                  domain.Issue{ID: "Y", Identifier: "Y-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { yCancels.Add(1) },
+			Identifier:           "Y-ident",
+			Issue:                domain.Issue{ID: "Y", Identifier: "Y-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { yCancels.Add(1) },
 		}
 		o.state.Claimed["X"] = struct{}{}
 		o.state.Claimed["Y"] = struct{}{}
@@ -1445,7 +1536,7 @@ func TestHandleWorkerExit_NoBudgetStopForExitingRun(t *testing.T) {
 			t.Error(`log contains "run stopped by token ceiling", want no such record`)
 		}
 		if yCancels.Load() != 0 {
-			t.Errorf("Y's TokenCeilingCancelFunc called %d times, want 0", yCancels.Load())
+			t.Errorf("Y's CeilingCancelFunc called %d times, want 0", yCancels.Load())
 		}
 		if len(store.runHistories) != 2 {
 			t.Fatalf("AppendRunHistory called %d times, want 2", len(store.runHistories))
@@ -1469,18 +1560,18 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 		o, _, spy, logBuf := budgetCeilingExemptionFixture(t)
 		var xCancels, yCancels atomic.Int32
 		o.state.Running["X"] = &RunningEntry{
-			Identifier:             "X-ident",
-			Issue:                  domain.Issue{ID: "X", Identifier: "X-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { xCancels.Add(1) },
+			Identifier:           "X-ident",
+			Issue:                domain.Issue{ID: "X", Identifier: "X-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { xCancels.Add(1) },
 		}
 		o.state.Running["Y"] = &RunningEntry{
-			Identifier:             "Y-ident",
-			Issue:                  domain.Issue{ID: "Y", Identifier: "Y-ident"},
-			StartedAt:              time.Now().UTC(),
-			IssueTokensCompleted:   90,
-			TokenCeilingCancelFunc: func() { yCancels.Add(1) },
+			Identifier:           "Y-ident",
+			Issue:                domain.Issue{ID: "Y", Identifier: "Y-ident"},
+			StartedAt:            time.Now().UTC(),
+			IssueTokensCompleted: 90,
+			CeilingCancelFunc:    func() { yCancels.Add(1) },
 		}
 		o.agentEventCh <- budgetCeilingCrossingEvent("Y")
 		o.agentEventCh <- budgetCeilingCrossingEvent("X")
@@ -1494,16 +1585,16 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			t.Fatalf(`log contains "run stopped by token ceiling", want no such record: %s`, logBuf.String())
 		}
 		if yCancels.Load() != 1 {
-			t.Errorf("Y's TokenCeilingCancelFunc called %d times, want 1", yCancels.Load())
+			t.Errorf("Y's CeilingCancelFunc called %d times, want 1", yCancels.Load())
 		}
 		if xCancels.Load() != 0 {
-			t.Errorf("X's TokenCeilingCancelFunc called %d times, want 0", xCancels.Load())
+			t.Errorf("X's CeilingCancelFunc called %d times, want 0", xCancels.Load())
 		}
-		if o.state.Running["Y"].TokenCeilingStopRequest == nil {
-			t.Error("Y's TokenCeilingStopRequest = nil, want non-nil")
+		if o.state.Running["Y"].CeilingStopRequest == nil {
+			t.Error("Y's CeilingStopRequest = nil, want non-nil")
 		}
-		if o.state.Running["X"].TokenCeilingStopRequest != nil {
-			t.Error("X's TokenCeilingStopRequest is non-nil, want nil")
+		if o.state.Running["X"].CeilingStopRequest != nil {
+			t.Error("X's CeilingStopRequest is non-nil, want nil")
 		}
 	})
 
@@ -1526,7 +1617,7 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			state.Running[issueX].IssueTokensCompleted = 90
 			state.Running[issueY] = queuedOrderingIssueEntry(issueY)
 			state.Running[issueY].IssueTokensCompleted = 90
-			state.Running[issueY].TokenCeilingCancelFunc = func() { yCancels.Add(1) }
+			state.Running[issueY].CeilingCancelFunc = func() { yCancels.Add(1) }
 
 			tracker := &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}}
 			o := budgetOrchestratorWithMetrics(state, wm, store, tracker, discardLogger(), spy)
@@ -1534,9 +1625,9 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			// X's row is the trial's first run_history row, appended after
 			// applyQueuedAheadOfExit has already applied (and, for Y,
 			// ceiling-enforced) every message queued ahead of X's exit. The
-			// hook observes Y's TokenCeilingCancelFunc and the budget-stop counter at
+			// hook observes Y's CeilingCancelFunc and the budget-stop counter at
 			// that moment, from the loop goroutine, before Y's own exit or
-			// the shutdown drain can call Y's TokenCeilingCancelFunc again. The send
+			// the shutdown drain can call Y's CeilingCancelFunc again. The send
 			// never blocks, so Y's later row cannot stall the loop.
 			type observedRow struct {
 				yCancels        int32
@@ -1563,14 +1654,11 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 				close(done)
 			}()
 
-			var row observedRow
-			select {
-			case row = <-captured:
-			case <-time.After(10 * time.Second):
+			t.Cleanup(func() {
 				cancel()
 				<-done
-				t.Fatalf("trial %d: timed out waiting for X's run_history row", trial)
-			}
+			})
+			row := waittest.Receive(t, captured, fmt.Sprintf("trial %d: X's run_history row", trial))
 
 			// Y exits too, so the shutdown drain finds no running entry to
 			// wait for.
@@ -1579,7 +1667,7 @@ func TestApplyQueuedAheadOfExit_EnforcesCeilingForOtherIssues(t *testing.T) {
 			<-done
 
 			if row.yCancels != 1 {
-				t.Fatalf("trial %d: Y's TokenCeilingCancelFunc called %d times by the time X's row was upserted, want 1", trial, row.yCancels)
+				t.Fatalf("trial %d: Y's CeilingCancelFunc called %d times by the time X's row was upserted, want 1", trial, row.yCancels)
 			}
 			// The counter fires only once Y's own exit confirms the ceiling ended it.
 			if row.stoppedByBudget != 0 {
@@ -1620,9 +1708,50 @@ func TestApplyTurnStarted(t *testing.T) {
 	})
 }
 
-// TestOrchestrator_TurnStartedAppliesAheadOfExit pins that a turn-started
-// message queued before a worker's exit reaches that run's entry, never
-// a later run of the same issue.
+func TestApplyIssueRead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, issueID, dispatchID, state, reactionKind string
+		pendingCleanup, recorded                       bool
+	}{
+		{name: "active state", issueID: "A", dispatchID: "d1", state: "ai:in-progress", recorded: true},
+		{name: "absent entry", issueID: "missing", dispatchID: "d1", state: "ai:in-progress"},
+		{name: "mismatched dispatch", issueID: "A", dispatchID: "d0", state: "ai:in-progress"},
+		{name: "pending cleanup", issueID: "A", dispatchID: "d1", state: "ai:in-progress", pendingCleanup: true},
+		{name: "empty state", issueID: "A", dispatchID: "d1"},
+		{name: "terminal state", issueID: "A", dispatchID: "d1", state: "Done"},
+		{name: "non-active state", issueID: "A", dispatchID: "d1", state: "Backlog"},
+		{name: "handoff without reaction kind", issueID: "A", dispatchID: "d1", state: "Handoff"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wm := &stubWorkflowManager{}
+			wm.config.Tracker.ActiveStates = []string{"ai:in-progress"}
+			wm.config.Tracker.HandoffState = "Handoff"
+			entry := &RunningEntry{DispatchID: "d1", PendingCleanup: tt.pendingCleanup, Issue: domain.Issue{State: "ai:ready", Labels: []string{"ai:ready"}}}
+			state := NewState(1000, 4, 0, nil, AgentTotals{})
+			state.Running["A"] = entry
+			o := &Orchestrator{state: state, workflowManager: wm}
+			startedAt := time.Now()
+
+			o.applyIssueRead(issueReadMsg{IssueID: tt.issueID, DispatchID: tt.dispatchID, Read: domain.IssueStateAndLabels{State: tt.state, Labels: []string{"ai:in-progress"}}, StartedAt: startedAt})
+
+			got := fmt.Sprintf("%s %v %t", entry.Issue.State, entry.Issue.Labels, entry.IssueReadAt.Equal(startedAt))
+			want := "ai:ready [ai:ready] false"
+			if tt.recorded {
+				want = tt.state + " [ai:in-progress] true"
+			}
+			if got != want {
+				t.Errorf("applyIssueRead(%q, %q) entry = %q, want %q", tt.dispatchID, tt.state, got, want)
+			}
+		})
+	}
+}
+
 func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 	t.Parallel()
 
@@ -1639,6 +1768,7 @@ func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 		o := budgetOrchestrator(state, budgetTickConfig(0), store, tracker)
 
 		o.turnStartedCh <- turnStartedMsg{IssueID: issueID, TurnsStarted: 5}
+		o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: issueID, UnaccountedTurns: 2}
 
 		o.handleWorkerExit(context.Background(), WorkerResult{
 			IssueID:      issueID,
@@ -1653,19 +1783,25 @@ func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 		if entry.TurnCount != 5 {
 			t.Errorf("entry.TurnCount = %d, want 5 (applied before HandleWorkerExit removed the entry)", entry.TurnCount)
 		}
+		if entry.UnaccountedTurns != 2 {
+			t.Errorf("entry.UnaccountedTurns = %d, want 2 (applied before HandleWorkerExit removed the entry)", entry.UnaccountedTurns)
+		}
 
 		state.Running[issueID] = queuedOrderingIssueEntry(issueID)
 		o.applyQueuedAheadOfExit(context.Background(), map[string]struct{}{})
 		if got := state.Running[issueID].TurnCount; got != 0 {
 			t.Errorf("a later entry's TurnCount = %d, want 0 (no stray message left queued)", got)
 		}
+		if got := state.Running[issueID].UnaccountedTurns; got != 0 {
+			t.Errorf("a later entry's UnaccountedTurns = %d, want 0 (no stray message left queued)", got)
+		}
 	})
 
 	t.Run("workerExitCh case of drainRunningWorkers", func(t *testing.T) {
 		t.Parallel()
 
-		// The drain's own turnStartedCh case wins the random select about
-		// half the time, so a single trial cannot catch a missing drain.
+		// The drain's own channel cases win the random select about half
+		// the time, so a single trial cannot catch a missing drain.
 		const trials = 64
 
 		for trial := range trials {
@@ -1679,6 +1815,7 @@ func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 			o := budgetOrchestrator(state, budgetTickConfig(0), store, tracker)
 
 			o.turnStartedCh <- turnStartedMsg{IssueID: issueID, TurnsStarted: 9}
+			o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: issueID, UnaccountedTurns: 4}
 			o.workerExitCh <- WorkerResult{
 				IssueID:      issueID,
 				Identifier:   entry.Identifier,
@@ -1692,27 +1829,106 @@ func TestOrchestrator_TurnStartedAppliesAheadOfExit(t *testing.T) {
 				close(done)
 			}()
 
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				t.Fatalf("trial %d: drainRunningWorkers did not return within 10 seconds", trial)
-			}
+			waittest.Receive(t, done, fmt.Sprintf("trial %d: drainRunningWorkers return", trial))
 
 			if entry.TurnCount != 9 {
 				t.Fatalf("trial %d: entry.TurnCount = %d, want 9 (applied before the drain's HandleWorkerExit removed the entry)", trial, entry.TurnCount)
+			}
+			if entry.UnaccountedTurns != 4 {
+				t.Fatalf("trial %d: entry.UnaccountedTurns = %d, want 4 (applied before the drain's HandleWorkerExit removed the entry)", trial, entry.UnaccountedTurns)
 			}
 		}
 	})
 }
 
+func TestOrchestrator_UnaccountedTurnsRelayWritesWithoutWorkerExit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a relayed count reaches the in-flight row inside the throttle interval", func(t *testing.T) {
+		t.Parallel()
+
+		issueID := "ISSUE-RELAY-WRITE"
+		state := NewState(60000, 4, 0, nil, AgentTotals{})
+		entry := queuedOrderingIssueEntry(issueID)
+		entry.LastMetadataWrite = time.Now().UTC()
+		state.Running[issueID] = entry
+		store := &stubStore{}
+		o := budgetOrchestrator(state, budgetTickConfig(0), store, &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}})
+		o.drainTimeout = 100 * time.Millisecond
+		written := make(chan persistence.SessionMetadata, 8)
+		store.onUpsertSessionMetadata = func(meta persistence.SessionMetadata) { written <- meta }
+		o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: issueID, UnaccountedTurns: 3}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			o.Run(ctx)
+			close(done)
+		}()
+
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		got := waittest.Receive(t, written, "UpsertSessionMetadata call after the relay")
+		cancel()
+		<-done
+
+		if got.UnaccountedTurns != 3 || got.DispatchID != entry.DispatchID {
+			t.Errorf("SessionMetadata (UnaccountedTurns, DispatchID) = (%d, %q), want (3, %q)", got.UnaccountedTurns, got.DispatchID, entry.DispatchID)
+		}
+	})
+}
+
+func TestOrchestrator_RunNotifiesObserversAfterAgentLaneMessage(t *testing.T) {
+	t.Parallel()
+
+	const id = "ISSUE-LANE-NOTIFY"
+	tests := []struct {
+		name string
+		send func(o *Orchestrator)
+	}{
+		{"token usage event", func(o *Orchestrator) {
+			o.agentEventCh <- agentEventMsg{IssueID: id, Event: tokenUsageEvent(1, 1, 2, 0)}
+		}},
+		{"turn start", func(o *Orchestrator) { o.turnStartedCh <- turnStartedMsg{IssueID: id, TurnsStarted: 2} }},
+		{"self-review progress", func(o *Orchestrator) { o.selfReviewCh <- selfReviewProgressMsg{IssueID: id, Iteration: 1} }},
+		{"unaccounted turns", func(o *Orchestrator) { o.unaccountedTurnsCh <- unaccountedTurnsMsg{IssueID: id, UnaccountedTurns: 3} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := NewState(60000, 4, 0, nil, AgentTotals{})
+			state.Running[id] = queuedOrderingIssueEntry(id)
+			o := budgetOrchestrator(state, budgetTickConfig(0), &stubStore{}, &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}})
+			o.drainTimeout = 100 * time.Millisecond
+			notified := make(chan struct{}, 16)
+			o.AddObserver(observerFunc(func() { notified <- struct{}{} }))
+			var running sync.WaitGroup
+			running.Go(func() { o.Run(t.Context()) })
+			t.Cleanup(running.Wait)
+
+			<-notified
+			_, _ = o.SnapshotFunc()()
+			for len(notified) > 0 {
+				<-notified
+			}
+			tt.send(o)
+
+			waittest.Receive(t, notified, "observer call after the "+tt.name+", with no tick in between")
+		})
+	}
+}
+
 // waitForTurnCount polls snapshots until issueID reports want, failing on
-// a larger value or at the deadline. Run applies turn-started messages
-// asynchronously to snapshot requests, so a single read can race ahead.
+// a larger value. Run applies turn-started messages asynchronously to
+// snapshot requests, so a single read can race ahead.
 func waitForTurnCount(t *testing.T, snapshot func() (RuntimeSnapshotResult, error), issueID string, want int) {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waittest.Until(t, func() error {
 		snap, err := snapshot()
 		if err != nil {
 			t.Fatalf("snapshot(): %v", err)
@@ -1722,16 +1938,14 @@ func waitForTurnCount(t *testing.T, snapshot func() (RuntimeSnapshotResult, erro
 			t.Fatalf("snapshot has no running entry for %q", issueID)
 		}
 		got := snap.Running[idx].TurnCount
-		if got == want {
-			return
-		}
 		if got > want {
 			t.Fatalf("TurnCount = %d, want %d (observed ahead of releasing this turn)", got, want)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("TurnCount did not reach %d within the deadline, last observed %d", want, got)
+		if got < want {
+			return fmt.Errorf("TurnCount = %d, want %d", got, want)
 		}
-	}
+		return nil
+	})
 }
 
 // TestOrchestrator_TurnCountTracksWorkerTally pins that a live snapshot
@@ -1823,11 +2037,7 @@ func TestOrchestrator_TurnCountTracksWorkerTally(t *testing.T) {
 				adapter.release <- struct{}{}
 			}
 
-			select {
-			case <-workerDone:
-			case <-time.After(10 * time.Second):
-				t.Fatal("worker did not exit within 10 seconds")
-			}
+			waittest.Receive(t, workerDone, "worker exit")
 		})
 	}
 }
@@ -1884,12 +2094,7 @@ func TestMakeWorkerFn(t *testing.T) {
 			close(exitDone)
 		}()
 
-		var exitResult WorkerResult
-		select {
-		case exitResult = <-o.workerExitCh:
-		case <-time.After(10 * time.Second):
-			t.Fatal("worker did not exit within 10 seconds")
-		}
+		exitResult := waittest.Receive(t, o.workerExitCh, "worker exit")
 
 		<-exitDone
 
@@ -1944,13 +2149,9 @@ func TestMakeWorkerFn(t *testing.T) {
 			close(exitDone)
 		}()
 
-		select {
-		case result := <-o.workerExitCh:
-			if result.IssueID != issue.ID {
-				t.Errorf("WorkerResult.IssueID = %q, want %q", result.IssueID, issue.ID)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for workerExitCh")
+		result := waittest.Receive(t, o.workerExitCh, "worker exit result")
+		if result.IssueID != issue.ID {
+			t.Errorf("WorkerResult.IssueID = %q, want %q", result.IssueID, issue.ID)
 		}
 
 		<-exitDone
@@ -1965,9 +2166,11 @@ func TestMakeWorkerFn(t *testing.T) {
 		tmpl := mustParseTemplate(t, "do {{ .issue.identifier }}")
 
 		var capturedResumeID string
+		var capturedResumeUsage *domain.TokenUsage
 		agent := &mockAgentAdapter{
 			startSessionFn: func(_ context.Context, params domain.StartSessionParams) (domain.Session, error) {
 				capturedResumeID = params.ResumeSessionID
+				capturedResumeUsage = params.ResumeUsage
 				return domain.Session{ID: "new-sess"}, nil
 			},
 		}
@@ -1980,7 +2183,7 @@ func TestMakeWorkerFn(t *testing.T) {
 			TrackerAdapter:  &mockTrackerAdapter{},
 			AgentAdapter:    agent,
 			WorkflowManager: wm,
-			Store:           &stubStore{},
+			Store:           &stubStore{resumeUsage: &persistence.ResumeUsage{InputTokens: 900, OutputTokens: 100, CacheReadTokens: 40, CacheWriteTokens: 5}},
 		})
 
 		issue := workerTestIssue()
@@ -1998,14 +2201,14 @@ func TestMakeWorkerFn(t *testing.T) {
 			close(exitDone)
 		}()
 
-		select {
-		case <-exitDone:
-		case <-time.After(10 * time.Second):
-			t.Fatal("worker did not exit within 10 seconds")
-		}
+		waittest.Receive(t, exitDone, "worker exit")
 
 		if capturedResumeID != "resume-sess-42" {
 			t.Errorf("ResumeSessionID = %q, want %q", capturedResumeID, "resume-sess-42")
+		}
+		wantUsage := domain.TokenUsage{InputTokens: 900, OutputTokens: 100, TotalTokens: 1000, CacheReadTokens: 40, CacheWriteTokens: 5}
+		if capturedResumeUsage == nil || *capturedResumeUsage != wantUsage {
+			t.Errorf("StartSessionParams.ResumeUsage = %+v, want %+v", capturedResumeUsage, wantUsage)
 		}
 	})
 
@@ -2052,11 +2255,7 @@ func TestMakeWorkerFn(t *testing.T) {
 			close(exitDone)
 		}()
 
-		select {
-		case <-exitDone:
-		case <-time.After(10 * time.Second):
-			t.Fatal("worker did not exit within 10 seconds")
-		}
+		waittest.Receive(t, exitDone, "worker exit")
 
 		if capturedStrictHostKeyChecking != "yes" {
 			t.Errorf("StartSessionParams.SSHStrictHostKeyChecking = %q, want %q", capturedStrictHostKeyChecking, "yes")
@@ -2104,11 +2303,7 @@ func TestMakeWorkerFn(t *testing.T) {
 			close(exitDone)
 		}()
 
-		select {
-		case <-exitDone:
-		case <-time.After(10 * time.Second):
-			t.Fatal("worker did not exit within 10 seconds")
-		}
+		waittest.Receive(t, exitDone, "worker exit")
 
 		mcpConfigPath, _ := capturedMCPConfigPath.Load().(string)
 		if mcpConfigPath == "" {
@@ -2175,11 +2370,7 @@ func TestMakeWorkerFn_DerivesPostureFromReactionKind(t *testing.T) {
 				close(exitDone)
 			}()
 
-			select {
-			case <-o.workerExitCh:
-			case <-time.After(10 * time.Second):
-				t.Fatal("worker did not exit within 10 seconds")
-			}
+			waittest.Receive(t, o.workerExitCh, "worker exit")
 			<-exitDone
 
 			gotTransitioned := len(tracker.transitionCalls) > 0
@@ -2503,7 +2694,7 @@ type errorString string
 
 func (e errorString) Error() string { return string(e) }
 
-func TestTickLogging_ZeroCandidates(t *testing.T) {
+func TestTickLogging_TickCompletedLevelFollowsSummaryChange(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.ServiceConfig{
@@ -2517,8 +2708,9 @@ func TestTickLogging_ZeroCandidates(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	var fetched []domain.Issue
 	pf := passingPreflightRegistries()
 	pf.ReloadWorkflow = func() error { return nil }
 	pf.ConfigFunc = func() config.ServiceConfig { return cfg }
@@ -2528,7 +2720,7 @@ func TestTickLogging_ZeroCandidates(t *testing.T) {
 		Logger: logger,
 		TrackerAdapter: &candidateTrackerAdapter{
 			mockTrackerAdapter: &mockTrackerAdapter{},
-			fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return nil, nil },
+			fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return fetched, nil },
 		},
 		AgentAdapter:    &mockAgentAdapter{},
 		WorkflowManager: &stubWorkflowManager{config: cfg},
@@ -2536,17 +2728,15 @@ func TestTickLogging_ZeroCandidates(t *testing.T) {
 		PreflightParams: pf,
 	})
 
-	o.handleTick(context.Background())
-
-	got := buf.String()
-	if !strings.Contains(got, "tick completed") {
-		t.Fatalf("log missing 'tick completed': %s", got)
-	}
-	if !strings.Contains(got, "candidates=0") {
-		t.Errorf("log missing candidates=0: %s", got)
-	}
-	if !strings.Contains(got, "dispatched=0") {
-		t.Errorf("log missing dispatched=0: %s", got)
+	for i, want := range []string{"INFO", "DEBUG", "INFO"} {
+		if i == 2 {
+			fetched = []domain.Issue{{ID: "1", Identifier: "T-1", State: "Backlog"}}
+		}
+		buf.Reset()
+		o.handleTick(context.Background())
+		if got := buf.String(); !strings.Contains(got, "level="+want+` msg="tick completed"`) {
+			t.Errorf("tick %d: log lacks tick completed at %s: %s", i+1, want, got)
+		}
 	}
 }
 
@@ -2830,26 +3020,19 @@ func TestOrchestratorLifecycle(t *testing.T) {
 
 	// state belongs to the event loop, so progress is read from the
 	// mutex-protected store rather than from state directly.
-	deadline := time.After(15 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			store.mu.Lock()
-			n := len(store.runHistories)
-			store.mu.Unlock()
-			t.Fatalf("timed out: run histories = %d, want 3", n)
-		default:
-		}
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waittest.Until(t, func() error {
 		store.mu.Lock()
 		n := len(store.runHistories)
 		store.mu.Unlock()
-		if n >= 3 {
-			break
+		if n < 3 {
+			return fmt.Errorf("run histories = %d, want 3", n)
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return nil
+	})
 
 	cancel()
 	<-done
@@ -2959,23 +3142,19 @@ func TestOrchestratorLifecycle_TokenCeilingStopsRunMidTurn(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatal("timed out waiting for a run_history record")
-		default:
-		}
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waittest.Until(t, func() error {
 		store.mu.Lock()
 		n := len(store.runHistories)
 		store.mu.Unlock()
-		if n >= 1 {
-			break
+		if n < 1 {
+			return errors.New("no run_history record yet")
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return nil
+	})
 
 	// The run already exited through the normal event-loop path above;
 	// nothing is left in state.Running for a later shutdown-time
@@ -3082,20 +3261,13 @@ func TestOrchestratorLifecycleRetry(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			store.mu.Lock()
-			h, r := len(store.runHistories), len(store.savedRetries)
-			store.mu.Unlock()
-			t.Fatalf("timed out: run histories = %d, saved retries = %d", h, r)
-		default:
-		}
-
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waittest.Until(t, func() error {
 		store.mu.Lock()
+		defer store.mu.Unlock()
 		hasOKHistory := false
 		for _, rh := range store.runHistories {
 			if rh.IssueID == "id-ok" {
@@ -3110,13 +3282,11 @@ func TestOrchestratorLifecycleRetry(t *testing.T) {
 				break
 			}
 		}
-		store.mu.Unlock()
-
-		if hasOKHistory && hasFailRetry {
-			break
+		if !hasOKHistory || !hasFailRetry {
+			return fmt.Errorf("run histories = %d, saved retries = %d, want id-ok history and id-fail retry", len(store.runHistories), len(store.savedRetries))
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return nil
+	})
 
 	cancel()
 	<-done
@@ -3213,20 +3383,13 @@ func TestDispatchLoopPerStateExhaustion(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			store.mu.Lock()
-			n := len(store.runHistories)
-			store.mu.Unlock()
-			t.Fatalf("timed out: run histories = %d, want >= 3", n)
-		default:
-		}
-
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waittest.Until(t, func() error {
 		store.mu.Lock()
+		defer store.mu.Unlock()
 		hasIP1, hasIP2, hasTD1 := false, false, false
 		for _, rh := range store.runHistories {
 			switch rh.IssueID {
@@ -3238,13 +3401,11 @@ func TestDispatchLoopPerStateExhaustion(t *testing.T) {
 				hasTD1 = true
 			}
 		}
-		store.mu.Unlock()
-
-		if hasIP1 && hasIP2 && hasTD1 {
-			break
+		if !hasIP1 || !hasIP2 || !hasTD1 {
+			return fmt.Errorf("run histories = %d, want ip-1, ip-2 and td-1", len(store.runHistories))
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return nil
+	})
 
 	cancel()
 	<-done
@@ -3262,6 +3423,192 @@ func TestDispatchLoopPerStateExhaustion(t *testing.T) {
 
 	if firstThreeIDs["ip-3"] && !firstThreeIDs["td-1"] {
 		t.Error("ip-3 was dispatched before td-1, per-state limit was not enforced")
+	}
+}
+
+func newHeldHarness(t *testing.T, tune func(*config.ServiceConfig), candidates ...domain.Issue) *runHarness {
+	t.Helper()
+	cfg := runConfig(t, map[string]any{"agent": map[string]any{"kind": "kind-a", "command": "a-cmd"}})
+	if tune != nil {
+		tune(&cfg)
+	}
+	h := newRunHarness(t, cfg, "kind-a")
+	h.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
+	h.state.MaxConcurrentByState = cfg.Agent.MaxConcurrentByState
+	h.tracker.candidates = candidates
+	h.build()
+	return h
+}
+
+func requireHeld(t *testing.T, h *runHarness, id string, reason SkipReason) *HeldEntry {
+	t.Helper()
+	got := h.state.Held[id]
+	if got == nil || got.Reason != reason {
+		t.Fatalf("State.Held[%q] = %+v, want a hold for %q", id, got, reason)
+	}
+	return got
+}
+
+func blockedCandidate(state string) domain.Issue {
+	issue := candidate("id-1", "A-1")
+	issue.BlockedBy = []domain.BlockerRef{{ID: "b-1", Identifier: "B-1", State: state}}
+	return issue
+}
+
+func TestHandleTick_Held(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	oneSlot := func(cfg *config.ServiceConfig) { cfg.Agent.MaxConcurrentAgents = 1 }
+	spendHeld := func(h *runHarness) {
+		h.store.windowUsage = persistence.IssueTokenUsage{RecordedCostUSD: 5, PricedSessions: 1, Sessions: 1}
+	}
+	dailyCeiling := func(cfg *config.ServiceConfig) { cfg.Agent.MaxDailyCostUSD = 5 }
+	dailyResetsAt := func(h *runHarness) time.Time {
+		for _, status := range h.state.SpendCeilings {
+			if status.Window == SpendWindowDaily {
+				return status.ResetsAt
+			}
+		}
+		return time.Time{}
+	}
+
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"an open blocker holds the issue until it turns terminal", func(t *testing.T) {
+			h := newHeldHarness(t, nil, blockedCandidate("In Progress"))
+
+			h.o.handleTick(ctx)
+
+			got := requireHeld(t, h, "id-1", SkipBlockedBy)
+			if len(got.Blockers) != 1 || got.Blockers[0].Identifier != "B-1" || got.Blockers[0].State != "In Progress" {
+				t.Errorf("State.Held[id-1].Blockers = %+v, want B-1 in In Progress", got.Blockers)
+			}
+
+			h.tracker.candidates = []domain.Issue{blockedCandidate("Done")}
+			h.o.handleTick(ctx)
+
+			h.waitForSessions(1)
+			if len(h.state.Held) != 0 {
+				t.Errorf("State.Held after the blocker turned terminal = %+v, want none", h.state.Held)
+			}
+		}},
+		{"a full global slot limit holds the issue without reading its blockers", func(t *testing.T) {
+			h := newHeldHarness(t, oneSlot, blockedCandidate("In Progress"))
+			h.state.Running["r"] = &RunningEntry{Issue: candidate("r", "R-1")}
+			resolver := &fakeBlockerResolver{needsReadFn: func(domain.Issue) bool { return true }}
+			h.o.blockerResolver = resolver
+
+			h.o.handleTick(ctx)
+
+			got := requireHeld(t, h, "id-1", SkipAgentSlotsFull)
+			if want := (SlotHold{Scope: SlotScopeGlobal, Used: 1, Limit: 1}); got.Slot == nil || *got.Slot != want {
+				t.Errorf("State.Held[id-1].Slot = %+v, want %+v", got.Slot, want)
+			}
+			if len(resolver.callOrder) != 0 {
+				t.Errorf("blocker reads under a full slot limit = %v, want none", resolver.callOrder)
+			}
+
+			delete(h.state.Running, "r")
+			h.tracker.candidates = []domain.Issue{candidate("id-1", "A-1")}
+			h.o.handleTick(ctx)
+
+			h.waitForSessions(1)
+			if len(h.state.Held) != 0 {
+				t.Errorf("State.Held after a slot freed = %+v, want none", h.state.Held)
+			}
+		}},
+		{"a full per-state slot limit holds the issue", func(t *testing.T) {
+			h := newHeldHarness(t, func(cfg *config.ServiceConfig) {
+				cfg.Agent.MaxConcurrentByState = map[string]int{"to do": 1}
+			}, candidate("id-1", "A-1"))
+			h.state.Running["r"] = &RunningEntry{Issue: candidate("r", "R-1")}
+
+			h.o.handleTick(ctx)
+
+			got := requireHeld(t, h, "id-1", SkipAgentSlotsFull)
+			if want := (SlotHold{Scope: SlotScopeState, State: "To Do", Used: 1, Limit: 1}); got.Slot == nil || *got.Slot != want {
+				t.Errorf("State.Held[id-1].Slot = %+v, want %+v", got.Slot, want)
+			}
+		}},
+		{"a full SSH host pool holds the issue", func(t *testing.T) {
+			raw := map[string]any{"agent": map[string]any{"kind": "kind-a", "command": "a-cmd"}}
+			raw["worker"] = map[string]any{"ssh_hosts": []any{"host-1"}, "max_concurrent_agents_per_host": 1}
+			h := newRunHarness(t, runConfig(t, raw), "kind-a")
+			h.tracker.candidates = []domain.Issue{candidate("id-1", "A-1")}
+			h.build()
+			h.o.applyWorkerConfig(h.wm.Config())
+			if _, ok := h.o.hostPool.AcquireHost("r", ""); !ok {
+				t.Fatal("AcquireHost() = false on an empty pool, want true")
+			}
+
+			h.o.handleTick(ctx)
+
+			requireHeld(t, h, "id-1", SkipSSHHostsFull)
+		}},
+		{"a failed candidate fetch keeps the hold and its first-held time", func(t *testing.T) {
+			h := newHeldHarness(t, nil, blockedCandidate("In Progress"))
+			h.o.handleTick(ctx)
+			since := requireHeld(t, h, "id-1", SkipBlockedBy).Since
+
+			h.tracker.fetchErr = errors.New("tracker unreachable")
+			h.o.handleTick(ctx)
+			requireHeld(t, h, "id-1", SkipBlockedBy)
+
+			h.tracker.fetchErr = nil
+			h.o.handleTick(ctx)
+
+			if got := requireHeld(t, h, "id-1", SkipBlockedBy).Since; !got.Equal(since) {
+				t.Errorf("State.Held[id-1].Since after a failed fetch = %v, want %v", got, since)
+			}
+		}},
+		{"an unconfirmed stage move holds the issue on its between-stages row", func(t *testing.T) {
+			h := newHeldHarness(t, nil, candidate("id-1", "A-1"))
+			h.state.StageHops["id-1"] = &StageHopEntry{Identifier: "A-1", TargetRule: "review", TargetLabel: "stage:review"}
+
+			h.o.handleTick(ctx)
+
+			requireHeld(t, h, "id-1", SkipStageHopUnconfirmed)
+			snap := RuntimeSnapshot(h.state, time.Now())
+			if len(snap.Held) != 0 || len(snap.BetweenStages) != 1 || snap.BetweenStages[0].Hold == nil || snap.BetweenStages[0].Hold.Reason != SkipStageHopUnconfirmed {
+				t.Errorf("RuntimeSnapshot() Held, BetweenStages = %+v, %+v, want no held row and a between-stages row holding %q",
+					snap.Held, snap.BetweenStages, SkipStageHopUnconfirmed)
+			}
+		}},
+		{"a spend ceiling holds every candidate with its reset while a slot is free", func(t *testing.T) {
+			h := newHeldHarness(t, dailyCeiling, candidate("id-1", "A-1"), candidate("id-2", "A-2"))
+			spendHeld(h)
+
+			h.o.handleTick(ctx)
+
+			resetsAt := dailyResetsAt(h)
+			for _, id := range []string{"id-1", "id-2"} {
+				if got := requireHeld(t, h, id, SkipDailySpendCeiling); resetsAt.IsZero() || !got.ResetsAt.Equal(resetsAt) {
+					t.Errorf("State.Held[%s].ResetsAt = %v, want the window's reset %v", id, got.ResetsAt, resetsAt)
+				}
+			}
+		}},
+		{"a spend ceiling outranks a full slot limit and an open blocker", func(t *testing.T) {
+			h := newHeldHarness(t, func(cfg *config.ServiceConfig) { oneSlot(cfg); dailyCeiling(cfg) }, blockedCandidate("In Progress"), candidate("id-2", "A-2"))
+			spendHeld(h)
+			h.state.Running["r"] = &RunningEntry{Issue: candidate("r", "R-1")}
+
+			h.o.handleTick(ctx)
+
+			for _, id := range []string{"id-1", "id-2"} {
+				requireHeld(t, h, id, SkipDailySpendCeiling)
+			}
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tt.run(t)
+		})
 	}
 }
 
@@ -3392,11 +3739,7 @@ func TestOrchestratorDynamicConfigReload(t *testing.T) {
 				entry.CancelFunc()
 			}
 		}
-		select {
-		case <-o.workerExitCh:
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for first worker exit")
-		}
+		waittest.Receive(t, o.workerExitCh, "first worker exit")
 		for id := range state.Running {
 			delete(state.Running, id)
 			delete(state.Claimed, id)
@@ -3416,11 +3759,7 @@ func TestOrchestratorDynamicConfigReload(t *testing.T) {
 
 		cancel()
 		for i := 0; i < len(state.Running); i++ {
-			select {
-			case <-o.workerExitCh:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for worker exit")
-			}
+			waittest.Receive(t, o.workerExitCh, "worker exit")
 		}
 	})
 
@@ -3501,11 +3840,7 @@ func TestOrchestratorDynamicConfigReload(t *testing.T) {
 
 		cancel()
 		for range state.Running {
-			select {
-			case <-o.workerExitCh:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for worker exit")
-			}
+			waittest.Receive(t, o.workerExitCh, "worker exit")
 		}
 	})
 
@@ -3674,39 +4009,25 @@ func TestOrchestratorDynamicConfigReload(t *testing.T) {
 			close(done)
 		}()
 
-		deadline := time.After(10 * time.Second)
-		for {
-			if _, ok := capturedPrompts.Load("P-1"); ok {
-				break
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		promptCaptured := func(identifier string) func() error {
+			return func() error {
+				if _, ok := capturedPrompts.Load(identifier); !ok {
+					return fmt.Errorf("no prompt captured for %s yet", identifier)
+				}
+				return nil
 			}
-			select {
-			case <-deadline:
-				cancel()
-				<-done
-				t.Fatal("timed out waiting for the prompt for P-1")
-			default:
-			}
-			time.Sleep(20 * time.Millisecond)
 		}
+		waittest.Until(t, promptCaptured("P-1"))
 
 		tmpl2 := mustParseTemplate(t, "review {{ .issue.identifier }}")
 		wm.setTemplate(tmpl2)
 		issueSet.Store(1)
 
-		deadline = time.After(10 * time.Second)
-		for {
-			if _, ok := capturedPrompts.Load("P-2"); ok {
-				break
-			}
-			select {
-			case <-deadline:
-				cancel()
-				<-done
-				t.Fatal("timed out waiting for the prompt for P-2")
-			default:
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
+		waittest.Until(t, promptCaptured("P-2"))
 
 		cancel()
 		<-done
@@ -3816,11 +4137,7 @@ func TestOrchestratorDynamicConfigReload(t *testing.T) {
 
 		originalCancel()
 
-		select {
-		case <-o.workerExitCh:
-		case <-time.After(5 * time.Second):
-			t.Fatal("worker did not exit after cancel")
-		}
+		waittest.Receive(t, o.workerExitCh, "worker exit")
 	})
 
 	t.Run("state_updates_on_preflight_failure", func(t *testing.T) {
@@ -4265,8 +4582,6 @@ do {{ .issue.identifier }}
 		t.Fatalf("Start watcher: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
 	tracker := &candidateTrackerAdapter{
 		mockTrackerAdapter: &mockTrackerAdapter{},
 		fetchCandidatesFn: func(_ context.Context) ([]domain.Issue, error) {
@@ -4345,24 +4660,16 @@ do {{ .issue.identifier }}
 	// Poll the atomic snapshot written by the observer. The observer
 	// runs on the event loop goroutine after state mutation, so this
 	// is free of data races.
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			t.Fatalf("timed out: MaxConcurrentAgents = %d, want 7",
-				observedMax.Load())
-		default:
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waittest.Until(t, func() error {
+		if got := observedMax.Load(); got != 7 {
+			return fmt.Errorf("MaxConcurrentAgents = %d, want 7", got)
 		}
-		if observedMax.Load() == 7 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	cancel()
-	<-done
+		return nil
+	})
 }
 
 func TestReconciliationGuardOnInvalidReload(t *testing.T) {
@@ -4459,24 +4766,21 @@ func promotionGate(cfg config.ServiceConfig) error {
 	return ValidateConfigForPromotion(cfg, registry.TrackerMeta{})
 }
 
-func TestReconciliationGuardEndToEnd(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	workflowPath := filepath.Join(tmpDir, "WORKFLOW.md")
-
-	initialContent := `---
-tracker:
-  kind: mock
-  api_key: test-key
-  active_states:
+const validStateLists = `  active_states:
     - In Progress
   terminal_states:
     - Done
-polling:
+`
+
+func realWorkflowContent(root, stateLists string) string {
+	return `---
+tracker:
+  kind: mock
+  api_key: test-key
+` + stateLists + `polling:
   interval_ms: 60000
 workspace:
-  root: ` + tmpDir + `
+  root: ` + root + `
 hooks:
   timeout_ms: 5000
 agent:
@@ -4487,15 +4791,32 @@ agent:
 ---
 do {{ .issue.identifier }}
 `
-	if err := os.WriteFile(workflowPath, []byte(initialContent), 0o644); err != nil {
-		t.Fatalf("writing initial WORKFLOW.md: %v", err)
-	}
+}
 
-	wm, err := workflow.NewManager(workflowPath, discardLogger(),
+func writeRealWorkflow(t *testing.T, path, stateLists string) {
+	t.Helper()
+	content := realWorkflowContent(filepath.Dir(path), stateLists)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing WORKFLOW.md: %v", err)
+	}
+}
+
+func mustRealWorkflowManager(t *testing.T) (*workflow.Manager, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "WORKFLOW.md")
+	writeRealWorkflow(t, path, validStateLists)
+	wm, err := workflow.NewManager(path, discardLogger(),
 		workflow.WithValidateFunc(promotionGate))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	return wm, path
+}
+
+func TestReconciliationGuardEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	wm, workflowPath := mustRealWorkflowManager(t)
 
 	cfg := wm.Config()
 	if len(cfg.Tracker.ActiveStates) == 0 {
@@ -4545,30 +4866,8 @@ do {{ .issue.identifier }}
 		},
 	})
 
-	// Overwrite WORKFLOW.md with empty state lists (valid YAML, but
-	// semantically dangerous: both active_states and terminal_states
-	// are empty).
-	brokenContent := `---
-tracker:
-  kind: mock
-  api_key: test-key
-polling:
-  interval_ms: 60000
-workspace:
-  root: ` + tmpDir + `
-hooks:
-  timeout_ms: 5000
-agent:
-  kind: mock
-  command: /usr/bin/agent
-  max_concurrent_agents: 5
-  max_turns: 1
----
-do {{ .issue.identifier }}
-`
-	if err := os.WriteFile(workflowPath, []byte(brokenContent), 0o644); err != nil {
-		t.Fatalf("writing broken WORKFLOW.md: %v", err)
-	}
+	// Valid YAML, but both state lists are empty, which promotion must refuse.
+	writeRealWorkflow(t, workflowPath, "")
 
 	o.handleTick(context.Background())
 
@@ -4593,10 +4892,88 @@ do {{ .issue.identifier }}
 	}
 }
 
-// TestReloadPromotesConfigWithMissingBlockFault pins the fail-safe
-// invariant: a dispatch-routed kind with no settings block still
-// promotes through Reload without error and surfaces the
-// dispatch.agent.missing_block fault only at tick preflight.
+func TestHealthReportsInvalidReloadAndFailedPreflight(t *testing.T) {
+	t.Parallel()
+
+	wm, workflowPath := mustRealWorkflowManager(t)
+	regs := passingPreflightRegistries()
+	o := NewOrchestrator(OrchestratorParams{
+		State:           NewState(60000, 5, 0, nil, AgentTotals{}),
+		Logger:          discardLogger(),
+		TrackerAdapter:  &mockTrackerAdapter{},
+		AgentAdapter:    &mockAgentAdapter{},
+		WorkflowManager: wm,
+		Store:           &stubStore{},
+		PreflightParams: PreflightParams{
+			ReloadWorkflow:  wm.Reload,
+			ConfigFunc:      wm.Config,
+			TrackerRegistry: regs.TrackerRegistry,
+			AgentRegistry:   regs.AgentRegistry,
+		},
+	})
+
+	validFrom, validTo := tickWithin(o)
+
+	clean := o.Health()
+	for name, check := range map[string]SnapshotHealthCheck{
+		"Database":  clean.Database,
+		"Preflight": clean.Preflight.SnapshotHealthCheck,
+		"Workflow":  clean.Workflow.SnapshotHealthCheck,
+		"Poll":      clean.Poll.SnapshotHealthCheck,
+	} {
+		if check.ConsecutiveFailures != 0 || check.Error != "" || check.CheckedAt.IsZero() {
+			t.Errorf("Health().%s after a clean tick = %+v, want a passing check with CheckedAt set", name, check)
+		}
+	}
+	if clean.Poll.Outcome != "succeeded" {
+		t.Errorf("Health().Poll.Outcome after a clean tick = %q, want %q", clean.Poll.Outcome, "succeeded")
+	}
+	if clean.SCM != nil {
+		t.Errorf("Health().SCM = %+v, want nil without a provider", clean.SCM)
+	}
+
+	writeRealWorkflow(t, workflowPath, "")
+	failFrom, failTo := tickWithin(o)
+	tickWithin(o)
+
+	failed := o.Health()
+	if failed.Workflow.ConsecutiveFailures != 2 {
+		t.Errorf("Health().Workflow.ConsecutiveFailures = %d, want 2", failed.Workflow.ConsecutiveFailures)
+	}
+	requireWithin(t, "Health().Workflow.LastSuccessAt", failed.Workflow.LastSuccessAt, validFrom, validTo)
+	requireWithin(t, "Health().Workflow.FailingSince", failed.Workflow.FailingSince, failFrom, failTo)
+	loadErr := wm.LastLoadError()
+	if loadErr == nil || failed.Workflow.Error != loadErr.Error() {
+		t.Errorf("Health().Workflow.Error = %q, want LastLoadError() text %v", failed.Workflow.Error, loadErr)
+	}
+	if failed.Preflight.ConsecutiveFailures != 2 || !strings.Contains(failed.Preflight.Error, "workflow file cannot be loaded") {
+		t.Errorf("Health().Preflight = %+v, want 2 failures carrying the workflow load failure", failed.Preflight)
+	}
+	if failed.Poll.Outcome != "preflight_failed" || failed.Poll.Error != "" {
+		t.Errorf("Health().Poll = %q with error %q, want outcome %q and no error", failed.Poll.Outcome, failed.Poll.Error, "preflight_failed")
+	}
+
+	if err := os.WriteFile(workflowPath, []byte("---\ntracker: [\n---\n"), 0o644); err != nil {
+		t.Fatalf("writing malformed WORKFLOW.md: %v", err)
+	}
+	tickWithin(o)
+	malformed := o.Health()
+	if !strings.Contains(wm.LastLoadError().Error(), workflowPath) {
+		t.Fatalf("LastLoadError() = %v, want the malformed file's error naming its path", wm.LastLoadError())
+	}
+	dir := filepath.Dir(workflowPath)
+	for name, text := range map[string]string{"Workflow": malformed.Workflow.Error, "Preflight": malformed.Preflight.Error} {
+		if !strings.Contains(text, "WORKFLOW.md") || strings.Contains(text, dir) {
+			t.Errorf("Health().%s.Error = %q, want the base name without directory %s", name, text, dir)
+		}
+	}
+
+	cfg := wm.Config()
+	if !slices.Equal(cfg.Tracker.ActiveStates, []string{"In Progress"}) || !slices.Equal(cfg.Tracker.TerminalStates, []string{"Done"}) {
+		t.Errorf("Config() state lists = %v and %v, want the valid file's [In Progress] and [Done]", cfg.Tracker.ActiveStates, cfg.Tracker.TerminalStates)
+	}
+}
+
 func TestReloadPromotesConfigWithMissingBlockFault(t *testing.T) {
 	t.Parallel()
 
@@ -4680,11 +5057,7 @@ func TestGracefulShutdown(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-		case <-time.After(1 * time.Second):
-			t.Fatal("Run did not return within 1 second with pre-cancelled context and empty state")
-		}
+		waittest.Receive(t, done, "Run return with a pre-cancelled context and empty state")
 
 		if len(state.Running) != 0 {
 			t.Errorf("Running = %d, want 0", len(state.Running))
@@ -4764,21 +5137,14 @@ func TestGracefulShutdown(t *testing.T) {
 			workersStarted.Wait()
 			close(waitCh)
 		}()
-		select {
-		case <-waitCh:
-		case <-time.After(10 * time.Second):
+		t.Cleanup(func() {
 			cancel()
 			<-done
-			t.Fatal("timed out waiting for workers to start")
-		}
+		})
+		waittest.Receive(t, waitCh, "workers to start")
 
 		cancel()
-
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("Run did not return within 10 seconds of cancellation")
-		}
+		waittest.Receive(t, done, "Run return after cancellation")
 
 		if len(state.Running) != 0 {
 			t.Errorf("Running = %d after drain, want 0", len(state.Running))
@@ -4852,11 +5218,7 @@ func TestGracefulShutdown(t *testing.T) {
 
 		cancel()
 
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Run did not return within 3 seconds (expected ~200ms drain timeout)")
-		}
+		waittest.Receive(t, done, "Run return after the drain timeout")
 
 		logOutput := buf.String()
 		if !strings.Contains(logOutput, "drain timeout exceeded") {
@@ -4907,26 +5269,15 @@ func TestGracefulShutdown(t *testing.T) {
 
 		cancel()
 
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			t.Fatal("Run did not return within 3 seconds")
-		}
-
-		time.Sleep(200 * time.Millisecond)
-
-		select {
-		case id := <-o.retryTimerCh:
-			t.Errorf("retryTimerCh received %q after shutdown, want no late fires", id)
-		default:
-			// No message, timer was stopped correctly.
-		}
+		waittest.Receive(t, done, "Run return")
+		waittest.Never(t, o.retryTimerCh, 200*time.Millisecond, "a retry timer fire after shutdown")
 	})
 
 	t.Run("drains_in_flight_triage_run", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(60000, 1, 0, nil, AgentTotals{})
+		obs, started := stateChangeSignal()
 		o := NewOrchestrator(OrchestratorParams{
 			State:           state,
 			Logger:          discardLogger(),
@@ -4934,6 +5285,7 @@ func TestGracefulShutdown(t *testing.T) {
 			AgentAdapter:    &mockAgentAdapter{},
 			WorkflowManager: &stubWorkflowManager{},
 			Store:           &stubStore{},
+			Observers:       []Observer{obs},
 			PreflightParams: PreflightParams{
 				ReloadWorkflow: func() error { return errPreflightFailed },
 				ConfigFunc:     func() config.ServiceConfig { return config.ServiceConfig{} },
@@ -4957,14 +5309,10 @@ func TestGracefulShutdown(t *testing.T) {
 			close(runReturned)
 		}()
 
-		time.Sleep(10 * time.Millisecond)
+		waittest.Receive(t, started, "first state change")
 		cancel()
 
-		select {
-		case <-runReturned:
-		case <-time.After(2 * time.Second):
-			t.Fatal("Run did not return after context cancellation")
-		}
+		waittest.Receive(t, runReturned, "Run return after context cancellation")
 		elapsed := time.Since(start)
 
 		select {
@@ -4985,6 +5333,7 @@ func TestSnapshotFunc(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(60000, 1, 0, nil, AgentTotals{InputTokens: 42})
+		obs, started := stateChangeSignal()
 
 		o := NewOrchestrator(OrchestratorParams{
 			State:           state,
@@ -4993,6 +5342,7 @@ func TestSnapshotFunc(t *testing.T) {
 			AgentAdapter:    &mockAgentAdapter{},
 			WorkflowManager: &stubWorkflowManager{},
 			Store:           &stubStore{},
+			Observers:       []Observer{obs},
 			PreflightParams: PreflightParams{
 				ReloadWorkflow: func() error { return errPreflightFailed },
 				ConfigFunc:     func() config.ServiceConfig { return config.ServiceConfig{} },
@@ -5006,7 +5356,7 @@ func TestSnapshotFunc(t *testing.T) {
 			close(done)
 		}()
 
-		time.Sleep(100 * time.Millisecond)
+		waittest.Receive(t, started, "first state change")
 
 		snapFn := o.SnapshotFunc()
 		snap, err := snapFn()
@@ -5022,11 +5372,7 @@ func TestSnapshotFunc(t *testing.T) {
 		}
 
 		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("Run did not return within 5 seconds")
-		}
+		waittest.Receive(t, done, "Run return")
 	})
 }
 
@@ -5082,6 +5428,7 @@ func TestRefreshFunc(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(60000, 1, 0, nil, AgentTotals{})
+		obs, started := stateChangeSignal()
 		o := NewOrchestrator(OrchestratorParams{
 			State:           state,
 			Logger:          discardLogger(),
@@ -5089,6 +5436,7 @@ func TestRefreshFunc(t *testing.T) {
 			AgentAdapter:    &mockAgentAdapter{},
 			WorkflowManager: &stubWorkflowManager{},
 			Store:           &stubStore{},
+			Observers:       []Observer{obs},
 			PreflightParams: PreflightParams{
 				ReloadWorkflow: func() error { return errPreflightFailed },
 				ConfigFunc:     func() config.ServiceConfig { return config.ServiceConfig{} },
@@ -5102,15 +5450,10 @@ func TestRefreshFunc(t *testing.T) {
 			close(done)
 		}()
 
-		time.Sleep(100 * time.Millisecond)
+		waittest.Receive(t, started, "first state change")
 
 		cancel()
-
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("Run did not return within 5 seconds")
-		}
+		waittest.Receive(t, done, "Run return")
 
 		refreshFn := o.RefreshFunc()
 		if refreshFn() {
@@ -5153,6 +5496,7 @@ func TestSnapshotDuringDrain(t *testing.T) {
 		CancelFunc: func() {},
 	}
 
+	obs, stateChanged := stateChangeSignal()
 	o := NewOrchestrator(OrchestratorParams{
 		State:           state,
 		Logger:          discardLogger(),
@@ -5160,6 +5504,7 @@ func TestSnapshotDuringDrain(t *testing.T) {
 		AgentAdapter:    &mockAgentAdapter{},
 		WorkflowManager: &stubWorkflowManager{},
 		Store:           &stubStore{},
+		Observers:       []Observer{obs},
 		PreflightParams: PreflightParams{
 			ReloadWorkflow: func() error { return errPreflightFailed },
 			ConfigFunc:     func() config.ServiceConfig { return config.ServiceConfig{} },
@@ -5173,20 +5518,16 @@ func TestSnapshotDuringDrain(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	waittest.Receive(t, stateChanged, "first state change")
+	select {
+	case <-stateChanged:
+	default:
+	}
 
 	cancel()
+	waittest.Receive(t, stateChanged, "state change as shutdown starts")
 
-	time.Sleep(50 * time.Millisecond)
-
-	snapFn := o.SnapshotFunc()
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		o.workerExitCh <- WorkerResult{IssueID: "id-1"}
-	}()
-
-	snap, err := snapFn()
+	snap, err := o.SnapshotFunc()()
 	if err != nil {
 		t.Fatalf("SnapshotFunc() during drain: %v", err)
 	}
@@ -5195,11 +5536,8 @@ func TestSnapshotDuringDrain(t *testing.T) {
 		t.Error("GeneratedAt is zero")
 	}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return within 5 seconds")
-	}
+	waittest.Send(t, o.workerExitCh, WorkerResult{IssueID: "id-1"}, "worker exit")
+	waittest.Receive(t, done, "Run return")
 }
 
 func TestRefreshDrainedDuringShutdown(t *testing.T) {
@@ -5213,6 +5551,7 @@ func TestRefreshDrainedDuringShutdown(t *testing.T) {
 		CancelFunc: func() {},
 	}
 
+	obs, started := stateChangeSignal()
 	o := NewOrchestrator(OrchestratorParams{
 		State:           state,
 		Logger:          discardLogger(),
@@ -5220,6 +5559,7 @@ func TestRefreshDrainedDuringShutdown(t *testing.T) {
 		AgentAdapter:    &mockAgentAdapter{},
 		WorkflowManager: &stubWorkflowManager{},
 		Store:           &stubStore{},
+		Observers:       []Observer{obs},
 		PreflightParams: PreflightParams{
 			ReloadWorkflow: func() error { return errPreflightFailed },
 			ConfigFunc:     func() config.ServiceConfig { return config.ServiceConfig{} },
@@ -5244,17 +5584,13 @@ func TestRefreshDrainedDuringShutdown(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	waittest.Receive(t, started, "first state change")
 
 	cancel()
 
 	o.workerExitCh <- WorkerResult{IssueID: "id-1"}
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return within 5 seconds")
-	}
+	waittest.Receive(t, done, "Run return")
 
 	if refreshFn() {
 		t.Error("RefreshFunc() = true after drain, want false")
@@ -5328,12 +5664,55 @@ func budgetOrchestratorWithMetrics(state *State, wm *stubWorkflowManager, store 
 	})
 }
 
+func TestHandleTick_FillsRetryHoldingNoRead(t *testing.T) {
+	t.Parallel()
+
+	candidates := []domain.Issue{
+		{ID: "iss-1", Identifier: "TEST-1", DisplayID: "acme/web#1", Title: "first title", URL: "https://example.test/1", IssueType: "Bug", Labels: []string{"a", "b"}, State: "To Do"},
+		{ID: "iss-2", Identifier: "TEST-2", DisplayID: "acme/web#2", Title: "candidate title", URL: "https://example.test/2", IssueType: "Story", Labels: []string{"c"}, State: "In Progress"},
+		{ID: "iss-4", Identifier: "TEST-4", Title: "fresh title", URL: "https://example.test/4", IssueType: "Task", Labels: []string{"new"}, State: "Done"},
+	}
+	partial := IssueIdentity{Title: "held title", URL: "https://example.test/held"}
+	complete := IssueIdentity{Title: "read title", URL: "https://example.test/read", IssueType: "Epic", Labels: []string{}, State: "Blocked"}
+	state := NewState(60000, 10, 0, nil, AgentTotals{})
+	for id, entry := range map[string]*RetryEntry{
+		"iss-1": {IssueID: "iss-1", Identifier: "TEST-1"},
+		"iss-2": {IssueID: "iss-2", Identifier: "TEST-2", DisplayID: "acme/web#held", IssueIdentity: partial},
+		"iss-3": {IssueID: "iss-3", Identifier: "TEST-3"},
+		"iss-4": {IssueID: "iss-4", Identifier: "TEST-4", IssueIdentity: complete},
+	} {
+		state.RetryAttempts[id] = entry
+		state.Claimed[id] = struct{}{}
+	}
+	tracker := &candidateTrackerAdapter{
+		mockTrackerAdapter: &mockTrackerAdapter{},
+		fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return candidates, nil },
+	}
+
+	budgetOrchestrator(state, budgetTickConfig(0), &stubStore{}, tracker).handleTick(context.Background())
+
+	type row struct{ displayID, title, url, issueType, labels, state string }
+	got := map[string]row{}
+	for _, r := range RuntimeSnapshot(state, time.Now()).Retrying {
+		got[r.IssueID] = row{r.DisplayID, r.IssueTitle, r.IssueURL, r.IssueType, strings.Join(r.IssueLabels, ","), r.State}
+	}
+	want := map[string]row{
+		"iss-1": {"acme/web#1", "first title", "https://example.test/1", "Bug", "a,b", "To Do"},
+		"iss-2": {"acme/web#held", "held title", "https://example.test/held", "Story", "c", "In Progress"},
+		"iss-3": {},
+		"iss-4": {"", "read title", "https://example.test/read", "Epic", "", "Blocked"},
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("Retrying rows after handleTick = %+v, want %+v", got, want)
+	}
+}
+
 func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 	t.Parallel()
 
 	issue := domain.Issue{ID: "iss-1", Identifier: "TEST-1", Title: "title", State: "To Do"}
 
-	t.Run("store returns exhausted IDs state populated", func(t *testing.T) {
+	t.Run("store returns exhausted IDs state populated and the issue is not dispatched", func(t *testing.T) {
 		t.Parallel()
 
 		wm := budgetTickConfig(3)
@@ -5349,21 +5728,6 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 		if _, ok := state.BudgetExhausted[issue.ID]; !ok {
 			t.Errorf("BudgetExhausted[%s] missing after tick, want present", issue.ID)
 		}
-	})
-
-	t.Run("exhausted issue not dispatched", func(t *testing.T) {
-		t.Parallel()
-
-		wm := budgetTickConfig(3)
-		store := &stubStore{budgetExhaustedIDs: map[string]int{issue.ID: 1}}
-		state := NewState(60000, 10, 0, nil, AgentTotals{})
-		tracker := &candidateTrackerAdapter{
-			mockTrackerAdapter: &mockTrackerAdapter{},
-			fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return []domain.Issue{issue}, nil },
-		}
-
-		budgetOrchestrator(state, wm, store, tracker).handleTick(context.Background())
-
 		if _, running := state.Running[issue.ID]; running {
 			t.Errorf("Running[%s] present, want absent (budget exhausted)", issue.ID)
 		}
@@ -5405,6 +5769,7 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 		if _, ok := state.BudgetExhausted[issue.ID]; ok {
 			t.Errorf("BudgetExhausted[%s] remains with MaxSessions=0, want cleared", issue.ID)
 		}
+		requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: issue.ID, Kind: persistence.LivePassBudget}})
 	})
 
 	t.Run("empty candidate list with budget enabled clears stale set", func(t *testing.T) {
@@ -5428,6 +5793,104 @@ func TestHandleTick_BudgetExhaustionRebuildsState(t *testing.T) {
 		// run_history on the next tick that has candidates.
 		if _, ok := state.BudgetExhausted[issue.ID]; ok {
 			t.Errorf("BudgetExhausted[%s] retained on empty candidate list, want cleared", issue.ID)
+		}
+		requireLivePasses(t, "DeleteLivePass", store.deleted, []persistence.LivePass{{IssueID: issue.ID, Kind: persistence.LivePassBudget}})
+	})
+
+	t.Run("dispatch context of a hold", func(t *testing.T) {
+		t.Parallel()
+
+		type holdContext struct {
+			rule, kind, model string
+			lineage           StageLineage
+		}
+		passAt := time.Date(2026, 3, 19, 9, 0, 0, 0, time.UTC)
+		fromRun := holdContext{"plan", "kind-b", "model-run", StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-run", DispatchedAt: passAt}}
+		fromHop := holdContext{"plan", "kind-b", "model-plan", StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-hop", DispatchedAt: passAt}}
+		held := holdContext{"implement", "kind-c", "model-held", StageLineage{ChainID: "chain-held", DispatchedAt: passAt.Add(-time.Hour)}}
+		latest := map[string]persistence.RunHistory{issue.ID: {
+			RuleName: "plan", AgentAdapter: "kind-b", ConfiguredModel: "model-run", StagePrevious: "specify", StagePreviousOutcome: "succeeded",
+			ChainID: "chain-run", DispatchedAt: "2026-03-19T09:00:00Z",
+		}}
+		waiting := persistence.StageHop{
+			IssueID: issue.ID, Identifier: issue.Identifier, HopCount: 1, SourceRule: "specify", TargetRule: "plan", TargetLabel: "Stage-Plan",
+			PreviousOutcome: "succeeded", ChainID: "chain-hop", HoppedAt: "2026-03-19T10:00:00Z", DispatchedAt: "2026-03-19T09:00:00Z",
+		}
+		dispatched := waiting
+		dispatched.RunDispatched = true
+		cfg := runConfig(t, map[string]any{
+			"agent":  map[string]any{"kind": "kind-a", "command": "a-cmd"},
+			"kind-b": map[string]any{},
+			"kind-c": map[string]any{},
+			"dispatch": map[string]any{"rules": []any{
+				map[string]any{"name": "plan", "stage": "Stage-Plan", "agent": "kind-b", "kind-b": map[string]any{"model": "model-plan"}},
+				map[string]any{"name": "implement", "stage": "stage-implement", "agent": "kind-c"},
+			}},
+		})
+		cfg.Agent.MaxSessions = 3
+		labeled := issue
+		labeled.Labels = []string{"Stage-Plan"}
+
+		tests := []struct {
+			name      string
+			prior     *BudgetExhaustedEntry
+			hop       *persistence.StageHop
+			runsErr   error
+			ticks     int
+			want      holdContext
+			wantReads int
+			wantRow   bool
+		}{
+			{name: "no prior record reads the latest agent run", ticks: 1, want: fromRun, wantReads: 1, wantRow: true},
+			{name: "a waiting hop describes its target with no run history read", hop: &waiting, ticks: 1, want: fromHop, wantRow: true},
+			{name: "a hop already followed by a run reads the latest agent run", hop: &dispatched, ticks: 1, want: fromRun, wantReads: 1, wantRow: true},
+			{
+				name:  "a record the retry lane described keeps its context with no read",
+				prior: &BudgetExhaustedEntry{RuleName: held.rule, AgentKind: held.kind, ConfiguredModel: held.model, StageLineage: held.lineage},
+				ticks: 2, want: held,
+			},
+			{name: "a failed read leaves no context and the next tick reads again", runsErr: errors.New("db error"), ticks: 2, wantReads: 2},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				store := &stubStore{budgetExhaustedIDs: map[string]int{issue.ID: 1}, latestRuns: latest, latestRunsErr: tt.runsErr}
+				state := NewState(60000, 10, 0, nil, AgentTotals{})
+				if tt.prior != nil {
+					state.BudgetExhausted[issue.ID] = tt.prior
+				}
+				if tt.hop != nil {
+					PopulateStageHops(state, []persistence.StageHop{*tt.hop}, nil)
+				}
+				tracker := &candidateTrackerAdapter{
+					mockTrackerAdapter: &mockTrackerAdapter{},
+					fetchCandidatesFn:  func(context.Context) ([]domain.Issue, error) { return []domain.Issue{labeled}, nil },
+				}
+				orch := budgetOrchestrator(state, &stubWorkflowManager{config: cfg}, store, tracker)
+
+				for range tt.ticks {
+					orch.handleTick(context.Background())
+				}
+
+				entry := state.BudgetExhausted[issue.ID]
+				if entry == nil {
+					t.Fatalf("BudgetExhausted[%s] missing after %d ticks", issue.ID, tt.ticks)
+				}
+				got := holdContext{entry.RuleName, entry.AgentKind, entry.ConfiguredModel, entry.StageLineage}
+				if got != tt.want {
+					t.Errorf("BudgetExhausted[%s] rule, kind, model, lineage = %+v, want %+v", issue.ID, got, tt.want)
+				}
+				if reads := len(store.latestRunsCalls); reads != tt.wantReads {
+					t.Errorf("LatestAgentRuns calls = %d over %d ticks, want %d", reads, tt.ticks, tt.wantReads)
+				}
+				wantPasses := []persistence.LivePass{{IssueID: issue.ID, Kind: persistence.LivePassBudget, ChainID: tt.want.lineage.ChainID, RuleName: tt.want.rule, StagePrevious: tt.want.lineage.PreviousRule}}
+				if !tt.wantRow {
+					wantPasses = nil
+				}
+				requireLivePasses(t, "UpsertLivePass", store.upserted, wantPasses)
+			})
 		}
 	})
 }
@@ -5469,6 +5932,29 @@ func TestHandleTick_TokenBudgetRebuild(t *testing.T) {
 		}
 		if _, running := state.Running[issueA.ID]; running {
 			t.Errorf("Running[%s] present, want absent (token budget exhausted)", issueA.ID)
+		}
+	})
+
+	t.Run("the hold follows uncached tokens, not the raw total", func(t *testing.T) {
+		t.Parallel()
+
+		store := &stubStore{
+			tokenExhaustedIDs: []string{issueA.ID, issueB.ID},
+			tokenExhaustedUsage: map[string]persistence.IssueTokenUsage{
+				issueA.ID: {TotalTokens: 1600, UncachedTokens: 600},
+				issueB.ID: {TotalTokens: 2500, UncachedTokens: 1100},
+			},
+		}
+		state := NewState(60000, 10, 0, nil, AgentTotals{})
+
+		budgetOrchestrator(state, budgetTickConfigTokens(0, 1000), store, candidates(issueA, issueB)).handleTick(context.Background())
+
+		if _, held := state.BudgetExhausted[issueA.ID]; held {
+			t.Errorf("BudgetExhausted[%s] present, want absent (600 uncached under 1000)", issueA.ID)
+		}
+		held, ok := state.BudgetExhausted[issueB.ID]
+		if !ok || held.UsedTokens == nil || *held.UsedTokens != 1100 {
+			t.Errorf("BudgetExhausted[%s] = %+v, want held with UsedTokens 1100", issueB.ID, held)
 		}
 	})
 
@@ -5810,6 +6296,109 @@ func TestHandleTick_TokenBudgetRebuild(t *testing.T) {
 	})
 }
 
+func TestHandleTick_MoneyBudgetRebuild(t *testing.T) {
+	t.Parallel()
+
+	issue := domain.Issue{ID: "iss-usd", Identifier: "TEST-USD", Title: "title", State: "To Do"}
+	first, second := 0.7, 0.1
+	atCeiling := persistence.IssueTokenUsage{RecordedCostUSD: first + second, PricedSessions: 2, Sessions: 2}
+
+	tests := []struct {
+		name            string
+		maxTokens       int
+		maxCostUSD      float64
+		usage           persistence.IssueTokenUsage
+		queryErr        error
+		priorHold       *BudgetExhaustedEntry
+		priorIncomplete bool
+		wantReason      string
+		wantIncomplete  bool
+	}{
+		{
+			name:       "recorded costs summing to the ceiling hold the issue under the money reason",
+			maxCostUSD: 0.8,
+			usage:      atCeiling,
+			wantReason: budgetReasonMoney,
+		},
+		{
+			name:       "recorded costs one cent below the ceiling hold nothing",
+			maxCostUSD: 0.8,
+			usage:      persistence.IssueTokenUsage{RecordedCostUSD: 0.79, PricedSessions: 2, Sessions: 2},
+		},
+		{
+			name:       "past the money and token ceilings the reason is money",
+			maxTokens:  1000,
+			maxCostUSD: 0.8,
+			usage:      persistence.IssueTokenUsage{TotalTokens: 1500, UncachedTokens: 1500, RecordedCostUSD: first + second, PricedSessions: 2, Sessions: 2},
+			wantReason: budgetReasonMoney,
+		},
+		{
+			name:           "an unpriced run beside a priced run below the ceiling holds nothing and is flagged incomplete",
+			maxCostUSD:     0.8,
+			usage:          persistence.IssueTokenUsage{RecordedCostUSD: 0.5, PricedSessions: 1, UnpricedSessions: 1, Sessions: 2},
+			wantIncomplete: true,
+		},
+		{
+			name:       "a failed shared query folds the prior money hold forward",
+			maxTokens:  1000,
+			maxCostUSD: 0.8,
+			queryErr:   fmt.Errorf("db error"),
+			priorHold:  &BudgetExhaustedEntry{Reason: budgetReasonMoney},
+			wantReason: budgetReasonMoney,
+		},
+		{
+			name:       "a failed shared query drops a prior token hold once the token ceiling is disabled",
+			maxCostUSD: 0.8,
+			queryErr:   fmt.Errorf("db error"),
+			priorHold:  &BudgetExhaustedEntry{Reason: budgetReasonToken},
+		},
+		{
+			name:            "no ceiling configured resets the incomplete flags",
+			priorIncomplete: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			wm := budgetTickConfigTokens(0, tt.maxTokens)
+			wm.config.Agent.MaxCostUSD = tt.maxCostUSD
+			store := &stubStore{
+				tokenExhaustedUsage: map[string]persistence.IssueTokenUsage{issue.ID: tt.usage},
+				tokenExhaustedErr:   tt.queryErr,
+			}
+			state := NewState(60000, 10, 0, nil, AgentTotals{})
+			if tt.priorHold != nil {
+				state.BudgetExhausted[issue.ID] = tt.priorHold
+			}
+			if tt.priorIncomplete {
+				state.MoneyBudgetIncomplete[issue.ID] = struct{}{}
+			}
+			tracker := &candidateTrackerAdapter{
+				mockTrackerAdapter: &mockTrackerAdapter{},
+				fetchCandidatesFn:  func(_ context.Context) ([]domain.Issue, error) { return []domain.Issue{issue}, nil },
+			}
+
+			budgetOrchestrator(state, wm, store, tracker).handleTick(context.Background())
+			state.TrackerOpsWg.Wait()
+
+			entry := state.BudgetExhausted[issue.ID]
+			switch {
+			case tt.wantReason == "" && entry != nil:
+				t.Errorf("BudgetExhausted[%s] = %+v, want absent", issue.ID, entry)
+			case tt.wantReason != "" && (entry == nil || entry.Reason != tt.wantReason):
+				t.Fatalf("BudgetExhausted[%s] = %+v, want reason %q", issue.ID, entry, tt.wantReason)
+			case entry != nil && tt.queryErr == nil:
+				requireUsedUSD(t, entry, 0.8, true)
+			}
+			if _, incomplete := state.MoneyBudgetIncomplete[issue.ID]; incomplete != tt.wantIncomplete {
+				t.Errorf("MoneyBudgetIncomplete[%s] present = %v, want %v", issue.ID, incomplete, tt.wantIncomplete)
+			}
+		})
+	}
+}
+
 func TestHandleTick_TokenWarningThreshold(t *testing.T) {
 	t.Parallel()
 
@@ -5818,6 +6407,7 @@ func TestHandleTick_TokenWarningThreshold(t *testing.T) {
 
 		wm := budgetTickConfigTokens(0, 1000)
 		wm.config.Agent.TokenWarningPercent = 80
+		wm.config.CIFeedback.MaxRetries = 4
 		store := &stubStore{}
 		state := NewState(60000, 10, 0, nil, AgentTotals{})
 		tracker := &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}}
@@ -5829,6 +6419,12 @@ func TestHandleTick_TokenWarningThreshold(t *testing.T) {
 		}
 		if state.TokenWarningThreshold != 800 {
 			t.Errorf("state.TokenWarningThreshold = %d, want 800 (cfg.Agent.TokenWarningThreshold())", state.TokenWarningThreshold)
+		}
+		if got, ok := state.ReactionMaxAttempts[ReactionKindCI]; !ok || got != 4 {
+			t.Errorf("state.ReactionMaxAttempts[%q] = %d, %v, want 4, true (loaded max_retries)", ReactionKindCI, got, ok)
+		}
+		if got, ok := state.ReactionMaxAttempts[ReactionKindAutoMerge]; ok {
+			t.Errorf("state.ReactionMaxAttempts[%q] = %d, want absent at max_retries 0", ReactionKindAutoMerge, got)
 		}
 	})
 
@@ -6346,6 +6942,7 @@ func incrementalWriteOrchestrator(t *testing.T, store *stubStore) (*Orchestrator
 		CacheWriteTokens:  3,
 		ModelName:         "test-model",
 		APIRequestCount:   2,
+		UnaccountedTurns:  2,
 	}
 	state.Running["id-1"] = entry
 	tracker := &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}}
@@ -6383,6 +6980,9 @@ func TestMaybeWriteIncrementalMetadata(t *testing.T) {
 		}
 		if meta.ModelName != "test-model" {
 			t.Errorf("SessionMetadata.ModelName = %q, want %q", meta.ModelName, "test-model")
+		}
+		if meta.UnaccountedTurns != 2 {
+			t.Errorf("SessionMetadata.UnaccountedTurns = %d, want 2", meta.UnaccountedTurns)
 		}
 		if entry.LastMetadataWrite.IsZero() {
 			t.Error("RunningEntry.LastMetadataWrite still zero after successful write")
@@ -6673,13 +7273,13 @@ func tokenWarningApplyEventOrchestrator(t *testing.T, maxTokens, warningThreshol
 // TestApplyAgentEvent_TokenWarningOrderedBeforeCeilingStop covers a figure
 // that crosses both the warning threshold and the ceiling in the same
 // event: the warning record must land before enforceInFlightTokenCeiling
-// invokes TokenCeilingCancelFunc for that figure.
+// invokes CeilingCancelFunc for that figure.
 func TestApplyAgentEvent_TokenWarningOrderedBeforeCeilingStop(t *testing.T) {
 	t.Parallel()
 
 	o, entry := tokenWarningApplyEventOrchestrator(t, 100, 80)
 	var warnedBeforeCancel bool
-	entry.TokenCeilingCancelFunc = func() { warnedBeforeCancel = entry.TokenWarningReached }
+	entry.CeilingCancelFunc = func() { warnedBeforeCancel = entry.TokenWarningReached }
 
 	msg := agentEventMsg{IssueID: "id-apply", Event: domain.AgentEvent{Type: domain.EventTokenUsage, Usage: domain.TokenUsage{TotalTokens: 150}}}
 	o.applyAgentEvent(context.Background(), msg, true)
@@ -6687,11 +7287,11 @@ func TestApplyAgentEvent_TokenWarningOrderedBeforeCeilingStop(t *testing.T) {
 	if !entry.TokenWarningReached {
 		t.Fatal("entry.TokenWarningReached = false, want true (150 crosses the 80 threshold)")
 	}
-	if entry.TokenCeilingStopRequest == nil {
-		t.Fatal("entry.TokenCeilingStopRequest = nil, want non-nil (150 also crosses the 100 ceiling)")
+	if entry.CeilingStopRequest == nil {
+		t.Fatal("entry.CeilingStopRequest = nil, want non-nil (150 also crosses the 100 ceiling)")
 	}
 	if !warnedBeforeCancel {
-		t.Error("TokenCeilingCancelFunc observed TokenWarningReached = false, want the warning recorded before the ceiling cancels the run")
+		t.Error("CeilingCancelFunc observed TokenWarningReached = false, want the warning recorded before the ceiling cancels the run")
 	}
 }
 
@@ -6710,8 +7310,8 @@ func TestApplyAgentEvent_EnforceCeilingFalseSuppressesTokenWarning(t *testing.T)
 	if entry.TokenWarningReached {
 		t.Error("entry.TokenWarningReached = true, want false: enforceCeiling false must suppress the warning evaluation")
 	}
-	if entry.TokenCeilingStopRequest != nil {
-		t.Error("entry.TokenCeilingStopRequest = non-nil, want nil: enforceCeiling false must suppress the ceiling evaluation")
+	if entry.CeilingStopRequest != nil {
+		t.Error("entry.CeilingStopRequest = non-nil, want nil: enforceCeiling false must suppress the ceiling evaluation")
 	}
 }
 
@@ -6747,9 +7347,7 @@ func TestDrainRunningWorkers_SelfReviewProgressUpdatesRunningEntry(t *testing.T)
 	store := &stubStore{}
 	tracker := &candidateTrackerAdapter{mockTrackerAdapter: &mockTrackerAdapter{}}
 	o := budgetOrchestrator(state, budgetTickConfig(0), store, tracker)
-	// The drain must still serve snapshot requests when the poll below
-	// gives up, so its own deadline sits well beyond the poll's.
-	o.drainTimeout = time.Minute
+	o.drainTimeout = time.Hour
 
 	done := make(chan struct{})
 	go func() {
@@ -6759,27 +7357,18 @@ func TestDrainRunningWorkers_SelfReviewProgressUpdatesRunningEntry(t *testing.T)
 
 	o.selfReviewCh <- selfReviewProgressMsg{IssueID: "id-1", Message: "self_review_iteration", Iteration: 2, MaxIterations: 3}
 
-	deadline := time.After(10 * time.Second)
-	for {
+	waittest.Until(t, func() error {
 		reply := make(chan RuntimeSnapshotResult, 1)
 		o.snapshotCh <- snapshotRequest{ReplyCh: reply}
 		snap := <-reply
-		if len(snap.Running) == 1 && snap.Running[0].SelfReviewActive && snap.Running[0].SelfReviewIteration == 2 {
-			break
+		if len(snap.Running) != 1 || !snap.Running[0].SelfReviewActive || snap.Running[0].SelfReviewIteration != 2 {
+			return fmt.Errorf("RuntimeSnapshot().Running = %+v, want one entry with SelfReviewActive true and SelfReviewIteration 2", snap.Running)
 		}
-		select {
-		case <-deadline:
-			t.Fatalf("RuntimeSnapshot().Running = %+v after 10s of drain, want one entry with SelfReviewActive true and SelfReviewIteration 2", snap.Running)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
+		return nil
+	})
 
 	o.workerExitCh <- WorkerResult{IssueID: "id-1", Identifier: "id-1-ident"}
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("drainRunningWorkers did not return within 10 seconds")
-	}
+	waittest.Receive(t, done, "drainRunningWorkers return")
 }
 
 func TestDrainRunningWorkers_TokenUsageEventTriggersIncrementalWrite(t *testing.T) {
@@ -6809,14 +7398,12 @@ func TestDrainRunningWorkers_TokenUsageEventTriggersIncrementalWrite(t *testing.
 
 	// The incremental write must land before the worker exit is delivered;
 	// the exit-path metadata write cannot have happened yet.
-	deadline := time.After(10 * time.Second)
-	for len(store.sessionWrites()) == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for incremental session_metadata write during drain")
-		case <-time.After(10 * time.Millisecond):
+	waittest.Until(t, func() error {
+		if len(store.sessionWrites()) == 0 {
+			return errors.New("no incremental session_metadata write during drain yet")
 		}
-	}
+		return nil
+	})
 
 	meta := store.sessionWrites()[0]
 	if meta.IssueID != "id-1" {
@@ -6830,11 +7417,7 @@ func TestDrainRunningWorkers_TokenUsageEventTriggersIncrementalWrite(t *testing.
 	}
 
 	o.workerExitCh <- WorkerResult{IssueID: "id-1", Identifier: "MT-1"}
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("drainRunningWorkers did not return within 10 seconds")
-	}
+	waittest.Receive(t, done, "drainRunningWorkers return")
 }
 
 func TestDrainRunningWorkers_AbsenceCeiling(t *testing.T) {
@@ -6878,11 +7461,7 @@ func TestDrainRunningWorkers_AbsenceCeiling(t *testing.T) {
 			AgentAdapter:            "mock",
 		}
 
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("drainRunningWorkers did not return within 10 seconds")
-		}
+		waittest.Receive(t, done, "drainRunningWorkers return")
 		state.TrackerOpsWg.Wait()
 
 		if _, ok := state.Parked[issueID]; !ok {
@@ -6930,11 +7509,7 @@ func TestDrainRunningWorkers_AbsenceCeiling(t *testing.T) {
 			AgentAdapter:            "mock",
 		}
 
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("drainRunningWorkers did not return within 10 seconds")
-		}
+		waittest.Receive(t, done, "drainRunningWorkers return")
 		state.TrackerOpsWg.Wait()
 
 		if _, ok := state.Parked[issueID]; !ok {
@@ -7005,11 +7580,7 @@ func TestDrainRunningWorkers_AbandonChannel(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("drainRunningWorkers did not return promptly with a closed AbandonCh")
-		}
+		waittest.Receive(t, done, "drainRunningWorkers return with a closed AbandonCh")
 
 		output := buf.String()
 		if !strings.Contains(output, "worker drain abandoned at the operator's request") {
@@ -7042,11 +7613,7 @@ func TestDrainRunningWorkers_AbandonChannel(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("drainRunningWorkers did not return within 5s")
-		}
+		waittest.Receive(t, done, "drainRunningWorkers return")
 		elapsed := time.Since(start)
 
 		if elapsed < 300*time.Millisecond {
@@ -7081,11 +7648,7 @@ func TestDrainTrackerOps_AbandonChannel(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("drainTrackerOps did not return promptly with a closed AbandonCh")
-		}
+		waittest.Receive(t, done, "drainTrackerOps return with a closed AbandonCh")
 
 		output := buf.String()
 		if !strings.Contains(output, "tracker ops drain abandoned at the operator's request") {
@@ -7112,14 +7675,9 @@ func TestDrainTrackerOps_AbandonChannel(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-			t.Fatal("drainTrackerOps returned with a nil AbandonCh and in-flight work still pending, want it to keep waiting")
-		case <-time.After(300 * time.Millisecond):
-			// Still waiting after 300ms, well short of the 35s
-			// trackerOpsDrainTimeout: this is the entered-the-wait
-			// evidence the nil arm must not have short-circuited past.
-		}
+		// The window sits well short of trackerOpsDrainTimeout, so a drain that
+		// is still waiting has entered the wait the nil arm must not skip.
+		waittest.Never(t, done, 300*time.Millisecond, "drainTrackerOps return with a nil AbandonCh and in-flight work pending")
 	})
 }
 
@@ -7145,11 +7703,7 @@ func TestDrainTriageRuns_AbandonChannel(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("drainTriageRuns did not return promptly with a closed AbandonCh")
-		}
+		waittest.Receive(t, done, "drainTriageRuns return with a closed AbandonCh")
 
 		output := buf.String()
 		if !strings.Contains(output, "reaction triage drain abandoned at the operator's request") {
@@ -7176,14 +7730,9 @@ func TestDrainTriageRuns_AbandonChannel(t *testing.T) {
 			close(done)
 		}()
 
-		select {
-		case <-done:
-			t.Fatal("drainTriageRuns returned with a nil AbandonCh and in-flight work still pending, want it to keep waiting")
-		case <-time.After(300 * time.Millisecond):
-			// Still waiting after 300ms, well short of the 35s
-			// trackerOpsDrainTimeout: this is the entered-the-wait
-			// evidence the nil arm must not have short-circuited past.
-		}
+		// The window sits well short of trackerOpsDrainTimeout, so a drain that
+		// is still waiting has entered the wait the nil arm must not skip.
+		waittest.Never(t, done, 300*time.Millisecond, "drainTriageRuns return with a nil AbandonCh and in-flight work pending")
 	})
 }
 
@@ -7261,24 +7810,16 @@ func TestOrchestratorScenarios(t *testing.T) {
 		return domain.Issue{ID: id, Identifier: identifier, Title: "Scenario Issue", State: "To Do"}
 	}
 
-	// pollStore polls the store until cond returns true or the deadline fires.
 	pollStore := func(t *testing.T, store *stubStore, cond func(*stubStore) bool) {
 		t.Helper()
-		deadline := time.After(15 * time.Second)
-		for {
-			select {
-			case <-deadline:
-				t.Fatal("timed out polling store for expected condition")
-			default:
-			}
+		waittest.Until(t, func() error {
 			store.mu.Lock()
-			ok := cond(store)
-			store.mu.Unlock()
-			if ok {
-				return
+			defer store.mu.Unlock()
+			if !cond(store) {
+				return errors.New("store does not hold the expected rows yet")
 			}
-			time.Sleep(50 * time.Millisecond)
-		}
+			return nil
+		})
 	}
 
 	// writeStatusFile creates .sortie/status in the given workspace directory.
@@ -7778,6 +8319,7 @@ func TestOrchestratorScenarios(t *testing.T) {
 		// from the event loop or from worker-driven state refreshes. Atomic access
 		// also keeps the value visible to the test-goroutine poll below.
 		var handoffDone atomic.Bool
+		var candidateFetches atomic.Int64
 
 		mockTracker := &mockTrackerAdapter{
 			transitionIssueFn: func(_ context.Context, _, _ string) error {
@@ -7806,6 +8348,7 @@ func TestOrchestratorScenarios(t *testing.T) {
 		tracker := &candidateTrackerAdapter{
 			mockTrackerAdapter: mockTracker,
 			fetchCandidatesFn: func(_ context.Context) ([]domain.Issue, error) {
+				candidateFetches.Add(1)
 				issueState := "To Do"
 				if handoffDone.Load() {
 					issueState = "In Review"
@@ -7845,19 +8388,39 @@ func TestOrchestratorScenarios(t *testing.T) {
 			close(done)
 		}()
 
-		deadline := time.After(15 * time.Second)
-		for !handoffDone.Load() {
-			select {
-			case <-deadline:
-				cancel()
-				<-done
-				t.Fatal("timed out waiting for handoff transition")
-			default:
+		t.Cleanup(func() {
+			cancel()
+			<-done
+		})
+		waittest.Until(t, func() error {
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if !handoffDone.Load() || len(store.runHistories) < 1 {
+				return fmt.Errorf("handoff done = %t, run histories = %d, want a handoff and one history", handoffDone.Load(), len(store.runHistories))
 			}
-			time.Sleep(50 * time.Millisecond)
-		}
+			return nil
+		})
 
-		time.Sleep(500 * time.Millisecond)
+		waittest.Until(t, func() error {
+			reply := make(chan RuntimeSnapshotResult, 1)
+			waittest.Send(t, o.snapshotCh, snapshotRequest{ReplyCh: reply}, "snapshot request")
+			snap := waittest.Receive(t, reply, "snapshot reply")
+			if len(snap.Running) != 0 || len(snap.Retrying) != 0 {
+				return fmt.Errorf("snapshot running = %d, retrying = %d, want the orchestrator to hold the issue nowhere", len(snap.Running), len(snap.Retrying))
+			}
+			return nil
+		})
+
+		// The fetch after the next one starts only once the tick that began
+		// with the next one has finished dispatching, so the orchestrator has
+		// had a full tick in which to re-dispatch the handed-off issue.
+		wantFetches := candidateFetches.Load() + 2
+		waittest.Until(t, func() error {
+			if got := candidateFetches.Load(); got < wantFetches {
+				return fmt.Errorf("candidate fetches = %d, want at least %d", got, wantFetches)
+			}
+			return nil
+		})
 
 		cancel()
 		<-done
@@ -7917,6 +8480,10 @@ func (s *sweepThrottleTracker) FetchIssuesByStates(_ context.Context, _ []string
 	return nil, nil
 }
 
+func (s *sweepThrottleTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (s *sweepThrottleTracker) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }
@@ -7928,11 +8495,7 @@ func (s *sweepThrottleTracker) FetchIssueComments(_ context.Context, _ string) (
 func (s *sweepThrottleTracker) TransitionIssue(_ context.Context, _, _ string) error { return nil }
 
 func (s *sweepThrottleTracker) CommentIssue(_ context.Context, _, _ string) error { return nil }
-func (s *sweepThrottleTracker) CommentIssueWithLiteral(_ context.Context, _, _, _ string) error {
-	return nil
-}
-
-func (s *sweepThrottleTracker) AddLabel(_ context.Context, _, _ string) error { return nil }
+func (s *sweepThrottleTracker) AddLabel(_ context.Context, _, _ string) error     { return nil }
 
 func (s *sweepThrottleTracker) RemoveLabel(_ context.Context, _ string, _ string) error { return nil }
 
@@ -8290,26 +8853,19 @@ func TestDispatch_RuleResolvedKindPersistsToRunHistory(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.After(15 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			cancel()
-			<-done
-			store.mu.Lock()
-			n := len(store.runHistories)
-			store.mu.Unlock()
-			t.Fatalf("timed out: run histories = %d, want 2", n)
-		default:
-		}
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	waittest.Until(t, func() error {
 		store.mu.Lock()
 		n := len(store.runHistories)
 		store.mu.Unlock()
-		if n >= 2 {
-			break
+		if n < 2 {
+			return fmt.Errorf("run histories = %d, want 2", n)
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return nil
+	})
 
 	cancel()
 	<-done
@@ -8489,12 +9045,8 @@ func TestHandleTick_DispatchFreezesUsageDisposition(t *testing.T) {
 
 	exitResults := make(map[string]WorkerResult, 2)
 	for i := range 2 {
-		select {
-		case r := <-o.workerExitCh:
-			exitResults[r.IssueID] = r
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for worker exit %d/2", i+1)
-		}
+		r := waittest.Receive(t, o.workerExitCh, fmt.Sprintf("worker exit %d/2", i+1))
+		exitResults[r.IssueID] = r
 	}
 
 	if got := exitResults[defaultIssue.ID].Usage; got != reportedUsage {
@@ -8680,18 +9232,33 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 	t.Parallel()
 
 	const fresh = "<fresh>"
+	passAt := time.Date(2026, 3, 19, 9, 0, 0, 500_000_000, time.UTC)
 	hopReachedPlan := persistence.StageHop{
 		IssueID: "id-1", Identifier: "S-1", HopCount: 1, SourceRule: "specify", TargetRule: "plan", TargetLabel: "Stage-Plan",
 		PreviousOutcome: "succeeded", SourceDispatchID: "d0", HoppedAt: "2026-03-19T10:00:00Z", ChainID: "chain-hop",
+		DispatchedAt: "2026-03-19T09:00:00.5Z",
 	}
+	followedByRun := hopReachedPlan
+	followedByRun.RunDispatched = true
+	reachedPlan := StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-hop", DispatchedAt: passAt}
 	tests := []struct {
-		name string
-		hops []persistence.StageHop
-		want map[string]StageLineage
+		name       string
+		hops       []persistence.StageHop
+		want       map[string]StageLineage
+		wantBefore int
+		wantMarked []string
+		wantFirst  string
 	}{
-		{"dispatches no hop reached each start a chain", nil, map[string]StageLineage{"id-1": {ChainID: fresh}, "id-2": {ChainID: fresh}}},
-		{"a restored hop record hands its chain to the dispatch it reached and to no other", []persistence.StageHop{hopReachedPlan},
-			map[string]StageLineage{"id-1": {PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-hop"}, "id-2": {ChainID: fresh}}},
+		{name: "dispatches no hop reached each start a chain", want: map[string]StageLineage{"id-1": {ChainID: fresh}, "id-2": {ChainID: fresh}}},
+		{
+			name: "a restored hop record hands its chain and pass time to the dispatch it reached and to no other",
+			hops: []persistence.StageHop{hopReachedPlan}, want: map[string]StageLineage{"id-1": reachedPlan, "id-2": {ChainID: fresh}},
+			wantBefore: 1, wantMarked: []string{"id-1"}, wantFirst: "id-1",
+		},
+		{
+			name: "a restored hop record already followed by a run is neither listed nor marked again",
+			hops: []persistence.StageHop{followedByRun}, want: map[string]StageLineage{"id-1": reachedPlan, "id-2": {ChainID: fresh}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -8702,6 +9269,9 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 			PopulateStageHops(h.state, tt.hops, nil)
 			h.tracker.candidates = []domain.Issue{candidate("id-1", "S-1", "Stage-Plan"), candidate("id-2", "S-2", "Stage-Plan")}
 			h.build()
+			if before := len(RuntimeSnapshot(h.state, time.Now()).BetweenStages); before != tt.wantBefore {
+				t.Fatalf("len(BetweenStages) before the tick = %d, want %d", before, tt.wantBefore)
+			}
 
 			h.o.handleTick(context.Background())
 			h.o.state.WorkerWg.Wait()
@@ -8711,6 +9281,12 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 				entry := h.o.state.Running[id]
 				if entry == nil {
 					t.Fatalf("Running[%q] missing after handleTick", id)
+				}
+				if entry.StartedAt.IsZero() {
+					t.Fatalf("Running[%q].StartedAt is zero after handleTick", id)
+				}
+				if want.DispatchedAt.IsZero() {
+					want.DispatchedAt = entry.StartedAt
 				}
 				got := entry.StageLineage
 				if want.ChainID == fresh {
@@ -8725,6 +9301,27 @@ func TestHandleTick_StageLineageChain(t *testing.T) {
 				if got != want {
 					t.Errorf("Running[%q].StageLineage = %+v, want %+v", id, got, want)
 				}
+				if wantFirst := id == tt.wantFirst; entry.FirstAfterHop != wantFirst {
+					t.Errorf("Running[%q].FirstAfterHop = %t, want %t", id, entry.FirstAfterHop, wantFirst)
+				}
+				wantPass := persistence.LivePass{IssueID: id, Kind: persistence.LivePassRunning, ChainID: entry.StageLineage.ChainID, RuleName: "plan", StagePrevious: want.PreviousRule}
+				if !slices.Contains(h.store.upserted, wantPass) {
+					t.Errorf("UpsertLivePass calls = %+v, want one for %+v", h.store.upserted, wantPass)
+				}
+			}
+			if len(h.store.upserted) != len(tt.want) {
+				t.Errorf("UpsertLivePass calls = %+v, want one per dispatch (%d)", h.store.upserted, len(tt.want))
+			}
+			if after := RuntimeSnapshot(h.state, time.Now()).BetweenStages; len(after) != 0 {
+				t.Errorf("BetweenStages after the dispatch = %+v, want none", after)
+			}
+			for _, hop := range tt.hops {
+				if !h.state.StageHops[hop.IssueID].RunDispatched {
+					t.Errorf("StageHops[%q].RunDispatched = false after the dispatch, want true", hop.IssueID)
+				}
+			}
+			if !slices.Equal(h.store.dispatchMarked, tt.wantMarked) {
+				t.Errorf("MarkStageHopDispatched calls = %q, want %q", h.store.dispatchMarked, tt.wantMarked)
 			}
 		})
 	}
@@ -8747,6 +9344,33 @@ func TestHandleTick_StageHopDirectReadWithoutStateHoldsTheIssue(t *testing.T) {
 	}
 	if hop := h.o.state.StageHops["id-1"]; hop == nil || hop.TargetObserved {
 		t.Errorf("handleTick() hop record = %+v, want kept and unobserved", hop)
+	}
+}
+
+func TestHandleTick_ParkReleasedByLabelRemovalEndsStandingEscalation(t *testing.T) {
+	t.Parallel()
+
+	h := newRunHarness(t, runConfig(t, stagedRulesRaw()), "kind-a", "kind-b", "kind-c")
+	rkey := ReactionKey("id-1", ReactionKindReview)
+	h.state.Parked["id-1"] = &ParkedEntry{Identifier: "S-1", Reason: parkReasonAgentBlocked, ParkedState: "To Do", Label: "needs-human", LabelApplied: true}
+	h.state.PendingReactions[rkey] = &PendingReaction{
+		IssueID: "id-1", Identifier: "S-1", Kind: ReactionKindReview,
+		EscalatedAt: time.Now().Add(-time.Hour), EscalationTrigger: EscalationTriggerBudget, EscalationSubject: "comment-set",
+	}
+	h.state.ReactionAttempts[rkey] = 3
+	h.tracker.candidates = []domain.Issue{candidate("id-1", "S-1")}
+	h.tracker.issues["id-1"] = candidate("id-1", "S-1")
+	h.build()
+
+	h.o.handleTick(context.Background())
+	h.o.state.WorkerWg.Wait()
+
+	sessionOfWorkspace(t, h.started(), "S-1")
+	if _, ok := h.state.PendingReactions[rkey]; ok {
+		t.Error("PendingReactions[review] after the park released and dispatched = present, want dropped")
+	}
+	if got, ok := h.state.ReactionAttempts[rkey]; ok {
+		t.Errorf("ReactionAttempts[review] after the park released and dispatched = %d, want none", got)
 	}
 }
 
@@ -9041,7 +9665,12 @@ func TestHandleTick_BudgetHoldNoticeOnce(t *testing.T) {
 	if !ok {
 		t.Fatal("BudgetExhausted missing after the ticks, want present")
 	}
-	if want := buildBudgetHoldComment(entry); calls[0].Text != want {
+	want := "Sortie stopped dispatching this issue.\n" +
+		"Recorded: " + entry.ExhaustedAt.Format(time.RFC3339) + "\n" +
+		"Ceiling: session budget (agent.max_sessions)\n" +
+		"Sessions: 5 of 3\n" +
+		"Raising agent.max_sessions raises this ceiling."
+	if calls[0].Text != want {
 		t.Errorf("commentCalls[0].Text =\n%q\nwant\n%q", calls[0].Text, want)
 	}
 
@@ -9639,104 +10268,67 @@ func TestHandleTick_BudgetHoldNoticeQueryErrorWithholdsRelease(t *testing.T) {
 func TestReconcilePasses_DoNotBlockOnInFlightTriage(t *testing.T) {
 	t.Parallel()
 
-	const nonBlockingBound = 200 * time.Millisecond
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (pass func(), providerCalls func() int)
+	}{
+		{"ci", func(t *testing.T) (func(), func() int) {
+			state := stateWithPendingReaction(t, "ISS-NB-CI", "feature/nb", 1)
+			state.PendingReactions[ReactionKey("ISS-NB-CI", ReactionKindCI)].Triage = inFlightTriageRun("fp-nb", func() {})
+			scm := defaultCISCM()
+			ci := &mockCIProvider{}
+			params := ciParams(t, &ciReconcileStore{}, ci, nil, scm)
+			return func() { reconcileCIStatus(state, params, discardLogger(), context.Background(), newCIMetricsSpy()) },
+				func() int { return scm.calls + ci.calls }
+		}},
+		{"review", func(t *testing.T) (func(), func() int) {
+			state := stateWithReviewReaction(t, "ISS-NB-REVIEW", 10)
+			state.PendingReactions[ReactionKey("ISS-NB-REVIEW", ReactionKindReview)].Triage = inFlightTriageRun("fp-nb", func() {})
+			scm := &mockSCMAdapter{comments: oldEnoughReviewComments()}
+			params := reviewParams(&reviewReconcileStore{}, scm, nil)
+			return func() {
+					reconcileReviewComments(state, params, discardLogger(), context.Background(), newReviewMetricsSpy())
+				},
+				func() int { return scm.calls }
+		}},
+		{"bot-review", func(t *testing.T) (func(), func() int) {
+			state := stateWithBotReviewReaction(t, "ISS-NB-BOT", 10)
+			state.PendingReactions[ReactionKey("ISS-NB-BOT", ReactionKindBotReview)].Triage = inFlightTriageRun("fp-nb", func() {})
+			scm := &mockSCMAdapter{botComments: actionableBotReviewComments()}
+			params := botReviewParams(&reviewReconcileStore{}, scm, nil)
+			return func() {
+					reconcileBotReviewComments(state, params, discardLogger(), context.Background(), newBotReviewMetricsSpy())
+				},
+				func() int { return scm.botCalls }
+		}},
+		{"merge-conflict", func(t *testing.T) (func(), func() int) {
+			state := stateWithMergeConflict(t, "ISS-NB-MC", 10)
+			state.PendingReactions[ReactionKey("ISS-NB-MC", ReactionKindMergeConflict)].Triage = inFlightTriageRun("fp-nb", func() {})
+			scm := &mergeabilitySCM{}
+			params := mergeConflictParams(newStatefulFingerprintStore(), scm, nil)
+			return func() {
+					reconcileMergeConflicts(state, params, discardLogger(), context.Background(), newMergeConflictMetricsSpy())
+				},
+				func() int { return scm.calls }
+		}},
+	}
 
-	t.Run("ci", func(t *testing.T) {
-		t.Parallel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-		state := stateWithPendingReaction(t, "ISS-NB-CI", "feature/nb", 1)
-		rkey := ReactionKey("ISS-NB-CI", ReactionKindCI)
-		state.PendingReactions[rkey].Triage = inFlightTriageRun("fp-nb", func() {})
-		scm := defaultCISCM()
-		ci := &mockCIProvider{}
-		params := ciParams(t, &ciReconcileStore{}, ci, nil, scm)
-
-		done := make(chan struct{})
-		go func() {
-			reconcileCIStatus(state, params, discardLogger(), context.Background(), newCIMetricsSpy())
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(nonBlockingBound):
-			t.Fatal("reconcileCIStatus blocked on an in-flight triage run")
-		}
-		if scm.calls != 0 || ci.calls != 0 {
-			t.Errorf("provider calls (scm=%d, ci=%d), want 0 while a triage run is in flight", scm.calls, ci.calls)
-		}
-	})
-
-	t.Run("review", func(t *testing.T) {
-		t.Parallel()
-
-		state := stateWithReviewReaction(t, "ISS-NB-REVIEW", 10)
-		rkey := ReactionKey("ISS-NB-REVIEW", ReactionKindReview)
-		state.PendingReactions[rkey].Triage = inFlightTriageRun("fp-nb", func() {})
-		scm := &mockSCMAdapter{comments: oldEnoughReviewComments()}
-		params := reviewParams(&reviewReconcileStore{}, scm, nil)
-
-		done := make(chan struct{})
-		go func() {
-			reconcileReviewComments(state, params, discardLogger(), context.Background(), newReviewMetricsSpy())
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(nonBlockingBound):
-			t.Fatal("reconcileReviewComments blocked on an in-flight triage run")
-		}
-		if scm.calls != 0 {
-			t.Errorf("FetchPendingReviews calls = %d, want 0 while a triage run is in flight", scm.calls)
-		}
-	})
-
-	t.Run("bot-review", func(t *testing.T) {
-		t.Parallel()
-
-		state := stateWithBotReviewReaction(t, "ISS-NB-BOT", 10)
-		rkey := ReactionKey("ISS-NB-BOT", ReactionKindBotReview)
-		state.PendingReactions[rkey].Triage = inFlightTriageRun("fp-nb", func() {})
-		scm := &mockSCMAdapter{botComments: actionableBotReviewComments()}
-		params := botReviewParams(&reviewReconcileStore{}, scm, nil)
-
-		done := make(chan struct{})
-		go func() {
-			reconcileBotReviewComments(state, params, discardLogger(), context.Background(), newBotReviewMetricsSpy())
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(nonBlockingBound):
-			t.Fatal("reconcileBotReviewComments blocked on an in-flight triage run")
-		}
-		if scm.botCalls != 0 {
-			t.Errorf("FetchBotReviewComments calls = %d, want 0 while a triage run is in flight", scm.botCalls)
-		}
-	})
-
-	t.Run("merge-conflict", func(t *testing.T) {
-		t.Parallel()
-
-		state := stateWithMergeConflict(t, "ISS-NB-MC", 10)
-		rkey := ReactionKey("ISS-NB-MC", ReactionKindMergeConflict)
-		state.PendingReactions[rkey].Triage = inFlightTriageRun("fp-nb", func() {})
-		scm := &mergeabilitySCM{}
-		params := mergeConflictParams(newStatefulFingerprintStore(), scm, nil)
-
-		done := make(chan struct{})
-		go func() {
-			reconcileMergeConflicts(state, params, discardLogger(), context.Background(), newMergeConflictMetricsSpy())
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(nonBlockingBound):
-			t.Fatal("reconcileMergeConflicts blocked on an in-flight triage run")
-		}
-		if scm.calls != 0 {
-			t.Errorf("GetMergeability calls = %d, want 0 while a triage run is in flight", scm.calls)
-		}
-	})
+			pass, providerCalls := tt.setup(t)
+			done := make(chan struct{})
+			go func() {
+				pass()
+				close(done)
+			}()
+			waittest.Receive(t, done, "reconcile pass return while a triage run is in flight")
+			if got := providerCalls(); got != 0 {
+				t.Errorf("provider calls = %d, want 0 while a triage run is in flight", got)
+			}
+		})
+	}
 }
 
 type sessionRecorder struct {
@@ -9765,13 +10357,14 @@ type runTracker struct {
 	candidates       []domain.Issue
 	issues           map[string]domain.Issue
 	candidateFetches atomic.Int64
+	fetchErr         error
 }
 
 func (r *runTracker) FetchCandidateIssues(context.Context) ([]domain.Issue, error) {
 	r.candidateFetches.Add(1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return slices.Clone(r.candidates), nil
+	return slices.Clone(r.candidates), r.fetchErr
 }
 
 func (r *runTracker) SetTrackerStates(func() domain.TrackerStates) {}
@@ -9797,6 +10390,8 @@ type runHarness struct {
 	metrics   domain.Metrics
 	meta      map[string]registry.AgentMeta
 	apiURL    string
+
+	orchestratorStore OrchestratorStore
 
 	mu          sync.Mutex
 	unavailable map[string]bool
@@ -9861,6 +10456,10 @@ func (h *runHarness) build() {
 		},
 	}
 	cfg := h.wm.Config()
+	store := OrchestratorStore(h.store)
+	if h.orchestratorStore != nil {
+		store = h.orchestratorStore
+	}
 	h.o = NewOrchestrator(OrchestratorParams{
 		State:          h.state,
 		Logger:         slog.New(slog.NewJSONHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
@@ -9876,7 +10475,7 @@ func (h *runHarness) build() {
 			return recorder.adapter, nil
 		},
 		WorkflowManager: h.wm,
-		Store:           h.store,
+		Store:           store,
 		Metrics:         h.metrics,
 		SessionAPIURL:   h.apiURL,
 		PreflightParams: PreflightParams{
@@ -9921,32 +10520,29 @@ func (h *runHarness) started() map[string][]domain.StartSessionParams {
 
 func (h *runHarness) waitForSessions(n int) map[string][]domain.StartSessionParams {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		got := h.started()
+	var got map[string][]domain.StartSessionParams
+	waittest.Until(h.t, func() error {
+		got = h.started()
 		total := 0
 		for _, sessions := range got {
 			total += len(sessions)
 		}
-		if total >= n {
-			return got
+		if total < n {
+			return fmt.Errorf("sessions started = %v, want at least %d; log: %s", got, n, h.logs.String())
 		}
-		if time.Now().After(deadline) {
-			h.t.Fatalf("sessions started = %v after 5s, want at least %d; log: %s", got, n, h.logs.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return nil
+	})
+	return got
 }
 
 func (h *runHarness) waitForLog(message string) {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for len(logRecords(h.t, h.logs, message)) == 0 {
-		if time.Now().After(deadline) {
-			h.t.Fatalf("log holds no %q record after 5s; log: %s", message, h.logs.String())
+	waittest.Until(h.t, func() error {
+		if len(logRecords(h.t, h.logs, message)) == 0 {
+			return fmt.Errorf("log holds no %q record; log: %s", message, h.logs.String())
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return nil
+	})
 }
 
 func rawWithBackendRule(agent map[string]any, ruleAgent string) map[string]any {
@@ -10201,13 +10797,12 @@ func TestRun_ConversionAdvisoryIsLoggedOnceAcrossTicks(t *testing.T) {
 	h := newRunHarness(t, cfg, "plain", "modern")
 
 	h.run()
-	deadline := time.Now().Add(5 * time.Second)
-	for h.tracker.candidateFetches.Load() < 4 {
-		if time.Now().After(deadline) {
-			t.Fatalf("candidate fetches = %d after 5s, want at least 4 ticks", h.tracker.candidateFetches.Load())
+	waittest.Until(t, func() error {
+		if fetches := h.tracker.candidateFetches.Load(); fetches < 4 {
+			return fmt.Errorf("candidate fetches = %d, want at least 4 ticks", fetches)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return nil
+	})
 	h.stop()
 
 	records := logRecords(t, h.logs, "agent kind was removed and its configuration was converted to the replacement kind; the conversion will be removed in a later release")
@@ -10482,19 +11077,17 @@ func TestRun_RetriesDispatchOnTheSelectionTheConfigurationInForceGives(t *testin
 
 func (h *runHarness) waitForRunHistories(n int) []persistence.RunHistory {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	var rows []persistence.RunHistory
+	waittest.Until(h.t, func() error {
 		h.store.mu.Lock()
-		rows := slices.Clone(h.store.runHistories)
+		rows = slices.Clone(h.store.runHistories)
 		h.store.mu.Unlock()
-		if len(rows) >= n {
-			return rows
+		if len(rows) < n {
+			return fmt.Errorf("run_history rows = %d, want at least %d; log: %s", len(rows), n, h.logs.String())
 		}
-		if time.Now().After(deadline) {
-			h.t.Fatalf("run_history rows = %d after 5s, want at least %d; log: %s", len(rows), n, h.logs.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return nil
+	})
+	return rows
 }
 
 func ruleBlock(name, label, agent string, block map[string]any) map[string]any {
@@ -10781,6 +11374,189 @@ func (s *stubStore) RecordRunStageResult(context.Context, int64, string, string)
 
 func (s *stubStore) MarkStageHopObserved(context.Context, string) error { return nil }
 
+func (s *stubStore) MarkStageHopDispatched(_ context.Context, issueID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dispatchMarked = append(s.dispatchMarked, issueID)
+	return s.markDispatchedErr
+}
+
+func (s *stubStore) LatestAgentRuns(_ context.Context, issueIDs []string) (map[string]persistence.RunHistory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latestRunsCalls = append(s.latestRunsCalls, slices.Clone(issueIDs))
+	if s.latestRunsErr != nil {
+		return nil, s.latestRunsErr
+	}
+	runs := make(map[string]persistence.RunHistory)
+	for _, id := range issueIDs {
+		if run, ok := s.latestRuns[id]; ok {
+			runs[id] = run
+		}
+	}
+	return runs, nil
+}
+
+func (s *stubStore) LatestResumeUsage(context.Context, string, string) (*persistence.ResumeUsage, error) {
+	return s.resumeUsage, s.resumeUsageErr
+}
+
 func (s *stubStore) ListStageHops(context.Context) ([]persistence.StageHop, error) {
 	return nil, nil
+}
+
+func TestWriteIncrementalMetadata_LiveEstimate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		kind       string
+		measured   bool
+		wantCost   *float64
+		wantStatus string
+	}{
+		{name: "priced kind", kind: "k", measured: true, wantCost: new(12.0), wantStatus: "estimated"},
+		{name: "kind without rates", kind: "u", measured: true, wantStatus: "unpriced"},
+		{name: "unmeasured session", kind: "k"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			store := openInMemoryStore(t)
+			state := NewState(60000, 10, 0, nil, AgentTotals{})
+			state.Rates = fixtureRates(t, 2)
+			o := &Orchestrator{state: state, store: store, logger: discardLogger()}
+			entry := &RunningEntry{
+				AgentKind:         tt.kind,
+				UsageMeasured:     tt.measured,
+				AgentInputTokens:  usageS.InputTokens,
+				AgentOutputTokens: usageS.OutputTokens,
+				AgentTotalTokens:  usageS.TotalTokens,
+			}
+
+			o.writeIncrementalMetadata(ctx, "id-1", entry, time.Now().UTC())
+
+			meta, found, err := store.LoadSessionMetadata(ctx, "id-1")
+			if err != nil || !found {
+				t.Fatalf("LoadSessionMetadata(%q) = found %v, err %v, want found", "id-1", found, err)
+			}
+			if !reflect.DeepEqual(meta.EstimatedCostUSD, tt.wantCost) || meta.CostStatus != tt.wantStatus {
+				t.Errorf("session_metadata cost for kind %q = (%v, %q), want (%v, %q)",
+					tt.kind, meta.EstimatedCostUSD, meta.CostStatus, tt.wantCost, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestApplyAgentEvent_WorkspaceReadyShortensLaterPaths covers a live run:
+// the workspace message arrives before the agent's first tool call, so a read
+// of a file inside the workspace is retained relative to it, not as a path
+// of the host.
+func TestApplyAgentEvent_WorkspaceReadyShortensLaterPaths(t *testing.T) {
+	t.Parallel()
+
+	o, entry := tokenWarningApplyEventOrchestrator(t, 0, 0)
+	entry.events = o.state.RetainedEvents.register("d-ws")
+
+	o.applyAgentEvent(context.Background(), agentEventMsg{IssueID: "id-apply", Workspace: "/ws/ISS-1"}, true)
+	o.applyAgentEvent(context.Background(), agentEventMsg{IssueID: "id-apply", Event: domain.AgentEvent{
+		Type: domain.EventToolResult, ToolName: "Read", ToolKind: domain.ToolKindRead, ToolArgument: "/ws/ISS-1/internal/foo.go",
+	}}, true)
+
+	events := entry.events.snapshot()
+	if len(events) != 1 || events[0].ToolArgument != "internal/foo.go" {
+		t.Fatalf("retained events = %+v, want one tool_result with ToolArgument %q", events, "internal/foo.go")
+	}
+}
+
+func backWithMockAdapter(t *testing.T, recorder *sessionRecorder) {
+	t.Helper()
+	construct, err := registry.Agents.Get("mock")
+	if err != nil {
+		t.Fatalf("registry.Agents.Get(mock) error = %v", err)
+	}
+	adapter, err := construct()
+	if err != nil {
+		t.Fatalf("mock constructor error = %v", err)
+	}
+	recorder.adapter.startSessionFn = adapter.StartSession
+	recorder.adapter.runTurnFn = adapter.RunTurn
+	recorder.adapter.stopSessionFn = adapter.StopSession
+}
+
+func TestRun_UsageLimitRefusalHoldsItsKindOnly(t *testing.T) {
+	t.Parallel()
+
+	resetsAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	raw := rawWithBackendRule(map[string]any{
+		"kind":                  "mock",
+		"command":               "mock-cmd",
+		"max_concurrent_agents": 1,
+		"max_sessions":          1,
+	}, "mock-b")
+	raw["mock"] = map[string]any{
+		"turn_outcomes":         []any{"usage_limit"},
+		"usage_limit_resets_at": resetsAt.Format(time.RFC3339),
+		"report_token_usage":    true,
+	}
+	cfg := runConfig(t, raw)
+	h := newRunHarness(t, cfg, "mock", "mock-b")
+	backWithMockAdapter(t, h.recorders["mock"])
+	backWithMockAdapter(t, h.recorders["mock-b"])
+	h.orchestratorStore = openParkStore(t)
+	h.state.MaxConcurrentAgents = cfg.Agent.MaxConcurrentAgents
+	h.tracker.candidates = []domain.Issue{
+		candidate("id-1", "A-1"),
+		candidate("id-2", "A-2"),
+		candidate("id-3", "B-1", "backend"),
+	}
+
+	h.run()
+	snapshot := h.o.SnapshotFunc()
+	var refused SnapshotRetryEntry
+	waittest.Until(t, func() error {
+		snap, err := snapshot()
+		if err != nil {
+			return err
+		}
+		for _, retry := range snap.Retrying {
+			if retry.Identifier == "A-1" {
+				refused = retry
+				return nil
+			}
+		}
+		return fmt.Errorf("no retry for A-1 yet; log: %s", h.logs.String())
+	})
+
+	if refused.DueAtMS != resetsAt.UnixMilli() || refused.Trigger != triggerUsageLimit {
+		t.Errorf("A-1 retry = {DueAtMS: %d, Trigger: %q}, want {%d, %q}", refused.DueAtMS, refused.Trigger, resetsAt.UnixMilli(), triggerUsageLimit)
+	}
+
+	h.o.RefreshFunc()()
+	var snap RuntimeSnapshotResult
+	waittest.Until(t, func() error {
+		var err error
+		snap, err = snapshot()
+		if err != nil {
+			return err
+		}
+		held := slices.IndexFunc(snap.Held, func(e SnapshotHeldEntry) bool {
+			return e.Identifier == "A-2" && e.Hold.Reason == SkipUsageLimit
+		})
+		if held < 0 || len(h.recorders["mock-b"].started()) == 0 {
+			return fmt.Errorf("held = %+v, mock-b sessions = %d, want A-2 held and B-1 started; log: %s", snap.Held, len(h.recorders["mock-b"].started()), h.logs.String())
+		}
+		return nil
+	})
+
+	held := snap.Held[slices.IndexFunc(snap.Held, func(e SnapshotHeldEntry) bool { return e.Identifier == "A-2" })]
+	if !held.Hold.ResetsAt.Equal(resetsAt) || held.Hold.AgentKind != "mock" || held.Hold.ModelOnly {
+		t.Errorf("A-2 hold = %+v, want resets_at %v on agent kind %q for every model", held.Hold, resetsAt, "mock")
+	}
+	if len(snap.BudgetExhausted) != 0 {
+		t.Errorf("budget_exhausted = %+v, want none after a refused run", snap.BudgetExhausted)
+	}
 }

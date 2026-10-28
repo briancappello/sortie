@@ -269,7 +269,38 @@ const (
 	SkipBlockersUnresolved SkipReason = "blockers_unresolved"
 	SkipBlockersNotRead    SkipReason = "blockers_not_read"
 	SkipBlockersIncomplete SkipReason = "blockers_incomplete"
+
+	SkipDailySpendCeiling   SkipReason = "daily_spend_ceiling"
+	SkipWeeklySpendCeiling  SkipReason = "weekly_spend_ceiling"
+	SkipMonthlySpendCeiling SkipReason = "monthly_spend_ceiling"
+
+	// The reasons below describe a hold only. [EvaluateCandidate] never
+	// returns them and the candidate-hold counter never receives them.
+	SkipAgentSlotsFull      SkipReason = "agent_slots_full"
+	SkipSSHHostsFull        SkipReason = "ssh_hosts_full"
+	SkipStageHopUnconfirmed SkipReason = "stage_hop_unconfirmed"
+	SkipUsageLimit          SkipReason = "usage_limit"
+	SkipParkCommentsUnread  SkipReason = "park_comments_unread"
 )
+
+// HoldReasons returns every reason a [HeldEntry] can carry, in the order of
+// the hold precedence. The slice is new on each call.
+func HoldReasons() []SkipReason {
+	return []SkipReason{
+		SkipAgentSlotsFull,
+		SkipSSHHostsFull,
+		SkipBlockersNotRead,
+		SkipBlockersUnresolved,
+		SkipBlockersIncomplete,
+		SkipBlockedBy,
+		SkipDailySpendCeiling,
+		SkipWeeklySpendCeiling,
+		SkipMonthlySpendCeiling,
+		SkipStageHopUnconfirmed,
+		SkipUsageLimit,
+		SkipParkCommentsUnread,
+	}
+}
 
 // CandidateDecision is the outcome of evaluating one candidate.
 type CandidateDecision struct {
@@ -479,6 +510,17 @@ func CancelRetry(state *State, issueID string) {
 	delete(state.RetryAttempts, issueID)
 }
 
+// releaseClaimUnlessRunning deletes the issue's claim unless a worker runs
+// for it. A running worker's exit decides its own claim and re-seeds the
+// watches its dispatch consumed, so releasing the claim under it would make
+// that exit seed nothing.
+func releaseClaimUnlessRunning(state *State, issueID string) {
+	if state.Running[issueID] != nil {
+		return
+	}
+	delete(state.Claimed, issueID)
+}
+
 // retrySlotIncumbent returns the retry entry occupying the issue's retry
 // slot, or nil when the slot is free. The retry slot holds at most one
 // entry per issue; a non-nil result means another unit of work already
@@ -513,14 +555,19 @@ func logRetrySlotDeferral(log *slog.Logger, challenger string, incumbent *RetryE
 
 // ScheduleRetryParams holds the inputs for [ScheduleRetry].
 type ScheduleRetryParams struct {
-	IssueID     string
-	Identifier  string
-	DisplayID   string
-	Attempt     int   // 1-based retry attempt number.
-	DelayMS     int64 // Delay before timer fires, in milliseconds.
-	Error       string
-	LastSSHHost string // Runtime-only: SSH host from previous attempt for retry affinity.
-	SessionID   string // Session identifier from previous attempt for cross-retry resume.
+	IssueID       string
+	Identifier    string
+	DisplayID     string
+	IssueIdentity IssueIdentity
+	Attempt       int   // 1-based retry attempt number.
+	DelayMS       int64 // Delay before timer fires, in milliseconds.
+	Error         string
+	LastSSHHost   string // Runtime-only: SSH host from previous attempt for retry affinity.
+	SessionID     string // Session identifier from previous attempt for cross-retry resume.
+
+	// DueAtMS is the absolute due time in Unix epoch milliseconds. A non-zero
+	// value replaces DelayMS; the timer fires max(DueAtMS-now, 0) later.
+	DueAtMS int64
 
 	// Logger receives the displacement warning when ScheduleRetry finds
 	// the retry slot occupied. Nil selects slog.Default().
@@ -536,9 +583,34 @@ type ScheduleRetryParams struct {
 	// retries.
 	ReactionKind string
 
+	// Trigger is the sortie_retries_total trigger label of this schedule.
+	// Propagated to [RetryEntry.Trigger]. Empty when the schedule records
+	// none.
+	Trigger string
+
+	// OriginTrigger is what started the retry. Only a caller that re-queues
+	// an existing retry passes it; [ScheduleRetry] ignores it on every
+	// schedule whose Trigger is not the timer label.
+	OriginTrigger string
+
+	// UsageLimitNotified reports that the run this retry follows ended in a
+	// provider usage-limit refusal, so the next run publishes no session.started
+	// event and, if refused, no session.failed event. Propagated verbatim into
+	// the new [RetryEntry].
+	UsageLimitNotified bool
+
 	// AgentKind is the adapter kind of the dispatch. Propagated verbatim
 	// into the new [RetryEntry].
 	AgentKind string
+
+	// ConfiguredModel is the model the dispatch was configured with.
+	// Propagated verbatim into the new [RetryEntry].
+	ConfiguredModel string
+
+	// Continuation names the pull request and try of a reaction
+	// continuation. Propagated verbatim into the new [RetryEntry]; the zero
+	// value for a non-reaction retry.
+	Continuation ContinuationTarget
 
 	// RuleName is the rule name of the dispatch. Propagated verbatim
 	// into the new [RetryEntry].
@@ -598,20 +670,29 @@ func ScheduleRetry(state *State, params ScheduleRetryParams, onFire func(issueID
 	// above reports when that happens.
 	CancelRetry(state, params.IssueID)
 
-	delayMS := max(params.DelayMS, 0)
-
 	// A timer that has fired must not look premature after a scheduling pause.
 	scheduledAt := time.Now()
+	delayMS := max(params.DelayMS, 0)
 	dueAtMS := scheduledAt.UnixMilli() + delayMS
+	if params.DueAtMS != 0 {
+		delayMS = max(params.DueAtMS-scheduledAt.UnixMilli(), 0)
+		dueAtMS = params.DueAtMS
+	}
 
 	timer := time.AfterFunc(time.Duration(delayMS)*time.Millisecond, func() {
 		onFire(params.IssueID)
 	})
 
+	originTrigger := params.Trigger
+	if params.Trigger == triggerTimer {
+		originTrigger = params.OriginTrigger
+	}
+
 	state.RetryAttempts[params.IssueID] = &RetryEntry{
 		IssueID:             params.IssueID,
 		Identifier:          params.Identifier,
 		DisplayID:           params.DisplayID,
+		IssueIdentity:       params.IssueIdentity,
 		SessionID:           params.SessionID,
 		Attempt:             params.Attempt,
 		DueAtMS:             dueAtMS,
@@ -620,11 +701,16 @@ func ScheduleRetry(state *State, params ScheduleRetryParams, onFire func(issueID
 		LastSSHHost:         params.LastSSHHost,
 		ContinuationContext: params.ContinuationContext,
 		ReactionKind:        params.ReactionKind,
+		Trigger:             params.Trigger,
+		OriginTrigger:       originTrigger,
+		UsageLimitNotified:  params.UsageLimitNotified,
 		RuleName:            params.RuleName,
 		StageLineage:        params.StageLineage,
 		RuleSettingsApplied: params.RuleSettingsApplied,
 		TemplateID:          params.TemplateID,
 		AgentKind:           params.AgentKind,
+		ConfiguredModel:     params.ConfiguredModel,
+		Continuation:        params.Continuation,
 		scheduledAt:         scheduledAt,
 		scheduledDelayMS:    delayMS,
 	}
@@ -674,6 +760,21 @@ func runContextFrom(ctx context.Context) context.Context {
 // must select on ctx.Done() to terminate promptly when cancelled.
 type WorkerFunc func(ctx context.Context, issue domain.Issue, attempt *int)
 
+// IsDispatchID reports whether s has the form [DispatchIssue] mints: 1 to 64
+// characters from "A" to "Z" and "2" to "7", the alphabet of [rand.Text].
+// The two change together.
+func IsDispatchID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := range len(s) {
+		if c := s[i]; (c < 'A' || c > 'Z') && (c < '2' || c > '7') {
+			return false
+		}
+	}
+	return true
+}
+
 // DispatchIssue claims the issue, populates the running map with initial
 // session fields, clears any existing retry entry, and spawns the worker
 // goroutine. All state mutations happen synchronously on the caller's
@@ -691,10 +792,10 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 		panic("DispatchIssue: nil WorkerFunc")
 	}
 
-	runCtx, cancelFn := context.WithCancel(ctx) //nolint:gosec // G118: cancelFn is stored in RunningEntry.CancelFunc for later use
+	runCtx, cancelRunCause := context.WithCancelCause(ctx) //nolint:gosec // G118: cancelRunCause is stored in RunningEntry.CancelCauseFunc for later use
 	workerCtx, cancelWorkerCause := context.WithCancelCause(runCtx)
-	tokenCeilingCancelFn := func() {
-		cancelWorkerCause(errTokenCeilingStop)
+	ceilingCancelFn := func() {
+		cancelWorkerCause(errCeilingStop)
 	}
 
 	var attemptCopy *int
@@ -717,17 +818,20 @@ func DispatchIssue(ctx context.Context, state *State, issue domain.Issue, attemp
 	state.Claimed[issue.ID] = struct{}{}
 
 	state.Running[issue.ID] = &RunningEntry{
-		Identifier:             issue.Identifier,
-		Issue:                  issue,
-		DispatchID:             dispatchID,
-		SessionToken:           sessionToken,
-		TurnClock:              clock,
-		RetryAttempt:           attemptCopy,
-		StartedAt:              time.Now().UTC(),
-		CancelFunc:             cancelFn,
-		TokenCeilingCancelFunc: tokenCeilingCancelFn,
-		WorkerDone:             workerCtx.Done(),
-		SSHHost:                sshHost,
+		Identifier:        issue.Identifier,
+		Issue:             issue,
+		DispatchLabels:    slices.Clone(issue.Labels),
+		DispatchID:        dispatchID,
+		SessionToken:      sessionToken,
+		TurnClock:         clock,
+		RetryAttempt:      attemptCopy,
+		StartedAt:         time.Now().UTC(),
+		CancelFunc:        func() { cancelRunCause(nil) },
+		CancelCauseFunc:   cancelRunCause,
+		CeilingCancelFunc: ceilingCancelFn,
+		WorkerDone:        workerCtx.Done(),
+		SSHHost:           sshHost,
+		events:            state.RetainedEvents.register(dispatchID),
 	}
 	if state.DescribeEnvironment != nil {
 		state.Running[issue.ID].Environment = state.DescribeEnvironment(issue.Identifier)

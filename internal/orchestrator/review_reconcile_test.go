@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -28,6 +30,15 @@ type mockSCMAdapter struct {
 	botComments []domain.ReviewComment
 	botErr      error
 	botCalls    int
+
+	mergeURL string
+	merged   bool
+	mergeErr error
+
+	decision      domain.ReviewDecision
+	decisionErr   error
+	decisionCalls int
+	mergeCalls    int
 }
 
 var _ domain.SCMAdapter = (*mockSCMAdapter)(nil)
@@ -49,7 +60,8 @@ func (m *mockSCMAdapter) FetchBotReviewComments(_ context.Context, _ int, _, _ s
 }
 
 func (m *mockSCMAdapter) GetReviewDecision(_ context.Context, _ int, _, _ string) (domain.ReviewDecision, error) {
-	return "", nil
+	m.decisionCalls++
+	return m.decision, m.decisionErr
 }
 
 func (m *mockSCMAdapter) GetCIStatus(_ context.Context, _ int, _, _ string) (string, error) {
@@ -57,7 +69,11 @@ func (m *mockSCMAdapter) GetCIStatus(_ context.Context, _ int, _, _ string) (str
 }
 
 func (m *mockSCMAdapter) GetMergeability(_ context.Context, _ int, _, _ string) (domain.PRMergeStatus, error) {
-	return domain.PRMergeStatus{}, nil
+	m.mergeCalls++
+	if m.mergeErr != nil {
+		return domain.PRMergeStatus{}, m.mergeErr
+	}
+	return domain.PRMergeStatus{URL: m.mergeURL, Merged: m.merged}, nil
 }
 
 func (m *mockSCMAdapter) MergePR(_ context.Context, _ int, _, _ string, _ domain.MergeStrategy, _, _, _ string) (domain.MergeResult, error) {
@@ -78,10 +94,13 @@ func (m *mockSCMAdapter) RemoveLabel(_ context.Context, _ int, _, _, _ string) e
 
 // reviewReconcileStore is a self-contained ReconcileStore for review tests.
 type reviewReconcileStore struct {
+	reactionActivityLog
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	savedEntries    []persistence.RetryEntry
 	deletedIssueIDs []string
+	outcomes        []persistence.IssueOutcome
 
 	saveRetryEntryErr   error
 	deleteRetryEntryErr error
@@ -109,6 +128,11 @@ func (s *reviewReconcileStore) SaveRetryEntry(_ context.Context, entry persisten
 func (s *reviewReconcileStore) DeleteRetryEntry(_ context.Context, issueID string) error {
 	s.deletedIssueIDs = append(s.deletedIssueIDs, issueID)
 	return s.deleteRetryEntryErr
+}
+
+func (s *reviewReconcileStore) RecordIssueOutcome(_ context.Context, outcome persistence.IssueOutcome) error {
+	s.outcomes = append(s.outcomes, outcome)
+	return nil
 }
 
 func (s *reviewReconcileStore) AppendRunHistory(_ context.Context, run persistence.RunHistory) (persistence.RunHistory, error) {
@@ -162,6 +186,10 @@ func (s *reviewTrackerStub) SetTrackerStates(func() domain.TrackerStates) {}
 func (s *reviewTrackerStub) FetchIssueByID(_ context.Context, _ string) (domain.Issue, error) {
 	return domain.Issue{}, nil
 }
+func (s *reviewTrackerStub) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
+}
+
 func (s *reviewTrackerStub) FetchIssueStatesByIDs(_ context.Context, _ []string) (map[string]string, error) {
 	return nil, nil
 }
@@ -176,9 +204,6 @@ func (s *reviewTrackerStub) TransitionIssue(_ context.Context, _ string, _ strin
 }
 func (s *reviewTrackerStub) CommentIssue(_ context.Context, _ string, _ string) error {
 	s.commentIssueCalls++
-	return nil
-}
-func (s *reviewTrackerStub) CommentIssueWithLiteral(_ context.Context, _, _, _ string) error {
 	return nil
 }
 func (s *reviewTrackerStub) AddLabel(_ context.Context, _ string, _ string) error {
@@ -304,6 +329,8 @@ func reviewParams(store *reviewReconcileStore, scm domain.SCMAdapter, tracker do
 }
 
 type fingerprintModelStore struct {
+	livePassLog
+	noUsageLimitHolds
 	reviewReconcileStore
 	fingerprints map[string]*modelFingerprint
 	rows         map[string]map[string]struct{}
@@ -363,6 +390,10 @@ func (s *fingerprintModelStore) storedIDs(issueID, kind string) []string {
 	return slices.Sorted(maps.Keys(s.rows[ReactionKey(issueID, kind)]))
 }
 
+func (s *fingerprintModelStore) AppendRunHistoryWithEvents(_ context.Context, run persistence.RunHistory, _ []persistence.RunEvent, _ persistence.RunEventLimits) (persistence.RunHistory, error) {
+	return run, nil
+}
+
 func (s *fingerprintModelStore) CountRunHistoryByIssue(context.Context, string) (int, error) {
 	return 0, nil
 }
@@ -371,7 +402,15 @@ func (s *fingerprintModelStore) QueryConsecutiveHandoffAbsenceCounts(_ context.C
 	return make(map[string]int, len(issueIDs)), nil
 }
 
+func (s *fingerprintModelStore) LatestAgentRuns(context.Context, []string) (map[string]persistence.RunHistory, error) {
+	return nil, nil
+}
+
 func (s *fingerprintModelStore) TokenUsageByIssue(context.Context, string) (persistence.IssueTokenUsage, error) {
+	return persistence.IssueTokenUsage{}, nil
+}
+
+func (s *fingerprintModelStore) UsageCompletedBetween(context.Context, time.Time, time.Time) (persistence.IssueTokenUsage, error) {
 	return persistence.IssueTokenUsage{}, nil
 }
 
@@ -541,6 +580,24 @@ func assertEscalations(t *testing.T, tracker *reviewTrackerStub, want int) {
 	}
 }
 
+func assertEscalationBegan(t *testing.T, state *State, rkey string, trigger ReactionEscalationTrigger) *PendingReaction {
+	t.Helper()
+	entry, ok := state.PendingReactions[rkey]
+	if !ok {
+		t.Fatalf("PendingReactions[%q] missing after the escalation, want the entry kept", rkey)
+	}
+	if entry.EscalatedAt.IsZero() {
+		t.Errorf("PendingReactions[%q].EscalatedAt is zero, want the escalation standing", rkey)
+	}
+	if entry.EscalationTrigger != trigger {
+		t.Errorf("PendingReactions[%q].EscalationTrigger = %q, want %q", rkey, entry.EscalationTrigger, trigger)
+	}
+	if !entry.PendingRetryAt.After(entry.EscalatedAt) {
+		t.Errorf("PendingReactions[%q].PendingRetryAt = %v, want after EscalatedAt %v (re-enqueued at the poll interval)", rkey, entry.PendingRetryAt, entry.EscalatedAt)
+	}
+	return entry
+}
+
 func makeDue(t *testing.T, state *State, rkey string) *PendingReaction {
 	t.Helper()
 	entry, ok := state.PendingReactions[rkey]
@@ -565,9 +622,9 @@ Bot comments:
 {{ end }}
 {{ end }}`
 
-func presentedByTemplate(t *testing.T, body string, issue domain.Issue, continuation map[string]any, freshRun bool) map[string][]string {
+func presentedByTemplate(t *testing.T, body string, issue domain.Issue, continuation map[string]any) map[string][]string {
 	t.Helper()
-	_, presented, err := renderFirstTurnPrompt(mustParseTemplate(t, body), issue.ToTemplateMap(), 0, 3, continuation, freshRun)
+	_, presented, err := renderFirstTurnPrompt(mustParseTemplate(t, body), issue.ToTemplateMap(), 0, 3, continuation)
 	if err != nil {
 		t.Fatalf("renderFirstTurnPrompt: %v", err)
 	}
@@ -609,7 +666,7 @@ func dispatchRetry(t *testing.T, state *State, store RetryTimerStore, issueID st
 func completeContinuation(t *testing.T, state *State, store *fingerprintModelStore, issueID, kind string, reseeded *PendingReaction) {
 	t.Helper()
 	running := dispatchRetry(t, state, store, issueID)
-	presented := presentedByTemplate(t, commentsPromptTemplate, running.Issue, running.ContinuationContext, running.ReactionKind == "")
+	presented := presentedByTemplate(t, commentsPromptTemplate, running.Issue, running.ContinuationContext)
 
 	HandleWorkerExit(state, WorkerResult{
 		IssueID:           issueID,
@@ -712,30 +769,6 @@ func TestReconcileReviewComments_PollThrottle(t *testing.T) {
 	}
 }
 
-func TestReconcileReviewComments_TTLExpired(t *testing.T) {
-	t.Parallel()
-
-	state := stateWithReviewReaction(t, "ISS-R-3", 10)
-	rkey := ReactionKey("ISS-R-3", ReactionKindReview)
-	// Set CreatedAt 31 minutes before NowFunc.
-	state.PendingReactions[rkey].CreatedAt = reviewBaseTime.Add(-31 * time.Minute)
-
-	store := &reviewReconcileStore{}
-	metrics := newReviewMetricsSpy()
-	scm := &mockSCMAdapter{}
-	params := reviewParams(store, scm, nil)
-	params.ReviewPendingTTL = 30 * time.Minute
-
-	reconcileReviewComments(state, params, discardLogger(), context.Background(), metrics)
-
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry retained after TTL expiry; want dropped")
-	}
-	if scm.calls != 0 {
-		t.Errorf("FetchPendingReviews calls = %d, want 0 (TTL exceeded)", scm.calls)
-	}
-}
-
 func TestReconcileReviewComments_DropOnAgeReleasesCounter(t *testing.T) {
 	t.Parallel()
 
@@ -782,9 +815,6 @@ func TestReconcileReviewComments_DropOnAgeReleasesCounter(t *testing.T) {
 	}
 }
 
-// TestReconcileReviewComments_WatchWindowZeroNeverDrops verifies that a
-// ReviewPendingTTL of 0 (watch_window_ms: 0) never drops an entry on age,
-// however old it is.
 func TestReconcileReviewComments_WatchWindowZeroNeverDrops(t *testing.T) {
 	t.Parallel()
 
@@ -805,63 +835,38 @@ func TestReconcileReviewComments_WatchWindowZeroNeverDrops(t *testing.T) {
 	}
 }
 
-// TestReconcileReviewComments_WatchWindowNonDefaultTakesEffect verifies that
-// a configured window other than the default threshold actually gates the
-// drop, not a hardcoded default: an entry older than the configured window
-// is dropped with its attempt counter released, and one younger survives.
 func TestReconcileReviewComments_WatchWindowNonDefaultTakesEffect(t *testing.T) {
 	t.Parallel()
 
-	t.Run("older than configured window is dropped and counter released", func(t *testing.T) {
-		t.Parallel()
+	tests := []struct {
+		name     string
+		age      time.Duration
+		wantKept bool
+	}{
+		{"older than the configured window is dropped", 6 * time.Minute, false},
+		{"younger than the configured window survives", 4 * time.Minute, true},
+	}
 
-		rkey := ReactionKey("ISS-R-WWN-OLD", ReactionKindReview)
-		state := stateWithReviewReaction(t, "ISS-R-WWN-OLD", 10)
-		state.PendingReactions[rkey].CreatedAt = reviewBaseTime.Add(-6 * time.Minute)
-		state.ReactionAttempts[rkey] = 2
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-		store := &reviewReconcileStore{}
-		metrics := newReviewMetricsSpy()
-		scm := &mockSCMAdapter{}
-		params := reviewParams(store, scm, nil)
-		params.ReviewPendingTTL = 5 * time.Minute
+			rkey := ReactionKey("ISS-R-WWN", ReactionKindReview)
+			state := stateWithReviewReaction(t, "ISS-R-WWN", 10)
+			state.PendingReactions[rkey].CreatedAt = reviewBaseTime.Add(-tt.age)
+			params := reviewParams(&reviewReconcileStore{}, &mockSCMAdapter{}, nil)
+			params.ReviewPendingTTL = 5 * time.Minute
 
-		reconcileReviewComments(state, params, discardLogger(), context.Background(), metrics)
+			reconcileReviewComments(state, params, discardLogger(), context.Background(), newReviewMetricsSpy())
 
-		if _, ok := state.PendingReactions[rkey]; ok {
-			t.Error("PendingReactions entry present past configured 5m window; want dropped")
-		}
-		if _, ok := state.ReactionAttempts[rkey]; ok {
-			t.Error("ReactionAttempts present past configured 5m window; want released")
-		}
-	})
-
-	t.Run("younger than configured window survives", func(t *testing.T) {
-		t.Parallel()
-
-		rkey := ReactionKey("ISS-R-WWN-NEW", ReactionKindReview)
-		state := stateWithReviewReaction(t, "ISS-R-WWN-NEW", 10)
-		state.PendingReactions[rkey].CreatedAt = reviewBaseTime.Add(-4 * time.Minute)
-
-		store := &reviewReconcileStore{}
-		metrics := newReviewMetricsSpy()
-		scm := &mockSCMAdapter{}
-		params := reviewParams(store, scm, nil)
-		params.ReviewPendingTTL = 5 * time.Minute
-
-		reconcileReviewComments(state, params, discardLogger(), context.Background(), metrics)
-
-		if _, ok := state.PendingReactions[rkey]; !ok {
-			t.Error("PendingReactions entry dropped inside configured 5m window; want kept")
-		}
-	})
+			if _, kept := state.PendingReactions[rkey]; kept != tt.wantKept {
+				t.Errorf("PendingReactions entry kept at age %v with a 5m window = %v, want %v", tt.age, kept, tt.wantKept)
+			}
+		})
+	}
 }
 
-// TestReconcileReviewComments_WatchWindowElapsedLogsRenamedAttribute pins the
-// drop-on-age log record: message text and the window_ms attribute name
-// (renamed from ttl_ms). A regression that reverts the rename or the wording
-// must fail this test.
-func TestReconcileReviewComments_WatchWindowElapsedLogsRenamedAttribute(t *testing.T) {
+func TestReconcileReviewComments_WatchWindowElapsedLogsWindow(t *testing.T) {
 	t.Parallel()
 
 	rkey := ReactionKey("ISS-R-WWLOG", ReactionKindReview)
@@ -877,14 +882,112 @@ func TestReconcileReviewComments_WatchWindowElapsedLogsRenamedAttribute(t *testi
 
 	reconcileReviewComments(state, params, log, context.Background(), metrics)
 
-	output := buf.String()
-	const msg = "review watch window elapsed, dropping"
-	assertLogLineHasIntAttr(t, output, msg, "window_ms", int(30*time.Minute/time.Millisecond))
-	if strings.Contains(output, "ttl_ms") {
-		t.Errorf("log output contains stale attribute %q: %s", "ttl_ms", output)
+	assertLogLineHasIntAttr(t, buf.String(), "review watch window elapsed, dropping", "window_ms", int(30*time.Minute/time.Millisecond))
+}
+
+func TestReconcileReviewComments_ApprovalHold(t *testing.T) {
+	t.Parallel()
+
+	awaitingCheck := &ReactionCheck{ObservedAt: reviewBaseTime.Add(-time.Minute), Comments: &CommentCheck{AwaitingApproval: true}}
+	quietCheck := &ReactionCheck{ObservedAt: reviewBaseTime.Add(-time.Minute), Comments: &CommentCheck{}}
+	const pastWindow, insideWindow = 31 * time.Minute, 5 * time.Minute
+
+	tests := []struct {
+		name        string
+		age         time.Duration
+		check       *ReactionCheck
+		comments    []domain.ReviewComment
+		decision    domain.ReviewDecision
+		decisionErr error
+		merged      bool
+
+		wantKept          bool
+		wantAwaiting      bool
+		wantMergeCalls    int
+		wantDecisionCalls int
+	}{
+		{
+			name: "an entry awaiting approval survives the window", age: pastWindow, check: awaitingCheck,
+			decision: domain.ReviewDecisionReviewRequired,
+			wantKept: true, wantAwaiting: true, wantMergeCalls: 1, wantDecisionCalls: 1,
+		},
+		{
+			name: "an entry not awaiting approval is dropped at the window", age: pastWindow, check: quietCheck,
+			decision: domain.ReviewDecisionReviewRequired,
+		},
+		{
+			name: "an approved pull request is dropped past the window", age: pastWindow, check: awaitingCheck,
+			decision:       domain.ReviewDecisionApproved,
+			wantMergeCalls: 1, wantDecisionCalls: 1,
+		},
+		{
+			name: "a merged pull request drops an entry awaiting approval", age: insideWindow, check: awaitingCheck,
+			decision: domain.ReviewDecisionReviewRequired, merged: true,
+			wantMergeCalls: 1,
+		},
+		{
+			name: "a turn-on pass on a merged pull request drops the entry and writes no check", age: insideWindow,
+			decision: domain.ReviewDecisionReviewRequired, merged: true,
+			wantMergeCalls: 1, wantDecisionCalls: 1,
+		},
+		{
+			name: "a turn-on pass on an open pull request records the wait", age: insideWindow,
+			decision: domain.ReviewDecisionReviewRequired,
+			wantKept: true, wantAwaiting: true, wantMergeCalls: 1, wantDecisionCalls: 1,
+		},
+		{
+			name: "a failed decision read keeps the reading past the window", age: pastWindow, check: awaitingCheck,
+			decisionErr: errors.New("connection reset"),
+			wantKept:    true, wantAwaiting: true, wantMergeCalls: 1, wantDecisionCalls: 1,
+		},
+		{
+			name: "actionable comments past the window drop the entry and dispatch nothing", age: pastWindow, check: awaitingCheck,
+			comments:       []domain.ReviewComment{summaryComment("c1")},
+			decision:       domain.ReviewDecisionReviewRequired,
+			wantMergeCalls: 1,
+		},
 	}
-	if strings.Contains(output, "exceeded ttl") {
-		t.Errorf("log output contains stale message wording %q: %s", "exceeded ttl", output)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rkey := ReactionKey("ISS-R-HOLD", ReactionKindReview)
+			state := stateWithReviewReaction(t, "ISS-R-HOLD", 10)
+			entry := state.PendingReactions[rkey]
+			entry.CreatedAt = reviewBaseTime.Add(-tt.age)
+			entry.LastCheck = tt.check
+			store := &reviewReconcileStore{}
+			scm := &mockSCMAdapter{comments: tt.comments, decision: tt.decision, decisionErr: tt.decisionErr, merged: tt.merged}
+			params := reviewParams(store, scm, nil)
+			params.ReviewPendingTTL = 30 * time.Minute
+
+			reconcileReviewComments(state, params, discardLogger(), context.Background(), newReviewMetricsSpy())
+
+			_, kept := state.PendingReactions[rkey]
+			if kept != tt.wantKept {
+				t.Fatalf("PendingReactions entry kept = %v, want %v", kept, tt.wantKept)
+			}
+			if scm.mergeCalls != tt.wantMergeCalls || scm.decisionCalls != tt.wantDecisionCalls {
+				t.Errorf("GetMergeability, GetReviewDecision calls = %d, %d, want %d, %d",
+					scm.mergeCalls, scm.decisionCalls, tt.wantMergeCalls, tt.wantDecisionCalls)
+			}
+			if len(state.RetryAttempts) != 0 || store.upsertFingerprintCalls != 0 {
+				t.Errorf("retries, fingerprint upserts = %d, %d, want a pass that dispatches nothing", len(state.RetryAttempts), store.upsertFingerprintCalls)
+			}
+			if !kept {
+				if tt.check == nil && entry.LastCheck != nil {
+					t.Errorf("dropped entry LastCheck = %+v, want none written", entry.LastCheck)
+				}
+				return
+			}
+			if got := awaits(entry.LastCheck); got != tt.wantAwaiting {
+				t.Errorf("awaiting approval after the pass = %v, want %v", got, tt.wantAwaiting)
+			}
+			if entry.PendingAttempts != 0 || entry.Wait != waitPollInterval {
+				t.Errorf("PendingAttempts, Wait = %d, %q, want 0, %q", entry.PendingAttempts, entry.Wait, waitPollInterval)
+			}
+		})
 	}
 }
 
@@ -1050,7 +1153,6 @@ func TestReconcileReviewComments_DebounceWindowActive(t *testing.T) {
 	state := stateWithReviewReaction(t, "ISS-R-9", 10)
 	rkey := ReactionKey("ISS-R-9", ReactionKindReview)
 
-	// Comment submitted 10 seconds ago; debounce window is 30s (defaultReviewConfig).
 	recentTime := reviewBaseTime.Add(-10 * time.Second)
 	comments := []domain.ReviewComment{
 		{ID: "300", Body: "new comment", SubmittedAt: recentTime},
@@ -1060,23 +1162,31 @@ func TestReconcileReviewComments_DebounceWindowActive(t *testing.T) {
 		getFingerprintDispatched: false,
 	}
 	metrics := newReviewMetricsSpy()
-	scm := &mockSCMAdapter{comments: comments}
+	scm := &mockSCMAdapter{comments: comments, mergeURL: "https://forge.example.com/acme/widgets/pull/10"}
 	params := reviewParams(store, scm, nil)
 
 	reconcileReviewComments(state, params, discardLogger(), context.Background(), metrics)
 
-	// Debounced: re-enqueued, no retry scheduled.
 	if _, ok := state.PendingReactions[rkey]; !ok {
 		t.Error("PendingReactions entry dropped during debounce; want re-enqueued")
 	}
 	if _, ok := state.RetryAttempts["ISS-R-9"]; ok {
 		t.Error("retry scheduled during debounce window; want none")
 	}
-	// PendingRetryAt should be set to LastEventAt + debounceMS.
-	entry := state.PendingReactions[rkey]
+	row := pendingRow(t, state, "ISS-R-9", ReactionKindReview)
+	if row.PullRequest.URL != scm.mergeURL {
+		t.Errorf("row PullRequest.URL = %q, want %q", row.PullRequest.URL, scm.mergeURL)
+	}
+	if row.Wait != "debounce" {
+		t.Errorf("row Wait = %q, want %q", row.Wait, "debounce")
+	}
 	expectedRetryAt := recentTime.Add(time.Duration(defaultReviewConfig().DebounceMS) * time.Millisecond)
-	if !entry.PendingRetryAt.Equal(expectedRetryAt) {
-		t.Errorf("PendingRetryAt = %v, want %v", entry.PendingRetryAt, expectedRetryAt)
+	if !row.NextPollAt.Equal(expectedRetryAt) {
+		t.Errorf("row NextPollAt = %v, want %v", row.NextPollAt, expectedRetryAt)
+	}
+	wantComments := &CommentCheck{Actionable: len(comments), New: len(comments)}
+	if row.LastCheck == nil || !reflect.DeepEqual(row.LastCheck.Comments, wantComments) {
+		t.Errorf("row LastCheck = %+v, want Comments %+v", row.LastCheck, wantComments)
 	}
 }
 
@@ -1112,45 +1222,6 @@ func TestReconcileReviewComments_DebounceElapsed_Dispatches(t *testing.T) {
 	}
 }
 
-func TestReconcileReviewComments_TurnCapExceeded_Escalates(t *testing.T) {
-	t.Parallel()
-
-	state, rkey := spentReviewState(t, "ISS-R-11", "rc-old")
-
-	store := &reviewReconcileStore{}
-	metrics := newReviewMetricsSpy()
-	tracker := &reviewTrackerStub{}
-	scm := &mockSCMAdapter{comments: []domain.ReviewComment{summaryComment("rc-old"), summaryComment("rc-new")}}
-	params := reviewEscalationParams(t, store, scm, tracker)
-	log, buf := logCapture()
-
-	reconcileReviewComments(state, params, log, context.Background(), metrics)
-	state.TrackerOpsWg.Wait()
-
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry still present after turn cap; want consumed")
-	}
-	if _, ok := state.Claimed["ISS-R-11"]; ok {
-		t.Error("claim not released after turn cap escalation; want released")
-	}
-	if len(store.deletedIssueIDs) != 1 || store.deletedIssueIDs[0] != "ISS-R-11" {
-		t.Errorf("DeleteRetryEntry calls = %v, want [ISS-R-11]", store.deletedIssueIDs)
-	}
-	if _, ok := state.RetryAttempts["ISS-R-11"]; ok {
-		t.Error("retry still scheduled after escalation; want none")
-	}
-	if _, ok := state.ReactionAttempts[rkey]; ok {
-		t.Errorf("ReactionAttempts[%s] present after escalation; want deleted", rkey)
-	}
-	assertHandedOffCached(t, state, rkey, "rc-old")
-	if scm.calls != 1 {
-		t.Errorf("FetchPendingReviews calls = %d, want 1 (the budget is decided after the fetch)", scm.calls)
-	}
-	assertEscalations(t, tracker, 1)
-	assertLogLineHasIntAttr(t, buf.String(), "review fix continuation turns exhausted, escalating", "turn_count", 3)
-	assertLogLacksLine(t, buf.String(), "review triage requested escalation")
-}
-
 func TestReconcileReviewComments_TurnCapExceeded_CrossKindIsolation(t *testing.T) {
 	t.Parallel()
 
@@ -1166,6 +1237,7 @@ func TestReconcileReviewComments_TurnCapExceeded_CrossKindIsolation(t *testing.T
 	}
 	state.ReactionAttempts[mcKey] = 1
 	seedHandedOff(state, ReactionKey(issueID, ReactionKindBotReview), "bc-1")
+	state.Running[issueID] = &RunningEntry{Identifier: issueID + "-ident", ReactionKind: ReactionKindCI}
 
 	store := &reviewReconcileStore{}
 	metrics := newReviewMetricsSpy()
@@ -1176,8 +1248,9 @@ func TestReconcileReviewComments_TurnCapExceeded_CrossKindIsolation(t *testing.T
 	reconcileReviewComments(state, params, discardLogger(), context.Background(), metrics)
 	state.TrackerOpsWg.Wait()
 
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("review PendingReactions entry present after escalation; want consumed")
+	assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
+	if _, ok := state.Claimed[issueID]; !ok {
+		t.Error("claim released by review escalation while a CI worker runs; want held so the worker's exit can seed its watch")
 	}
 	if _, ok := state.PendingReactions[mcKey]; !ok {
 		t.Error("sibling merge-completion PendingReactions entry removed by review escalation; want untouched")
@@ -1832,16 +1905,14 @@ func TestComputeReviewPendingDelay(t *testing.T) {
 	}
 }
 
-// TestReconcileReviewComments_ForeignIncumbentDefers verifies that a
-// foreign incumbent occupying the retry slot leaves the review pending
-// entry re-enqueued rather than dispatched, and that
-// state.ReactionAttempts for the review kind is left unchanged.
 func TestReconcileReviewComments_ForeignIncumbentDefers(t *testing.T) {
 	t.Parallel()
 
 	const issueID = "ISS-R-DEFER"
 	state := stateWithReviewReaction(t, issueID, 10)
 	rkey := ReactionKey(issueID, ReactionKindReview)
+	seededAt := reviewBaseTime.Add(-5 * time.Minute)
+	state.PendingReactions[rkey].CreatedAt = seededAt
 	state.RetryAttempts[issueID] = &RetryEntry{
 		IssueID:      issueID,
 		Attempt:      1,
@@ -1863,8 +1934,8 @@ func TestReconcileReviewComments_ForeignIncumbentDefers(t *testing.T) {
 	if !ok {
 		t.Fatal("PendingReactions entry dropped on a defer; want re-enqueued")
 	}
-	if !entry.CreatedAt.Equal(reviewBaseTime) {
-		t.Errorf("CreatedAt = %v, want refreshed to %v", entry.CreatedAt, reviewBaseTime)
+	if !entry.CreatedAt.Equal(seededAt) {
+		t.Errorf("CreatedAt = %v, want %v (a deferral leaves it unchanged)", entry.CreatedAt, seededAt)
 	}
 	incumbent := state.RetryAttempts[issueID]
 	if incumbent.ReactionKind != ReactionKindLabelReview {
@@ -1910,7 +1981,7 @@ func runReviewTriageToCompletion(t *testing.T, state *State, params ReconcilePar
 	if !ok || entry.Triage == nil {
 		t.Fatalf("PendingReactions[%s] = %+v, want a started triage run", rkey, entry)
 	}
-	waitTriageRunDone(t, entry.Triage)
+	waittest.Receive(t, entry.Triage.Done, "triage run to finish")
 	entry.PendingRetryAt = time.Time{}
 }
 
@@ -2043,9 +2114,7 @@ func TestReconcileReviewComments_Triage_Escalate(t *testing.T) {
 	if tracker.addLabelCalled != 1 {
 		t.Errorf("AddLabel calls = %d, want 1 (triage escalation uses the kind's own escalation action)", tracker.addLabelCalled)
 	}
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry survived a triage escalation, want dropped (matches a budget escalation)")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerTriage)
 	if store.markDispatchedCalls != 1 {
 		t.Errorf("MarkReactionDispatched calls = %d, want 1", store.markDispatchedCalls)
 	}
@@ -2218,9 +2287,7 @@ func TestReconcileReviewComments_Triage_EpisodeCloseClearsHandledForNextEpisode(
 	if tracker.addLabelCalled != 1 {
 		t.Errorf("AddLabel calls = %d, want 1 (the replayed handled verdict from episode 1 must not suppress the fresh escalate)", tracker.addLabelCalled)
 	}
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry survived a triage escalation, want dropped (the replayed handled verdict from episode 1 must not suppress it)")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerTriage)
 	if store.markDispatchedCalls != 2 {
 		t.Errorf("MarkReactionDispatched calls = %d, want 2 (one real verdict per episode: handled, then escalate)", store.markDispatchedCalls)
 	}
@@ -2434,6 +2501,10 @@ func TestReconcileReviewComments_SpentBudget_NoNewComment(t *testing.T) {
 			if want := reviewBaseTime.Add(time.Minute); !entry.PendingRetryAt.Equal(want) {
 				t.Errorf("PendingRetryAt = %v, want %v", entry.PendingRetryAt, want)
 			}
+			wantComments := &CommentCheck{Actionable: tt.wantCount}
+			if row := pendingRow(t, state, "ISS-R-SPENT", ReactionKindReview); row.LastCheck == nil || !reflect.DeepEqual(row.LastCheck.Comments, wantComments) {
+				t.Errorf("row LastCheck = %+v, want Comments %+v", row.LastCheck, wantComments)
+			}
 			if scm.calls != 1 {
 				t.Errorf("FetchPendingReviews calls = %d, want 1", scm.calls)
 			}
@@ -2523,8 +2594,8 @@ func TestReconcileReviewComments_SpentBudget_NoDecisionBeforeObservation(t *test
 			},
 			check: func(t *testing.T, entry *PendingReaction, _ *reviewMetricsSpy) {
 				t.Helper()
-				if !entry.CreatedAt.Equal(reviewBaseTime) {
-					t.Errorf("CreatedAt = %v, want refreshed to %v", entry.CreatedAt, reviewBaseTime)
+				if want := reviewBaseTime.Add(-5 * time.Minute); !entry.CreatedAt.Equal(want) {
+					t.Errorf("CreatedAt = %v, want %v (a deferral leaves it unchanged)", entry.CreatedAt, want)
 				}
 			},
 		},
@@ -2627,14 +2698,18 @@ func TestReconcileReviewComments_SpentBudget_NewCommentEscalatesOnce(t *testing.
 			if metrics.reviewEscalations["label"] != 1 {
 				t.Errorf(`IncReviewEscalations("label") = %d, want 1`, metrics.reviewEscalations["label"])
 			}
-			if _, ok := state.PendingReactions[rkey]; ok {
-				t.Error("PendingReactions entry present after escalation; want consumed")
-			}
+			assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
 			if _, ok := state.Claimed["ISS-R-ONCE"]; ok {
 				t.Error("claim kept after escalation; want released")
 			}
-			if _, ok := state.ReactionAttempts[rkey]; ok {
-				t.Error("counter kept after escalation; want deleted")
+			if len(store.deletedIssueIDs) != 1 || store.deletedIssueIDs[0] != "ISS-R-ONCE" {
+				t.Errorf("DeleteRetryEntry calls = %v, want [ISS-R-ONCE]", store.deletedIssueIDs)
+			}
+			if _, ok := state.RetryAttempts["ISS-R-ONCE"]; ok {
+				t.Error("retry still scheduled after escalation; want none")
+			}
+			if state.ReactionAttempts[rkey] != defaultReviewConfig().MaxContinuationTurns {
+				t.Errorf("ReactionAttempts[%s] = %d, want %d (kept while the escalation stands)", rkey, state.ReactionAttempts[rkey], defaultReviewConfig().MaxContinuationTurns)
 			}
 			assertHandedOffCached(t, state, rkey, tt.handedOff...)
 			if store.deleteFingerprintCalls != 1 {
@@ -2646,6 +2721,15 @@ func TestReconcileReviewComments_SpentBudget_NewCommentEscalatesOnce(t *testing.
 			assertLogLineHasIntAttr(t, buf.String(), "review fix continuation turns exhausted, escalating", "turn_count", 3)
 			assertLogLineHasIntAttr(t, buf.String(), "review fix continuation turns exhausted, escalating", "max_continuation_turns", 3)
 			assertLogLacksLine(t, buf.String(), "review triage requested escalation")
+
+			makeDue(t, state, rkey)
+			reconcileReviewComments(state, params, log, context.Background(), metrics)
+			state.TrackerOpsWg.Wait()
+
+			assertEscalations(t, tracker, 1)
+			if _, ok := state.RetryAttempts["ISS-R-ONCE"]; ok {
+				t.Error("standing pass scheduled a retry; want none")
+			}
 		})
 	}
 }
@@ -2872,8 +2956,9 @@ func TestReconcileReviewComments_HandedOff_TriageEscalationKeepsSet(t *testing.T
 	if tracker.addLabelCalled != 1 {
 		t.Fatalf("AddLabel calls = %d, want 1", tracker.addLabelCalled)
 	}
-	if _, ok := state.ReactionAttempts[rkey]; ok {
-		t.Error("ReactionAttempts present after a triage escalation; want deleted")
+	assertEscalationBegan(t, state, rkey, EscalationTriggerTriage)
+	if state.ReactionAttempts[rkey] != 1 {
+		t.Errorf("ReactionAttempts[%s] = %d, want 1 (kept while the escalation stands)", rkey, state.ReactionAttempts[rkey])
 	}
 	assertHandedOffCached(t, state, rkey, "rc-earlier")
 }
@@ -2996,9 +3081,7 @@ func TestReconcileReviewComments_NoEscalationAfterSuccessfulLastTurn(t *testing.
 
 	assertEscalations(t, tracker, 1)
 	assertLogLineHasIntAttr(t, buf.String(), escalatingMsg, "turn_count", 3)
-	if _, ok := state.PendingReactions[rkey]; ok {
-		t.Error("PendingReactions entry present after the escalation; want consumed")
-	}
+	assertEscalationBegan(t, state, rkey, EscalationTriggerBudget)
 	assertHandedOffCached(t, state, rkey, "c1", "c2", "c3", "review-1", "review-2", "review-3")
 	assertStoredHandedOff(t, store, issueID, ReactionKindReview, "c1", "c2", "c3", "review-1", "review-2", "review-3")
 }
@@ -3119,6 +3202,7 @@ func (c *reactionCycle) freshRun(comments ...domain.ReviewComment) map[string]an
 	c.state.Running[c.issueID].ContinuationContext = seed
 	exitParams := workerExitParams(c.store)
 	exitParams.SCMAdapter = c.scm
+	exitParams.ReviewReactionConfigured = true
 	exitParams.BotReviewReactionConfigured = true
 
 	HandleWorkerExit(c.state, WorkerResult{
@@ -3126,7 +3210,7 @@ func (c *reactionCycle) freshRun(comments ...domain.ReviewComment) map[string]an
 		Identifier:        identifier,
 		ExitKind:          WorkerExitNormal,
 		WorkspacePath:     ws.Path,
-		HandedOffComments: presentedByTemplate(c.t, commentsPromptTemplate, issue, seed, true),
+		HandedOffComments: presentedByTemplate(c.t, commentsPromptTemplate, issue, seed),
 	}, exitParams)
 
 	CancelRetry(c.state, c.issueID)
@@ -3761,19 +3845,19 @@ func TestSettleHandedOffCommentSet(t *testing.T) {
 		listErr       error
 		markErr       error
 		comments      []domain.ReviewComment
-		want          bool
+		want          settleOutcome
 		wantMarks     int
 		wantListCalls int
 		wantMsg       string
 	}{
-		{name: "a load failure defers without marking", kind: ReactionKindReview, listErr: errors.New("unavailable"), comments: []domain.ReviewComment{summaryComment("a")}, want: true, wantListCalls: 1, wantMsg: loadMsg},
-		{name: "rows covering the set settle and mark", kind: ReactionKindReview, rows: []string{"a", "b"}, comments: []domain.ReviewComment{summaryComment("a")}, want: true, wantMarks: 1, wantListCalls: 1, wantMsg: settledMsg},
-		{name: "a cached key is not reloaded", kind: ReactionKindReview, cached: []string{"a"}, comments: []domain.ReviewComment{summaryComment("a")}, want: true, wantMarks: 1, wantMsg: settledMsg},
-		{name: "reported IDs settle and mark", kind: ReactionKindBotReview, rows: []string{"a"}, reported: []string{"r"}, comments: []domain.ReviewComment{summaryComment("a"), summaryComment("r")}, want: true, wantMarks: 1, wantListCalls: 1, wantMsg: settledMsg},
-		{name: "running IDs hold the set unmarked", kind: ReactionKindReview, running: []string{"a"}, comments: []domain.ReviewComment{summaryComment("a")}, want: true, wantListCalls: 1, wantMsg: heldMsg},
-		{name: "a set covered partly by rows and partly by running IDs is held", kind: ReactionKindReview, rows: []string{"a"}, running: []string{"b"}, comments: []domain.ReviewComment{summaryComment("a"), summaryComment("b")}, want: true, wantListCalls: 1, wantMsg: heldMsg},
+		{name: "a load failure defers without marking", kind: ReactionKindReview, listErr: errors.New("unavailable"), comments: []domain.ReviewComment{summaryComment("a")}, want: settleLoadFailed, wantListCalls: 1, wantMsg: loadMsg},
+		{name: "rows covering the set settle and mark", kind: ReactionKindReview, rows: []string{"a", "b"}, comments: []domain.ReviewComment{summaryComment("a")}, want: settleSettled, wantMarks: 1, wantListCalls: 1, wantMsg: settledMsg},
+		{name: "a cached key is not reloaded", kind: ReactionKindReview, cached: []string{"a"}, comments: []domain.ReviewComment{summaryComment("a")}, want: settleSettled, wantMarks: 1, wantMsg: settledMsg},
+		{name: "reported IDs settle and mark", kind: ReactionKindBotReview, rows: []string{"a"}, reported: []string{"r"}, comments: []domain.ReviewComment{summaryComment("a"), summaryComment("r")}, want: settleSettled, wantMarks: 1, wantListCalls: 1, wantMsg: settledMsg},
+		{name: "running IDs hold the set unmarked", kind: ReactionKindReview, running: []string{"a"}, comments: []domain.ReviewComment{summaryComment("a")}, want: settleSettled, wantListCalls: 1, wantMsg: heldMsg},
+		{name: "a set covered partly by rows and partly by running IDs is held", kind: ReactionKindReview, rows: []string{"a"}, running: []string{"b"}, comments: []domain.ReviewComment{summaryComment("a"), summaryComment("b")}, want: settleSettled, wantListCalls: 1, wantMsg: heldMsg},
 		{name: "a new comment does not settle", kind: ReactionKindReview, rows: []string{"a"}, comments: []domain.ReviewComment{summaryComment("a"), summaryComment("n")}, wantListCalls: 1},
-		{name: "a failed mark still settles", kind: ReactionKindReview, rows: []string{"a"}, markErr: errors.New("write failed"), comments: []domain.ReviewComment{summaryComment("a")}, want: true, wantMarks: 1, wantListCalls: 1, wantMsg: markMsg},
+		{name: "a failed mark still settles", kind: ReactionKindReview, rows: []string{"a"}, markErr: errors.New("write failed"), comments: []domain.ReviewComment{summaryComment("a")}, want: settleSettled, wantMarks: 1, wantListCalls: 1, wantMsg: markMsg},
 	}
 
 	for _, tt := range tests {
@@ -3826,6 +3910,8 @@ func TestSettleHandedOffCommentSet(t *testing.T) {
 }
 
 func (s *reviewReconcileStore) DeleteStageHop(context.Context, string) error { return nil }
+
+func (s *reviewReconcileStore) MarkStageHopDispatched(context.Context, string) error { return nil }
 
 func (s *reviewReconcileStore) RecordStageHop(context.Context, persistence.StageHop) error {
 	return nil

@@ -84,12 +84,12 @@ func shutdownLine(inputTokens, outputTokens, cacheReadTokens int64) string {
 func TestReadSessionUsage(t *testing.T) {
 	t.Parallel()
 
-	t.Run("one record: found true, previous zero, model from the sole record", func(t *testing.T) {
+	t.Run("one record: found true, model from the sole record", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir, shutdownLine(100, 20, 5)+"\n")
 
-		current, previous, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -100,20 +100,17 @@ func TestReadSessionUsage(t *testing.T) {
 		if current != want {
 			t.Errorf("current = %+v, want %+v", current, want)
 		}
-		if previous != (domain.TokenUsage{}) {
-			t.Errorf("previous = %+v, want zero (only one record)", previous)
-		}
 		if model != "claude-sonnet-5" {
 			t.Errorf("model = %q, want %q", model, "claude-sonnet-5")
 		}
 	})
 
-	t.Run("two records: current and previous both populated", func(t *testing.T) {
+	t.Run("two records: current is the newest", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir, shutdownLine(100, 20, 5)+"\n"+shutdownLine(300, 60, 15)+"\n")
 
-		current, previous, model, found, err := readSessionUsage(path)
+		current, _, model, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -124,16 +121,12 @@ func TestReadSessionUsage(t *testing.T) {
 		if current != wantCurrent {
 			t.Errorf("current = %+v, want %+v", current, wantCurrent)
 		}
-		wantPrevious := domain.TokenUsage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120, CacheReadTokens: 5}
-		if previous != wantPrevious {
-			t.Errorf("previous = %+v, want %+v", previous, wantPrevious)
-		}
 		if model != "claude-sonnet-5" {
 			t.Errorf("model = %q, want %q", model, "claude-sonnet-5")
 		}
 	})
 
-	t.Run("three records keeps only the last two", func(t *testing.T) {
+	t.Run("three records reads the last", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := writeEventsFile(t, dir,
@@ -141,7 +134,7 @@ func TestReadSessionUsage(t *testing.T) {
 				shutdownLine(100, 20, 5)+"\n"+
 				shutdownLine(300, 60, 15)+"\n")
 
-		current, previous, _, found, err := readSessionUsage(path)
+		current, _, _, found, err := readSessionUsage(path)
 		if err != nil {
 			t.Fatalf("readSessionUsage() error = %v", err)
 		}
@@ -150,9 +143,6 @@ func TestReadSessionUsage(t *testing.T) {
 		}
 		if current.InputTokens != 300 {
 			t.Errorf("current.InputTokens = %d, want 300 (last record)", current.InputTokens)
-		}
-		if previous.InputTokens != 100 {
-			t.Errorf("previous.InputTokens = %d, want 100 (second-to-last, not the first record)", previous.InputTokens)
 		}
 	})
 

@@ -2,10 +2,14 @@ package orchestrator
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -13,16 +17,24 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/notify/render"
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 type mockRetryStore struct {
+	reactionActivityLog
+	livePassLog
+	noopOutcomeRecorder
+	noEscalationRecords
 	unsupportedReactionObservationStore
 
 	savedEntries   []persistence.RetryEntry
 	deletedIssueID []string
+
+	upsertedAtRetryDelete int
 
 	saveRetryEntryErr         error
 	deleteRetryEntryErr       error
@@ -34,17 +46,27 @@ type mockRetryStore struct {
 	absenceCountedIssueIDs    []string
 
 	tokenSum                 int64
+	tokenCacheReads          int64
 	tokenSessionCount        int
 	tokenUnmeasured          int
 	tokenUnaccounted         int
 	tokenStoppedInFlight     int
+	tokenRecordedCostUSD     float64
+	tokenPriced              int
+	tokenPartial             int
+	tokenUnpriced            int
 	sumTotalTokensByIssueErr error
 	summedTokenIssueIDs      []string
+
+	windowUsage persistence.IssueTokenUsage
 
 	markDispatchedCalls   int
 	markDispatchedIssueID string
 	markDispatchedKind    string
 	markDispatchedErr     error
+
+	latestRuns    map[string]persistence.RunHistory
+	latestRunsErr error
 
 	parkedIssues     []persistence.ParkedIssue
 	deletedParkedIDs []string
@@ -66,6 +88,7 @@ func (m *mockRetryStore) SaveRetryEntry(_ context.Context, entry persistence.Ret
 
 func (m *mockRetryStore) DeleteRetryEntry(_ context.Context, issueID string) error {
 	m.deletedIssueID = append(m.deletedIssueID, issueID)
+	m.upsertedAtRetryDelete = len(m.upserted)
 	return m.deleteRetryEntryErr
 }
 
@@ -86,15 +109,28 @@ func (m *mockRetryStore) QueryConsecutiveHandoffAbsenceCounts(_ context.Context,
 	return result, nil
 }
 
+func (m *mockRetryStore) LatestAgentRuns(_ context.Context, _ []string) (map[string]persistence.RunHistory, error) {
+	return m.latestRuns, m.latestRunsErr
+}
+
 func (m *mockRetryStore) TokenUsageByIssue(_ context.Context, issueID string) (persistence.IssueTokenUsage, error) {
 	m.summedTokenIssueIDs = append(m.summedTokenIssueIDs, issueID)
 	return persistence.IssueTokenUsage{
 		TotalTokens:        m.tokenSum,
+		UncachedTokens:     m.tokenSum - m.tokenCacheReads,
 		Sessions:           m.tokenSessionCount,
 		UnmeasuredSessions: m.tokenUnmeasured,
 		UnaccountedTurns:   m.tokenUnaccounted,
 		StoppedInFlight:    m.tokenStoppedInFlight,
+		RecordedCostUSD:    m.tokenRecordedCostUSD,
+		PricedSessions:     m.tokenPriced,
+		PartialSessions:    m.tokenPartial,
+		UnpricedSessions:   m.tokenUnpriced,
 	}, m.sumTotalTokensByIssueErr
+}
+
+func (m *mockRetryStore) UsageCompletedBetween(context.Context, time.Time, time.Time) (persistence.IssueTokenUsage, error) {
+	return m.windowUsage, nil
 }
 
 func (m *mockRetryStore) AppendRunHistory(_ context.Context, run persistence.RunHistory) (persistence.RunHistory, error) {
@@ -155,7 +191,6 @@ type mockRetryTracker struct {
 type mockRetryCommentCall struct {
 	IssueID string
 	Text    string
-	Literal string
 }
 
 var _ domain.TrackerAdapter = (*mockRetryTracker)(nil)
@@ -174,6 +209,10 @@ func (m *mockRetryTracker) FetchIssueByID(_ context.Context, issueID string) (do
 
 func (m *mockRetryTracker) FetchIssuesByStates(context.Context, []string) ([]domain.Issue, error) {
 	panic("FetchIssuesByStates must not be called by HandleRetryTimer")
+}
+
+func (m *mockRetryTracker) FetchIssueStatesAndLabelsByIDs(context.Context, []string) (map[string]domain.IssueStateAndLabels, error) {
+	return nil, nil
 }
 
 func (m *mockRetryTracker) FetchIssueStatesByIDs(context.Context, []string) (map[string]string, error) {
@@ -196,11 +235,6 @@ func (m *mockRetryTracker) TransitionIssue(context.Context, string, string) erro
 // detached goroutine, never synchronously from HandleRetryTimer.
 func (m *mockRetryTracker) CommentIssue(_ context.Context, issueID, text string) error {
 	m.commentCalls = append(m.commentCalls, mockRetryCommentCall{IssueID: issueID, Text: text})
-	return m.commentIssueErr
-}
-
-func (m *mockRetryTracker) CommentIssueWithLiteral(_ context.Context, issueID, text, literal string) error {
-	m.commentCalls = append(m.commentCalls, mockRetryCommentCall{IssueID: issueID, Text: text, Literal: literal})
 	return m.commentIssueErr
 }
 
@@ -254,6 +288,103 @@ func defaultRetryParams(t *testing.T, store *mockRetryStore, tracker *mockRetryT
 	}
 }
 
+var usageResetsAt = time.Date(2100, 1, 1, 12, 0, 0, 0, time.UTC)
+
+func usageHeldState(id string, entry RetryEntry, holds ...UsageLimitHoldKey) *State {
+	entry.AgentKind = "mock"
+	state := frozenRetryState(id, entry)
+	for _, key := range holds {
+		state.UsageLimitHolds[key] = UsageLimitHold{ResetsAt: usageResetsAt}
+	}
+	return state
+}
+
+func usageFetchesIssue(id string) *mockRetryTracker {
+	return &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")}
+}
+
+func atUsageReset(p *HandleRetryTimerParams) {
+	p.NowFunc = func() time.Time { return usageResetsAt }
+	p.PollIntervalMS = 60_000
+}
+
+func workerSignals(ch chan<- struct{}) WorkerFunc {
+	return func(context.Context, domain.Issue, *int) { ch <- struct{}{} }
+}
+
+func requireUsageDispatched(t *testing.T, id string, state *State, _ *mockRetryStore, _ *mockRetryTracker, workerCalled bool) {
+	t.Helper()
+	if _, running := state.Running[id]; !running || !workerCalled {
+		t.Errorf("HandleRetryTimer: Running[%s] present = %v, worker invoked = %v, want both true", id, running, workerCalled)
+	}
+}
+
+func requireUsageRearmed(attempt int) func(*testing.T, string, *State, *mockRetryStore, *mockRetryTracker, bool) {
+	return func(t *testing.T, id string, state *State, store *mockRetryStore, _ *mockRetryTracker, _ bool) {
+		t.Helper()
+		stopRetryTimer(state, id)
+		entry, queued := state.RetryAttempts[id]
+		if !queued {
+			t.Fatalf("RetryAttempts[%s] missing, want re-armed", id)
+		}
+		wantDue := usageResetsAt.Add(time.Minute).UnixMilli()
+		if entry.Attempt != attempt || entry.DueAtMS != wantDue {
+			t.Errorf("HandleRetryTimer re-armed attempt, due_at_ms = %d, %d, want %d, %d", entry.Attempt, entry.DueAtMS, attempt, wantDue)
+		}
+		if _, claimed := state.Claimed[id]; !claimed || len(state.Running) != 0 {
+			t.Errorf("HandleRetryTimer claimed = %v, running = %d, want true, 0", claimed, len(state.Running))
+		}
+		if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 {
+			t.Errorf("persisted retry rows saved, deleted = %d, %v, want none touched", len(store.savedEntries), store.deletedIssueID)
+		}
+	}
+}
+
+func requireMoneyHold(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker) *BudgetExhaustedEntry {
+	t.Helper()
+	state.TrackerOpsWg.Wait()
+	if _, claimed := state.Claimed[id]; claimed {
+		t.Errorf("Claimed[%s] still present, want released", id)
+	}
+	if _, retrying := state.RetryAttempts[id]; retrying {
+		t.Errorf("RetryAttempts[%s] present, want deleted", id)
+	}
+	if len(store.deletedIssueID) != 1 || store.deletedIssueID[0] != id {
+		t.Errorf("DeleteRetryEntry calls = %v, want [%s]", store.deletedIssueID, id)
+	}
+	if tracker.fetchCount != 0 {
+		t.Errorf("FetchIssueByID call count = %d, want 0", tracker.fetchCount)
+	}
+	entry, held := state.BudgetExhausted[id]
+	if !held {
+		t.Fatalf("BudgetExhausted[%s] missing, want a hold", id)
+	}
+	if len(tracker.commentCalls) != 1 || tracker.commentCalls[0].Text != render.Notification(budgetHeldNotification(id, entry)).Public {
+		t.Errorf("hold comment calls = %+v, want exactly one carrying the hold comment", tracker.commentCalls)
+	}
+	return entry
+}
+
+func requireUsedUSD(t *testing.T, entry *BudgetExhaustedEntry, wantUSD float64, wantComplete bool) {
+	t.Helper()
+	if entry.UsedUSD == nil || entry.UsedUSDComplete == nil {
+		t.Fatalf("BudgetExhaustedEntry (UsedUSD, UsedUSDComplete) = (%v, %v), want both set", entry.UsedUSD, entry.UsedUSDComplete)
+	}
+	if math.Abs(*entry.UsedUSD-wantUSD) > 1e-9 || *entry.UsedUSDComplete != wantComplete {
+		t.Errorf("BudgetExhaustedEntry (UsedUSD, UsedUSDComplete) = (%v, %v), want (%v, %v)", *entry.UsedUSD, *entry.UsedUSDComplete, wantUSD, wantComplete)
+	}
+}
+
+func requireDispatchedWithoutHold(t *testing.T, id string, state *State, workerCalled bool) {
+	t.Helper()
+	if entry, held := state.BudgetExhausted[id]; held {
+		t.Errorf("BudgetExhausted[%s] = %+v, want absent", id, entry)
+	}
+	if _, running := state.Running[id]; !running || !workerCalled {
+		t.Errorf("Running[%s] present = %v, worker invoked = %v, want both true", id, running, workerCalled)
+	}
+}
+
 func TestHandleRetryTimer(t *testing.T) {
 	t.Parallel()
 
@@ -265,6 +396,8 @@ func TestHandleRetryTimer(t *testing.T) {
 		tracker     func(issueID string) *mockRetryTracker
 		maxSessions int
 		maxTokens   int
+		maxCostUSD  float64
+		configure   func(p *HandleRetryTimerParams)
 		workerFn    func(ch chan<- struct{}) WorkerFunc
 		check       func(t *testing.T, issueID string, state *State, store *mockRetryStore, tracker *mockRetryTracker, workerCalled bool)
 	}{
@@ -723,6 +856,7 @@ func TestHandleRetryTimer(t *testing.T) {
 				state := retryState(t, id, id, 2)
 				entry := state.RetryAttempts[id]
 				entry.SessionID, entry.ReactionKind = "sess-keep", ReactionKindCI
+				entry.Error = "worker exited: boom"
 				entry.ContinuationContext = map[string]any{"ci_failure": "failing"}
 				state.StageHops[id] = &StageHopEntry{Count: 2}
 				return state
@@ -742,6 +876,9 @@ func TestHandleRetryTimer(t *testing.T) {
 				}
 				if entry.Attempt != 2 || entry.SessionID != "sess-keep" || entry.ReactionKind != ReactionKindCI || entry.ContinuationContext == nil || !entry.noStateObserved {
 					t.Errorf("RetryAttempts[%s] = %+v, want attempt 2, session, reaction kind and continuation kept, noStateObserved set", id, entry)
+				}
+				if entry.Error != "issue without a state label" || entry.Trigger != "timer" {
+					t.Errorf("RetryAttempts[%s] error, trigger = %q, %q, want %q, %q", id, entry.Error, entry.Trigger, "issue without a state label", "timer")
 				}
 				if _, claimed := state.Claimed[id]; !claimed || state.StageHops[id] == nil || len(state.Running) != 0 {
 					t.Errorf("after the first no-state reading claimed = %v, hop kept = %v, running = %d; want true, true, 0", claimed, state.StageHops[id] != nil, len(state.Running))
@@ -964,7 +1101,7 @@ func TestHandleRetryTimer(t *testing.T) {
 				return retryState(t, id, "PROJ-TOK", 2)
 			},
 			store: func() *mockRetryStore {
-				return &mockRetryStore{tokenSum: 1000, tokenSessionCount: 2}
+				return &mockRetryStore{tokenSum: 2500, tokenCacheReads: 1400, tokenSessionCount: 2}
 			},
 			tracker: func(_ string) *mockRetryTracker {
 				return &mockRetryTracker{}
@@ -1007,7 +1144,7 @@ func TestHandleRetryTimer(t *testing.T) {
 				return retryState(t, id, "PROJ-TOK-UNDER", 1)
 			},
 			store: func() *mockRetryStore {
-				return &mockRetryStore{tokenSum: 999, tokenSessionCount: 3}
+				return &mockRetryStore{tokenSum: 1600, tokenCacheReads: 1000, tokenSessionCount: 3}
 			},
 			tracker: func(id string) *mockRetryTracker {
 				return &mockRetryTracker{
@@ -1021,8 +1158,8 @@ func TestHandleRetryTimer(t *testing.T) {
 			},
 			check: func(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker, workerCalled bool) {
 				t.Helper()
-				if len(store.summedTokenIssueIDs) != 1 || store.summedTokenIssueIDs[0] != id {
-					t.Errorf("SumTotalTokensByIssue calls = %v, want [%s]", store.summedTokenIssueIDs, id)
+				if want := []string{id, id}; !slices.Equal(store.summedTokenIssueIDs, want) {
+					t.Errorf("TokenUsageByIssue calls = %v, want %v (gate read, then freeze read)", store.summedTokenIssueIDs, want)
 				}
 				if tracker.fetchCount != 1 {
 					t.Errorf("FetchIssueByID call count = %d, want 1", tracker.fetchCount)
@@ -1060,8 +1197,8 @@ func TestHandleRetryTimer(t *testing.T) {
 			},
 			check: func(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker, workerCalled bool) {
 				t.Helper()
-				if len(store.summedTokenIssueIDs) != 0 {
-					t.Errorf("SumTotalTokensByIssue calls = %v, want empty (MaxTokens=0)", store.summedTokenIssueIDs)
+				if entry, ok := state.BudgetExhausted[id]; ok {
+					t.Errorf("BudgetExhausted[%s] = %+v, want absent: no ceiling is set, so the token gate must not run", id, entry)
 				}
 				if tracker.fetchCount != 1 {
 					t.Errorf("FetchIssueByID call count = %d, want 1", tracker.fetchCount)
@@ -1100,8 +1237,8 @@ func TestHandleRetryTimer(t *testing.T) {
 			},
 			check: func(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker, workerCalled bool) {
 				t.Helper()
-				if len(store.summedTokenIssueIDs) != 1 || store.summedTokenIssueIDs[0] != id {
-					t.Errorf("SumTotalTokensByIssue calls = %v, want [%s]", store.summedTokenIssueIDs, id)
+				if want := []string{id, id}; !slices.Equal(store.summedTokenIssueIDs, want) {
+					t.Errorf("TokenUsageByIssue calls = %v, want %v (gate read, then freeze read)", store.summedTokenIssueIDs, want)
 				}
 				if tracker.fetchCount != 1 {
 					t.Errorf("FetchIssueByID call count = %d, want 1 (fail-open)", tracker.fetchCount)
@@ -1200,6 +1337,119 @@ func TestHandleRetryTimer(t *testing.T) {
 				if len(store.deletedIssueID) != 1 || store.deletedIssueID[0] != id {
 					t.Errorf("DeleteRetryEntry calls = %v, want [%s]", store.deletedIssueID, id)
 				}
+			},
+		},
+		{
+			name:       "recorded costs summing to the ceiling hold the issue under the money reason",
+			issueID:    "ISS-USD-AT",
+			maxCostUSD: 0.8,
+			state: func(t *testing.T, id string) *State {
+				t.Helper()
+				return retryState(t, id, "PROJ-USD-AT", 2)
+			},
+			store: func() *mockRetryStore {
+				first, second := 0.7, 0.1
+				return &mockRetryStore{tokenRecordedCostUSD: first + second, tokenPriced: 2, tokenSessionCount: 2}
+			},
+			tracker: func(_ string) *mockRetryTracker { return &mockRetryTracker{} },
+			check: func(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker, _ bool) {
+				t.Helper()
+				entry := requireMoneyHold(t, id, state, store, tracker)
+				if entry.Reason != budgetReasonMoney {
+					t.Errorf("BudgetExhausted[%s].Reason = %q, want %q", id, entry.Reason, budgetReasonMoney)
+				}
+				requireUsedUSD(t, entry, 0.8, true)
+			},
+		},
+		{
+			name:       "recorded costs one cent below the ceiling dispatch",
+			issueID:    "ISS-USD-UNDER",
+			maxCostUSD: 0.8,
+			state: func(t *testing.T, id string) *State {
+				t.Helper()
+				return retryState(t, id, "PROJ-USD-UNDER", 1)
+			},
+			store: func() *mockRetryStore {
+				return &mockRetryStore{tokenRecordedCostUSD: 0.79, tokenPriced: 2, tokenSessionCount: 2}
+			},
+			tracker: func(id string) *mockRetryTracker {
+				return &mockRetryTracker{fetchedIssue: candidateIssue(id, "PROJ-USD-UNDER", "To Do")}
+			},
+			workerFn: func(ch chan<- struct{}) WorkerFunc {
+				return func(_ context.Context, _ domain.Issue, _ *int) { ch <- struct{}{} }
+			},
+			check: func(t *testing.T, id string, state *State, _ *mockRetryStore, _ *mockRetryTracker, workerCalled bool) {
+				t.Helper()
+				requireDispatchedWithoutHold(t, id, state, workerCalled)
+			},
+		},
+		{
+			name:       "an unpriced run beside a priced run below the ceiling dispatches",
+			issueID:    "ISS-USD-UNPRICED",
+			maxCostUSD: 0.8,
+			state: func(t *testing.T, id string) *State {
+				t.Helper()
+				return retryState(t, id, "PROJ-USD-UNPRICED", 1)
+			},
+			store: func() *mockRetryStore {
+				return &mockRetryStore{tokenRecordedCostUSD: 0.5, tokenPriced: 1, tokenUnpriced: 1, tokenSessionCount: 2}
+			},
+			tracker: func(id string) *mockRetryTracker {
+				return &mockRetryTracker{fetchedIssue: candidateIssue(id, "PROJ-USD-UNPRICED", "To Do")}
+			},
+			workerFn: func(ch chan<- struct{}) WorkerFunc {
+				return func(_ context.Context, _ domain.Issue, _ *int) { ch <- struct{}{} }
+			},
+			check: func(t *testing.T, id string, state *State, _ *mockRetryStore, _ *mockRetryTracker, workerCalled bool) {
+				t.Helper()
+				requireDispatchedWithoutHold(t, id, state, workerCalled)
+			},
+		},
+		{
+			name:        "past the money and token ceilings records the money reason",
+			issueID:     "ISS-USD-BOTH",
+			maxTokens:   1000,
+			maxCostUSD:  0.8,
+			maxSessions: 3,
+			state: func(t *testing.T, id string) *State {
+				t.Helper()
+				return retryState(t, id, "PROJ-USD-BOTH", 2)
+			},
+			store: func() *mockRetryStore {
+				return &mockRetryStore{runHistoryCount: 3, tokenSum: 1500, tokenRecordedCostUSD: 0.9, tokenPriced: 3, tokenSessionCount: 3}
+			},
+			tracker: func(_ string) *mockRetryTracker { return &mockRetryTracker{} },
+			check: func(t *testing.T, id string, state *State, store *mockRetryStore, tracker *mockRetryTracker, _ bool) {
+				t.Helper()
+				entry := requireMoneyHold(t, id, state, store, tracker)
+				if entry.Reason != budgetReasonMoney {
+					t.Errorf("BudgetExhausted[%s].Reason = %q, want %q (money overwrites the token and session holds)", id, entry.Reason, budgetReasonMoney)
+				}
+				if entry.UsedTokens == nil || *entry.UsedTokens != 1500 {
+					t.Errorf("BudgetExhausted[%s].UsedTokens = %v, want 1500 (a money hold states the token figures too)", id, entry.UsedTokens)
+				}
+			},
+		},
+		{
+			name:        "a session hold states an incomplete money figure below the ceiling",
+			issueID:     "ISS-USD-ENRICH",
+			maxSessions: 3,
+			maxCostUSD:  1,
+			state: func(t *testing.T, id string) *State {
+				t.Helper()
+				return retryState(t, id, "PROJ-USD-ENRICH", 2)
+			},
+			store: func() *mockRetryStore {
+				return &mockRetryStore{runHistoryCount: 3, tokenRecordedCostUSD: 0.5, tokenPriced: 1, tokenUnpriced: 1, tokenSessionCount: 3}
+			},
+			tracker: func(_ string) *mockRetryTracker { return &mockRetryTracker{} },
+			check: func(t *testing.T, id string, state *State, _ *mockRetryStore, _ *mockRetryTracker, _ bool) {
+				t.Helper()
+				entry := state.BudgetExhausted[id]
+				if entry == nil || entry.Reason != budgetReasonSession {
+					t.Fatalf("BudgetExhausted[%s] = %+v, want a %q hold", id, entry, budgetReasonSession)
+				}
+				requireUsedUSD(t, entry, 0.5, false)
 			},
 		},
 		{
@@ -1400,6 +1650,91 @@ func TestHandleRetryTimer(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:    "usage-limit retry of the refused issue dispatches at the reset",
+			issueID: "ISS-UL-OWN",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{OriginTrigger: triggerUsageLimit}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			workerFn:  workerSignals,
+			check:     requireUsageDispatched,
+		},
+		{
+			name:    "other retry inside the grace re-arms at the reset plus the poll interval",
+			issueID: "ISS-UL-GRACE",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{Attempt: 3}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			check:     requireUsageRearmed(3),
+		},
+		{
+			name:    "model hold of the configured model re-arms the retry",
+			issueID: "ISS-UL-MODEL",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{Attempt: 2, ConfiguredModel: "opus"}, UsageLimitHoldKey{AgentKind: "mock", ModelOnly: true, Model: "opus"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			check:     requireUsageRearmed(2),
+		},
+		{
+			name:    "retry held by a usage limit releases the claim and keeps the persisted row",
+			issueID: "ISS-UL-RELEASE",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{Attempt: 3}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:   func() *mockRetryStore { return &mockRetryStore{} },
+			tracker: usageFetchesIssue,
+			configure: func(p *HandleRetryTimerParams) {
+				atUsageReset(p)
+				p.ReleaseHeld = true
+			},
+			check: func(t *testing.T, id string, state *State, store *mockRetryStore, _ *mockRetryTracker, _ bool) {
+				t.Helper()
+				_, claimed := state.Claimed[id]
+				_, queued := state.RetryAttempts[id]
+				if claimed || queued {
+					t.Errorf("HandleRetryTimer(ReleaseHeld) claimed, queued = %v, %v, want false, false", claimed, queued)
+				}
+				if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 {
+					t.Errorf("persisted retry rows saved, deleted = %d, %v, want none touched", len(store.savedEntries), store.deletedIssueID)
+				}
+			},
+		},
+		{
+			name:    "retry-now fire dispatches through a usage-limit hold",
+			issueID: "ISS-UL-NOW",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{dueBeforeRequestMS: 1}, UsageLimitHoldKey{AgentKind: "mock"})
+			},
+			store:     func() *mockRetryStore { return &mockRetryStore{} },
+			tracker:   usageFetchesIssue,
+			configure: atUsageReset,
+			workerFn:  workerSignals,
+			check:     requireUsageDispatched,
+		},
+		{
+			name:    "fire on another configured model passes a model hold",
+			issueID: "ISS-UL-OTHER",
+			state: func(_ *testing.T, id string) *State {
+				return usageHeldState(id, RetryEntry{ConfiguredModel: "opus"}, UsageLimitHoldKey{AgentKind: "mock", ModelOnly: true, Model: "opus"})
+			},
+			store:   func() *mockRetryStore { return &mockRetryStore{} },
+			tracker: usageFetchesIssue,
+			configure: func(p *HandleRetryTimerParams) {
+				atUsageReset(p)
+				p.ConfiguredModelOf = func(DispatchResolution) string { return "sonnet" }
+			},
+			workerFn: workerSignals,
+			check:    requireUsageDispatched,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1413,6 +1748,10 @@ func TestHandleRetryTimer(t *testing.T) {
 			params := defaultRetryParams(t, store, tracker)
 			params.MaxSessions = tt.maxSessions
 			params.MaxTokens = tt.maxTokens
+			params.MaxCostUSD = tt.maxCostUSD
+			if tt.configure != nil {
+				tt.configure(&params)
+			}
 
 			var workerCalled bool
 			if tt.workerFn != nil {
@@ -1420,12 +1759,8 @@ func TestHandleRetryTimer(t *testing.T) {
 				wf := tt.workerFn(ch)
 				params.MakeWorkerFn = func(_, _, _, _, _ string, _ domain.AgentAdapter, _ AttemptSettings) WorkerFunc { return wf }
 				HandleRetryTimer(state, id, params)
-				select {
-				case <-ch:
-					workerCalled = true
-				case <-time.After(time.Second):
-					t.Fatal("worker goroutine did not execute within 1 second")
-				}
+				waittest.Receive(t, ch, "worker goroutine execution")
+				workerCalled = true
 			} else {
 				HandleRetryTimer(state, id, params)
 			}
@@ -1476,108 +1811,61 @@ func TestHandleRetryTimer_TokenBudgetLogLine(t *testing.T) {
 func TestHandleRetryTimer_TokenBudgetIncomplete(t *testing.T) {
 	t.Parallel()
 
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	const warning = "token budget cannot be fully evaluated, allowing dispatch"
 
-	store := &mockRetryStore{tokenSum: 500, tokenUnmeasured: 1}
-	tracker := &mockRetryTracker{
-		fetchedIssue: candidateIssue("ISS-TOK-INC", "PROJ-TOK-INC", "To Do"),
+	tests := []struct {
+		name      string
+		store     *mockRetryStore
+		wantAttrs []string
+	}{
+		{
+			name:      "an unmeasured session",
+			store:     &mockRetryStore{tokenSum: 500, tokenUnmeasured: 1},
+			wantAttrs: []string{"used_tokens=500", "unmeasured_sessions=1"},
+		},
+		{
+			name:      "a measured session with an unaccounted turn",
+			store:     &mockRetryStore{tokenSum: 500, tokenSessionCount: 1, tokenUnaccounted: 1},
+			wantAttrs: []string{"used_tokens=500", "unmeasured_sessions=0", "unaccounted_turns=1"},
+		},
 	}
 
-	dispatched := make(chan struct{}, 2)
-	params := defaultRetryParams(t, store, tracker)
-	params.MaxTokens = 1000
-	params.Logger = logger
-	params.MakeWorkerFn = func(_, _, _, _, _ string, _ domain.AgentAdapter, _ AttemptSettings) WorkerFunc {
-		return func(_ context.Context, _ domain.Issue, _ *int) {
-			dispatched <- struct{}{}
-		}
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	state := retryState(t, "ISS-TOK-INC", "PROJ-TOK-INC", 1)
-	HandleRetryTimer(state, "ISS-TOK-INC", params)
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			tracker := &mockRetryTracker{fetchedIssue: candidateIssue("ISS-TOK-INC", "PROJ-TOK-INC", "To Do")}
+			dispatched := make(chan struct{}, 2)
+			params := defaultRetryParams(t, tt.store, tracker)
+			params.MaxTokens = 1000
+			params.Logger = logger
+			params.MakeWorkerFn = func(_, _, _, _, _ string, _ domain.AgentAdapter, _ AttemptSettings) WorkerFunc {
+				return func(_ context.Context, _ domain.Issue, _ *int) {
+					dispatched <- struct{}{}
+				}
+			}
 
-	select {
-	case <-dispatched:
-	case <-time.After(time.Second):
-		t.Fatal("worker not dispatched within 1 second (an unmeasured session must not block dispatch)")
-	}
+			// The retry lane runs once per retry rather than once per tick,
+			// so the warning is not edge-triggered.
+			for occurrence := 1; occurrence <= 2; occurrence++ {
+				state := retryState(t, "ISS-TOK-INC", "PROJ-TOK-INC", 1)
+				HandleRetryTimer(state, "ISS-TOK-INC", params)
 
-	output := buf.String()
-	if !strings.Contains(output, "token budget cannot be fully evaluated, allowing dispatch") {
-		t.Fatalf("log output = %q, want to contain the incomplete-budget warning", output)
-	}
-	for _, attr := range []string{
-		"used_tokens=500",
-		"budget_tokens=1000",
-		"unmeasured_sessions=1",
-		"issue_id=ISS-TOK-INC",
-	} {
-		if !strings.Contains(output, attr) {
-			t.Errorf("log output missing attribute %q: %q", attr, output)
-		}
-	}
+				waittest.Receive(t, dispatched, fmt.Sprintf("occurrence %d: worker dispatch (an incomplete figure below the ceiling must not block dispatch)", occurrence))
+			}
 
-	// A second occurrence must warn again: the retry path runs once per
-	// retry rather than once per tick, so it is not edge-triggered.
-	state = retryState(t, "ISS-TOK-INC", "PROJ-TOK-INC", 1)
-	HandleRetryTimer(state, "ISS-TOK-INC", params)
-
-	select {
-	case <-dispatched:
-	case <-time.After(time.Second):
-		t.Fatal("worker not dispatched on the second occurrence within 1 second")
-	}
-
-	if got := strings.Count(buf.String(), "token budget cannot be fully evaluated, allowing dispatch"); got != 2 {
-		t.Errorf("warning count after two occurrences = %d, want 2 (not edge-triggered)", got)
-	}
-}
-
-func TestHandleRetryTimer_TokenBudgetUnaccountedTurns(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	store := &mockRetryStore{tokenSum: 500, tokenSessionCount: 1, tokenUnaccounted: 1}
-	tracker := &mockRetryTracker{
-		fetchedIssue: candidateIssue("ISS-TOK-UNACC", "PROJ-TOK-UNACC", "To Do"),
-	}
-
-	dispatched := make(chan struct{}, 1)
-	params := defaultRetryParams(t, store, tracker)
-	params.MaxTokens = 1000
-	params.Logger = logger
-	params.MakeWorkerFn = func(_, _, _, _, _ string, _ domain.AgentAdapter, _ AttemptSettings) WorkerFunc {
-		return func(_ context.Context, _ domain.Issue, _ *int) {
-			dispatched <- struct{}{}
-		}
-	}
-
-	state := retryState(t, "ISS-TOK-UNACC", "PROJ-TOK-UNACC", 1)
-	HandleRetryTimer(state, "ISS-TOK-UNACC", params)
-
-	select {
-	case <-dispatched:
-	case <-time.After(time.Second):
-		t.Fatal("worker not dispatched within 1 second (an unaccounted turn must not block dispatch)")
-	}
-
-	output := buf.String()
-	if !strings.Contains(output, "token budget cannot be fully evaluated, allowing dispatch") {
-		t.Fatalf("log output = %q, want to contain the incomplete-budget warning", output)
-	}
-	for _, attr := range []string{
-		"used_tokens=500",
-		"budget_tokens=1000",
-		"unmeasured_sessions=0",
-		"unaccounted_turns=1",
-		"issue_id=ISS-TOK-UNACC",
-	} {
-		if !strings.Contains(output, attr) {
-			t.Errorf("log output missing attribute %q: %q", attr, output)
-		}
+			output := buf.String()
+			if got := strings.Count(output, warning); got != 2 {
+				t.Fatalf("log contains %d %q records after two occurrences, want 2:\n%s", got, warning, output)
+			}
+			for _, attr := range append([]string{"budget_tokens=1000", "issue_id=ISS-TOK-INC"}, tt.wantAttrs...) {
+				if !strings.Contains(output, attr) {
+					t.Errorf("log output missing attribute %q: %q", attr, output)
+				}
+			}
+		})
 	}
 }
 
@@ -1605,11 +1893,7 @@ func TestHandleRetryTimer_TokenBudgetFailOpenLogsWarning(t *testing.T) {
 
 	HandleRetryTimer(state, "ISS-TOK-WARN", params)
 
-	select {
-	case <-dispatched:
-	case <-time.After(time.Second):
-		t.Fatal("worker not dispatched within 1 second (fail-open must dispatch)")
-	}
+	waittest.Receive(t, dispatched, "worker dispatch (fail-open must dispatch)")
 
 	output := buf.String()
 	if !strings.Contains(output, "token budget check failed, proceeding with dispatch") {
@@ -1627,6 +1911,7 @@ func TestHandleRetryTimer_WorkerStillRunningReschedulesInsteadOfDispatching(t *t
 	tracker := &mockRetryTracker{}
 
 	state := retryState(t, "ISS-1", "ISS-1", 2)
+	state.RetryAttempts["ISS-1"].Error = "worker exited: boom"
 	state.Running["ISS-1"] = &RunningEntry{
 		Identifier: "ISS-1",
 		Issue:      candidateIssue("ISS-1", "ISS-1", "In Progress"),
@@ -1658,6 +1943,9 @@ func TestHandleRetryTimer_WorkerStillRunningReschedulesInsteadOfDispatching(t *t
 	}
 	if entry.Attempt != 2 {
 		t.Errorf("rescheduled Attempt = %d, want 2 (same as original)", entry.Attempt)
+	}
+	if entry.Error != "worker still running" || entry.Trigger != "timer" {
+		t.Errorf("rescheduled error, trigger = %q, %q, want %q, %q", entry.Error, entry.Trigger, "worker still running", "timer")
 	}
 	if entry.TimerHandle == nil {
 		t.Error("rescheduled TimerHandle = nil, want non-nil")
@@ -1707,11 +1995,7 @@ func TestHandleRetryTimer_SSHHostAcquisition(t *testing.T) {
 
 		HandleRetryTimer(state, "ISS-SSH", params)
 
-		select {
-		case <-ch:
-		case <-time.After(time.Second):
-			t.Fatal("worker did not execute")
-		}
+		waittest.Receive(t, ch, "worker execution")
 
 		if hp.HostFor("ISS-SSH") != "host-b" {
 			t.Errorf("HostFor(ISS-SSH) = %q, want \"host-b\"", hp.HostFor("ISS-SSH"))
@@ -1844,11 +2128,7 @@ func TestHandleRetryTimer_WorkflowFilePropagated(t *testing.T) {
 
 	HandleRetryTimer(state, "ISS-WF", params)
 
-	select {
-	case <-workerCalled:
-	case <-time.After(time.Second):
-		t.Fatal("worker goroutine did not execute within 1 second")
-	}
+	waittest.Receive(t, workerCalled, "worker goroutine execution")
 
 	running, ok := state.Running["ISS-WF"]
 	if !ok {
@@ -1887,11 +2167,7 @@ func TestHandleRetryTimer_UsageDispositionFrozen(t *testing.T) {
 
 	HandleRetryTimer(state, "ISS-UD", params)
 
-	select {
-	case <-workerCalled:
-	case <-time.After(time.Second):
-		t.Fatal("worker goroutine did not execute within 1 second")
-	}
+	waittest.Receive(t, workerCalled, "worker goroutine execution")
 
 	running, ok := state.Running["ISS-UD"]
 	if !ok {
@@ -1915,6 +2191,8 @@ func TestHandleRetryTimer_BudgetExhaustedBlocksShouldDispatch(t *testing.T) {
 	const id = "ISS-COMP"
 	spy := &spyMetrics{}
 	state := retryState(t, id, "PROJ-COMP", 2)
+	state.RetryAttempts[id].RuleName = "plan"
+	state.RetryAttempts[id].StageLineage = StageLineage{PreviousRule: "specify", ChainID: "chain-1"}
 	store := &mockRetryStore{runHistoryCount: 3}
 	tracker := &mockRetryTracker{
 		fetchedIssue: candidateIssue(id, "PROJ-COMP", "To Do"),
@@ -1937,6 +2215,8 @@ func TestHandleRetryTimer_BudgetExhaustedBlocksShouldDispatch(t *testing.T) {
 	if ShouldDispatch(candidateIssue(id, "PROJ-COMP", "To Do"), state, params.ActiveStates, params.TerminalStates) {
 		t.Error("ShouldDispatch() = true after budget exhaustion, want false")
 	}
+
+	requireLivePasses(t, "UpsertLivePass", store.upserted, []persistence.LivePass{{IssueID: id, Kind: persistence.LivePassBudget, ChainID: "chain-1", RuleName: "plan", StagePrevious: "specify"}})
 }
 
 func TestHandleRetryTimer_BudgetMetrics(t *testing.T) {
@@ -2409,26 +2689,21 @@ func TestHandleRetryTimer_SessionID_PassedToMakeWorkerFn(t *testing.T) {
 
 	HandleRetryTimer(state, id, params)
 
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not execute within 1 second")
-	}
+	waittest.Receive(t, ch, "worker execution")
 
 	if gotSessionID != wantSessionID {
 		t.Errorf("MakeWorkerFn resumeSessionID = %q, want %q", gotSessionID, wantSessionID)
 	}
 }
 
-// TestHandleRetryTimer_PassesReactionKindToMakeWorkerFn checks that a
-// popped entry's ReactionKind reaches MakeWorkerFn, which uses it to derive
-// the read-only posture for label-review dispatches.
 func TestHandleRetryTimer_PassesReactionKindToMakeWorkerFn(t *testing.T) {
 	t.Parallel()
 
 	const id = "ISS-LR-RK"
 	state := retryState(t, id, id, 1)
 	state.RetryAttempts[id].ReactionKind = ReactionKindLabelReview
+	state.RetryAttempts[id].RuleName = "plan"
+	state.RetryAttempts[id].StageLineage = StageLineage{ChainID: "chain-1"}
 
 	store := &mockRetryStore{}
 	tracker := &mockRetryTracker{
@@ -2447,15 +2722,12 @@ func TestHandleRetryTimer_PassesReactionKindToMakeWorkerFn(t *testing.T) {
 
 	HandleRetryTimer(state, id, params)
 
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not execute within 1 second")
-	}
+	waittest.Receive(t, ch, "worker execution")
 
 	if gotReactionKind != ReactionKindLabelReview {
 		t.Errorf("MakeWorkerFn reactionKind = %q, want %q", gotReactionKind, ReactionKindLabelReview)
 	}
+	requireLivePasses(t, "UpsertLivePass", store.upserted, nil)
 }
 
 func TestHandleRetryTimer_Reschedule_PreservesSessionID(t *testing.T) {
@@ -2655,13 +2927,13 @@ func TestHandleRetryTimer_ReactionInUnrelatedStateReschedules(t *testing.T) {
 		Identifier:          id,
 		Attempt:             1,
 		ReactionKind:        ReactionKindReview,
+		Error:               "worker exited: boom",
 		ContinuationContext: contContext,
 		SessionID:           "sess-x",
 		LastSSHHost:         "host-a",
 	}
 
 	store := &mockRetryStore{}
-	// "QA Review": not active, not terminal, not handoff.
 	tracker := &mockRetryTracker{
 		fetchedIssue: candidateIssue(id, id, "QA Review"),
 	}
@@ -2682,6 +2954,9 @@ func TestHandleRetryTimer_ReactionInUnrelatedStateReschedules(t *testing.T) {
 	}
 	if entry.ReactionKind != ReactionKindReview {
 		t.Errorf("RetryAttempts[%s].ReactionKind = %q, want %q", id, entry.ReactionKind, ReactionKindReview)
+	}
+	if entry.Error != "reaction retry paused by issue state" || entry.Trigger != "timer" {
+		t.Errorf("RetryAttempts[%s] error, trigger = %q, %q, want %q, %q", id, entry.Error, entry.Trigger, "reaction retry paused by issue state", "timer")
 	}
 	if entry.ContinuationContext == nil {
 		t.Fatal("RetryAttempts.ContinuationContext is nil, want preserved")
@@ -2761,7 +3036,6 @@ func TestHandleRetryTimer_ReactionInTerminalStateReleasesClaim(t *testing.T) {
 
 	store := &mockRetryStore{}
 	tracker := &mockRetryTracker{
-		// "Done" is in TerminalStates; "Ready For Review" is HandoffState.
 		fetchedIssue: candidateIssue(id, id, "Done"),
 	}
 	params := defaultRetryParams(t, store, tracker)
@@ -2931,6 +3205,7 @@ func TestHandleRetryTimer_ReactionActiveStateBlockerReschedules(t *testing.T) {
 		Identifier:          id,
 		Attempt:             1,
 		ReactionKind:        ReactionKindReview,
+		Error:               "worker exited: boom",
 		ContinuationContext: contContext,
 		SessionID:           "sess-b",
 		LastSSHHost:         "host-b",
@@ -2959,6 +3234,9 @@ func TestHandleRetryTimer_ReactionActiveStateBlockerReschedules(t *testing.T) {
 	}
 	if entry.ReactionKind != ReactionKindReview {
 		t.Errorf("RetryAttempts[%s].ReactionKind = %q, want %q", id, entry.ReactionKind, ReactionKindReview)
+	}
+	if entry.Error != "reaction retry paused by an open blocking issue" || entry.Trigger != "timer" {
+		t.Errorf("RetryAttempts[%s] error, trigger = %q, %q, want %q, %q", id, entry.Error, entry.Trigger, "reaction retry paused by an open blocking issue", "timer")
 	}
 	if entry.ContinuationContext == nil {
 		t.Fatal("RetryAttempts.ContinuationContext nil after blocker reschedule, want preserved")
@@ -3223,15 +3501,16 @@ func TestHandleRetryTimer_FrozenFieldsPersistedOnReschedule(t *testing.T) {
 		RuleName:   wantRuleName,
 		TemplateID: wantTemplateID,
 
-		StageLineage: StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-1"},
+		StageLineage:  StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-1"},
+		IssueIdentity: IssueIdentity{Title: "held title", URL: "https://example.test/held"},
 	}
 	state.Claimed[id] = struct{}{}
 	state.Running["OTHER"] = &RunningEntry{Identifier: "OTHER"}
 
 	store := &mockRetryStore{}
-	tracker := &mockRetryTracker{
-		fetchedIssue: candidateIssue(id, id, "To Do"),
-	}
+	fired := candidateIssue(id, id, "To Do")
+	fired.URL, fired.IssueType, fired.Labels = "https://example.test/fired", "Bug", []string{"a", "b"}
+	tracker := &mockRetryTracker{fetchedIssue: fired}
 	params := defaultRetryParams(t, store, tracker)
 
 	HandleRetryTimer(state, id, params)
@@ -3251,6 +3530,12 @@ func TestHandleRetryTimer_FrozenFieldsPersistedOnReschedule(t *testing.T) {
 	}
 	if saved.StagePrevious != "specify" || saved.StagePreviousOutcome != "succeeded" || saved.ChainID != "chain-1" {
 		t.Errorf("saved RetryEntry previous, outcome, chain = %q, %q, %q, want %q, %q, %q", saved.StagePrevious, saved.StagePreviousOutcome, saved.ChainID, "specify", "succeeded", "chain-1")
+	}
+	if saved.IssueTitle != "held title" || saved.IssueURL != "https://example.test/held" {
+		t.Errorf("saved RetryEntry title, url = %q, %q, want the held %q, %q", saved.IssueTitle, saved.IssueURL, "held title", "https://example.test/held")
+	}
+	if saved.IssueType != "Bug" || !slices.Equal(saved.IssueLabels, []string{"a", "b"}) || saved.IssueState != "To Do" {
+		t.Errorf("saved RetryEntry type, labels, state = %q, %q, %q, want %q, %q, %q", saved.IssueType, saved.IssueLabels, saved.IssueState, "Bug", []string{"a", "b"}, "To Do")
 	}
 	if entry, ok := state.RetryAttempts[id]; ok && entry.TimerHandle != nil {
 		entry.TimerHandle.Stop()
@@ -3313,8 +3598,10 @@ func TestHandleRetryTimer_StageLineage(t *testing.T) {
 	t.Parallel()
 
 	const fresh = "<fresh>"
-	carried := StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-1"}
-	hop := &StageHopEntry{SourceRule: "plan", TargetRule: "implement", PreviousOutcome: "no_change", ChainID: "chain-hop"}
+	passAt := time.Date(2026, 3, 19, 9, 0, 0, 0, time.UTC)
+	hopPassAt := passAt.Add(-time.Hour)
+	carried := StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: "chain-1", DispatchedAt: passAt}
+	hop := &StageHopEntry{SourceRule: "plan", TargetRule: "implement", PreviousOutcome: "no_change", ChainID: "chain-hop", DispatchedAt: hopPassAt}
 	tests := []struct {
 		name        string
 		lineage     StageLineage
@@ -3322,12 +3609,12 @@ func TestHandleRetryTimer_StageLineage(t *testing.T) {
 		resolveRule string
 		want        StageLineage
 	}{
-		{"a retry keeping its rule carries the chain it was frozen with", carried, nil, "", carried},
+		{"a retry keeping its rule carries the chain and pass time it was frozen with", carried, nil, "", carried},
 		{"an empty carried chain is replaced and the pair is kept", StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded"}, nil, "",
 			StageLineage{PreviousRule: "specify", PreviousOutcome: "succeeded", ChainID: fresh}},
 		{"a retry routed afresh to a rule no hop targeted starts a chain", carried, nil, "implement", StageLineage{ChainID: fresh}},
-		{"a retry routed afresh to the rule a hop targeted inherits the hop's chain", carried, hop, "implement",
-			StageLineage{PreviousRule: "plan", PreviousOutcome: "no_change", ChainID: "chain-hop"}},
+		{"a retry routed afresh to the rule a hop targeted inherits the hop's chain and pass time", carried, hop, "implement",
+			StageLineage{PreviousRule: "plan", PreviousOutcome: "no_change", ChainID: "chain-hop", DispatchedAt: hopPassAt}},
 	}
 
 	for _, tt := range tests {
@@ -3339,7 +3626,8 @@ func TestHandleRetryTimer_StageLineage(t *testing.T) {
 			if tt.hop != nil {
 				state.StageHops[id] = tt.hop
 			}
-			params := capturingRetryParams(t, &mockRetryStore{}, &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")}, new([]dispatchedWorker))
+			store := &mockRetryStore{}
+			params := capturingRetryParams(t, store, &mockRetryTracker{fetchedIssue: candidateIssue(id, id, "To Do")}, new([]dispatchedWorker))
 			if tt.resolveRule != "" {
 				params.ResolveSelection = func(frozen DispatchResolution, _ domain.Issue) DispatchResolution {
 					frozen.RuleName = tt.resolveRule
@@ -3353,12 +3641,20 @@ func TestHandleRetryTimer_StageLineage(t *testing.T) {
 			if running == nil {
 				t.Fatal("Running[id] missing after dispatch")
 			}
+			want := tt.want
+			if want.DispatchedAt.IsZero() {
+				want.DispatchedAt = running.StartedAt
+			}
 			got := running.StageLineage
-			if tt.want.ChainID == fresh && got.ChainID != "" && got.ChainID != tt.lineage.ChainID {
+			if want.ChainID == fresh && got.ChainID != "" && got.ChainID != tt.lineage.ChainID {
 				got.ChainID = fresh
 			}
-			if got != tt.want {
-				t.Errorf("RunningEntry.StageLineage = %+v, want %+v (a fresh chain differs from %q)", got, tt.want, tt.lineage.ChainID)
+			if got != want {
+				t.Errorf("RunningEntry.StageLineage = %+v, want %+v (a fresh chain differs from %q, an unset pass time is the run's start %v)", got, want, tt.lineage.ChainID, running.StartedAt)
+			}
+			requireLivePasses(t, "UpsertLivePass", store.upserted, []persistence.LivePass{{IssueID: id, Kind: persistence.LivePassRunning, ChainID: running.StageLineage.ChainID, RuleName: cmp.Or(tt.resolveRule, "plan"), StagePrevious: tt.want.PreviousRule}})
+			if store.upsertedAtRetryDelete != 1 {
+				t.Errorf("live passes stored before DeleteRetryEntry = %d, want 1", store.upsertedAtRetryDelete)
 			}
 		})
 	}
@@ -3672,7 +3968,6 @@ func TestHandleRetryTimer_PausedDwellBound(t *testing.T) {
 
 		store := &mockRetryStore{}
 		tracker := &mockRetryTracker{
-			// Not active, not terminal, not handoff.
 			fetchedIssue: candidateIssue(id, id, "QA Review"),
 		}
 		params := defaultRetryParams(t, store, tracker)
@@ -3860,7 +4155,6 @@ func TestHandleRetryTimer_PausedDwellBound(t *testing.T) {
 
 		store := &mockRetryStore{}
 		tracker := &mockRetryTracker{
-			// Not active, not terminal, not handoff: paused arm.
 			fetchedIssue: candidateIssue(id, id, "QA Review"),
 		}
 		params := defaultRetryParams(t, store, tracker)
@@ -3884,10 +4178,6 @@ func TestHandleRetryTimer_PausedDwellBound(t *testing.T) {
 		firstEntry.scheduledAt = time.Time{}
 		firstEntry.scheduledDelayMS = 0
 
-		// Second fire: the issue is now active with no blocker, and the
-		// sole concurrency slot is occupied by another running issue, so
-		// this fire takes the no-orchestrator-slots arm instead of a
-		// paused arm.
 		tracker.fetchedIssue = candidateIssue(id, id, "To Do")
 		state.Running["OTHER-1"] = &RunningEntry{
 			Identifier: "OTHER-1",
@@ -4020,7 +4310,11 @@ func TestHandleRetryTimer_BudgetHoldNotice(t *testing.T) {
 		if !ok {
 			t.Fatal("BudgetExhausted[ISS-NOTICE] missing, want present after the block")
 		}
-		want := buildBudgetHoldComment(entry)
+		want := "Sortie stopped dispatching this issue.\n" +
+			"Recorded: " + entry.ExhaustedAt.Format(time.RFC3339) + "\n" +
+			"Ceiling: session budget (agent.max_sessions)\n" +
+			"Sessions: 3 of 3\n" +
+			"Raising agent.max_sessions raises this ceiling."
 
 		if len(tracker.commentCalls) != 1 {
 			t.Fatalf("commentCalls = %+v, want exactly one comment", tracker.commentCalls)
@@ -4285,3 +4579,80 @@ func TestHandleRetryTimer_ReactionRetryRecordsNoHandedOffComments(t *testing.T) 
 }
 
 func (m *mockRetryStore) DeleteStageHop(context.Context, string) error { return nil }
+
+func (m *mockRetryStore) MarkStageHopDispatched(context.Context, string) error { return nil }
+
+func TestHandleRetryTimer_SpendCeilingKeepsTheRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		entry      RetryEntry
+		issueState string
+	}{
+		{"plain retry", RetryEntry{Attempt: 3, Error: "agent exited"}, "To Do"},
+		{"reaction continuation", RetryEntry{Attempt: 1, Error: "review comments", ReactionKind: ReactionKindReview, ContinuationContext: map[string]any{"review_comments": map[string]any{"count": 2}}}, "Ready For Review"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			const id = "ISS-SPEND"
+			entry := tt.entry
+			entry.IssueID, entry.Identifier = id, id
+			state := frozenRetryState(id, entry)
+			state.MaxConcurrentAgents = 1
+			state.Running["OTHER-1"] = &RunningEntry{Identifier: "OTHER-1", Issue: candidateIssue("OTHER-1", "OTHER-1", "In Progress")}
+			store := &mockRetryStore{windowUsage: persistence.IssueTokenUsage{RecordedCostUSD: 5, PricedSessions: 1, Sessions: 1}}
+			tracker := &mockRetryTracker{fetchedIssue: candidateIssue(id, id, tt.issueState)}
+			var dispatched []dispatchedWorker
+			params := capturingRetryParams(t, store, tracker, &dispatched)
+			params.HandoffState = "Ready For Review"
+			params.SpendCeilings = map[SpendWindow]float64{SpendWindowDaily: 5}
+			params.PollIntervalMS = 60_000
+			t.Cleanup(func() {
+				stopRetryTimer(state, id)
+				state.WorkerWg.Wait()
+			})
+			fire := func() {
+				stopRetryTimer(state, id)
+				state.RetryAttempts[id].scheduledAt = time.Time{}
+				HandleRetryTimer(state, id, params)
+			}
+			requireKept := func(when string) {
+				t.Helper()
+				kept := state.RetryAttempts[id]
+				if kept == nil {
+					t.Fatalf("RetryAttempts[%s] missing %s, want the retry kept", id, when)
+				}
+				got := RetryEntry{Attempt: kept.Attempt, Error: kept.Error, ReactionKind: kept.ReactionKind, ContinuationContext: kept.ContinuationContext}
+				if want := (RetryEntry{Attempt: tt.entry.Attempt, Error: tt.entry.Error, ReactionKind: tt.entry.ReactionKind, ContinuationContext: tt.entry.ContinuationContext}); !reflect.DeepEqual(got, want) {
+					t.Errorf("RetryAttempts[%s] %s = %+v, want %+v", id, when, got, want)
+				}
+				if _, claimed := state.Claimed[id]; !claimed || len(dispatched) != 0 {
+					t.Errorf("claim kept, workers started %s = %v, %d, want true, 0", when, claimed, len(dispatched))
+				}
+			}
+
+			fire()
+
+			requireKept("under the hold")
+			if len(store.savedEntries) != 0 || len(store.deletedIssueID) != 0 || tracker.fetchCount != 0 {
+				t.Errorf("fire under the hold (saved entries, deleted entries, tracker fetches) = (%d, %d, %d), want all 0", len(store.savedEntries), len(store.deletedIssueID), tracker.fetchCount)
+			}
+
+			params.SpendCeilings = map[SpendWindow]float64{SpendWindowDaily: 10}
+			fire()
+
+			requireKept("with the ceiling raised and every slot taken")
+
+			delete(state.Running, "OTHER-1")
+			fire()
+
+			if running := state.Running[id]; running == nil || running.RetryAttempt == nil || *running.RetryAttempt != tt.entry.Attempt {
+				t.Errorf("Running[%s] after the slot freed = %+v, want dispatched with RetryAttempt %d", id, running, tt.entry.Attempt)
+			}
+		})
+	}
+}

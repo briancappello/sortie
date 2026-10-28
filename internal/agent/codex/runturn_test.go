@@ -9,10 +9,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
@@ -21,6 +23,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/jsonrpc"
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // nopWriteCloser is an io.WriteCloser that discards all writes.
@@ -739,12 +742,12 @@ func TestRunTurn_ModelRerouted_MalformedPayload(t *testing.T) {
 
 	notified := false
 	for _, n := range filterEventsOfType(events, domain.EventNotification) {
-		if n.Message == "model/rerouted" {
+		if n.Message == "model rerouted" {
 			notified = true
 		}
 	}
 	if !notified {
-		t.Error("expected an EventNotification carrying \"model/rerouted\" for the malformed payload, none found")
+		t.Error("expected an EventNotification carrying \"model rerouted\" for the malformed payload, none found")
 	}
 
 	tokenUsageEvents := filterEventsOfType(events, domain.EventTokenUsage)
@@ -1043,22 +1046,13 @@ func TestRunTurn_CancelledMainLoopWaitsForCompletion(t *testing.T) {
 		outcomeCh <- outcome{result: result, err: err}
 	}()
 
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		case <-time.After(time.Second):
-		}
-	})
+	t.Cleanup(func() { waittest.Receive(t, finished, "RunTurn exit") })
 
 	state.inbox.Put(jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/started", Params: json.RawMessage(`{"turnId":"turn-001"}`)})
-	waitForSessionStarted(t, started)
+	waittest.Receive(t, started, "RunTurn past its turn/start call")
 
 	cancel()
-	select {
-	case <-stdin.interrupts:
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not send turn/interrupt after cancellation")
-	}
+	waittest.Receive(t, stdin.interrupts, "turn/interrupt after cancellation")
 
 	callsAfterInterrupt := ctx.calls.Load()
 	time.Sleep(50 * time.Millisecond)
@@ -1073,15 +1067,11 @@ func TestRunTurn_CancelledMainLoopWaitsForCompletion(t *testing.T) {
 	turnCompletedMsg := jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/completed", Params: json.RawMessage(`{"turn":{"id":"turn-001","status":"interrupted"}}`)}
 	state.inbox.Put(turnCompletedMsg)
 
-	select {
-	case got := <-outcomeCh:
-		if got.result.ExitReason != domain.EventTurnCancelled {
-			t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
-		}
-		requireAgentError(t, got.err, domain.ErrTurnCancelled)
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not return after turn/completed")
+	got := waittest.Receive(t, outcomeCh, "RunTurn outcome after turn/completed")
+	if got.result.ExitReason != domain.EventTurnCancelled {
+		t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
 	}
+	requireAgentError(t, got.err, domain.ErrTurnCancelled)
 }
 
 // TestRunTurn_CancelledMainLoopReportsCancelledDespiteCompletedStatus drives
@@ -1119,22 +1109,13 @@ func TestRunTurn_CancelledMainLoopReportsCancelledDespiteCompletedStatus(t *test
 		outcomeCh <- outcome{result: result, err: err}
 	}()
 
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		case <-time.After(time.Second):
-		}
-	})
+	t.Cleanup(func() { waittest.Receive(t, finished, "RunTurn exit") })
 
 	state.inbox.Put(jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/started", Params: json.RawMessage(`{"turnId":"turn-001"}`)})
-	waitForSessionStarted(t, started)
+	waittest.Receive(t, started, "RunTurn past its turn/start call")
 
 	cancel()
-	select {
-	case <-stdin.interrupts:
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not send turn/interrupt after cancellation")
-	}
+	waittest.Receive(t, stdin.interrupts, "turn/interrupt after cancellation")
 	if got := stdin.count.Load(); got != 1 {
 		t.Errorf("turn/interrupt request count = %d, want 1", got)
 	}
@@ -1142,15 +1123,11 @@ func TestRunTurn_CancelledMainLoopReportsCancelledDespiteCompletedStatus(t *test
 	turnCompletedMsg := jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/completed", Params: json.RawMessage(`{"turn":{"id":"turn-001","status":"completed"}}`)}
 	state.inbox.Put(turnCompletedMsg)
 
-	select {
-	case got := <-outcomeCh:
-		if got.result.ExitReason != domain.EventTurnCancelled {
-			t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
-		}
-		requireAgentError(t, got.err, domain.ErrTurnCancelled)
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not return after turn/completed")
+	got := waittest.Receive(t, outcomeCh, "RunTurn outcome after turn/completed")
+	if got.result.ExitReason != domain.EventTurnCancelled {
+		t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
 	}
+	requireAgentError(t, got.err, domain.ErrTurnCancelled)
 
 	if got := filterEventsOfType(events, domain.EventTurnCancelled); len(got) != 1 {
 		t.Errorf("turn_cancelled event count = %d, want 1", len(got))
@@ -1179,19 +1156,26 @@ func TestRunTurn_ItemStartedAndCompletedEmitsToolResult(t *testing.T) {
 		t.Errorf("ExitReason = %v, want EventTurnCompleted", result.ExitReason)
 	}
 
-	wantToolError := map[string]bool{"ls -la": false, "mcpToolCall": true, "rm -rf build": true}
-	results := filterEventsOfType(events, domain.EventToolResult)
-	if len(results) != len(wantToolError) {
-		t.Fatalf("EventToolResult count = %d, want %d", len(results), len(wantToolError))
+	type toolResult struct {
+		name, argument string
+		kind           domain.ToolKind
+		failed         bool
 	}
-	for _, e := range results {
-		if want, ok := wantToolError[e.ToolName]; !ok || e.ToolError != want {
-			t.Errorf("ToolResult %q: ToolError = %v, want %v (expected and unseen: %v)", e.ToolName, e.ToolError, want, ok)
-		}
-		delete(wantToolError, e.ToolName)
+	want := []toolResult{
+		{"", "ls -la", domain.ToolKindShell, false},
+		{"github.get_issue", "", "", true},
+		{"", "rm -rf build", domain.ToolKindShell, true},
+		{"", "a.go", domain.ToolKindEdit, false},
+		{"", "a.go, b.go", domain.ToolKindEdit, false},
+		{"sortie.status", "", "", false},
+		{"lookup", "", "", false},
 	}
-	if len(wantToolError) != 0 {
-		t.Errorf("missing ToolResult for %v", wantToolError)
+	var got []toolResult
+	for _, e := range filterEventsOfType(events, domain.EventToolResult) {
+		got = append(got, toolResult{e.ToolName, e.ToolArgument, e.ToolKind, e.ToolError})
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("tool_result events (name, argument, kind, failed) = %+v, want %+v", got, want)
 	}
 }
 
@@ -1235,20 +1219,17 @@ func TestRunTurn_MiscNotifications(t *testing.T) {
 		t.Fatalf("RunTurn() error = %v", err)
 	}
 
-	// some/unknown/method -> EventOtherMessage
-	if _, ok := firstEventOfType(events, domain.EventOtherMessage); !ok {
-		t.Error("expected EventOtherMessage for unknown notification method, not found")
-	}
-	// turn/plan/updated -> EventNotification
-	found := false
 	for _, e := range events {
-		if e.Type == domain.EventNotification && e.Message == "plan updated" {
-			found = true
-			break
+		if e.Type == domain.EventOtherMessage {
+			t.Errorf("unexpected other_message %q, want protocol methods reported as blank pings", e.Message)
+		}
+		if e.Type == domain.EventNotification && e.Message != "" {
+			t.Errorf("notification message = %q, want blank", e.Message)
 		}
 	}
-	if !found {
-		t.Error("expected 'plan updated' EventNotification, not found")
+	// The unknown method, the plan update and the two output deltas.
+	if n := countBlankPings(events); n != 4 {
+		t.Errorf("blank pings = %d, want 4", n)
 	}
 }
 
@@ -1519,64 +1500,52 @@ func TestRunTurn_HumanInputRequestEndsAttempt(t *testing.T) {
 func TestRunTurn_CancelledReturnsWithinBoundWhenTurnCompletedNeverArrives(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		const bound = 50 * time.Millisecond
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	stdin := &interruptTrackingWriteCloser{interrupts: make(chan struct{}, 1)}
-	state := newInterruptedStatusState(t, stdin)
-	state.agentConfig = domain.AgentConfig{ReadTimeoutMS: 50}
+		stdin := &interruptTrackingWriteCloser{interrupts: make(chan struct{}, 1)}
+		state := newInterruptedStatusState(t, stdin)
+		state.agentConfig = domain.AgentConfig{ReadTimeoutMS: int(bound.Milliseconds())}
 
-	type outcome struct {
-		result domain.TurnResult
-		err    error
-	}
-	outcomeCh := make(chan outcome, 1)
-	finished := make(chan struct{})
-	started := make(chan struct{})
-
-	adapter, _ := NewCodexAdapter()
-	go func() {
-		defer close(finished)
-		result, err := adapter.RunTurn(ctx, fakeSession(state), domain.RunTurnParams{
-			Prompt:  "go",
-			OnEvent: onEventSignalingSessionStarted(func(domain.AgentEvent) {}, started),
-		})
-		outcomeCh <- outcome{result: result, err: err}
-	}()
-
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		case <-time.After(time.Second):
+		type outcome struct {
+			result domain.TurnResult
+			err    error
 		}
-	})
+		outcomeCh := make(chan outcome, 1)
+		finished := make(chan struct{})
+		started := make(chan struct{})
 
-	state.inbox.Put(jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/started", Params: json.RawMessage(`{"turnId":"turn-001"}`)})
-	waitForSessionStarted(t, started)
+		adapter, _ := NewCodexAdapter()
+		go func() {
+			defer close(finished)
+			result, err := adapter.RunTurn(ctx, fakeSession(state), domain.RunTurnParams{
+				Prompt:  "go",
+				OnEvent: onEventSignalingSessionStarted(func(domain.AgentEvent) {}, started),
+			})
+			outcomeCh <- outcome{result: result, err: err}
+		}()
 
-	start := time.Now()
-	cancel()
+		t.Cleanup(func() { waittest.Receive(t, finished, "RunTurn exit") })
 
-	select {
-	case <-stdin.interrupts:
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not send turn/interrupt after cancellation")
-	}
+		state.inbox.Put(jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/started", Params: json.RawMessage(`{"turnId":"turn-001"}`)})
+		waittest.Receive(t, started, "RunTurn past its turn/start call")
 
-	// turn/completed is never sent. RunTurn must return once the
-	// configured read_timeout_ms bound elapses, not merely eventually.
-	select {
-	case got := <-outcomeCh:
-		if elapsed := time.Since(start); elapsed > time.Second {
-			t.Errorf("RunTurn returned after %v, want well within the 50ms read_timeout_ms bound", elapsed)
+		start := time.Now()
+		cancel()
+
+		waittest.Receive(t, stdin.interrupts, "turn/interrupt after cancellation")
+
+		got := waittest.Receive(t, outcomeCh, "RunTurn outcome")
+		if elapsed := time.Since(start); elapsed > bound {
+			t.Errorf("RunTurn returned after %v, want within the %v read_timeout_ms bound", elapsed, bound)
 		}
 		if got.result.ExitReason != domain.EventTurnCancelled {
 			t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
 		}
 		requireAgentError(t, got.err, domain.ErrTurnCancelled)
-	case <-time.After(2 * time.Second):
-		t.Fatal("RunTurn did not return within the bound; it kept reading after cancellation with no turn/completed")
-	}
+	})
 }
 
 func TestStopSession_InvalidInternalType(t *testing.T) {
@@ -1721,13 +1690,9 @@ func TestStopSession_WithActiveReaderGoroutine(t *testing.T) {
 	go watchTermination(state)
 
 	for i := range lines {
-		select {
-		case <-state.inbox.Ready():
-			if _, ok := state.inbox.Take(); !ok {
-				t.Fatalf("inbox closed after %d of %d lines, want the reader still parked on the live pipe", i, lines)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("reader delivered %d of %d lines within 5s", i, lines)
+		waittest.Receive(t, state.inbox.Ready(), fmt.Sprintf("reader line %d of %d", i+1, lines))
+		if _, ok := state.inbox.Take(); !ok {
+			t.Fatalf("inbox closed after %d of %d lines, want the reader still parked on the live pipe", i, lines)
 		}
 	}
 	select {
@@ -1858,7 +1823,7 @@ func TestRunTurn_StdoutParseFailureBeforeResponse(t *testing.T) {
 
 // TestAuthenticateIfNeeded_LoginWaitEOF drives the login wait past a
 // clean end of stream and asserts it returns the pinned text rather
-// than timing out, within 2s while readTimeout keeps its 30s default.
+// than timing out on its 30s readTimeout default.
 func TestAuthenticateIfNeeded_LoginWaitEOF(t *testing.T) {
 	// No t.Parallel(): uses t.Setenv.
 	t.Setenv("CODEX_API_KEY", "test-key")
@@ -1881,20 +1846,15 @@ func TestAuthenticateIfNeeded_LoginWaitEOF(t *testing.T) {
 	// own resolution on the connection.
 	state.inbox.Close()
 
-	select {
-	case err := <-done:
-		const want = "unexpected EOF waiting for login"
-		if err == nil || err.Error() != want {
-			t.Errorf("authenticateIfNeeded() error = %v, want %q", err, want)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("authenticateIfNeeded() did not return within 2s of the stream ending")
+	const want = "unexpected EOF waiting for login"
+	if err := waittest.Receive(t, done, "authenticateIfNeeded return"); err == nil || err.Error() != want {
+		t.Errorf("authenticateIfNeeded() error = %v, want %q", err, want)
 	}
 }
 
 // TestAuthenticateIfNeeded_LoginWaitReadError drives the login wait
 // past a read failure (rather than a clean end of stream) and asserts
-// it returns the pinned text naming the underlying error, within 2s.
+// it returns the pinned text naming the underlying error.
 func TestAuthenticateIfNeeded_LoginWaitReadError(t *testing.T) {
 	// No t.Parallel(): uses t.Setenv.
 	t.Setenv("CODEX_API_KEY", "test-key")
@@ -1910,21 +1870,16 @@ func TestAuthenticateIfNeeded_LoginWaitReadError(t *testing.T) {
 
 	state.inbox.Put(jsonrpc.Message{Kind: jsonrpc.KindStreamEnd, Err: wantErr})
 
-	select {
-	case err := <-done:
-		want := "scanner error waiting for login: " + wantErr.Error()
-		if err == nil || err.Error() != want {
-			t.Errorf("authenticateIfNeeded() error = %v, want %q", err, want)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("authenticateIfNeeded() did not return within 2s of the read failure")
+	want := "scanner error waiting for login: " + wantErr.Error()
+	if err := waittest.Receive(t, done, "authenticateIfNeeded return"); err == nil || err.Error() != want {
+		t.Errorf("authenticateIfNeeded() error = %v, want %q", err, want)
 	}
 }
 
 // TestStartThread_NotificationWaitEOF drives the thread/started wait
 // past a clean end of stream and asserts it returns the thread ID
-// with a nil error, within 2s, rather than waiting for the 30s
-// readTimeout default.
+// with a nil error, rather than waiting for the 30s readTimeout
+// default.
 func TestStartThread_NotificationWaitEOF(t *testing.T) {
 	t.Parallel()
 
@@ -1944,16 +1899,12 @@ func TestStartThread_NotificationWaitEOF(t *testing.T) {
 
 	state.inbox.Close()
 
-	select {
-	case got := <-done:
-		if got.err != nil {
-			t.Errorf("startThread() error = %v, want nil", got.err)
-		}
-		if got.threadID != "thread-abc" {
-			t.Errorf("startThread() threadID = %q, want %q", got.threadID, "thread-abc")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("startThread() did not return within 2s of the stream ending")
+	got := waittest.Receive(t, done, "startThread return")
+	if got.err != nil {
+		t.Errorf("startThread() error = %v, want nil", got.err)
+	}
+	if got.threadID != "thread-abc" {
+		t.Errorf("startThread() threadID = %q, want %q", got.threadID, "thread-abc")
 	}
 }
 
@@ -1997,14 +1948,13 @@ func TestRunTurn_NullIDApprovalRequestIsNotAnswered(t *testing.T) {
 		t.Error("a reply was written for a null-id request, which the reply path refuses and the peer cannot match")
 	}
 
-	var reported bool
 	for _, e := range events {
-		if e.Type == domain.EventOtherMessage && e.Message == "item/commandExecution/requestApproval" {
-			reported = true
+		if e.Message == "item/commandExecution/requestApproval" {
+			t.Errorf("null-id approval request leaked its method name into %s event", e.Type)
 		}
 	}
-	if !reported {
-		t.Error("null-id approval request was not reported as another message")
+	if countBlankPings(events) == 0 {
+		t.Error("null-id approval request was not reported as a blank ping")
 	}
 }
 
@@ -2043,22 +1993,13 @@ func TestRunTurn_CancelledApprovalRequestReportsCancelled(t *testing.T) {
 		outcomeCh <- outcome{result: result, err: err}
 	}()
 
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		case <-time.After(time.Second):
-		}
-	})
+	t.Cleanup(func() { waittest.Receive(t, finished, "RunTurn exit") })
 
 	state.inbox.Put(jsonrpc.Message{Kind: jsonrpc.KindNotification, Method: "turn/started", Params: json.RawMessage(`{"turnId":"turn-001"}`)})
-	waitForSessionStarted(t, started)
+	waittest.Receive(t, started, "RunTurn past its turn/start call")
 
 	cancel()
-	select {
-	case <-stdin.interrupts:
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not send turn/interrupt after cancellation")
-	}
+	waittest.Receive(t, stdin.interrupts, "turn/interrupt after cancellation")
 
 	approvalMsg := jsonrpc.Message{
 		Kind:   jsonrpc.KindRequest,
@@ -2068,15 +2009,11 @@ func TestRunTurn_CancelledApprovalRequestReportsCancelled(t *testing.T) {
 	}
 	state.inbox.Put(approvalMsg)
 
-	select {
-	case got := <-outcomeCh:
-		if got.result.ExitReason != domain.EventTurnCancelled {
-			t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
-		}
-		requireAgentError(t, got.err, domain.ErrTurnCancelled)
-	case <-time.After(time.Second):
-		t.Fatal("RunTurn did not return after the approval request arrived")
+	got := waittest.Receive(t, outcomeCh, "RunTurn outcome after the approval request")
+	if got.result.ExitReason != domain.EventTurnCancelled {
+		t.Errorf("ExitReason = %q, want %q", got.result.ExitReason, domain.EventTurnCancelled)
 	}
+	requireAgentError(t, got.err, domain.ErrTurnCancelled)
 
 	if err := state.conn.Flush(context.Background()); err != nil {
 		t.Fatalf("Flush() error = %v", err)

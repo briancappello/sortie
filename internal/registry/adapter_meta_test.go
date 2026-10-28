@@ -1,11 +1,13 @@
 package registry_test
 
 import (
+	"errors"
 	"maps"
 	"reflect"
 	"slices"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/agent/mcpconfig"
 	"github.com/sortie-ai/sortie/internal/registry"
 
 	// Trigger adapter init() registrations.
@@ -22,6 +24,93 @@ import (
 	_ "github.com/sortie-ai/sortie/internal/tracker/jira"
 	_ "github.com/sortie-ai/sortie/internal/tracker/linear"
 )
+
+func assertMCPDialectDeclaration(t *testing.T, kind string, meta registry.AgentMeta) {
+	t.Helper()
+
+	if meta.MCPDialect == registry.MCPDialectUndeclared {
+		t.Errorf("Agents.Meta(%q).MCPDialect = %q, want a declared dialect", kind, meta.MCPDialect)
+		return
+	}
+
+	isNone := meta.MCPDialect == registry.MCPDialectNone
+	if isNone && meta.MCPDialectNoneReason == "" {
+		t.Errorf("Agents.Meta(%q).MCPDialectNoneReason = %q, want non-empty with MCPDialectNone", kind, meta.MCPDialectNoneReason)
+	}
+	if !isNone && meta.MCPDialectNoneReason != "" {
+		t.Errorf("Agents.Meta(%q).MCPDialectNoneReason = %q, want empty with dialect %q", kind, meta.MCPDialectNoneReason, meta.MCPDialect)
+	}
+	if got := meta.MCPDialect.DeliversTools(); got == isNone {
+		t.Errorf("Agents.Meta(%q).MCPDialect.DeliversTools() = %v, want %v", kind, got, !isNone)
+	}
+
+	_, err := mcpconfig.Config{}.Render(meta.MCPDialect, mcpconfig.RenderInput{})
+	if isNone {
+		if !errors.Is(err, mcpconfig.ErrUnknownDialect) {
+			t.Errorf("Config.Render(%q) error = %v, want ErrUnknownDialect", meta.MCPDialect, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Errorf("Config.Render(%q) = error %v, want nil", meta.MCPDialect, err)
+	}
+}
+
+func usageLimitDeclarationProblem(meta registry.AgentMeta) string {
+	hasReason := meta.UsageLimitNotRecognizedReason != ""
+
+	switch meta.UsageLimitRecognition {
+	case registry.UsageLimitNotRecognized:
+		if !hasReason {
+			return "not_recognized without a reason"
+		}
+	case registry.UsageLimitRecognized:
+		if hasReason {
+			return "recognized with a reason"
+		}
+	case registry.UsageLimitRecognitionUndeclared:
+		return "undeclared"
+	default:
+		return "unknown value " + string(meta.UsageLimitRecognition)
+	}
+	return ""
+}
+
+func TestUsageLimitDeclarationProblem(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		meta registry.AgentMeta
+		want bool
+	}{
+		{"zero value", registry.AgentMeta{}, true},
+		{"not_recognized without a reason", registry.AgentMeta{UsageLimitRecognition: registry.UsageLimitNotRecognized}, true},
+		{
+			"recognized with a reason",
+			registry.AgentMeta{UsageLimitRecognition: registry.UsageLimitRecognized, UsageLimitNotRecognizedReason: "stale"},
+			true,
+		},
+		{"recognized", registry.AgentMeta{UsageLimitRecognition: registry.UsageLimitRecognized}, false},
+		{
+			"not_recognized with a reason",
+			registry.AgentMeta{UsageLimitRecognition: registry.UsageLimitNotRecognized, UsageLimitNotRecognizedReason: "no form"},
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := usageLimitDeclarationProblem(tt.meta) != ""
+
+			if got != tt.want {
+				t.Errorf("usageLimitDeclarationProblem(%+v) non-empty = %v, want %v", tt.meta, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestAdapterMeta_RealRegistrations(t *testing.T) {
 	t.Parallel()
@@ -104,7 +193,7 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 			name                   string
 			kind                   string
 			wantCommand            bool
-			wantMCPInjection       registry.MCPInjection
+			wantMCPDialect         registry.MCPDialect
 			wantUsageArrival       registry.UsageArrival
 			wantUsageAttribution   registry.UsageAttribution
 			declaresResumeBlocker  bool
@@ -112,22 +201,24 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 			wantKey                string
 			wantCredentialEnvNames []string
 			wantEffortForwarding   registry.EffortForwarding
+			wantUsageLimit         registry.UsageLimitRecognition
 		}{
 			{
-				name:                   "agent-client-protocol requires command, declares MCP injection translated, declares turn_end/per_model usage, declares no resume blocker, and declares no credential names",
+				name:                   "agent-client-protocol requires command, declares MCP dialect acp_session, declares turn_end/per_model usage, declares no resume blocker, and declares no credential names",
 				kind:                   "agent-client-protocol",
 				wantCommand:            true,
-				wantMCPInjection:       registry.MCPInjectionTranslated,
+				wantMCPDialect:         registry.MCPDialectACPSession,
 				wantUsageArrival:       registry.UsageArrivalTurnEnd,
 				wantUsageAttribution:   registry.UsageAttributionPerModel,
 				wantCredentialEnvNames: nil,
 				wantEffortForwarding:   registry.EffortNotForwarded,
+				wantUsageLimit:         registry.UsageLimitNotRecognized,
 			},
 			{
-				name:                   "claude-code requires command, declares MCP injection supported, declares incremental/per_model usage, declares session_persistence as a resume blocker, and declares its Anthropic credential names",
+				name:                   "claude-code requires command, declares MCP dialect mcp_servers_json_always_load, declares incremental/per_model usage, declares session_persistence as a resume blocker, and declares its Anthropic credential names",
 				kind:                   "claude-code",
 				wantCommand:            true,
-				wantMCPInjection:       registry.MCPInjectionSupported,
+				wantMCPDialect:         registry.MCPDialectMCPServersJSONAlwaysLoad,
 				wantUsageArrival:       registry.UsageArrivalIncremental,
 				wantUsageAttribution:   registry.UsageAttributionPerModel,
 				declaresResumeBlocker:  true,
@@ -135,45 +226,50 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 				wantKey:                "session_persistence",
 				wantCredentialEnvNames: []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"},
 				wantEffortForwarding:   registry.EffortForwarded,
+				wantUsageLimit:         registry.UsageLimitRecognized,
 			},
 			{
-				name:                   "copilot-cli requires command, declares MCP injection supported, declares turn_end/per_model usage, declares no resume blocker, and declares its GitHub-token credential names",
+				name:                   "copilot-cli requires command, declares MCP dialect mcp_servers_json, declares turn_end/per_model usage, declares no resume blocker, and declares its GitHub-token credential names",
 				kind:                   "copilot-cli",
 				wantCommand:            true,
-				wantMCPInjection:       registry.MCPInjectionSupported,
+				wantMCPDialect:         registry.MCPDialectMCPServersJSON,
 				wantUsageArrival:       registry.UsageArrivalTurnEnd,
 				wantUsageAttribution:   registry.UsageAttributionPerModel,
 				wantCredentialEnvNames: []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"},
 				wantEffortForwarding:   registry.EffortForwarded,
+				wantUsageLimit:         registry.UsageLimitNotRecognized,
 			},
 			{
-				name:                   "codex requires command, declares MCP injection translated, declares incremental/per_model usage, declares no resume blocker, and declares no credential names",
+				name:                   "codex requires command, declares MCP dialect mcp_servers_toml, declares incremental/per_model usage, declares no resume blocker, and declares no credential names",
 				kind:                   "codex",
 				wantCommand:            true,
-				wantMCPInjection:       registry.MCPInjectionTranslated,
+				wantMCPDialect:         registry.MCPDialectMCPServersTOML,
 				wantUsageArrival:       registry.UsageArrivalIncremental,
 				wantUsageAttribution:   registry.UsageAttributionPerModel,
 				wantCredentialEnvNames: nil,
 				wantEffortForwarding:   registry.EffortForwarded,
+				wantUsageLimit:         registry.UsageLimitRecognized,
 			},
 			{
-				name:                   "opencode requires command, declares MCP injection translated, declares turn_end/per_model usage, declares no resume blocker, and declares no credential names",
+				name:                   "opencode requires command, declares MCP dialect mcp_member_json, declares turn_end/per_model usage, declares no resume blocker, and declares no credential names",
 				kind:                   "opencode",
 				wantCommand:            true,
-				wantMCPInjection:       registry.MCPInjectionTranslated,
+				wantMCPDialect:         registry.MCPDialectMCPMemberJSON,
 				wantUsageArrival:       registry.UsageArrivalTurnEnd,
 				wantUsageAttribution:   registry.UsageAttributionPerModel,
 				wantCredentialEnvNames: nil,
 				wantEffortForwarding:   registry.EffortForwarded,
+				wantUsageLimit:         registry.UsageLimitNotRecognized,
 			},
 			{
-				name:                   "mock requires nothing, declares MCP injection unsupported, declares incremental/session_total usage, declares no resume blocker, and declares no credential names",
+				name:                   "mock requires nothing, declares MCP dialect none, declares incremental/session_total usage, declares no resume blocker, and declares no credential names",
 				kind:                   "mock",
-				wantMCPInjection:       registry.MCPInjectionUnsupported,
+				wantMCPDialect:         registry.MCPDialectNone,
 				wantUsageArrival:       registry.UsageArrivalIncremental,
 				wantUsageAttribution:   registry.UsageAttributionSessionTotal,
 				wantCredentialEnvNames: nil,
 				wantEffortForwarding:   registry.EffortNotForwarded,
+				wantUsageLimit:         registry.UsageLimitRecognized,
 			},
 		}
 
@@ -184,9 +280,6 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 
 		registered := registry.Agents.Kinds()
 
-		// Completeness in both directions, so a kind added to the blank
-		// imports without an entry (or an entry naming an unregistered
-		// kind) fails by name before any field is compared.
 		for _, kind := range registered {
 			if _, ok := byKind[kind]; !ok {
 				t.Errorf("Agents.Kinds() includes %q, which has no expectation entry in this table", kind)
@@ -210,9 +303,10 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 				if meta.RequiresCommand != tt.wantCommand {
 					t.Errorf("Agents.Meta(%q).RequiresCommand = %v, want %v", tt.kind, meta.RequiresCommand, tt.wantCommand)
 				}
-				if meta.MCPInjection != tt.wantMCPInjection {
-					t.Errorf("Agents.Meta(%q).MCPInjection = %q, want %q", tt.kind, meta.MCPInjection, tt.wantMCPInjection)
+				if meta.MCPDialect != tt.wantMCPDialect {
+					t.Errorf("Agents.Meta(%q).MCPDialect = %q, want %q", tt.kind, meta.MCPDialect, tt.wantMCPDialect)
 				}
+				assertMCPDialectDeclaration(t, tt.kind, meta)
 				if meta.UsageArrival != tt.wantUsageArrival {
 					t.Errorf("Agents.Meta(%q).UsageArrival = %q, want %q", tt.kind, meta.UsageArrival, tt.wantUsageArrival)
 				}
@@ -229,6 +323,13 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 
 				if meta.EffortForwarding != tt.wantEffortForwarding {
 					t.Errorf("Agents.Meta(%q).EffortForwarding = %q, want %q", tt.kind, meta.EffortForwarding, tt.wantEffortForwarding)
+				}
+
+				if meta.UsageLimitRecognition != tt.wantUsageLimit {
+					t.Errorf("Agents.Meta(%q).UsageLimitRecognition = %q, want %q", tt.kind, meta.UsageLimitRecognition, tt.wantUsageLimit)
+				}
+				if problem := usageLimitDeclarationProblem(meta); problem != "" {
+					t.Errorf("Agents.Meta(%q) usage-limit declaration is invalid: %s", tt.kind, problem)
 				}
 
 				if meta.Deprecation != nil {
@@ -293,9 +394,6 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 	})
 }
 
-// TestAgentConfigFields_ShapeUnchanged pins registry.AgentConfigFields to
-// exactly Kind and Passthrough by reflection, so a silent widening fails
-// here rather than only in a diff.
 func TestAgentConfigFields_ShapeUnchanged(t *testing.T) {
 	t.Parallel()
 

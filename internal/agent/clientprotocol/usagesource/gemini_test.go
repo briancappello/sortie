@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func apiResponse(sessionID, model string, input, output, cached, thoughts, tool, total int64) string {
@@ -93,8 +95,8 @@ func TestGeminiCounterMappingMatchesTheMeasuredSequence(t *testing.T) {
 	reader := newArmedReader(t, "sess-a")
 	writeOutfile(t, reader,
 		apiResponse("sess-a", "gemini-3.5-flash", 11835, 1, 0, 170, 0, 12006),
-		apiResponse("sess-a", "gemini-3.5-flash", 11864, 20, 8118, 241, 0, 12125),
-		apiResponse("sess-a", "gemini-3.5-flash", 12143, 4, 8113, 41, 0, 12188),
+		apiResponse("sess-a", "gemini-3.5-pro", 11864, 20, 8118, 241, 0, 12125),
+		apiResponse("sess-a", "", 12143, 4, 8113, 41, 0, 12188),
 	)
 
 	// The total 36319 lands only if reasoning goes into output and the cache
@@ -119,8 +121,16 @@ func TestGeminiCounterMappingMatchesTheMeasuredSequence(t *testing.T) {
 	if recovered.Run.CacheReadTokens > recovered.Run.InputTokens {
 		t.Error("the cache read exceeds input, so it was not folded in as the subset it is")
 	}
-	if recovered.Model != "gemini-3.5-flash" {
-		t.Errorf("Drain() model = %q, want the model of record", recovered.Model)
+	if recovered.Model != "gemini-3.5-pro" {
+		t.Errorf("Drain() model = %q, want the last model named", recovered.Model)
+	}
+
+	wantByModel := map[string]domain.TokenUsage{
+		"gemini-3.5-flash": {InputTokens: 11835, OutputTokens: 171, TotalTokens: 12006},
+		"gemini-3.5-pro":   {InputTokens: 11864, OutputTokens: 261, TotalTokens: 12125, CacheReadTokens: 8118},
+	}
+	if !maps.Equal(recovered.ByModel, wantByModel) {
+		t.Errorf("Drain() per-model = %+v, want %+v: the record naming no model adds to no entry", recovered.ByModel, wantByModel)
 	}
 }
 
@@ -385,11 +395,7 @@ func TestGeminiCloseIsNotHeldBehindADrainThatIsWaiting(t *testing.T) {
 		reader.Close()
 	}()
 
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Error("Close() during an in-flight Drain() = blocked, want it to return")
-	}
+	waittest.Receive(t, closed, "Close() during an in-flight Drain() to return")
 }
 
 // steppingClock advances an hour per reading, so a drain's deadline has already
@@ -411,6 +417,20 @@ func slowClock() func() time.Time {
 	return func() time.Time {
 		calls++
 		return at.Add(time.Duration(calls-1) * time.Second)
+	}
+}
+
+func slowClockWritingAfterFirstPoll(t *testing.T, reader *geminiReader, tail string) func() time.Time {
+	t.Helper()
+
+	clock := slowClock()
+	reads := 0
+	return func() time.Time {
+		reads++
+		if reads == 2 {
+			writeOutfile(t, reader, tail)
+		}
+		return clock()
 	}
 }
 
@@ -674,23 +694,10 @@ func TestGeminiWaitsForTheTailOfAMultiRequestTurn(t *testing.T) {
 	reader.dir = dir
 	reader.home = filepath.Join(dir, "home")
 	reader.outfile = filepath.Join(dir, "telemetry.json")
-	reader.now = slowClock()
+	reader.now = slowClockWritingAfterFirstPoll(t, reader, apiResponse("sess-a", "model-x", 600, 5, 0, 0, 0, 605))
 	reader.Open("sess-a")
 
 	writeOutfile(t, reader, apiResponse("sess-a", "model-x", 400, 5, 0, 0, 0, 405))
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		time.Sleep(250 * time.Millisecond)
-		file, err := os.OpenFile(reader.outfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return
-		}
-		defer file.Close()                                                       //nolint:errcheck // test handle
-		file.WriteString(apiResponse("sess-a", "model-x", 600, 5, 0, 0, 0, 605)) //nolint:errcheck,gosec // best effort
-	}()
-	t.Cleanup(func() { <-done })
 
 	recovered, source, found := drain(t, reader, 1000)
 	if !found {
@@ -713,25 +720,12 @@ func TestGeminiARecordSplitAcrossPollsIsCountedOnce(t *testing.T) {
 	reader.dir = dir
 	reader.home = filepath.Join(dir, "home")
 	reader.outfile = filepath.Join(dir, "telemetry.json")
-	reader.now = slowClock()
-	reader.Open("sess-a")
-
 	full := apiResponse("sess-a", "model-x", 400, 5, 0, 0, 0, 405)
 	split := len(full) / 2
-	writeOutfile(t, reader, full[:split])
+	reader.now = slowClockWritingAfterFirstPoll(t, reader, full[split:])
+	reader.Open("sess-a")
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		time.Sleep(250 * time.Millisecond)
-		file, err := os.OpenFile(reader.outfile, os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return
-		}
-		defer file.Close()             //nolint:errcheck // test handle
-		file.WriteString(full[split:]) //nolint:errcheck,gosec // best effort
-	}()
-	t.Cleanup(func() { <-done })
+	writeOutfile(t, reader, full[:split])
 
 	recovered, source, found := drain(t, reader, 405)
 	if !found {

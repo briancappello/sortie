@@ -10,7 +10,7 @@ This kind names no default runtime. The operator's `agent.command` picks the bin
 
 The generated wire types in `wire_gen.go` come from a pinned release of the protocol's stable schema. The tag and commit live in `schemagen/generate.go` and in `PROVENANCE.txt` beside the schema copy under `testdata/`. Changing them is a pin move, not a routine edit.
 
-The adapter deliberately ignores some members of the pinned schema. It reports the tool kind instead of the optional tool `name` on a tool call. It does not advertise the client capabilities for notice and compaction session updates, and does not read those updates.
+The adapter deliberately ignores some members of the pinned schema. It names a tool call by its tool kind instead of the optional tool `name`, except that the kinds `other` and `switch_mode` name none. It does not advertise the client capabilities for notice and compaction session updates, and does not read those updates.
 
 A scheduled check reports when the publisher's stable schema releases differ from the pin. It never moves the pin, and it closes its own report on the first run that finds no difference.
 
@@ -39,9 +39,13 @@ A local launch needs up to three command-line switches: one that puts the runtim
 
 Some runtimes send many notifications under their own vendor method prefix. They are notifications, not requests, so the client answers none of them and depends on none of them.
 
+## Agent message chunks
+
+A runtime streams one reply as many `agent_message_chunk` updates. Chunks of one message share a `messageId`, and a new ID starts a new message. Each text chunk is reported as a notification with an empty message, which keeps the stall timer fresh without replacing the run's last agent message. The text accumulates, capped at 500 runes, and the completed message is reported once, when a chunk with another ID, a user message chunk, or any update reported as an event arrives, or when the turn or the stream ends. Updates that are only logged do not end a message, and neither does a `usage_update` that reports usage windows. The completed message carries the time its last chunk arrived, so a reply a session load replays is not dated into the next turn. A non-text chunk belongs to its message and is reported as its own event.
+
 ## Usage reporting
 
-The kind declares `turn_end` arrival and `per_model` attribution; a remote launch resolves to `none`/`none`. The figure does not come from the wire. A `usage_update` session update is only logged at debug level. The `_meta.quota` block on a prompt result is a presence signal and a lower bound, never the accounting figure.
+The kind declares `turn_end` arrival and `per_model` attribution; a remote launch resolves to `none`/`none`. The figure does not come from the wire. A `usage_update` session update stays out of every token figure and is otherwise logged at debug level. Under a runtime declaration selected from the handshake name, its `_meta` reports usage windows, without ending the agent message. Claude Agent ACP forwards the SDK's `rate_limit_info` unchanged in `_claude/rateLimit`; a report without `rateLimitType` updates the kind's one `Usage limit` window, and the bridge drops a `rate_limit_event` until the turn has seen token usage, so a refusal on a turn's first request reports no window. The `_meta.quota` block on a prompt result is a presence signal and a lower bound, never the accounting figure.
 
 The figure comes from a measurement source outside the protocol. Each source registers itself into `usagesource` from an `init` function, so adding one is additive. Before the first start, every registered source sees the launch target, and a source that arms something is carried only when the command line names its runtime. The handshake confirms at most one carried source, the first whose `Recognize` accepts the runtime's reported name, and sets `tokenCounts` to `ours`.
 
@@ -49,11 +53,15 @@ If the start carried a source the handshake does not confirm, or lacked the one 
 
 A source accepts or refuses a record by whether it has every field the source's mapping needs, never by the runtime's version. The first drain that yields no record lowers `tokenCounts` to `gap` for the rest of the session. A session with no applicable source, which includes every remote launch, is unmeasured, and the token ceiling is inactive.
 
-The source for `gemini-cli`, under `usagesource`, reads the runtime's OpenTelemetry output first and its session journal as a backstop. It maps `input_token_count` to input (the cache read is already inside it), `output_token_count` plus `thoughts_token_count` to output, and `cached_content_token_count` to the cache-read subset. It discards the runtime's own total and `tool_token_count`.
+The source for `gemini-cli`, under `usagesource`, reads the runtime's OpenTelemetry output first and its session journal as a backstop. It maps `input_token_count` to input (the cache read is already inside it), `output_token_count` plus `thoughts_token_count` to output, and `cached_content_token_count` to the cache-read subset. It discards the runtime's own total and `tool_token_count`. The figure carries a per-model split by each record's or kept journal message's model.
 
 The wait for a record is bounded and ends early once the record reaches the wire's lower bound. The telemetry is batched behind a five-second tick that no configuration shortens. A turn that reached the model but ended without its own prompt result still gets one bounded wait, with no lower bound to end it early, and what it recovers does not change the turn's disposition.
 
 A turn that made a model request no figure accounts for is recorded as "spend occurred, amount partly unknown". The issue's summed total then becomes a lower bound, which is different from a measured zero. Every turn of a remote launch that reports spend on the wire ends in this state, because nothing reads the far host's files.
+
+A runtime declaration can also pull its usage windows when a turn ends, for a runtime whose limits the wire never carries. When the prompt response arrives and the turn was not cancelled, the pump starts the pull in its own goroutine, publishes the windows ahead of the turn's terminal event, and finalizes the turn once the pull has answered; the pull's bound caps the wait. A credential verification session and a cancelled turn run no pull. The pump sends the declaration's request without naming the runtime. The declaration reaches the connection, the launch environment, and the runtime's home files only through the pull runtime the transport hands it, and the transport reads a home file, and runs a read-only command, on the far host for a remote launch. An error on the pull is logged at debug level and drops that turn's windows, and a declaration that finds its source unsupported ends the session's pulls.
+
+A declaration is selected by the name the handshake reports. When that name matches no declaration, the launch command is the fallback: a command line that names the runtime selects its declaration, so a runtime whose newer engine sends no `agentInfo` still pulls. `docs/kiro-adapter-notes.md` and `docs/gemini-adapter-notes.md` describe the two pulls.
 
 ## Session close and delete
 
@@ -65,7 +73,7 @@ When a handshake advertises `sessionCapabilities.delete`, a verification session
 
 The `initialize` wait during credential verification is the larger of `agent.read_timeout_ms` and `agentcore.CredentialExchangeBound`, because a runtime may talk to its own backend before it answers. `kiro-cli` with an API key takes far longer than the 5-second default read timeout to answer `initialize`; with a stored device login it answers in well under a second. With the longer wait, a refused key fails its first prompt with a `-32603` error whose `data` names the invalid bearer token.
 
-A `-32000` response to `initialize` or `session/new` means the runtime refused its credential, on a verification session and a working one alike. A runtime that exits before it answers any startup request gets the shared early-exit report, not a credential diagnosis. A connection lost while the runtime stays alive past the observation grace keeps `port_exit`'s transport message. A failed `session/load` or `session/resume` still falls back to a fresh session and is never read as a credential refusal.
+A `-32000` response to `initialize`, `session/new`, or `session/prompt` means the runtime refused its credential, on a verification session and a working one alike. A runtime that exits before it answers any startup request gets the shared early-exit report, not a credential diagnosis. A connection lost while the runtime stays alive past the observation grace keeps `port_exit`'s transport message. A failed `session/load` or `session/resume` still falls back to a fresh session and is never read as a credential refusal.
 
 ## Session load spacing
 
@@ -85,7 +93,11 @@ Limits:
 
 ## What a delivered tool server needs to be callable
 
-Delivery is not the problem: `session/new` carries the declaration, and the runtime launches the server and lists its tools. But a runtime that asks the client for consent before a tool call gets a refusal, and the tool is not called. The protocol's stdio server declaration has no trust or approval field, so Sortie cannot mark a server as pre-approved on the wire. The only lever is the runtime's own configuration, reached through `agent.command`: an approval mode that does not ask, or a rule that pre-approves the tools of Sortie's server.
+A runtime that advertises `mcpCapabilities.http` receives Sortie's tool server as an HTTP server hosted on the orchestrator host, on every launch. The entry names a loopback address and carries a per-session bearer as an `Authorization` header inside the request, which is the only place the protocol lets a header value travel. On a remote launch the address is the remote end of a reverse SSH forward. A runtime without HTTP support receives the stdio entries on a local launch and runs without Sortie's tools on a remote launch, with the gap declared in the opening notice.
+
+`copilot --acp` rejects every stdio entry a client sends, with no error and no notification, so an operator stdio server never reaches it, and the session is told nothing. It accepts HTTP entries. `kiro-cli` at its debug log level writes the `Authorization` value to its log; the bearer is useless once its session ends.
+
+Delivery is not the problem: `session/new` carries the declaration, and the runtime reaches the server and lists its tools. But a runtime that asks the client for consent before a tool call gets a refusal, and the tool is not called. The protocol's server declaration has no trust or approval field, so Sortie cannot mark a server as pre-approved on the wire. The only lever is the runtime's own configuration, reached through `agent.command`: an approval mode that does not ask, or a rule that pre-approves the tools of Sortie's server.
 
 Both `gemini` and `kiro-cli` behave this way: under a posture that asks, the declared server is delivered and its tool is never called. The other runtimes are unmeasured on this point.
 

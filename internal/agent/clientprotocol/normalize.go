@@ -10,20 +10,11 @@ import (
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
-// reasoningBlockMessage and planUpdateMessage are the compile-time
-// constant messages the normalization table assigns to a thought chunk,
-// a plan update, and a message chunk carrying no text; none of them
-// carries agent-produced text.
-const (
-	reasoningBlockMessage = "reasoning block"
-
-	// nonTextChunkMessage stands in for a message chunk whose content
-	// block is not text. The chunk is work the agent did, so the turn
-	// still observes work, but there is no text to show an operator and
-	// an empty notification would read as the agent having said nothing.
-	nonTextChunkMessage = "agent sent a message chunk this client does not render"
-	planUpdateMessage   = "plan update"
-)
+// nonTextChunkMessage stands in for a message chunk whose content block is
+// not text. The chunk is work the agent did, so the turn still observes
+// work, but there is no text to show an operator and an empty notification
+// would read as the agent having said nothing.
+const nonTextChunkMessage = "agent sent a message chunk this client does not render"
 
 // messageTruncateLimit bounds every agent-produced message this adapter
 // emits, matching the shared per-adapter convention.
@@ -32,8 +23,11 @@ const messageTruncateLimit = 500
 // normalizedUpdate is what applySessionUpdate returns for one recognized
 // session/update variant: the event to publish, if any.
 type normalizedUpdate struct {
-	event    domain.AgentEvent
-	hasEvent bool
+	event        domain.AgentEvent
+	hasEvent     bool
+	messageChunk bool
+	messageID    *messageId
+	messageText  string
 }
 
 // applySessionUpdate normalizes one decoded session/update variant,
@@ -48,22 +42,26 @@ func applySessionUpdate(tracker *agentcore.ToolTracker, ev sessionUpdateEvent) n
 		text := chunkText(ev.chunk)
 		if text == "" {
 			return normalizedUpdate{
-				event:    domain.AgentEvent{Type: domain.EventMalformed, Timestamp: now, Message: nonTextChunkMessage},
-				hasEvent: true,
+				event:        domain.AgentEvent{Type: domain.EventMalformed, Timestamp: now, Message: nonTextChunkMessage},
+				hasEvent:     true,
+				messageChunk: true,
+				messageID:    ev.chunk.MessageID,
 			}
 		}
 		return normalizedUpdate{
 			event: domain.AgentEvent{
 				Type:      domain.EventNotification,
 				Timestamp: now,
-				Message:   redact.Truncate(text, messageTruncateLimit),
 			},
-			hasEvent: true,
+			hasEvent:     true,
+			messageChunk: true,
+			messageID:    ev.chunk.MessageID,
+			messageText:  text,
 		}
 
 	case updateAgentThoughtChunk:
 		return normalizedUpdate{
-			event:    domain.AgentEvent{Type: domain.EventOtherMessage, Timestamp: now, Message: reasoningBlockMessage},
+			event:    domain.AgentEvent{Type: domain.EventOtherMessage, Timestamp: now},
 			hasEvent: true,
 		}
 
@@ -74,7 +72,7 @@ func applySessionUpdate(tracker *agentcore.ToolTracker, ev sessionUpdateEvent) n
 		return normalizedUpdate{}
 
 	case updateToolCall:
-		tracker.Begin(string(ev.toolCallBegin.ToolCallID), normalizeToolKind(ev.toolCallBegin.Kind))
+		tracker.Begin(string(ev.toolCallBegin.ToolCallID), toolCallOf(ev.toolCallBegin))
 		return normalizedUpdate{}
 
 	case updateToolCallUpdate:
@@ -83,7 +81,7 @@ func applySessionUpdate(tracker *agentcore.ToolTracker, ev sessionUpdateEvent) n
 		}
 		switch *ev.toolCallUpdate.Status {
 		case toolCallStatusCompleted, toolCallStatusFailed:
-			name, durationMS, ok := tracker.End(string(ev.toolCallUpdate.ToolCallID))
+			call, durationMS, ok := tracker.End(string(ev.toolCallUpdate.ToolCallID))
 			if !ok {
 				return normalizedUpdate{}
 			}
@@ -95,7 +93,9 @@ func applySessionUpdate(tracker *agentcore.ToolTracker, ev sessionUpdateEvent) n
 				event: domain.AgentEvent{
 					Type:           domain.EventToolResult,
 					Timestamp:      now,
-					ToolName:       name,
+					ToolName:       call.Name,
+					ToolKind:       call.Kind,
+					ToolArgument:   call.Argument,
 					ToolDurationMS: durationMS,
 					ToolError:      *ev.toolCallUpdate.Status == toolCallStatusFailed,
 					Message:        redact.Truncate(title, messageTruncateLimit),
@@ -113,7 +113,7 @@ func applySessionUpdate(tracker *agentcore.ToolTracker, ev sessionUpdateEvent) n
 
 	case updatePlan:
 		return normalizedUpdate{
-			event:    domain.AgentEvent{Type: domain.EventOtherMessage, Timestamp: now, Message: planUpdateMessage},
+			event:    domain.AgentEvent{Type: domain.EventOtherMessage, Timestamp: now},
 			hasEvent: true,
 		}
 
@@ -142,9 +142,8 @@ func chunkText(chunk contentChunk) string {
 	return text.Text
 }
 
-// normalizeToolKind maps a tool call's declared kind to the ten-value
-// closed set the orchestrator's tool-call metric uses as a label,
-// substituting "other" for an absent or unrecognized value.
+// normalizeToolKind maps a tool call's declared kind to the closed set of
+// ACP kinds, substituting "other" for an absent or unrecognized value.
 func normalizeToolKind(kind *toolKind) string {
 	if kind == nil {
 		return string(toolKindOther)
@@ -156,6 +155,36 @@ func normalizeToolKind(kind *toolKind) string {
 	default:
 		return string(toolKindOther)
 	}
+}
+
+// toolCallOf maps a tool_call begin payload to a tool call. The call is named
+// by its normalized ACP kind, except other and switch_mode, which name none.
+// The main argument is the first location's path for a file kind and the
+// title for execute, because the protocol defines no command member.
+func toolCallOf(begin toolCall) agentcore.ToolCall {
+	kind := normalizeToolKind(begin.Kind)
+	call := agentcore.ToolCall{Name: kind}
+	switch toolKind(kind) {
+	case toolKindOther, toolKindSwitchMode:
+		call.Name = ""
+	case toolKindRead:
+		call.Kind = domain.ToolKindRead
+		call.Argument = firstLocationPath(begin.Locations)
+	case toolKindEdit, toolKindDelete, toolKindMove:
+		call.Kind = domain.ToolKindEdit
+		call.Argument = firstLocationPath(begin.Locations)
+	case toolKindExecute:
+		call.Kind = domain.ToolKindShell
+		call.Argument = begin.Title
+	}
+	return call
+}
+
+func firstLocationPath(locations *[]toolCallLocation) string {
+	if locations == nil || len(*locations) == 0 {
+		return ""
+	}
+	return (*locations)[0].Path
 }
 
 // stopReasonEvidence maps promptResponse.StopReason to the shared turn

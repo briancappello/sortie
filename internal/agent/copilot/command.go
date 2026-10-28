@@ -80,6 +80,10 @@ func parsePassthroughConfig(config map[string]any) (passthroughConfig, *typeutil
 	}, nil
 }
 
+// verificationAvailableTool is a documented read-only tool; the runtime offers
+// no way to hide every tool.
+const verificationAvailableTool = "view"
+
 // buildArgs constructs the CLI argument slice for a Copilot CLI
 // invocation. The arguments are passed directly to exec.Command,
 // avoiding shell interpolation.
@@ -130,11 +134,15 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 	if pt.DeniedTools != "" {
 		args = append(args, "--deny-tool", pt.DeniedTools)
 	}
-	if pt.AvailableTools != "" {
-		args = append(args, "--available-tools", pt.AvailableTools)
-	}
-	if pt.ExcludedTools != "" {
-		args = append(args, "--excluded-tools", pt.ExcludedTools)
+	if state.reducedVerificationContext {
+		args = append(args, "--available-tools", verificationAvailableTool)
+	} else {
+		if pt.AvailableTools != "" {
+			args = append(args, "--available-tools", pt.AvailableTools)
+		}
+		if pt.ExcludedTools != "" {
+			args = append(args, "--excluded-tools", pt.ExcludedTools)
+		}
 	}
 	if state.credentialVerification {
 		args = append(args, "--disable-builtin-mcps")
@@ -143,14 +151,16 @@ func buildArgs(state *sessionState, turn int, prompt string, pt passthroughConfi
 			// The runtime opens the file where it runs, so it gets the
 			// path at which it sees the file there.
 			args = append(args, "--additional-mcp-config", "@"+state.target.GuestPath(state.mcpConfigPath))
-		} else if v := formatMCPConfigValue(pt.MCPConfig); v != "" {
-			args = append(args, "--additional-mcp-config", v)
+		} else if !state.target.Remote() {
+			if v := formatMCPConfigValue(pt.MCPConfig); v != "" {
+				args = append(args, "--additional-mcp-config", v)
+			}
 		}
 		if pt.DisableBuiltinMCPs {
 			args = append(args, "--disable-builtin-mcps")
 		}
 	}
-	if pt.NoCustomInstructions {
+	if pt.NoCustomInstructions || state.reducedVerificationContext {
 		args = append(args, "--no-custom-instructions")
 	}
 	if pt.Experimental {

@@ -8,6 +8,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
@@ -86,9 +89,6 @@ func TestNewState(t *testing.T) {
 			}
 			if s.AgentTotals != tt.totals {
 				t.Errorf("AgentTotals = %+v, want %+v", s.AgentTotals, tt.totals)
-			}
-			if s.AgentRateLimits != nil {
-				t.Errorf("AgentRateLimits = %v, want nil", s.AgentRateLimits)
 			}
 
 			if s.MaxConcurrentByState == nil {
@@ -268,8 +268,11 @@ func TestRuntimeSnapshot(t *testing.T) {
 		if result.AgentTotals.SecondsRunning != 42.5 {
 			t.Errorf("AgentTotals.SecondsRunning = %f, want 42.5", result.AgentTotals.SecondsRunning)
 		}
-		if result.RateLimits != nil {
-			t.Errorf("RateLimits = %v, want nil", result.RateLimits)
+		if result.UsageWindows == nil {
+			t.Error("UsageWindows = nil, want non-nil empty map")
+		}
+		if len(result.UsageWindows) != 0 {
+			t.Errorf("len(UsageWindows) = %d, want 0", len(result.UsageWindows))
 		}
 	})
 
@@ -433,45 +436,33 @@ func TestRuntimeSnapshot(t *testing.T) {
 		}
 	})
 
-	t.Run("rate limits present with isolation", func(t *testing.T) {
+	t.Run("kind with every window reset", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(5000, 10, 0, nil, AgentTotals{})
-		origData := map[string]any{
-			"requests_remaining": 42,
-			"reset_at":           "2026-03-24T13:00:00Z",
-		}
-		state.AgentRateLimits = &RateLimitSnapshot{
-			Data:       origData,
-			ReceivedAt: fixedNow,
+		older := fixedNow.Add(-3 * time.Hour)
+		newest := fixedNow.Add(-time.Hour)
+		state.UsageWindows = map[string][]domain.UsageWindow{
+			"claude-code": {
+				{Key: "five_hour", Label: "5-hour limit", ResetsAt: fixedNow.Add(-30 * time.Minute), ReportedAt: older},
+				{Key: "seven_day", Label: "Weekly limit", ResetsAt: fixedNow, ReportedAt: newest},
+			},
 		}
 
 		result := RuntimeSnapshot(state, fixedNow)
 
-		if result.RateLimits == nil {
-			t.Fatal("RateLimits = nil, want non-nil")
+		got, ok := result.UsageWindows["claude-code"]
+		if !ok {
+			t.Fatal("UsageWindows[claude-code] missing, want the kind served after all its windows reset")
 		}
-		if got, ok := result.RateLimits["requests_remaining"]; !ok || got != 42 {
-			t.Errorf("RateLimits[requests_remaining] = %v, want 42", got)
+		if got.Windows == nil {
+			t.Error("Windows = nil, want non-nil empty slice")
 		}
-		if got, ok := result.RateLimits["reset_at"]; !ok || got != "2026-03-24T13:00:00Z" {
-			t.Errorf("RateLimits[reset_at] = %v, want %q", got, "2026-03-24T13:00:00Z")
+		if len(got.Windows) != 0 {
+			t.Errorf("len(Windows) = %d, want 0 (windows reset at or before now are not served)", len(got.Windows))
 		}
-
-		origData["injected_key"] = "should not appear"
-		if _, leaked := result.RateLimits["injected_key"]; leaked {
-			t.Error("RateLimits contains injected_key after original mutation — shallow copy isolation failed")
-		}
-	})
-
-	t.Run("rate limits nil", func(t *testing.T) {
-		t.Parallel()
-
-		state := NewState(5000, 10, 0, nil, AgentTotals{})
-		result := RuntimeSnapshot(state, fixedNow)
-
-		if result.RateLimits != nil {
-			t.Errorf("RateLimits = %v, want nil", result.RateLimits)
+		if !got.ReportedAt.Equal(newest) {
+			t.Errorf("ReportedAt = %v, want %v (newest report of every held window)", got.ReportedAt, newest)
 		}
 	})
 
@@ -984,6 +975,270 @@ func TestRuntimeSnapshot_ConfiguredSettingsBesideTheReportedModel(t *testing.T) 
 	if got := result.Running[0]; got.RuleName != "cheap" || got.ConfiguredModel != "configured-model" || got.ConfiguredEffort != "low" || got.ModelName != "reported-model" {
 		t.Errorf("snapshot rule, configured model, configured effort, model_name = %q, %q, %q, %q, want %q, %q, %q, %q",
 			got.RuleName, got.ConfiguredModel, got.ConfiguredEffort, got.ModelName, "cheap", "configured-model", "low", "reported-model")
+	}
+}
+
+func TestRuntimeSnapshot_StagePosition(t *testing.T) {
+	t.Parallel()
+
+	chains := [][]string{{"specify", "implement"}, {"triage", "implement"}}
+	tests := []struct {
+		name     string
+		chains   [][]string
+		rule     string
+		previous string
+		hops     int
+		want     *SnapshotStagePosition
+	}{
+		{"no chains configured", nil, "specify", "", 0, nil},
+		{"first stage of the first chain", chains, "specify", "", 0,
+			&SnapshotStagePosition{Chain: chains[0], Current: "specify", HopCeiling: 4}},
+		{"previous rule selects the chain that lists it before the rule", chains, "implement", "triage", 2,
+			&SnapshotStagePosition{Chain: chains[1], Current: "implement", HopCount: 2, HopCeiling: 4}},
+		{"previous rule on no chain falls back to the first chain holding the rule", chains, "implement", "gone", 1,
+			&SnapshotStagePosition{Chain: chains[0], Current: "implement", HopCount: 1, HopCeiling: 4}},
+		{"rule on no chain", chains, "review", "", 0, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := NewState(5000, 4, 0, nil, AgentTotals{})
+			state.StageChains, state.HopCeiling = tt.chains, 4
+			lineage := StageLineage{PreviousRule: tt.previous}
+			agent := RuleAgent{AgentKind: "claude-code", ConfiguredModel: "sonnet"}
+			state.RuleAgents = map[string]RuleAgent{tt.rule: agent}
+			state.Running["run"] = &RunningEntry{Issue: domain.Issue{ID: "run"}, RuleName: tt.rule, StageLineage: lineage}
+			state.RetryAttempts["retry"] = &RetryEntry{IssueID: "retry", RuleName: tt.rule, StageLineage: lineage}
+			state.BudgetExhausted["budget"] = &BudgetExhaustedEntry{RuleName: tt.rule, StageLineage: lineage}
+			state.Parked["parked"] = &ParkedEntry{RuleName: tt.rule, StageLineage: lineage}
+			state.PendingReactions[ReactionKey("pending", ReactionKindCI)] = &PendingReaction{IssueID: "pending", Kind: ReactionKindCI, RuleName: tt.rule, StageLineage: lineage}
+			state.StageHops["hop"] = &StageHopEntry{SourceRule: tt.previous, TargetRule: tt.rule, Count: tt.hops}
+			if tt.hops > 0 {
+				for _, id := range []string{"run", "retry", "budget", "parked", "pending"} {
+					state.StageHops[id] = &StageHopEntry{Count: tt.hops}
+				}
+			}
+
+			result := RuntimeSnapshot(state, time.Time{})
+
+			hopIndex := slices.IndexFunc(result.BetweenStages, func(row SnapshotStageHop) bool { return row.IssueID == "hop" })
+			if len(result.Running) != 1 || len(result.Retrying) != 1 || len(result.BudgetExhausted) != 1 || len(result.Parked) != 1 || len(result.PendingReactions) != 1 || hopIndex < 0 {
+				t.Fatalf("RuntimeSnapshot rows = %d running, %d retrying, %d budget, %d parked, %d pending, between stages %+v, want 1 of each and the hop row",
+					len(result.Running), len(result.Retrying), len(result.BudgetExhausted), len(result.Parked), len(result.PendingReactions), result.BetweenStages)
+			}
+			hop := result.BetweenStages[hopIndex]
+			if hop.RuleName != tt.rule || hop.AgentKind != agent.AgentKind || hop.ConfiguredModel != agent.ConfiguredModel {
+				t.Errorf("BetweenStages hop rule, agent kind, model = %q, %q, %q, want %q, %q, %q",
+					hop.RuleName, hop.AgentKind, hop.ConfiguredModel, tt.rule, agent.AgentKind, agent.ConfiguredModel)
+			}
+			for kind, got := range map[string]*SnapshotStagePosition{
+				"Running":          result.Running[0].StagePosition,
+				"Retrying":         result.Retrying[0].StagePosition,
+				"BudgetExhausted":  result.BudgetExhausted[0].StagePosition,
+				"Parked":           result.Parked[0].StagePosition,
+				"PendingReactions": result.PendingReactions[0].StagePosition,
+				"BetweenStages":    hop.StagePosition,
+			} {
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("%s[0].StagePosition (chains %v, rule %q, previous %q) = %+v, want %+v", kind, tt.chains, tt.rule, tt.previous, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordIssueRead(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	steps := []struct {
+		name      string
+		startedAt time.Time
+		read      string
+		want      string
+	}{
+		{"first read after dispatch", now, "ai:in-progress", "ai:in-progress"},
+		{"equal start is refused", now, "ai:done", "ai:in-progress"},
+		{"older start is refused", now.Add(-time.Second), "ai:done", "ai:in-progress"},
+	}
+	entry := &RunningEntry{Issue: domain.Issue{State: "ai:ready", Labels: []string{"ai:ready"}}}
+
+	for _, step := range steps {
+		recordIssueRead(entry, domain.IssueStateAndLabels{State: step.read, Labels: []string{step.read}}, step.startedAt)
+
+		if entry.Issue.State != step.want || !slices.Equal(entry.Issue.Labels, []string{step.want}) {
+			t.Errorf("%s: recordIssueRead state, labels = %q, %q, want %q for both", step.name, entry.Issue.State, entry.Issue.Labels, step.want)
+		}
+	}
+}
+
+func TestRuntimeSnapshot_PendingReactionWatchEndsAt(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { v := created.Add(d); return &v }
+	windows := map[string]time.Duration{ReactionKindCI: 24 * time.Hour, ReactionKindReview: 30 * time.Minute}
+	tests := []struct {
+		name  string
+		entry PendingReaction
+		want  *time.Time
+	}{
+		{"ci counts from the recorded head", PendingReaction{Kind: ReactionKindCI, HeadRecordedAt: created.Add(10 * time.Minute)}, at(24*time.Hour + 10*time.Minute)},
+		{"ci without a recorded head counts from creation", PendingReaction{Kind: ReactionKindCI}, at(24 * time.Hour)},
+		{"review counts from the restart", PendingReaction{Kind: ReactionKindReview, WatchRestartedAt: created.Add(20 * time.Minute)}, at(50 * time.Minute)},
+		{"kind without a window", PendingReaction{Kind: ReactionKindMergeCompletion}, nil},
+		{"review awaiting approval has no end", PendingReaction{Kind: ReactionKindReview, LastCheck: &ReactionCheck{Comments: &CommentCheck{AwaitingApproval: true}}}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := NewState(5000, 4, 0, nil, AgentTotals{})
+			state.ReactionWatchWindows = windows
+			entry := tt.entry
+			entry.IssueID, entry.CreatedAt = "ISS-1", created
+			state.PendingReactions[ReactionKey(entry.IssueID, entry.Kind)] = &entry
+
+			rows := RuntimeSnapshot(state, created).PendingReactions
+
+			if len(rows) != 1 {
+				t.Fatalf("len(PendingReactions) = %d, want 1", len(rows))
+			}
+			got := rows[0].WatchEndsAt
+			if (got == nil) != (tt.want == nil) || got != nil && !got.Equal(*tt.want) {
+				t.Errorf("PendingReactions[0].WatchEndsAt for kind %q = %v, want %v", entry.Kind, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeSnapshot_MasksRegisteredValueInIssueIdentity(t *testing.T) {
+	t.Parallel()
+
+	value := eventTestSecret(t)
+	redact.Add("test.state issue identity", value)
+	now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	state := NewState(5000, 4, 0, nil, AgentTotals{})
+	state.Running["ISS-1"] = &RunningEntry{
+		Issue: domain.Issue{
+			ID: "ISS-1", Title: "rotate " + value, Labels: []string{"ops", "leak-" + value},
+			IssueType: "type-" + value, State: "state-" + value,
+		},
+		Continuation: ContinuationTarget{PRNumber: 7, Owner: "acme", Repo: "repo-" + value, Attempt: 1},
+	}
+	state.RetryAttempts["ISS-2"] = &RetryEntry{
+		IssueID: "ISS-2",
+		IssueIdentity: IssueIdentity{
+			Title: "rotate " + value, IssueType: "type-" + value,
+			Labels: []string{"ops", "leak-" + value}, State: "state-" + value,
+		},
+	}
+	state.BudgetExhausted["ISS-5"] = &BudgetExhaustedEntry{
+		Identifier: "PROJ-5", IssueIdentity: IssueIdentity{State: "state-" + value},
+	}
+	state.Parked["ISS-3"] = &ParkedEntry{
+		Identifier: "PROJ-3", IssueIdentity: IssueIdentity{Title: "rotate " + value, IssueType: "type-" + value, Labels: []string{"ops", "leak-" + value}},
+	}
+	state.StageHops["ISS-6"] = &StageHopEntry{
+		Identifier: "PROJ-6",
+		IssueIdentity: IssueIdentity{
+			Title: "rotate " + value, URL: "https://forge.example.com/" + value,
+			IssueType: "type-" + value, Labels: []string{"ops", "leak-" + value}, State: "state-" + value,
+		},
+	}
+	state.PendingReactions[ReactionKey("ISS-4", ReactionKindCI)] = &PendingReaction{
+		IssueID:    "ISS-4",
+		Identifier: "PROJ-4",
+		IssueIdentity: IssueIdentity{
+			IssueType: "type-" + value, Labels: []string{"ops", "leak-" + value}, State: "state-" + value,
+		},
+		Kind:           ReactionKindCI,
+		PullRequestURL: "https://forge.example.com/" + value,
+		KindData:       &CIReactionData{PRNumber: 7, Owner: "acme", Repo: "widgets", Branch: "feature/" + value},
+		LastCheck:      &ReactionCheck{CI: &CICheck{Status: "failing", FailingChecks: []string{"build-" + value}, Failing: 1}},
+	}
+
+	result := RuntimeSnapshot(state, now)
+
+	if len(result.Running) != 1 || len(result.Retrying) != 1 || len(result.Parked) != 1 || len(result.BudgetExhausted) != 1 {
+		t.Fatalf("RuntimeSnapshot rows = %d running, %d retrying, %d parked, %d budget, want 1, 1, 1, 1",
+			len(result.Running), len(result.Retrying), len(result.Parked), len(result.BudgetExhausted))
+	}
+	running, retrying := result.Running[0], result.Retrying[0]
+	if want := "rotate " + redact.Marker; running.IssueTitle != want {
+		t.Errorf("Running[0].IssueTitle = %q, want %q", running.IssueTitle, want)
+	}
+	if want := []string{"ops", "leak-" + redact.Marker}; !slices.Equal(running.IssueLabels, want) {
+		t.Errorf("Running[0].IssueLabels = %q, want %q", running.IssueLabels, want)
+	}
+	if want := "type-" + redact.Marker; running.IssueType != want {
+		t.Errorf("Running[0].IssueType = %q, want %q", running.IssueType, want)
+	}
+	if want := "state-" + redact.Marker; running.State != want {
+		t.Errorf("Running[0].State = %q, want %q", running.State, want)
+	}
+	if want := "acme/repo-" + redact.Marker; running.Continuation == nil || running.Continuation.Repository != want {
+		t.Errorf("Running[0].Continuation = %+v, want repository %q", running.Continuation, want)
+	}
+	if want := "rotate " + redact.Marker; retrying.IssueTitle != want {
+		t.Errorf("Retrying[0].IssueTitle = %q, want %q", retrying.IssueTitle, want)
+	}
+	if want := "type-" + redact.Marker; retrying.IssueType != want {
+		t.Errorf("Retrying[0].IssueType = %q, want %q", retrying.IssueType, want)
+	}
+	if want := []string{"ops", "leak-" + redact.Marker}; !slices.Equal(retrying.IssueLabels, want) {
+		t.Errorf("Retrying[0].IssueLabels = %q, want %q", retrying.IssueLabels, want)
+	}
+	if want := "state-" + redact.Marker; retrying.State != want {
+		t.Errorf("Retrying[0].State = %q, want %q", retrying.State, want)
+	}
+	if want := "state-" + redact.Marker; result.BudgetExhausted[0].State != want {
+		t.Errorf("BudgetExhausted[0].State = %q, want %q", result.BudgetExhausted[0].State, want)
+	}
+	if want := "rotate " + redact.Marker; result.Parked[0].IssueTitle != want {
+		t.Errorf("Parked[0].IssueTitle = %q, want %q", result.Parked[0].IssueTitle, want)
+	}
+	if len(result.BetweenStages) != 1 {
+		t.Fatalf("len(BetweenStages) = %d, want 1", len(result.BetweenStages))
+	}
+	if len(result.PendingReactions) != 1 {
+		t.Fatalf("len(PendingReactions) = %d, want 1", len(result.PendingReactions))
+	}
+	type issueFacts struct {
+		IssueType string
+		Labels    []string
+	}
+	wantFacts := issueFacts{"type-" + redact.Marker, []string{"ops", "leak-" + redact.Marker}}
+	parked, hopRow, reaction := result.Parked[0], result.BetweenStages[0], result.PendingReactions[0]
+	for name, got := range map[string]issueFacts{
+		"Parked[0]":           {parked.IssueType, parked.IssueLabels},
+		"BetweenStages[0]":    {hopRow.IssueType, hopRow.IssueLabels},
+		"PendingReactions[0]": {reaction.IssueType, reaction.IssueLabels},
+	} {
+		if !reflect.DeepEqual(got, wantFacts) {
+			t.Errorf("%s issue type, labels = %+v, want %+v", name, got, wantFacts)
+		}
+	}
+	for name, got := range map[string]string{"BetweenStages[0]": hopRow.State, "PendingReactions[0]": reaction.State} {
+		if want := "state-" + redact.Marker; got != want {
+			t.Errorf("%s.State = %q, want %q", name, got, want)
+		}
+	}
+	if hop, wantTitle, wantURL := result.BetweenStages[0], "rotate "+redact.Marker, "https://forge.example.com/"+redact.Marker; hop.IssueTitle != wantTitle || hop.IssueURL != wantURL {
+		t.Errorf("BetweenStages[0] title, url = %q, %q, want %q, %q", hop.IssueTitle, hop.IssueURL, wantTitle, wantURL)
+	}
+	row := result.PendingReactions[0]
+	if want := "feature/" + redact.Marker; row.PullRequest.Branch != want {
+		t.Errorf("PendingReactions[0].PullRequest.Branch = %q, want %q", row.PullRequest.Branch, want)
+	}
+	if want := "https://forge.example.com/" + redact.Marker; row.PullRequest.URL != want {
+		t.Errorf("PendingReactions[0].PullRequest.URL = %q, want %q", row.PullRequest.URL, want)
+	}
+	if want := []string{"build-" + redact.Marker}; !slices.Equal(row.LastCheck.CI.FailingChecks, want) {
+		t.Errorf("PendingReactions[0].LastCheck.CI.FailingChecks = %q, want %q", row.LastCheck.CI.FailingChecks, want)
 	}
 }
 
@@ -1716,20 +1971,17 @@ func TestIsKnownReactionKind_AcceptsLabelReview(t *testing.T) {
 	}
 }
 
-// TestReactionKindPins asserts the known-kind set by iterating
-// reactionKindPins itself, so a second hand-written list cannot diverge
-// from it.
 func TestReactionKindPins(t *testing.T) {
 	t.Parallel()
 
 	t.Run("isKnownReactionKind is true for exactly the registered kinds", func(t *testing.T) {
 		t.Parallel()
 
-		for kind := range reactionKindPins {
+		for kind := range reactionKinds {
 			t.Run(kind, func(t *testing.T) {
 				t.Parallel()
 				if !isKnownReactionKind(kind) {
-					t.Errorf("isKnownReactionKind(%q) = false, want true (registered in reactionKindPins)", kind)
+					t.Errorf("isKnownReactionKind(%q) = false, want true (registered in reactionKinds)", kind)
 				}
 			})
 		}
@@ -1739,16 +1991,38 @@ func TestReactionKindPins(t *testing.T) {
 		}
 	})
 
-	t.Run("reactionKindPinsWorkspace returns the registered value for each registered kind", func(t *testing.T) {
+	t.Run("pullRequestOf reads the pull request of exactly the registered kinds", func(t *testing.T) {
 		t.Parallel()
 
-		for kind, wantPins := range reactionKindPins {
-			t.Run(kind, func(t *testing.T) {
-				t.Parallel()
-				if got := reactionKindPinsWorkspace(kind); got != wantPins {
-					t.Errorf("reactionKindPinsWorkspace(%q) = %v, want %v", kind, got, wantPins)
-				}
-			})
+		tests := []struct {
+			kind   string
+			data   any
+			number int
+		}{
+			{ReactionKindCI, &CIReactionData{PRNumber: 1}, 1},
+			{ReactionKindReview, &ReviewReactionData{PRNumber: 2}, 2},
+			{ReactionKindBotReview, &BotReviewReactionData{PRNumber: 3}, 3},
+			{ReactionKindAutoMerge, &AutoMergeReactionData{PRNumber: 4}, 4},
+			{ReactionKindMergeConflict, &MergeConflictReactionData{PRNumber: 5}, 5},
+			{ReactionKindLabelReview, &LabelReviewReactionData{PRNumber: 6}, 6},
+			{ReactionKindLabelFix, &LabelFixReactionData{PRNumber: 7}, 7},
+			{ReactionKindMergeCompletion, &MergeCompletionReactionData{PRNumber: 8}, 8},
+		}
+
+		covered := make(map[string]bool, len(tests))
+		for _, tt := range tests {
+			covered[tt.kind] = true
+			if _, ok := reactionKinds[tt.kind]; !ok {
+				t.Errorf("table kind %q is not registered in reactionKinds", tt.kind)
+			}
+			if got := pullRequestOf(&PendingReaction{Kind: tt.kind, KindData: tt.data}).Number; got != tt.number {
+				t.Errorf("pullRequestOf(%q data).Number = %d, want %d", tt.kind, got, tt.number)
+			}
+		}
+		for kind := range reactionKinds {
+			if !covered[kind] {
+				t.Errorf("registered kind %q has no pullRequestOf table row", kind)
+			}
 		}
 	})
 
@@ -1994,58 +2268,18 @@ func TestBuildLabelFixReactionConfig(t *testing.T) {
 func TestPopulateParked(t *testing.T) {
 	t.Parallel()
 
-	t.Run("loads rows into state.Parked", func(t *testing.T) {
+	t.Run("loads a row with an empty parked_state", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(5000, 4, 0, nil, AgentTotals{})
 		rows := []persistence.ParkedIssue{
-			{
-				IssueID:      "id-1",
-				Identifier:   "PROJ-1",
-				DisplayID:    "PROJ-1-display",
-				Reason:       parkReasonAgentBlocked,
-				ParkedState:  "In Progress",
-				Label:        "needs-human",
-				LabelApplied: true,
-				ParkedAt:     "2026-08-17T00:00:00Z",
-			},
-			{
-				IssueID:     "id-2",
-				Identifier:  "PROJ-2",
-				Reason:      parkReasonHandoffAbsence,
-				ParkedState: "",
-				Label:       "needs-human",
-				ParkedAt:    "2026-08-17T01:00:00Z",
-			},
+			{IssueID: "id-2", Identifier: "PROJ-2", Reason: parkReasonHandoffAbsence, Label: "needs-human", ParkedAt: "2026-08-17T01:00:00Z"},
 		}
 
 		PopulateParked(state, rows, nil)
 
-		if len(state.Parked) != 2 {
-			t.Fatalf("len(state.Parked) = %d, want 2", len(state.Parked))
-		}
-
-		entry1, ok := state.Parked["id-1"]
-		if !ok {
-			t.Fatal("state.Parked missing id-1")
-		}
-		if entry1.Identifier != "PROJ-1" || entry1.DisplayID != "PROJ-1-display" ||
-			entry1.Reason != parkReasonAgentBlocked || entry1.ParkedState != "In Progress" ||
-			entry1.Label != "needs-human" || !entry1.LabelApplied {
-			t.Errorf("state.Parked[id-1] = %+v, want fields to match the persisted row", entry1)
-		}
-		if !entry1.ParkedAt.Equal(time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)) {
-			t.Errorf("state.Parked[id-1].ParkedAt = %v, want 2026-08-17T00:00:00Z", entry1.ParkedAt)
-		}
-
-		// Only an empty issue_id makes a row malformed; an empty
-		// parked_state is loaded, not skipped.
-		entry2, ok := state.Parked["id-2"]
-		if !ok {
-			t.Fatal("state.Parked missing id-2")
-		}
-		if entry2.ParkedState != "" {
-			t.Errorf("state.Parked[id-2].ParkedState = %q, want empty", entry2.ParkedState)
+		if entry, ok := state.Parked["id-2"]; !ok || entry.ParkedState != "" {
+			t.Errorf("state.Parked[id-2] = %+v, want the row loaded with an empty ParkedState", entry)
 		}
 	})
 
@@ -2092,7 +2326,7 @@ func TestRuntimeSnapshot_ParkedFields(t *testing.T) {
 
 	fixedNow := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
 
-	t.Run("empty Parked produces zero count and nil slices", func(t *testing.T) {
+	t.Run("empty Parked is a non-nil empty list", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(5000, 10, 0, nil, AgentTotals{})
@@ -2102,15 +2336,12 @@ func TestRuntimeSnapshot_ParkedFields(t *testing.T) {
 		if result.ParkedCount != 0 {
 			t.Errorf("ParkedCount = %d, want 0", result.ParkedCount)
 		}
-		if result.Parked != nil {
-			t.Errorf("Parked = %v, want nil", result.Parked)
-		}
-		if result.ParkedReason != nil {
-			t.Errorf("ParkedReason = %v, want nil", result.ParkedReason)
+		if result.Parked == nil || len(result.Parked) != 0 {
+			t.Errorf("Parked = %#v, want a non-nil empty list", result.Parked)
 		}
 	})
 
-	t.Run("non-empty Parked sorted, counted, and reasoned", func(t *testing.T) {
+	t.Run("non-empty Parked sorted by identifier and counted", func(t *testing.T) {
 		t.Parallel()
 
 		state := NewState(5000, 10, 0, nil, AgentTotals{})
@@ -2123,20 +2354,14 @@ func TestRuntimeSnapshot_ParkedFields(t *testing.T) {
 		if result.ParkedCount != 3 {
 			t.Errorf("ParkedCount = %d, want 3", result.ParkedCount)
 		}
-		want := []string{"ISS-A", "ISS-B", "ISS-C"}
+		want := []string{"PROJ-A", "PROJ-B", "PROJ-C"}
 		if len(result.Parked) != len(want) {
 			t.Fatalf("len(Parked) = %d, want %d", len(result.Parked), len(want))
 		}
-		for i, id := range want {
-			if result.Parked[i] != id {
-				t.Errorf("Parked[%d] = %q, want %q", i, result.Parked[i], id)
+		for i, identifier := range want {
+			if result.Parked[i].Identifier != identifier {
+				t.Errorf("Parked[%d].Identifier = %q, want %q", i, result.Parked[i].Identifier, identifier)
 			}
-		}
-		if got := result.ParkedReason["ISS-A"]; got != parkReasonHandoffAbsence {
-			t.Errorf("ParkedReason[ISS-A] = %q, want %q", got, parkReasonHandoffAbsence)
-		}
-		if got := result.ParkedReason["ISS-C"]; got != parkReasonAgentBlocked {
-			t.Errorf("ParkedReason[ISS-C] = %q, want %q", got, parkReasonAgentBlocked)
 		}
 	})
 }

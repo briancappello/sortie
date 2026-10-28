@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,13 +11,18 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/sentence"
 )
 
 func fixedSnapshot(snap orchestrator.RuntimeSnapshotResult) SnapshotFunc {
@@ -60,20 +66,110 @@ func decodeJSON[T any](t *testing.T, resp *http.Response) T {
 	return v
 }
 
+func getJSON[T any](t *testing.T, ts *httptest.Server, path string) (int, T) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode, decodeJSON[T](t, resp)
+}
+
+func jsonObject(t *testing.T, v any) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal(%T): %v", v, err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(%T): %v", v, err)
+	}
+	return decoded
+}
+
+func assertJSONKeys(t *testing.T, body any, want map[string]any) {
+	t.Helper()
+	got := jsonObject(t, body)
+	for key, wantValue := range jsonObject(t, want) {
+		gotValue, present := got[key]
+		gotNum, gotIsNum := gotValue.(float64)
+		wantNum, wantIsNum := wantValue.(float64)
+		near := gotIsNum && wantIsNum && math.Abs(gotNum-wantNum) <= 1e-9
+		if !present || !near && !reflect.DeepEqual(gotValue, wantValue) {
+			t.Errorf("JSON %q = %v (present=%t), want %v", key, gotValue, present, wantValue)
+		}
+	}
+}
+
+const wantPendingReactionsJSON = `[
+  {"issue_id": "mno345", "issue_identifier": "MT-653", "issue_title": "Add the export button",
+   "issue_url": "https://tracker.example.com/browse/MT-653", "kind": "ci", "config_key": "ci_failure",
+   "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
+                    "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
+   "created_at": "2026-02-24T20:09:30Z", "dispatched_at": "2026-02-24T20:05:00Z", "next_poll_at": "2026-02-24T20:17:40Z", "wait": "poll_interval", "stage_position": null,
+   "used_attempts": 2, "max_attempts": 2, "escalated_at": "2026-02-24T20:12:40Z", "escalation_trigger": "budget_exhausted", "watch_ends_at": null,
+   "last_check": {"observed_at": "2026-02-24T20:12:40Z", "head_sha": "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
+                  "status": "failing", "failing_checks": ["Test"], "failing": 1, "pending": 0, "passing": 4},
+   "status_text": "CI escalated on #931",
+   "status_text_full": "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2."},
+  {"issue_id": "mno345", "issue_identifier": "MT-653", "issue_title": "Add the export button",
+   "issue_url": "https://tracker.example.com/browse/MT-653", "kind": "review", "config_key": "review_comments",
+   "pull_request": {"number": 931, "repository": "acme/web", "url": "https://github.com/acme/web/pull/931",
+                    "branch": "sortie/MT-653", "head_sha": "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b"},
+   "created_at": "2026-02-24T20:09:30Z", "dispatched_at": null, "next_poll_at": "2026-02-24T20:16:05Z", "wait": "debounce", "stage_position": null,
+   "used_attempts": 1, "max_attempts": 3, "escalated_at": null, "watch_ends_at": null,
+   "last_check": {"observed_at": "2026-02-24T20:15:10Z", "actionable_comments": 3, "new_comments": 1},
+   "status_text": "1 new review comment on #931; next check in 30s",
+   "status_text_full": "Waiting for 1 new review comment on PR #931 (3 actionable) to settle; next check in 30s. Review fix runs used: 1 of 3."}
+]`
+
+func pendingReactionRows() []orchestrator.SnapshotPendingReaction {
+	base := orchestrator.SnapshotPendingReaction{
+		IssueID: "mno345", Identifier: "MT-653",
+		IssueTitle: "Add the export button", IssueURL: "https://tracker.example.com/browse/MT-653",
+		PullRequest: orchestrator.SnapshotPullRequest{
+			Number: 931, Repository: "acme/web", URL: "https://github.com/acme/web/pull/931",
+			Branch: "sortie/MT-653", HeadSHA: "4f1c2a9e8b7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b",
+		},
+	}
+
+	ci := base
+	ci.Kind, ci.ConfigKey, ci.Wait = "ci", "ci_failure", "poll_interval"
+	ci.CreatedAt = time.Date(2026, 2, 24, 15, 9, 30, 0, time.FixedZone("EST", -5*60*60))
+	ci.DispatchedAt = time.Date(2026, 2, 24, 15, 5, 0, 0, time.FixedZone("EST", -5*60*60))
+	ci.NextPollAt = time.Date(2026, 2, 24, 20, 17, 40, 0, time.UTC)
+	ci.UsedAttempts, ci.MaxAttempts = new(2), new(2)
+	ci.EscalatedAt = new(time.Date(2026, 2, 24, 20, 12, 40, 0, time.UTC))
+	ci.EscalationTrigger = "budget_exhausted"
+	ci.LastCheck = &orchestrator.ReactionCheck{
+		ObservedAt: time.Date(2026, 2, 24, 20, 12, 40, 0, time.UTC),
+		HeadSHA:    "9b7e3d1c0a2f4e6b8d0c1a3e5f7b9d2c4e6a8f0b",
+		CI:         &orchestrator.CICheck{Status: "failing", FailingChecks: []string{"Test"}, Failing: 1, Passing: 4},
+	}
+
+	review := base
+	review.Kind, review.ConfigKey, review.Wait = "review", "review_comments", "debounce"
+	review.CreatedAt = time.Date(2026, 2, 24, 20, 9, 30, 0, time.UTC)
+	review.NextPollAt = time.Date(2026, 2, 24, 20, 16, 5, 0, time.UTC)
+	review.UsedAttempts, review.MaxAttempts = new(1), new(3)
+	review.LastCheck = &orchestrator.ReactionCheck{
+		ObservedAt: time.Date(2026, 2, 24, 20, 15, 10, 0, time.UTC),
+		Comments:   &orchestrator.CommentCheck{Actionable: 3, New: 1},
+	}
+
+	return []orchestrator.SnapshotPendingReaction{ci, review}
+}
+
 func TestToRunningEntryResponse(t *testing.T) {
 	t.Parallel()
 
-	// Use a non-UTC time to verify UTC normalization.
 	est := time.FixedZone("EST", -5*60*60)
 	startedAt := time.Date(2026, 3, 24, 12, 0, 0, 0, est)
 	lastEventAt := time.Date(2026, 3, 24, 12, 5, 0, 0, est)
 
 	entry := orchestrator.SnapshotRunningEntry{
-		IssueID:            "issue-1",
-		Identifier:         "MT-100",
-		State:              "In Progress",
-		SessionID:          "sess-abc",
-		TurnCount:          5,
 		LastAgentEvent:     domain.EventTurnCompleted,
 		LastAgentTimestamp: lastEventAt,
 		LastAgentMessage:   "Implementing feature",
@@ -81,38 +177,18 @@ func TestToRunningEntryResponse(t *testing.T) {
 		AgentInputTokens:   1000,
 		AgentOutputTokens:  500,
 		AgentTotalTokens:   1500,
-		WorkspacePath:      "/tmp/ws/MT-100",
 		UsageMeasured:      true,
 	}
 
 	got := toRunningEntryResponse(entry)
 
-	if got.IssueID != "issue-1" {
-		t.Errorf("IssueID = %q, want %q", got.IssueID, "issue-1")
-	}
-	if got.IssueIdentifier != "MT-100" {
-		t.Errorf("IssueIdentifier = %q, want %q", got.IssueIdentifier, "MT-100")
-	}
-	if got.State != "In Progress" {
-		t.Errorf("State = %q, want %q", got.State, "In Progress")
-	}
-	if got.SessionID != "sess-abc" {
-		t.Errorf("SessionID = %q, want %q", got.SessionID, "sess-abc")
-	}
-	if got.TurnCount != 5 {
-		t.Errorf("TurnCount = %d, want %d", got.TurnCount, 5)
-	}
 	if got.LastEvent != string(domain.EventTurnCompleted) {
 		t.Errorf("LastEvent = %q, want %q", got.LastEvent, domain.EventTurnCompleted)
 	}
 	if got.LastMessage != "Implementing feature" {
 		t.Errorf("LastMessage = %q, want %q", got.LastMessage, "Implementing feature")
 	}
-	if got.WorkspacePath != "/tmp/ws/MT-100" {
-		t.Errorf("WorkspacePath = %q, want %q", got.WorkspacePath, "/tmp/ws/MT-100")
-	}
 
-	// UTC normalization
 	if got.StartedAt.Location() != time.UTC {
 		t.Errorf("StartedAt location = %v, want UTC", got.StartedAt.Location())
 	}
@@ -123,7 +199,6 @@ func TestToRunningEntryResponse(t *testing.T) {
 		t.Errorf("LastEventAt location = %v, want UTC", got.LastEventAt.Location())
 	}
 
-	// Token info: a measured entry carries its figures rather than nulls.
 	if got.Tokens.InputTokens == nil || got.Tokens.OutputTokens == nil || got.Tokens.TotalTokens == nil {
 		t.Fatalf("Tokens = %+v, want three non-nil members on a measured entry", got.Tokens)
 	}
@@ -135,103 +210,6 @@ func TestToRunningEntryResponse(t *testing.T) {
 	}
 	if *got.Tokens.TotalTokens != 1500 {
 		t.Errorf("Tokens.TotalTokens = %d, want %d", *got.Tokens.TotalTokens, 1500)
-	}
-}
-
-// TestToRunningEntryResponse_ExtendedFields verifies that the
-// CacheReadTokens, ModelName, APIRequestCount, and RequestsByModel
-// fields are mapped correctly through the wire-type constructor for a
-// measured entry, whose figures the constructor carries rather than
-// nulls.
-func TestToRunningEntryResponse_ExtendedFields(t *testing.T) {
-	t.Parallel()
-
-	entry := orchestrator.SnapshotRunningEntry{
-		IssueID:         "issue-ext",
-		Identifier:      "MT-EXT",
-		State:           "In Progress",
-		StartedAt:       time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
-		CacheReadTokens: 8000,
-		ModelName:       "claude-sonnet-4-20250514",
-		APIRequestCount: 15,
-		RequestsByModel: map[string]int{"claude-sonnet-4-20250514": 12, "claude-opus-4-20250514": 3},
-
-		UsageMeasured:       true,
-		APIRequestsMeasured: true,
-	}
-
-	got := toRunningEntryResponse(entry)
-
-	if got.Tokens.CacheReadTokens == nil {
-		t.Fatal("Tokens.CacheReadTokens = nil, want 8000 on a measured entry")
-	}
-	if *got.Tokens.CacheReadTokens != 8000 {
-		t.Errorf("Tokens.CacheReadTokens = %d, want 8000", *got.Tokens.CacheReadTokens)
-	}
-	if got.ModelName != "claude-sonnet-4-20250514" {
-		t.Errorf("ModelName = %q, want %q", got.ModelName, "claude-sonnet-4-20250514")
-	}
-	if got.APIRequestCount == nil {
-		t.Fatal("APIRequestCount = nil, want 15 on a measured entry")
-	}
-	if *got.APIRequestCount != 15 {
-		t.Errorf("APIRequestCount = %d, want 15", *got.APIRequestCount)
-	}
-	if len(got.RequestsByModel) != 2 {
-		t.Fatalf("len(RequestsByModel) = %d, want 2", len(got.RequestsByModel))
-	}
-	if got.RequestsByModel["claude-sonnet-4-20250514"] != 12 {
-		t.Errorf("RequestsByModel[sonnet] = %d, want 12", got.RequestsByModel["claude-sonnet-4-20250514"])
-	}
-}
-
-// TestToRunningEntryResponse_ExtendedFields_JSON verifies that the new
-// fields serialize correctly as JSON with proper keys.
-func TestToRunningEntryResponse_ExtendedFields_JSON(t *testing.T) {
-	t.Parallel()
-
-	entry := orchestrator.SnapshotRunningEntry{
-		IssueID:           "issue-json",
-		Identifier:        "MT-JSON",
-		State:             "In Progress",
-		StartedAt:         time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
-		AgentInputTokens:  1000,
-		AgentOutputTokens: 500,
-		AgentTotalTokens:  1500,
-		CacheReadTokens:   3000,
-		ModelName:         "test-model",
-		APIRequestCount:   7,
-		RequestsByModel:   map[string]int{"test-model": 7},
-
-		UsageMeasured:       true,
-		APIRequestsMeasured: true,
-	}
-
-	got := toRunningEntryResponse(entry)
-	data, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-
-	var decoded map[string]any
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
-
-	// Check JSON key names.
-	tokens := decoded["tokens"].(map[string]any)
-	if tokens["cache_read_tokens"] != float64(3000) {
-		t.Errorf("JSON tokens.cache_read_tokens = %v, want 3000", tokens["cache_read_tokens"])
-	}
-	if decoded["model_name"] != "test-model" {
-		t.Errorf("JSON model_name = %v, want %q", decoded["model_name"], "test-model")
-	}
-	if decoded["api_request_count"] != float64(7) {
-		t.Errorf("JSON api_request_count = %v, want 7", decoded["api_request_count"])
-	}
-	rbm := decoded["requests_by_model"].(map[string]any)
-	if rbm["test-model"] != float64(7) {
-		t.Errorf("JSON requests_by_model[test-model] = %v, want 7", rbm["test-model"])
 	}
 }
 
@@ -861,66 +839,494 @@ func TestToRunningEntryResponse_ZeroStartedAt_JSON_Null(t *testing.T) {
 	}
 }
 
-func TestToRetryEntryResponse(t *testing.T) {
+func TestEntryResponses_KeysJSON(t *testing.T) {
 	t.Parallel()
 
-	dueAtMS := int64(1711276800000) // 2024-03-24T12:00:00.000Z
-	entry := orchestrator.SnapshotRetryEntry{
-		IssueID:    "retry-1",
-		Identifier: "MT-301",
-		Attempt:    3,
-		DueAtMS:    dueAtMS,
-		Error:      "agent timeout",
-	}
-
-	got := toRetryEntryResponse(entry)
-
-	if got.IssueID != "retry-1" {
-		t.Errorf("IssueID = %q, want %q", got.IssueID, "retry-1")
-	}
-	if got.IssueIdentifier != "MT-301" {
-		t.Errorf("IssueIdentifier = %q, want %q", got.IssueIdentifier, "MT-301")
-	}
-	if got.Attempt != 3 {
-		t.Errorf("Attempt = %d, want %d", got.Attempt, 3)
-	}
-	if got.Error != "agent timeout" {
-		t.Errorf("Error = %q, want %q", got.Error, "agent timeout")
-	}
-
-	// DueAt should be UTC.
-	if got.DueAt.Location() != time.UTC {
-		t.Errorf("DueAt location = %v, want UTC", got.DueAt.Location())
-	}
-	wantDueAt := time.UnixMilli(dueAtMS).UTC()
-	if !got.DueAt.Equal(wantDueAt) {
-		t.Errorf("DueAt = %v, want %v", got.DueAt, wantDueAt)
-	}
-}
-
-func TestToRunningEntryResponse_DisplayID(t *testing.T) {
-	t.Parallel()
-
+	startedAt := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	passAt := time.Date(2026, 3, 24, 4, 0, 0, 0, time.FixedZone("EST", -5*60*60))
+	lineage := orchestrator.StageLineage{ChainID: "chain-1", PreviousRule: "specify", PreviousOutcome: "succeeded", DispatchedAt: passAt}
+	position := &orchestrator.SnapshotStagePosition{Chain: []string{"specify", "implement"}, Current: "implement", HopCount: 1, HopCeiling: 3}
+	wantLineage := map[string]any{"chain_id": "chain-1", "previous": "specify", "previous_outcome": "succeeded"}
+	wantPosition := map[string]any{"chain": []any{"specify", "implement"}, "current": "implement", "hop_count": float64(1), "hop_ceiling": float64(3)}
 	tests := []struct {
-		name           string
-		id             string
-		dispID         string
-		wantIdentifier string
-		wantDisplayID  string
+		name   string
+		body   any
+		want   map[string]any
+		absent []string
 	}{
 		{
-			name:           "DisplayID set — raw Identifier preserved, qualified form in DisplayIdentifier",
-			id:             "42",
-			dispID:         "owner/repo#42",
-			wantIdentifier: "42",
-			wantDisplayID:  "owner/repo#42",
+			name: "running ci continuation",
+			body: toRunningEntryResponse(orchestrator.SnapshotRunningEntry{
+				IssueID:             "id-1",
+				Identifier:          "PROJ-1",
+				DisplayID:           "acme/web#1",
+				IssueTitle:          "Fix the login redirect",
+				IssueURL:            "https://acme.atlassian.net/browse/PROJ-1",
+				IssueLabels:         []string{"backend", "urgent"},
+				IssueType:           "Bug",
+				State:               "In Progress",
+				SessionID:           "sess-1",
+				TurnCount:           4,
+				SelfReviewActive:    true,
+				SelfReviewIteration: 2,
+				WorkspacePath:       "/work/PROJ-1",
+				SSHHost:             "build-1.example.test",
+				WorkflowFile:        "backend.WORKFLOW.md",
+				AgentKind:           "claude-code",
+				TokensAwaited:       true,
+				StartedAt:           startedAt,
+				StageLineage:        lineage,
+				StagePosition:       position,
+				ReactionKind:        "ci",
+				ReactionConfigKey:   "ci_failure",
+				Continuation:        &orchestrator.SnapshotContinuation{Number: 931, Repository: "acme/web", Attempt: 1},
+			}),
+			want: map[string]any{
+				"issue_id":              "id-1",
+				"issue_identifier":      "PROJ-1",
+				"display_identifier":    "acme/web#1",
+				"issue_title":           "Fix the login redirect",
+				"issue_url":             "https://acme.atlassian.net/browse/PROJ-1",
+				"issue_labels":          []any{"backend", "urgent"},
+				"issue_type":            "Bug",
+				"state":                 "In Progress",
+				"session_id":            "sess-1",
+				"turn_count":            float64(4),
+				"workspace_path":        "/work/PROJ-1",
+				"ssh_host":              "build-1.example.test",
+				"workflow_file":         "backend.WORKFLOW.md",
+				"agent_kind":            "claude-code",
+				"self_review_active":    true,
+				"self_review_iteration": float64(2),
+				"tokens_awaited":        true,
+				"dispatched_at":         "2026-03-24T09:00:00Z",
+				"stage_lineage":         wantLineage,
+				"stage_position":        wantPosition,
+				"reaction_kind":         "ci",
+				"reaction_config_key":   "ci_failure",
+				"reaction_attempt":      float64(1),
+				"pull_request":          map[string]any{"number": float64(931), "repository": "acme/web"},
+			},
 		},
 		{
-			name:           "DisplayID empty — Identifier unchanged, DisplayIdentifier empty",
-			id:             "PROJ-99",
-			dispID:         "",
-			wantIdentifier: "PROJ-99",
-			wantDisplayID:  "",
+			name: "running on a chain's first stage has no lineage and no continuation",
+			body: toRunningEntryResponse(orchestrator.SnapshotRunningEntry{
+				StageLineage:  orchestrator.StageLineage{ChainID: "chain-1", DispatchedAt: passAt},
+				StagePosition: &orchestrator.SnapshotStagePosition{Chain: []string{"specify", "implement"}, Current: "specify", HopCeiling: 3},
+			}),
+			want: map[string]any{
+				"dispatched_at":  "2026-03-24T09:00:00Z",
+				"stage_lineage":  nil,
+				"stage_position": map[string]any{"chain": []any{"specify", "implement"}, "current": "specify", "hop_count": float64(0), "hop_ceiling": float64(3)},
+			},
+			absent: []string{"reaction_kind", "reaction_config_key", "reaction_attempt", "pull_request"},
+		},
+		{
+			name: "retry",
+			body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{
+				IssueID:         "id-2",
+				Identifier:      "PROJ-2",
+				DisplayID:       "acme/web#2",
+				IssueTitle:      "Retry me",
+				IssueURL:        "https://acme.atlassian.net/browse/PROJ-2",
+				IssueType:       "Task",
+				IssueLabels:     []string{"backend", "urgent"},
+				State:           "To Do",
+				Attempt:         3,
+				DueAtMS:         startedAt.UnixMilli(),
+				Error:           "agent timeout",
+				AgentKind:       "claude-code",
+				ConfiguredModel: "opus",
+				StageLineage:    lineage,
+				StagePosition:   position,
+			}),
+			want: map[string]any{
+				"issue_id":           "id-2",
+				"issue_identifier":   "PROJ-2",
+				"display_identifier": "acme/web#2",
+				"issue_title":        "Retry me",
+				"issue_url":          "https://acme.atlassian.net/browse/PROJ-2",
+				"issue_type":         "Task",
+				"issue_labels":       []any{"backend", "urgent"},
+				"state":              "To Do",
+				"attempt":            float64(3),
+				"due_at":             "2026-03-24T12:00:00Z",
+				"error":              "agent timeout",
+				"dispatched_at":      "2026-03-24T09:00:00Z",
+				"agent_kind":         "claude-code",
+				"configured_model":   "opus",
+				"stage_lineage":      wantLineage,
+				"stage_position":     wantPosition,
+			},
+		},
+		{
+			name:   "retry without a read or a dated pass omits the facts and serves null",
+			body:   toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Attempt: 1}),
+			want:   map[string]any{"attempt": float64(1), "dispatched_at": nil, "stage_position": nil},
+			absent: []string{"issue_type", "issue_labels", "state", "agent_kind", "configured_model"},
+		},
+		{
+			name: "retry whose issue carries no labels serves an empty list",
+			body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{IssueLabels: []string{}}),
+			want: map[string]any{"issue_labels": []any{}},
+		},
+		{
+			name: "running measured usage and per-model requests",
+			body: toRunningEntryResponse(orchestrator.SnapshotRunningEntry{
+				IssueID:             "id-4",
+				Identifier:          "PROJ-4",
+				StartedAt:           startedAt,
+				AgentInputTokens:    1000,
+				AgentOutputTokens:   500,
+				AgentTotalTokens:    1500,
+				CacheReadTokens:     3000,
+				ModelName:           "test-model",
+				APIRequestCount:     7,
+				RequestsByModel:     map[string]int{"test-model": 7},
+				UsageMeasured:       true,
+				APIRequestsMeasured: true,
+			}),
+			want: map[string]any{
+				"tokens": map[string]any{
+					"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500,
+					"cache_read_tokens": 3000, "cache_write_tokens": 0,
+				},
+				"model_name":        "test-model",
+				"api_request_count": 7,
+				"requests_by_model": map[string]any{"test-model": 7},
+			},
+		},
+		{name: "retry trigger error", body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Trigger: "error"}), want: map[string]any{"trigger": "error"}},
+		{name: "retry trigger continuation", body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Trigger: "continuation"}), want: map[string]any{"trigger": "continuation"}},
+		{name: "retry trigger stall", body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Trigger: "stall"}), want: map[string]any{"trigger": "stall"}},
+		{
+			name: "retry trigger timer carries the reschedule reason",
+			body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Trigger: "timer", Error: "no available orchestrator slots"}),
+			want: map[string]any{"trigger": "timer", "error": "no available orchestrator slots"},
+		},
+		{
+			name: "retry trigger ci_fix names its reaction",
+			body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Trigger: "ci_fix", ReactionKind: "ci", ReactionConfigKey: "ci_failure"}),
+			want: map[string]any{"trigger": "ci_fix", "reaction_kind": "ci", "reaction_config_key": "ci_failure"},
+		},
+		{name: "retry paused", body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{Trigger: "timer", Paused: true}), want: map[string]any{"paused": true}},
+		{
+			name:   "review continuation has no trigger",
+			body:   toRetryEntryResponse(orchestrator.SnapshotRetryEntry{ReactionKind: "review", ReactionConfigKey: "review_comments"}),
+			want:   map[string]any{"reaction_kind": "review", "reaction_config_key": "review_comments"},
+			absent: []string{"trigger"},
+		},
+		{
+			name: "retry stage lineage with a previous rule",
+			body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{StageLineage: orchestrator.StageLineage{ChainID: "chain-1", PreviousRule: "implement", PreviousOutcome: "succeeded"}}),
+			want: map[string]any{"stage_lineage": map[string]any{"chain_id": "chain-1", "previous": "implement", "previous_outcome": "succeeded"}},
+		},
+		{
+			name: "retry stage lineage with only a chain is null",
+			body: toRetryEntryResponse(orchestrator.SnapshotRetryEntry{StageLineage: orchestrator.StageLineage{ChainID: "chain-1"}}),
+			want: map[string]any{"stage_lineage": nil},
+		},
+		{
+			name: "budget exhausted",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				IssueID:         "id-3",
+				Identifier:      "PROJ-3",
+				DisplayID:       "acme/web#3",
+				IssueTitle:      "Held by budget",
+				IssueURL:        "https://acme.atlassian.net/browse/PROJ-3",
+				IssueType:       "Story",
+				IssueLabels:     []string{"billing"},
+				State:           "Backlog",
+				Reason:          "session_budget",
+				UsedSessions:    3,
+				BudgetSessions:  3,
+				RuleName:        "implement",
+				StageLineage:    lineage,
+				StagePosition:   position,
+				AgentKind:       "claude-code",
+				ConfiguredModel: "opus",
+			}),
+			want: map[string]any{
+				"issue_id":           "id-3",
+				"issue_identifier":   "PROJ-3",
+				"display_identifier": "acme/web#3",
+				"issue_title":        "Held by budget",
+				"issue_url":          "https://acme.atlassian.net/browse/PROJ-3",
+				"issue_type":         "Story",
+				"issue_labels":       []any{"billing"},
+				"state":              "Backlog",
+				"reason":             "session_budget",
+				"used_sessions":      float64(3),
+				"budget_sessions":    float64(3),
+				"budget_tokens":      nil,
+				"dispatched_at":      "2026-03-24T09:00:00Z",
+				"rule_name":          "implement",
+				"stage_lineage":      wantLineage,
+				"stage_position":     wantPosition,
+				"agent_kind":         "claude-code",
+				"configured_model":   "opus",
+			},
+		},
+		{
+			name:   "budget exhausted without a dispatch context serves null and omits the rest",
+			body:   toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{}),
+			want:   map[string]any{"dispatched_at": nil, "stage_lineage": nil, "stage_position": nil},
+			absent: []string{"rule_name", "agent_kind", "configured_model"},
+		},
+		{
+			name: "between stages",
+			body: toStageHopResponse(orchestrator.SnapshotStageHop{
+				IssueID:      "id-5",
+				Identifier:   "PROJ-5",
+				DisplayID:    "acme/web#5",
+				IssueTitle:   "Hop me",
+				IssueURL:     "https://acme.atlassian.net/browse/PROJ-5",
+				SourceRule:   "specify",
+				TargetRule:   "implement",
+				TargetLabel:  "stage:implement",
+				HoppedAt:     time.Date(2026, 3, 24, 5, 0, 0, 0, time.FixedZone("EST", -5*60*60)),
+				DispatchedAt: passAt,
+
+				IssueType: "Story", IssueLabels: []string{"backend", "stage:implement"}, State: "In Progress",
+				RuleName: "implement", StagePosition: position, AgentKind: "claude-code", ConfiguredModel: "opus",
+			}, sentence.Context{}),
+			want: map[string]any{
+				"issue_id":           "id-5",
+				"issue_identifier":   "PROJ-5",
+				"display_identifier": "acme/web#5",
+				"issue_title":        "Hop me",
+				"issue_url":          "https://acme.atlassian.net/browse/PROJ-5",
+				"source_rule":        "specify",
+				"target_rule":        "implement",
+				"target_label":       "stage:implement",
+				"hopped_at":          "2026-03-24T10:00:00Z",
+				"dispatched_at":      "2026-03-24T09:00:00Z",
+				"issue_type":         "Story",
+				"issue_labels":       []any{"backend", "stage:implement"},
+				"state":              "In Progress",
+				"rule_name":          "implement",
+				"stage_position":     wantPosition,
+				"agent_kind":         "claude-code",
+				"configured_model":   "opus",
+			},
+		},
+		{
+			name:   "between stages without times or identity serves null times",
+			body:   toStageHopResponse(orchestrator.SnapshotStageHop{IssueID: "id-6", Identifier: "PROJ-6"}, sentence.Context{}),
+			want:   map[string]any{"hopped_at": nil, "dispatched_at": nil, "hold": nil},
+			absent: []string{"display_identifier", "issue_title", "issue_url"},
+		},
+		{
+			name: "hold by a blocker serves its blockers and no slot or reset",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipBlockedBy, Since: startedAt,
+				Blockers: []orchestrator.SnapshotBlocker{{IssueID: "b-1", Identifier: "PROJ-9", DisplayID: "acme/web#9"}},
+			}, sentence.Context{}),
+			want: map[string]any{
+				"reason":     "blocked_by",
+				"held_since": "2026-03-24T12:00:00Z",
+				"blockers":   []any{map[string]any{"issue_id": "b-1", "issue_identifier": "PROJ-9", "display_identifier": "acme/web#9"}},
+				"slot":       nil,
+				"resets_at":  nil,
+			},
+		},
+		{
+			name: "hold by a state slot limit serves its slot and no blockers or reset",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipAgentSlotsFull, Since: startedAt,
+				Slot: &orchestrator.SnapshotSlotHold{Scope: orchestrator.SlotScopeState, State: "In Progress", Used: 2, Limit: 2},
+			}, sentence.Context{}),
+			want: map[string]any{
+				"slot":      map[string]any{"scope": "state", "state": "In Progress", "used": 2, "limit": 2},
+				"blockers":  nil,
+				"resets_at": nil,
+			},
+		},
+		{
+			name: "hold by the global slot limit serves a slot without a state",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipAgentSlotsFull, Since: startedAt,
+				Slot: &orchestrator.SnapshotSlotHold{Scope: orchestrator.SlotScopeGlobal, Used: 1, Limit: 1},
+			}, sentence.Context{}),
+			want: map[string]any{"slot": map[string]any{"scope": "global", "used": 1, "limit": 1}},
+		},
+		{
+			name: "hold by a spend ceiling serves its reset in UTC and no blockers or slot",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipDailySpendCeiling, Since: passAt, ResetsAt: passAt,
+			}, sentence.Context{}),
+			want: map[string]any{"held_since": "2026-03-24T09:00:00Z", "resets_at": "2026-03-24T09:00:00Z", "blockers": nil, "slot": nil},
+		},
+		{
+			name: "hold by a usage limit serves its reset and the model scope it covers",
+			body: toHoldResponse(&orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipUsageLimit, Since: passAt, ResetsAt: passAt,
+				AgentKind: "claude-code", ModelOnly: true, Model: "opus",
+			}, sentence.Context{}),
+			want: map[string]any{"reason": "usage_limit", "resets_at": "2026-03-24T09:00:00Z", "agent_kind": "claude-code", "model_only": true, "model": "opus"},
+		},
+		{
+			name:   "hold by a kind-wide usage limit omits the model scope",
+			body:   toHoldResponse(&orchestrator.SnapshotHold{Reason: orchestrator.SkipUsageLimit, Since: passAt, ResetsAt: passAt, AgentKind: "codex"}, sentence.Context{}),
+			want:   map[string]any{"agent_kind": "codex"},
+			absent: []string{"model_only", "model"},
+		},
+		{
+			name: "held issue without labels serves an empty list",
+			body: toHeldIssueResponse(orchestrator.SnapshotHeldEntry{
+				IssueID: "id-8", Identifier: "PROJ-8", IssueLabels: []string{},
+				Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull, Since: startedAt},
+			}, sentence.Context{}),
+			want: map[string]any{"issue_labels": []any{}},
+		},
+		{
+			name: "parked record",
+			body: toParkedEntryResponse(orchestrator.SnapshotParkedEntry{
+				IssueID:         "id-7",
+				IssueType:       "Bug",
+				IssueLabels:     []string{"backend"},
+				DispatchedAt:    passAt,
+				Reason:          "agent_blocked",
+				ParkedState:     "In Progress",
+				Label:           "needs-human",
+				ParkedAt:        startedAt,
+				RuleName:        "implement",
+				StagePosition:   position,
+				AgentKind:       "claude-code",
+				ConfiguredModel: "opus",
+			}),
+			want: map[string]any{
+				"issue_id":         "id-7",
+				"reason":           "agent_blocked",
+				"parked_state":     "In Progress",
+				"label":            "needs-human",
+				"parked_at":        "2026-03-24T12:00:00Z",
+				"issue_type":       "Bug",
+				"issue_labels":     []any{"backend"},
+				"state":            "In Progress",
+				"dispatched_at":    "2026-03-24T09:00:00Z",
+				"rule_name":        "implement",
+				"stage_position":   wantPosition,
+				"agent_kind":       "claude-code",
+				"configured_model": "opus",
+			},
+		},
+		{
+			name:   "parked record without a run or a read serves null and omits the rest",
+			body:   toParkedEntryResponse(orchestrator.SnapshotParkedEntry{IssueID: "id-8", Identifier: "PROJ-8"}),
+			want:   map[string]any{"dispatched_at": nil, "stage_position": nil},
+			absent: []string{"issue_type", "issue_labels", "state", "rule_name", "agent_kind", "configured_model"},
+		},
+		{
+			name: "pending reaction",
+			body: toPendingReactionResponse(orchestrator.SnapshotPendingReaction{
+				IssueID:         "id-9",
+				Kind:            "ci",
+				ConfigKey:       "ci_failure",
+				IssueType:       "Task",
+				IssueLabels:     []string{"backend"},
+				State:           "In Review",
+				RuleName:        "implement",
+				StagePosition:   position,
+				AgentKind:       "claude-code",
+				ConfiguredModel: "opus",
+			}),
+			want: map[string]any{
+				"issue_id":         "id-9",
+				"kind":             "ci",
+				"config_key":       "ci_failure",
+				"issue_type":       "Task",
+				"issue_labels":     []any{"backend"},
+				"state":            "In Review",
+				"rule_name":        "implement",
+				"stage_position":   wantPosition,
+				"agent_kind":       "claude-code",
+				"configured_model": "opus",
+			},
+		},
+		{
+			name: "budget exhausted with sessions stopped in flight",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{StoppedInFlight: new(1)}),
+			want: map[string]any{"stopped_in_flight": 1},
+		},
+		{
+			name: "budget held by tokens serves a null session ceiling",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{BudgetTokens: 500000}),
+			want: map[string]any{"budget_sessions": nil, "budget_tokens": 500000},
+		},
+		{
+			name: "session-held token read failed serves null spend and counts",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{BudgetTokens: 500000}),
+			want: map[string]any{"used_tokens": nil, "unmeasured_sessions": nil, "stopped_in_flight": nil},
+		},
+		{
+			name: "session-held no usage reported serves null spend",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(0)), UnmeasuredSessions: new(3), StoppedInFlight: new(0),
+			}),
+			want: map[string]any{"used_tokens": nil, "unmeasured_sessions": 3, "stopped_in_flight": 0},
+		},
+		{
+			name: "session-held unaccounted turn serves null spend",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(0)), UnmeasuredSessions: new(0), StoppedInFlight: new(0), UnaccountedTurns: 1,
+			}),
+			want: map[string]any{"used_tokens": nil, "unmeasured_sessions": 0, "stopped_in_flight": 0},
+		},
+		{
+			name: "session-held measured zero serves zero spend",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(0)), UnmeasuredSessions: new(0), StoppedInFlight: new(0),
+			}),
+			want: map[string]any{"used_tokens": 0, "unmeasured_sessions": 0, "stopped_in_flight": 0},
+		},
+		{
+			name: "session-held partial sum serves the lower bound",
+			body: toBudgetExhaustedResponse(orchestrator.SnapshotBudgetEntry{
+				BudgetTokens: 500000, UsedTokens: new(int64(1200)), UnmeasuredSessions: new(1), StoppedInFlight: new(0),
+			}),
+			want: map[string]any{"used_tokens": 1200, "unmeasured_sessions": 1, "stopped_in_flight": 0},
+		},
+		{
+			name: "pending reaction merge-conflict with mergeability not computed",
+			body: toPendingReactionResponse(orchestrator.SnapshotPendingReaction{
+				Kind: "merge-conflict",
+				LastCheck: &orchestrator.ReactionCheck{
+					ObservedAt:   startedAt,
+					HeadSHA:      "9b7e3d1c",
+					Mergeability: &orchestrator.MergeabilityCheck{},
+				},
+			}),
+			want: map[string]any{"last_check": map[string]any{"observed_at": "2026-03-24T12:00:00Z", "head_sha": "9b7e3d1c", "mergeable": nil}},
+		},
+		{
+			name: "pending reaction label-review counts no tries and records no check",
+			body: toPendingReactionResponse(orchestrator.SnapshotPendingReaction{
+				Kind:        "label-review",
+				ConfigKey:   "label_review",
+				PullRequest: orchestrator.SnapshotPullRequest{Number: 7, Repository: "acme/web"},
+			}),
+			want: map[string]any{
+				"used_attempts": nil,
+				"max_attempts":  nil,
+				"escalated_at":  nil,
+				"last_check":    nil,
+				"pull_request":  map[string]any{"number": 7, "repository": "acme/web"},
+			},
+			absent: []string{"wait", "display_identifier", "issue_title", "issue_url"},
+		},
+		{
+			name: "pending reaction passing CI serves zero counts and an empty failing_checks",
+			body: toPendingReactionResponse(orchestrator.SnapshotPendingReaction{
+				Kind: "ci",
+				LastCheck: &orchestrator.ReactionCheck{
+					ObservedAt: startedAt,
+					CI:         &orchestrator.CICheck{Status: "passing", Passing: 5},
+				},
+			}),
+			want: map[string]any{"last_check": map[string]any{
+				"observed_at": "2026-03-24T12:00:00Z", "status": "passing", "failing_checks": []any{}, "failing": 0, "pending": 0, "passing": 5,
+			}},
 		},
 	}
 
@@ -928,25 +1334,18 @@ func TestToRunningEntryResponse_DisplayID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			entry := orchestrator.SnapshotRunningEntry{
-				IssueID:    "issue-x",
-				Identifier: tt.id,
-				DisplayID:  tt.dispID,
-			}
-
-			got := toRunningEntryResponse(entry)
-
-			if got.IssueIdentifier != tt.wantIdentifier {
-				t.Errorf("IssueIdentifier = %q, want %q", got.IssueIdentifier, tt.wantIdentifier)
-			}
-			if got.DisplayIdentifier != tt.wantDisplayID {
-				t.Errorf("DisplayIdentifier = %q, want %q", got.DisplayIdentifier, tt.wantDisplayID)
+			assertJSONKeys(t, tt.body, tt.want)
+			got := jsonObject(t, tt.body)
+			for _, key := range tt.absent {
+				if _, present := got[key]; present {
+					t.Errorf("JSON %q present, want absent", key)
+				}
 			}
 		})
 	}
 }
 
-func TestToRetryEntryResponse_DisplayID(t *testing.T) {
+func TestToEntryResponses_DisplayID(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -976,22 +1375,14 @@ func TestToRetryEntryResponse_DisplayID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			entry := orchestrator.SnapshotRetryEntry{
-				IssueID:    "issue-y",
-				Identifier: tt.id,
-				DisplayID:  tt.dispID,
-				Attempt:    1,
-				DueAtMS:    time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC).UnixMilli(),
-				Error:      "timeout",
-			}
+			running := toRunningEntryResponse(orchestrator.SnapshotRunningEntry{IssueID: "issue-x", Identifier: tt.id, DisplayID: tt.dispID})
+			retry := toRetryEntryResponse(orchestrator.SnapshotRetryEntry{IssueID: "issue-y", Identifier: tt.id, DisplayID: tt.dispID})
 
-			got := toRetryEntryResponse(entry)
-
-			if got.IssueIdentifier != tt.wantIdentifier {
-				t.Errorf("IssueIdentifier = %q, want %q", got.IssueIdentifier, tt.wantIdentifier)
+			if running.IssueIdentifier != tt.wantIdentifier || retry.IssueIdentifier != tt.wantIdentifier {
+				t.Errorf("IssueIdentifier running, retry = %q, %q, want %q", running.IssueIdentifier, retry.IssueIdentifier, tt.wantIdentifier)
 			}
-			if got.DisplayIdentifier != tt.wantDisplayID {
-				t.Errorf("DisplayIdentifier = %q, want %q", got.DisplayIdentifier, tt.wantDisplayID)
+			if running.DisplayIdentifier != tt.wantDisplayID || retry.DisplayIdentifier != tt.wantDisplayID {
+				t.Errorf("DisplayIdentifier running, retry = %q, %q, want %q", running.DisplayIdentifier, retry.DisplayIdentifier, tt.wantDisplayID)
 			}
 		})
 	}
@@ -1010,7 +1401,7 @@ func TestToStateResponse(t *testing.T) {
 			AgentTotals: orchestrator.SnapshotAgentTotals{},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, sentence.Context{}, nil)
 
 		if got.Running == nil {
 			t.Fatal("Running = nil, want non-nil empty slice")
@@ -1021,6 +1412,12 @@ func TestToStateResponse(t *testing.T) {
 		if got.Retrying == nil {
 			t.Fatal("Retrying = nil, want non-nil empty slice")
 		}
+		if got.PendingReactions == nil {
+			t.Fatal("PendingReactions = nil, want non-nil empty slice")
+		}
+		if got.BetweenStages == nil {
+			t.Fatal("BetweenStages = nil, want non-nil empty slice")
+		}
 		if len(got.Retrying) != 0 {
 			t.Errorf("len(Retrying) = %d, want 0", len(got.Retrying))
 		}
@@ -1030,23 +1427,6 @@ func TestToStateResponse(t *testing.T) {
 		if got.Counts.Retrying != 0 {
 			t.Errorf("Counts.Retrying = %d, want 0", got.Counts.Retrying)
 		}
-		if got.RateLimits == nil {
-			t.Fatal("RateLimits = nil, want non-nil empty map")
-		}
-	})
-
-	t.Run("nil RateLimits becomes empty map", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running:     nil,
-			Retrying:    nil,
-			RateLimits:  nil,
-		}
-
-		got := toStateResponse(snap, nil)
-
 		if got.RateLimits == nil {
 			t.Fatal("RateLimits = nil, want non-nil empty map")
 		}
@@ -1069,7 +1449,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, sentence.Context{}, nil)
 
 		if got.Counts.Running != 2 {
 			t.Errorf("Counts.Running = %d, want 2", got.Counts.Running)
@@ -1079,161 +1459,119 @@ func TestToStateResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("nil token rates — ActiveEstimatedCostUSD absent", func(t *testing.T) {
+	t.Run("held rows are counted and leave active and attention as they were", func(t *testing.T) {
 		t.Parallel()
 
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "r",
-					Identifier:        "MT-R",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 500_000,
-				},
-			},
+		now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+		base := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: now,
+			Running:     []orchestrator.SnapshotRunningEntry{{IssueID: "id-1", Identifier: "MT-1", StartedAt: now}},
+			Parked:      []orchestrator.SnapshotParkedEntry{{IssueID: "id-2", Identifier: "MT-2", Reason: "agent_blocked", Label: "needs-human"}},
+		}
+		withHeld := base
+		withHeld.Held = []orchestrator.SnapshotHeldEntry{
+			{IssueID: "id-3", Identifier: "MT-3", Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull, Since: now}},
+			{IssueID: "id-4", Identifier: "MT-4", Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull, Since: now}},
 		}
 
-		got := toStateResponse(snap, nil)
+		want := toStateResponse(base, sentence.Context{Now: now}, nil)
+		got := toStateResponse(withHeld, sentence.Context{Now: now}, nil)
 
-		if got.ActiveEstimatedCostUSD != nil {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want nil", *got.ActiveEstimatedCostUSD)
+		if want.Held == nil || len(want.Held) != 0 || want.Counts.Held != 0 {
+			t.Errorf("toStateResponse(no held).Held, Counts.Held = %v, %d, want an empty non-nil list and 0", want.Held, want.Counts.Held)
+		}
+		if got.Counts.Held != len(got.Held) || len(got.Held) != 2 {
+			t.Errorf("toStateResponse(2 held).Counts.Held, len(Held) = %d, %d, want 2, 2", got.Counts.Held, len(got.Held))
+		}
+		if !reflect.DeepEqual(got.Active, want.Active) || !reflect.DeepEqual(got.Attention, want.Attention) || got.Counts.Attention != want.Counts.Attention {
+			t.Errorf("toStateResponse(held).Active, Attention, Counts.Attention = %+v, %+v, %d, want %+v, %+v, %d",
+				got.Active, got.Attention, got.Counts.Attention, want.Active, want.Attention, want.Counts.Attention)
 		}
 	})
 
-	t.Run("with token rates and matching AgentKind — cost computed", func(t *testing.T) {
+	t.Run("parked entry serves every key and counts", func(t *testing.T) {
 		t.Parallel()
 
-		fptr := func(v float64) *float64 { return &v }
-
-		// 2M input @ $3/Mtok = $6, 1M output @ $15/Mtok = $15 -> $21
+		est := time.FixedZone("EST", -5*60*60)
 		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "cost-1",
-					Identifier:        "MT-C1",
-					AgentKind:         "claude",
-					AgentInputTokens:  2_000_000,
-					AgentOutputTokens: 1_000_000,
-					UsageMeasured:     true,
-				},
-			},
+			Parked: []orchestrator.SnapshotParkedEntry{{
+				IssueID: "id-p", Identifier: "MT-9", DisplayID: "acme/web#9",
+				IssueTitle: "Needs a human", IssueURL: "https://acme.atlassian.net/browse/MT-9",
+				Reason: "handoff_absence", ParkedState: "In Review", Label: "needs-human", LabelApplied: true,
+				ParkedAt: time.Date(2026, 3, 24, 12, 0, 0, 0, est),
+			}},
 		}
 
-		rates := TokenRates{
-			"claude": TokenRateConfig{
-				InputPerMtok:  fptr(3.0),
-				OutputPerMtok: fptr(15.0),
-			},
-		}
+		got := toStateResponse(snap, sentence.Context{}, nil)
 
-		got := toStateResponse(snap, rates)
-
-		if got.ActiveEstimatedCostUSD == nil {
-			t.Fatal("ActiveEstimatedCostUSD = nil, want non-nil")
+		if got.Counts.Parked != 1 || len(got.Parked) != 1 {
+			t.Fatalf("Counts.Parked, len(Parked) = %d, %d, want 1, 1", got.Counts.Parked, len(got.Parked))
 		}
-		want := 6.0 + 15.0 // $21
-		if diff := *got.ActiveEstimatedCostUSD - want; diff > 1e-9 || diff < -1e-9 {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want %v", *got.ActiveEstimatedCostUSD, want)
-		}
+		assertJSONKeys(t, got.Parked[0], map[string]any{
+			"issue_id":           "id-p",
+			"issue_identifier":   "MT-9",
+			"display_identifier": "acme/web#9",
+			"issue_title":        "Needs a human",
+			"issue_url":          "https://acme.atlassian.net/browse/MT-9",
+			"reason":             "handoff_absence",
+			"parked_state":       "In Review",
+			"label":              "needs-human",
+			"label_applied":      true,
+			"parked_at":          "2026-03-24T17:00:00Z",
+		})
 	})
 
-	t.Run("with token rates but no matching AgentKind — cost absent", func(t *testing.T) {
+	t.Run("pending reactions serve every key and count", func(t *testing.T) {
 		t.Parallel()
 
-		fptr := func(v float64) *float64 { return &v }
+		snap := orchestrator.RuntimeSnapshotResult{PendingReactions: pendingReactionRows()}
 
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "no-match",
-					Identifier:        "MT-NM",
-					AgentKind:         "other-adapter",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 500_000,
-				},
+		got := toStateResponse(snap, sentence.Context{Now: time.Date(2026, 2, 24, 20, 15, 35, 0, time.UTC)}, nil)
+
+		assertJSONKeys(t, got, map[string]any{
+			"counts": map[string]any{
+				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 2, "between_stages": 0, "held": 0, "attention": 1,
 			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
-		}
-
-		got := toStateResponse(snap, rates)
-
-		if got.ActiveEstimatedCostUSD != nil {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want nil (no matching kind)", *got.ActiveEstimatedCostUSD)
-		}
+			"pending_reactions": json.RawMessage(wantPendingReactionsJSON),
+		})
 	})
 
-	t.Run("ActiveEstimatedCostUSD omitted from JSON when nil", func(t *testing.T) {
+	t.Run("between stages serve the list and count", func(t *testing.T) {
 		t.Parallel()
 
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-		}
+		snap := orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{
+			{IssueID: "id-1", Identifier: "MT-1", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"},
+		}}
 
-		got := toStateResponse(snap, nil)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
+		got := toStateResponse(snap, sentence.Context{}, nil)
 
-		var decoded map[string]any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal: %v", err)
-		}
-
-		if _, exists := decoded["active_estimated_cost_usd"]; exists {
-			t.Error("JSON active_estimated_cost_usd present, want omitted (omitempty with nil pointer)")
-		}
-	})
-
-	t.Run("ActiveEstimatedCostUSD present in JSON when set", func(t *testing.T) {
-		t.Parallel()
-
-		fptr := func(v float64) *float64 { return &v }
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "json-cost",
-					Identifier:        "MT-JC",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 0,
-					UsageMeasured:     true,
-				},
+		assertJSONKeys(t, got, map[string]any{
+			"counts": map[string]any{
+				"running": 0, "retrying": 0, "budget_exhausted": 0, "parked": 0, "pending_reactions": 0, "between_stages": 1, "held": 0, "attention": 0,
 			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{InputPerMtok: fptr(5.0), OutputPerMtok: fptr(15.0)},
-		}
-
-		got := toStateResponse(snap, rates)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-
-		var decoded map[string]any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal: %v", err)
-		}
-
-		costVal, exists := decoded["active_estimated_cost_usd"]
-		if !exists {
-			t.Fatal("JSON active_estimated_cost_usd missing, want present")
-		}
-		if costVal != float64(5.0) {
-			t.Errorf("JSON active_estimated_cost_usd = %v, want 5.0", costVal)
-		}
+			"between_stages": json.RawMessage(`[{"issue_id": "id-1", "issue_identifier": "MT-1", "source_rule": "specify",
+				"target_rule": "implement", "target_label": "stage:implement", "hopped_at": null, "dispatched_at": null, "stage_position": null, "hold": null,
+				"status_text": "Between stages: specify to implement",
+				"status_text_full": "Moved from stage specify to stage implement, and Sortie added \u0060stage:implement\u0060; implement starts when a poll tick reads that label on the issue."}]`),
+		})
 	})
+
+	for _, window := range orchestrator.SpendWindows() {
+		t.Run("spend window "+string(window)+" serves under its own member", func(t *testing.T) {
+			t.Parallel()
+
+			snap := orchestrator.RuntimeSnapshotResult{SpendCeilings: []orchestrator.SpendCeilingStatus{{Window: window, BudgetUSD: 7}}}
+
+			got := jsonObject(t, toStateResponse(snap, sentence.Context{}, nil))
+
+			members, _ := got["spend_ceiling"].(map[string]any)
+			for _, member := range orchestrator.SpendWindows() {
+				if served := members[string(member)] != nil; served != (member == window) {
+					t.Errorf("toStateResponse(%s only).spend_ceiling[%q] = %v, want an object only under %q", window, member, members[string(member)], window)
+				}
+			}
+		})
+	}
 
 	t.Run("tokens_measured reflects each running entry's own flag", func(t *testing.T) {
 		t.Parallel()
@@ -1246,7 +1584,7 @@ func TestToStateResponse(t *testing.T) {
 			},
 		}
 
-		got := toStateResponse(snap, nil)
+		got := toStateResponse(snap, sentence.Context{}, nil)
 
 		if len(got.Running) != 2 {
 			t.Fatalf("len(Running) = %d, want 2", len(got.Running))
@@ -1270,53 +1608,8 @@ func TestToStateResponse(t *testing.T) {
 			t.Errorf("JSON = %s, want both tokens_measured:true and tokens_measured:false", data)
 		}
 	})
-
-	t.Run("an unmeasured entry is excluded from active_estimated_cost_usd while a measured entry with the same adapter and rate is included", func(t *testing.T) {
-		t.Parallel()
-
-		fptr := func(v float64) *float64 { return &v }
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{
-					IssueID:           "measured",
-					Identifier:        "MT-MEAS",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 0,
-					UsageMeasured:     true,
-				},
-				{
-					IssueID:           "unmeasured",
-					Identifier:        "MT-UNM",
-					AgentKind:         "claude",
-					AgentInputTokens:  1_000_000,
-					AgentOutputTokens: 0,
-					UsageMeasured:     false,
-				},
-			},
-		}
-
-		rates := TokenRates{
-			"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
-		}
-
-		got := toStateResponse(snap, rates)
-
-		// 1M input @ $3/Mtok = $3, from the measured entry alone.
-		if got.ActiveEstimatedCostUSD == nil {
-			t.Fatal("ActiveEstimatedCostUSD = nil, want non-nil")
-		}
-		if diff := *got.ActiveEstimatedCostUSD - 3.0; diff > 1e-9 || diff < -1e-9 {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want 3.0 (unmeasured entry excluded)", *got.ActiveEstimatedCostUSD)
-		}
-	})
 }
 
-// TestToStateResponse_AgentTotalsExclusionFieldsJSON binds the
-// unmeasured_sessions, running_unreported, and running_non_reporting
-// members of the nested agent_totals object to their JSON key names.
 func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 	t.Parallel()
 
@@ -1329,7 +1622,7 @@ func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 		},
 	}
 
-	got := toStateResponse(snap, nil)
+	got := toStateResponse(snap, sentence.Context{}, nil)
 	data, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
@@ -1357,179 +1650,145 @@ func TestToStateResponse_AgentTotalsExclusionFieldsJSON(t *testing.T) {
 	}
 }
 
-// requireCostUnpricedRunning fails unless got is non-nil and dereferences to want.
-func requireCostUnpricedRunning(t *testing.T, got *int, want int) {
+func loadTestRates(t *testing.T, raw map[string]any, kinds ...string) *pricing.Rates {
 	t.Helper()
-	if got == nil {
-		t.Fatalf("CostUnpricedRunning = nil, want %d", want)
+
+	cfg, err := config.NewServiceConfig(raw)
+	if err != nil {
+		t.Fatalf("config.NewServiceConfig: %v", err)
 	}
-	if *got != want {
-		t.Errorf("CostUnpricedRunning = %d, want %d", *got, want)
+	rates, _, err := pricing.LoadRates(cfg, pricing.LoadInput{IsKind: func(key string) bool { return slices.Contains(kinds, key) }})
+	if err != nil {
+		t.Fatalf("pricing.LoadRates: %v", err)
 	}
+	return rates
 }
 
-// TestToStateResponse_CostUnpricedRunning verifies the count includes only
-// running, measured sessions with no configured token rate, and is omitted
-// from JSON when zero.
 func TestToStateResponse_CostUnpricedRunning(t *testing.T) {
 	t.Parallel()
 
 	fptr := func(v float64) *float64 { return &v }
-	rates := TokenRates{
-		"claude": TokenRateConfig{InputPerMtok: fptr(3.0), OutputPerMtok: fptr(15.0)},
+
+	tests := []struct {
+		name       string
+		raw        map[string]any
+		wantServed bool
+	}{
+		{name: "zero served with defaults", wantServed: true},
+		{name: "omitted when no rate source is available", raw: map[string]any{"price_table": map[string]any{"embedded": false}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			snap := orchestrator.RuntimeSnapshotResult{
+				GeneratedAt: time.Now().UTC(),
+				Rates:       loadTestRates(t, tt.raw),
+				Running: []orchestrator.SnapshotRunningEntry{
+					{IssueID: "b", Identifier: "MT-B", EstimatedCostUSD: fptr(3.0), CostStatus: "estimated"},
+				},
+			}
+
+			got := jsonObject(t, toStateResponse(snap, sentence.Context{}, nil))
+
+			unpriced, served := got["cost_unpriced_running"]
+			if served != tt.wantServed || served && unpriced != float64(0) {
+				t.Errorf("cost_unpriced_running = %v (present=%t), want 0 (present=%t)", unpriced, served, tt.wantServed)
+			}
+			if _, served := got["active_estimated_cost_usd"]; served != tt.wantServed {
+				t.Errorf("active_estimated_cost_usd present = %t, want %t", served, tt.wantServed)
+			}
+		})
+	}
+}
+
+func TestToServedRunningEntry(t *testing.T) {
+	t.Parallel()
+
+	type entry = orchestrator.SnapshotRunningEntry
+	workedExample := func() entry {
+		return entry{
+			AgentKind: "claude-code", UsageMeasured: true,
+			AgentInputTokens: 60000, CacheReadTokens: 40000, AgentOutputTokens: 5000, AgentTotalTokens: 65000,
+			EstimatedCostUSD: new(12.0), CostStatus: "estimated",
+			IssueUsage: &orchestrator.SnapshotIssueUsage{Sessions: 3, TotalTokens: 420000, UncachedTokens: 120000, RecordedCostUSD: 15, PricedSessions: 2},
+		}
+	}
+	noFigure := func(usage orchestrator.SnapshotIssueUsage) func(*entry) {
+		return func(e *entry) {
+			e.UsageMeasured, e.IssueUsage, e.EstimatedCostUSD, e.CostStatus = false, &usage, nil, "unmeasured"
+		}
+	}
+	unknownSpend := func(completed any) map[string]any {
+		return map[string]any{
+			"issue_tokens_completed": completed, "used_tokens": nil, "used_tokens_complete": false,
+			"cost_status": "unmeasured", "estimated_cost_usd": nil, "issue_cost_status": "unmeasured", "issue_estimated_cost_usd": nil,
+		}
+	}
+	partialWorked := map[string]any{"used_tokens": 145000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 27}
+
+	tests := []struct {
+		name                   string
+		maxTokens, maxSessions int
+		edit                   func(*entry)
+		want                   map[string]any
+	}{
+		{
+			name: "worked example", maxTokens: 1_000_000, maxSessions: 5,
+			want: map[string]any{
+				"used_sessions": 3, "budget_sessions": 5, "issue_tokens_completed": 120000, "unmeasured_sessions": 0,
+				"used_tokens": 145000, "used_tokens_complete": true, "budget_tokens": 1_000_000,
+				"estimated_cost_usd": 12, "cost_status": "estimated", "issue_estimated_cost_usd": 27, "issue_cost_status": "estimated",
+			},
+		},
+		{
+			name: "larger live total with no ceilings", edit: func(e *entry) { e.AgentTotalTokens = 75000 },
+			want: map[string]any{"used_tokens": 155000, "issue_tokens_completed": 120000, "budget_tokens": nil, "budget_sessions": nil},
+		},
+		{
+			name: "session budget served, token ceiling null", maxSessions: 3,
+			want: map[string]any{"budget_tokens": nil, "budget_sessions": 3},
+		},
+		{
+			name: "unmeasured completed session and no figure",
+			edit: noFigure(orchestrator.SnapshotIssueUsage{Sessions: 2, UnmeasuredSessions: 1}), want: unknownSpend(nil),
+		},
+		{
+			name: "completed run that never entered a turn and no figure",
+			edit: noFigure(orchestrator.SnapshotIssueUsage{Sessions: 1}), want: unknownSpend(0),
+		},
+		{
+			name: "unmeasured completed session beside a measured one",
+			edit: func(e *entry) { e.IssueUsage = &orchestrator.SnapshotIssueUsage{Sessions: 1, UnmeasuredSessions: 1} },
+			want: map[string]any{"issue_tokens_completed": nil, "used_tokens": 25000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 12},
+		},
+		{
+			name: "unaccounted turn of the running session", edit: func(e *entry) { e.UnaccountedTurns = 1 },
+			want: partialWorked,
+		},
+		{
+			name: "unaccounted turn of a completed session", edit: func(e *entry) { e.IssueUsage.UnaccountedTurns = 1 },
+			want: partialWorked,
+		},
+		{
+			name: "no usage read and a priced session", edit: func(e *entry) { e.IssueUsage = nil },
+			want: map[string]any{"used_sessions": nil, "unmeasured_sessions": nil, "issue_tokens_completed": nil, "used_tokens": 25000, "used_tokens_complete": false, "issue_cost_status": "partial", "issue_estimated_cost_usd": 12},
+		},
 	}
 
-	t.Run("measured session with no configured rate is counted", func(t *testing.T) {
-		t.Parallel()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "a", Identifier: "MT-A", AgentKind: "unpriced-kind", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
+			e := workedExample()
+			if tt.edit != nil {
+				tt.edit(&e)
+			}
+			snap := orchestrator.RuntimeSnapshotResult{MaxTokens: tt.maxTokens, MaxSessions: tt.maxSessions}
 
-		got := toStateResponse(snap, rates)
-
-		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 1)
-	})
-
-	t.Run("measured session under an incomplete entry is counted with no cost", func(t *testing.T) {
-		t.Parallel()
-
-		incompleteRates := TokenRates{
-			"claude-code": TokenRateConfig{OutputPerMtok: fptr(15.0)},
-		}
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "d", Identifier: "MT-D", AgentKind: "claude-code", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
-
-		got := toStateResponse(snap, incompleteRates)
-
-		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 1)
-		if got.ActiveEstimatedCostUSD != nil {
-			t.Errorf("ActiveEstimatedCostUSD = %v, want nil (the only entry is incomplete)", *got.ActiveEstimatedCostUSD)
-		}
-	})
-
-	t.Run("measured session with a configured rate is not counted", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "b", Identifier: "MT-B", AgentKind: "claude", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
-
-		got := toStateResponse(snap, rates)
-
-		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 0)
-	})
-
-	t.Run("unmeasured session with no configured rate is not counted", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "c", Identifier: "MT-C", AgentKind: "unpriced-kind", UsageMeasured: false},
-			},
-		}
-
-		got := toStateResponse(snap, rates)
-
-		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 0)
-	})
-
-	t.Run("mixed population counts only the unpriced measured sessions", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "priced", Identifier: "MT-PRICED", AgentKind: "claude", UsageMeasured: true, AgentInputTokens: 1000},
-				{IssueID: "unpriced-1", Identifier: "MT-UNP1", AgentKind: "unpriced-kind", UsageMeasured: true, AgentInputTokens: 1000},
-				{IssueID: "unpriced-2", Identifier: "MT-UNP2", AgentKind: "other-unpriced", UsageMeasured: true, AgentInputTokens: 1000},
-				{IssueID: "unmeasured", Identifier: "MT-UNM", AgentKind: "unpriced-kind", UsageMeasured: false},
-			},
-		}
-
-		got := toStateResponse(snap, rates)
-
-		requireCostUnpricedRunning(t, got.CostUnpricedRunning, 2)
-	})
-
-	t.Run("zero count with rates configured is present as zero", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "b", Identifier: "MT-B", AgentKind: "claude", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
-
-		got := toStateResponse(snap, rates)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-		var decoded map[string]any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal: %v", err)
-		}
-		if v, ok := decoded["cost_unpriced_running"]; !ok || v != float64(0) {
-			t.Errorf(`JSON cost_unpriced_running = %v (present=%v), want 0`, v, ok)
-		}
-	})
-
-	t.Run("no rates configured omits the field from JSON", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "b", Identifier: "MT-B", AgentKind: "claude", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
-
-		got := toStateResponse(snap, nil)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-		if strings.Contains(string(data), "cost_unpriced_running") {
-			t.Errorf("JSON = %s, want cost_unpriced_running omitted when no token rate is configured", data)
-		}
-	})
-
-	t.Run("non-zero count is present in JSON under the correct key", func(t *testing.T) {
-		t.Parallel()
-
-		snap := orchestrator.RuntimeSnapshotResult{
-			GeneratedAt: time.Now().UTC(),
-			Running: []orchestrator.SnapshotRunningEntry{
-				{IssueID: "a", Identifier: "MT-A", AgentKind: "unpriced-kind", UsageMeasured: true, AgentInputTokens: 1000},
-			},
-		}
-
-		got := toStateResponse(snap, rates)
-		data, err := json.Marshal(got)
-		if err != nil {
-			t.Fatalf("json.Marshal: %v", err)
-		}
-		var decoded map[string]any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatalf("json.Unmarshal: %v", err)
-		}
-		if v, ok := decoded["cost_unpriced_running"]; !ok || v != float64(1) {
-			t.Errorf(`JSON cost_unpriced_running = %v (present=%v), want 1`, v, ok)
-		}
-	})
+			assertJSONKeys(t, toServedRunningEntry(e, snap), tt.want)
+		})
+	}
 }
 
 func TestBuildIssueDetail(t *testing.T) {
@@ -1561,13 +1820,10 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("running issue", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("MT-100", snap)
+		got := buildIssueDetail("MT-100", "", snap, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-100) = nil, want non-nil")
 			return
-		}
-		if got.Status != "running" {
-			t.Errorf("Status = %q, want %q", got.Status, "running")
 		}
 		if got.IssueID != "id-1" {
 			t.Errorf("IssueID = %q, want %q", got.IssueID, "id-1")
@@ -1600,13 +1856,10 @@ func TestBuildIssueDetail(t *testing.T) {
 
 	t.Run("retrying issue", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("MT-200", snap)
+		got := buildIssueDetail("MT-200", "", snap, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-200) = nil, want non-nil")
 			return
-		}
-		if got.Status != "retrying" {
-			t.Errorf("Status = %q, want %q", got.Status, "retrying")
 		}
 		if got.Running != nil {
 			t.Errorf("Running = %v, want nil for retrying issue", got.Running)
@@ -1631,9 +1884,72 @@ func TestBuildIssueDetail(t *testing.T) {
 		}
 	})
 
+	t.Run("issue object carries the deciding row's values", func(t *testing.T) {
+		t.Parallel()
+		issueSnap := orchestrator.RuntimeSnapshotResult{
+			Running:          []orchestrator.SnapshotRunningEntry{{Identifier: "MT-1", IssueTitle: "Run", IssueURL: "https://t.example/MT-1", IssueType: "Bug", IssueLabels: []string{"a"}, State: "In Progress"}},
+			Retrying:         []orchestrator.SnapshotRetryEntry{{Identifier: "MT-2", IssueTitle: "Retry", IssueURL: "https://t.example/MT-2", IssueType: "Task", IssueLabels: []string{"b"}, State: "To Do"}},
+			BudgetExhausted:  []orchestrator.SnapshotBudgetEntry{{Identifier: "MT-3", IssueTitle: "Held", IssueURL: "https://t.example/MT-3", IssueType: "Story", IssueLabels: []string{"c"}, State: "Backlog"}},
+			Parked:           []orchestrator.SnapshotParkedEntry{{Identifier: "MT-5", IssueTitle: "Parked", IssueURL: "https://t.example/MT-5", IssueType: "Epic", IssueLabels: []string{"d"}, ParkedState: "Blocked"}},
+			PendingReactions: []orchestrator.SnapshotPendingReaction{{Identifier: "MT-6", IssueTitle: "Waiting", IssueURL: "https://t.example/MT-6", IssueType: "Chore", IssueLabels: []string{"e"}, State: "In Review"}},
+			BetweenStages: []orchestrator.SnapshotStageHop{
+				{IssueID: "id-3", Identifier: "MT-3", IssueTitle: "Hopped", IssueURL: "https://t.example/hop-3"},
+				{IssueID: "id-4", Identifier: "MT-4", IssueTitle: "Between", IssueURL: "https://t.example/MT-4", IssueType: "Spike", IssueLabels: []string{"f"}, State: "Triage", SourceRule: "specify", TargetRule: "implement"},
+			},
+		}
+		tests := []struct {
+			identifier string
+			wantStatus string
+			want       issueResponse
+		}{
+			{"MT-1", "running", issueResponse{Title: "Run", URL: "https://t.example/MT-1", IssueType: "Bug", Labels: []string{"a"}, State: "In Progress"}},
+			{"MT-2", "retrying", issueResponse{Title: "Retry", URL: "https://t.example/MT-2", IssueType: "Task", Labels: []string{"b"}, State: "To Do"}},
+			{"MT-3", "budget_exhausted", issueResponse{Title: "Held", URL: "https://t.example/MT-3", IssueType: "Story", Labels: []string{"c"}, State: "Backlog"}},
+			{"MT-4", "between_stages", issueResponse{Title: "Between", URL: "https://t.example/MT-4", IssueType: "Spike", Labels: []string{"f"}, State: "Triage"}},
+			{"MT-5", "parked", issueResponse{Title: "Parked", URL: "https://t.example/MT-5", IssueType: "Epic", Labels: []string{"d"}, State: "Blocked"}},
+			{"MT-6", "pending_reactions", issueResponse{Title: "Waiting", URL: "https://t.example/MT-6", IssueType: "Chore", Labels: []string{"e"}, State: "In Review"}},
+		}
+
+		for _, tt := range tests {
+			got := buildIssueDetail(tt.identifier, "", issueSnap, sentence.Context{})
+			if got == nil {
+				t.Fatalf("buildIssueDetail(%q) = nil, want non-nil", tt.identifier)
+			}
+			if got.Status != tt.wantStatus {
+				t.Errorf("buildIssueDetail(%q).Status = %q, want %q", tt.identifier, got.Status, tt.wantStatus)
+			}
+			if !reflect.DeepEqual(got.Issue, tt.want) {
+				t.Errorf("buildIssueDetail(%q).Issue = %+v, want %+v", tt.identifier, got.Issue, tt.want)
+			}
+		}
+	})
+
+	t.Run("issue only between stages answers as one only parked does", func(t *testing.T) {
+		t.Parallel()
+		hop := orchestrator.SnapshotStageHop{IssueID: "id-4", Identifier: "MT-4", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"}
+
+		got := buildIssueDetail("MT-4", "", orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{hop}}, sentence.Context{})
+
+		if got == nil {
+			t.Fatal("buildIssueDetail(MT-4) = nil, want non-nil")
+		}
+		if got.BetweenStages == nil {
+			t.Fatal("buildIssueDetail(MT-4).BetweenStages = nil, want non-nil")
+		}
+		want := toStageHopResponse(hop, sentence.Context{})
+		want.StatusText, want.StatusTextFull = got.BetweenStages.StatusText, got.BetweenStages.StatusTextFull
+		if !reflect.DeepEqual(*got.BetweenStages, want) {
+			t.Errorf("buildIssueDetail(MT-4).BetweenStages = %+v, want %+v", got.BetweenStages, want)
+		}
+		if got.IssueID != "id-4" || got.Workspace != nil || got.LastError != nil || *got.Attempts != (attemptsInfo{}) {
+			t.Errorf("buildIssueDetail(MT-4) IssueID, Workspace, LastError, Attempts = %q, %v, %v, %+v, want %q, nil, nil, zeroed",
+				got.IssueID, got.Workspace, got.LastError, got.Attempts, "id-4")
+		}
+	})
+
 	t.Run("not found", func(t *testing.T) {
 		t.Parallel()
-		got := buildIssueDetail("NONEXISTENT", snap)
+		got := buildIssueDetail("NONEXISTENT", "", snap, sentence.Context{})
 		if got != nil {
 			t.Errorf("buildIssueDetail(NONEXISTENT) = %v, want nil", got)
 		}
@@ -1646,7 +1962,7 @@ func TestBuildIssueDetail(t *testing.T) {
 				{IssueID: "id-3", Identifier: "MT-300", State: "To Do"},
 			},
 		}
-		got := buildIssueDetail("MT-300", noWSSnap)
+		got := buildIssueDetail("MT-300", "", noWSSnap, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-300) = nil, want non-nil")
 			return
@@ -1663,7 +1979,7 @@ func TestBuildIssueDetail(t *testing.T) {
 				{IssueID: "id-4", Identifier: "MT-400", Attempt: 1, Error: ""},
 			},
 		}
-		got := buildIssueDetail("MT-400", noErrSnap)
+		got := buildIssueDetail("MT-400", "", noErrSnap, sentence.Context{})
 		if got == nil {
 			t.Fatal("buildIssueDetail(MT-400) = nil, want non-nil")
 			return
@@ -1672,6 +1988,17 @@ func TestBuildIssueDetail(t *testing.T) {
 			t.Errorf("LastError = %v, want nil when Error is empty", got.LastError)
 		}
 	})
+}
+
+func acknowledgeHold(t *testing.T, snap *orchestrator.RuntimeSnapshotResult, at time.Time) {
+	t.Helper()
+	for _, cause := range orchestrator.AttentionCauses(*snap, nil) {
+		if cause.Kind == orchestrator.AttentionKindBudgetHeld {
+			snap.AttentionAcknowledgements = map[string]time.Time{cause.ID: at}
+			return
+		}
+	}
+	t.Fatal("AttentionCauses() holds no budget_held cause, want one to acknowledge")
 }
 
 func TestHandleState(t *testing.T) {
@@ -1728,31 +2055,135 @@ func TestHandleState(t *testing.T) {
 		}
 	})
 
+	t.Run("attention", func(t *testing.T) {
+		t.Parallel()
+
+		parkedAt := time.Date(2026, 3, 24, 11, 0, 0, 0, time.UTC)
+		heldAndParked := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: fixedTime,
+			Parked: []orchestrator.SnapshotParkedEntry{
+				{IssueID: "id-1", Identifier: "MT-652", Reason: "agent_blocked", ParkedAt: parkedAt},
+			},
+			BudgetExhausted: []orchestrator.SnapshotBudgetEntry{
+				{IssueID: "id-1", Identifier: "MT-652", Reason: "session_budget", UsedSessions: 3, BudgetSessions: 3, ExhaustedAt: parkedAt.Add(time.Hour)},
+			},
+		}
+		acknowledgeHold(t, &heldAndParked, parkedAt.Add(90*time.Minute))
+		tests := []struct {
+			name               string
+			snap               orchestrator.RuntimeSnapshotResult
+			wantLen            int
+			wantCount          int
+			wantAcknowledgedAt map[string]any
+			wantItem           map[string]any
+		}{
+			{
+				name: "clean state serves an empty list",
+				snap: orchestrator.RuntimeSnapshotResult{GeneratedAt: fixedTime},
+			},
+			{
+				name: "parked issue serves tagged keys and omits empty issue keys",
+				snap: orchestrator.RuntimeSnapshotResult{
+					GeneratedAt: fixedTime,
+					Parked: []orchestrator.SnapshotParkedEntry{
+						{IssueID: "id-1", Identifier: "MT-652", Reason: "agent_blocked", Label: "needs-human", LabelApplied: true, ParkedAt: parkedAt},
+					},
+				},
+				wantLen:            1,
+				wantCount:          1,
+				wantAcknowledgedAt: map[string]any{"parked": nil},
+				wantItem: map[string]any{
+					"kind":             "parked",
+					"severity":         "warning",
+					"since":            "2026-03-24T11:00:00Z",
+					"issue_id":         "id-1",
+					"issue_identifier": "MT-652",
+					"reason_text":      "Parked: the agent needs a person",
+					"action":           map[string]any{"kind": "acknowledge"},
+					"evidence":         map[string]any{"reason": "agent_blocked", "label": "needs-human"},
+				},
+			},
+			{
+				name:               "acknowledged hold stays listed and leaves the count while the park of its issue stays counted",
+				snap:               heldAndParked,
+				wantLen:            2,
+				wantCount:          1,
+				wantAcknowledgedAt: map[string]any{"budget_held": "2026-03-24T12:30:00Z", "parked": nil},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				ts := testServer(t, fixedSnapshot(tt.snap), acceptingRefresh())
+				resp, err := http.Get(ts.URL + "/api/v1/state")
+				if err != nil {
+					t.Fatalf("GET /api/v1/state: %v", err)
+				}
+				defer func() { _ = resp.Body.Close() }()
+				var body struct {
+					Attention []map[string]any `json:"attention"`
+					Counts    struct {
+						Attention int `json:"attention"`
+					} `json:"counts"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+
+				if body.Attention == nil || len(body.Attention) != tt.wantLen {
+					t.Fatalf("GET /api/v1/state attention = %v, want a non-null list of %d", body.Attention, tt.wantLen)
+				}
+				if body.Counts.Attention != tt.wantCount {
+					t.Errorf("GET /api/v1/state counts.attention = %d, want %d", body.Counts.Attention, tt.wantCount)
+				}
+				for _, listed := range body.Attention {
+					kind, _ := listed["kind"].(string)
+					got, ok := listed["acknowledged_at"]
+					if !ok {
+						t.Errorf("attention %q lacks acknowledged_at, want the key present", kind)
+						continue
+					}
+					if want := tt.wantAcknowledgedAt[kind]; got != want {
+						t.Errorf("attention %q acknowledged_at = %v, want %v", kind, got, want)
+					}
+				}
+				if tt.wantItem == nil {
+					return
+				}
+				item := body.Attention[0]
+				for key, want := range tt.wantItem {
+					if !reflect.DeepEqual(item[key], want) {
+						t.Errorf("attention[0].%s = %v, want %v", key, item[key], want)
+					}
+				}
+				for _, key := range []string{"id", "why_text", "clears_text"} {
+					if text, _ := item[key].(string); text == "" {
+						t.Errorf("attention[0].%s = %q, want non-empty", key, text)
+					}
+				}
+				for _, key := range []string{"display_identifier", "issue_title", "issue_url"} {
+					if _, ok := item[key]; ok {
+						t.Errorf("attention[0] carries %q, want it omitted when empty", key)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("snapshot error returns 503 with generic message", func(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, failingSnapshot("connection refused"), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/state")
-		if err != nil {
-			t.Fatalf("GET /api/v1/state: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
-		}
+		status, body := getJSON[errorResponse](t, ts, "/api/v1/state")
 
-		var body errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode error response: %v", err)
+		if status != http.StatusServiceUnavailable || body.Error.Code != "snapshot_unavailable" {
+			t.Errorf("GET /api/v1/state = %d %q, want %d %q", status, body.Error.Code, http.StatusServiceUnavailable, "snapshot_unavailable")
 		}
-		if body.Error.Code != "snapshot_unavailable" {
-			t.Errorf("error code = %q, want %q", body.Error.Code, "snapshot_unavailable")
-		}
-
-		wantMsg := "orchestrator state snapshot unavailable"
-		if body.Error.Message != wantMsg {
-			t.Errorf("error message = %q, want %q", body.Error.Message, wantMsg)
+		if wantMsg := "orchestrator state snapshot unavailable"; body.Error.Message != wantMsg {
+			t.Errorf("GET /api/v1/state error message = %q, want %q", body.Error.Message, wantMsg)
 		}
 	})
 
@@ -1772,7 +2203,6 @@ func TestHandleState(t *testing.T) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		// Decode as raw JSON to check for null vs [].
 		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
@@ -1789,15 +2219,176 @@ func TestHandleState(t *testing.T) {
 		if string(rawMap["retrying"]) == "null" {
 			t.Error("retrying = null in JSON, want []")
 		}
-		if string(rawMap["rate_limits"]) == "null" {
-			t.Error("rate_limits = null in JSON, want {}")
+		if got := string(rawMap["rate_limits"]); got != "{}" {
+			t.Errorf("rate_limits = %s in JSON, want {}", got)
+		}
+	})
+
+	t.Run("rate limits serve unknown values as null", func(t *testing.T) {
+		t.Parallel()
+
+		reset := time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)
+		share := 82.0
+		snap := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: fixedTime,
+			UsageWindows: map[string]orchestrator.SnapshotUsageWindows{
+				"claude-code": {
+					ReportedAt: fixedTime,
+					Windows: []domain.UsageWindow{
+						{Key: "seven_day", Label: "Weekly limit", UsedPercent: &share, Status: domain.UsageWindowWarning, ResetsAt: reset, ReportedAt: fixedTime, Amount: &domain.UsageWindowAmount{Used: 410, Limit: 500, Unit: "credits"}},
+						{Key: "five_hour", Label: "5-hour limit", ReportedAt: fixedTime},
+					},
+				},
+				"codex": {ReportedAt: fixedTime, Windows: []domain.UsageWindow{}},
+			},
+		}
+
+		ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
+		_, body := getJSON[struct {
+			RateLimits map[string]struct {
+				Windows []struct {
+					Label       string          `json:"label"`
+					UsedPercent *float64        `json:"used_percent"`
+					Status      *string         `json:"status"`
+					ResetsAt    *time.Time      `json:"resets_at"`
+					Amount      json.RawMessage `json:"amount"`
+				} `json:"windows"`
+			} `json:"rate_limits"`
+		}](t, ts, "/api/v1/state")
+
+		claude := body.RateLimits["claude-code"].Windows
+		if len(claude) != 2 {
+			t.Fatalf("len(rate_limits[claude-code].windows) = %d, want 2", len(claude))
+		}
+		known, unknown := claude[0], claude[1]
+		if known.UsedPercent == nil || *known.UsedPercent != 82 {
+			t.Errorf("known window used_percent = %v, want 82", known.UsedPercent)
+		}
+		if known.Status == nil || *known.Status != "warning" {
+			t.Errorf("known window status = %v, want %q", known.Status, "warning")
+		}
+		if known.ResetsAt == nil || !known.ResetsAt.Equal(reset) {
+			t.Errorf("known window resets_at = %v, want %v", known.ResetsAt, reset)
+		}
+		if unknown.UsedPercent != nil {
+			t.Errorf("unknown window used_percent = %v, want null", *unknown.UsedPercent)
+		}
+		if unknown.Status != nil {
+			t.Errorf("unknown window status = %q, want null", *unknown.Status)
+		}
+		if unknown.ResetsAt != nil {
+			t.Errorf("unknown window resets_at = %v, want null", *unknown.ResetsAt)
+		}
+		if got, want := string(known.Amount), `{"used":410,"limit":500,"unit":"credits"}`; got != want {
+			t.Errorf("known window amount = %s, want %s", got, want)
+		}
+		if got := string(unknown.Amount); got != "null" {
+			t.Errorf("unknown window amount = %s, want null", got)
+		}
+
+		codex, ok := body.RateLimits["codex"]
+		if !ok {
+			t.Fatal("rate_limits[codex] missing, want a member with no current window")
+		}
+		if codex.Windows == nil {
+			t.Error("rate_limits[codex].windows = null, want []")
+		}
+	})
+
+	t.Run("failed reaction activity read serves null pr_loop", func(t *testing.T) {
+		t.Parallel()
+
+		snap := orchestrator.RuntimeSnapshotResult{
+			GeneratedAt: fixedTime,
+			Running: []orchestrator.SnapshotRunningEntry{
+				{IssueID: "id-1", Identifier: "MT-1", StageLineage: orchestrator.StageLineage{ChainID: "chain-1", DispatchedAt: fixedTime}},
+				{IssueID: "id-2", Identifier: "MT-2", StageLineage: orchestrator.StageLineage{ChainID: "chain-2", DispatchedAt: fixedTime}},
+			},
+		}
+		srv := New(Params{
+			SnapshotFn: fixedSnapshot(snap),
+			RefreshFn:  acceptingRefresh(),
+			Logger:     slog.New(slog.DiscardHandler),
+			RunHistory: &fakeRunHistory{passesErr: errors.New("database is locked")},
+			WorkflowShapeFn: func() orchestrator.WorkflowShape {
+				return orchestrator.WorkflowShape{Reactions: orchestrator.ShapeReactions{CIFailure: &orchestrator.ShapeCIFailure{}}}
+			},
+		})
+		ts := httptest.NewServer(srv.Mux())
+		t.Cleanup(ts.Close)
+
+		status, body := getJSON[stateResponse](t, ts, "/api/v1/state")
+
+		if status != http.StatusOK {
+			t.Fatalf("GET /api/v1/state status = %d, want %d", status, http.StatusOK)
+		}
+		if len(body.Active) != 2 {
+			t.Fatalf("GET /api/v1/state active = %d entries, want 2", len(body.Active))
+		}
+		for _, entry := range body.Active {
+			if entry.PRLoop != nil {
+				t.Errorf("GET /api/v1/state active %s pr_loop = %v, want null", entry.IssueID, entry.PRLoop)
+			}
 		}
 	})
 }
 
-// TestHandleState_Budget fails if the reason or its numbers stop reaching
-// the JSON API, or if a surface this change adds names a setting as a
-// thing to change.
+func TestHandleState_EveryRowCarriesBothForms(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	snap := orchestrator.RuntimeSnapshotResult{
+		GeneratedAt: now,
+		Running: []orchestrator.SnapshotRunningEntry{
+			{IssueID: "id-1", Identifier: "MT-11", StartedAt: now, TurnCount: 2},
+			{IssueID: "id-2", Identifier: "MT-22", StartedAt: now, TurnCount: 5},
+		},
+		Retrying:         []orchestrator.SnapshotRetryEntry{{IssueID: "id-3", Identifier: "MT-33", Attempt: 1, Trigger: "error", DueAtMS: now.Add(time.Minute).UnixMilli()}},
+		BudgetExhausted:  []orchestrator.SnapshotBudgetEntry{{IssueID: "id-4", Identifier: "MT-44", Reason: "session_budget"}},
+		Parked:           []orchestrator.SnapshotParkedEntry{{IssueID: "id-5", Identifier: "MT-55", Reason: "agent_blocked", Label: "needs-human"}},
+		PendingReactions: []orchestrator.SnapshotPendingReaction{{IssueID: "id-6", Identifier: "MT-66", Kind: "ci", NextPollAt: now.Add(time.Minute), PullRequest: orchestrator.SnapshotPullRequest{Number: 7}}},
+		BetweenStages:    []orchestrator.SnapshotStageHop{{IssueID: "id-7", Identifier: "MT-77", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"}},
+		Held: []orchestrator.SnapshotHeldEntry{{
+			IssueID: "id-8", Identifier: "MT-88",
+			Hold: orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipBlockedBy, Since: now,
+				Blockers: []orchestrator.SnapshotBlocker{{IssueID: "id-9", Identifier: "MT-99", State: "In Progress"}},
+			},
+		}},
+	}
+	ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
+
+	_, body := getJSON[map[string]json.RawMessage](t, ts, "/api/v1/state")
+
+	lists := []string{"running", "retrying", "budget_exhausted", "parked", "pending_reactions", "between_stages", "held"}
+	served := 0
+	for _, list := range lists {
+		var rows []struct {
+			Identifier string `json:"issue_identifier"`
+			Short      string `json:"status_text"`
+			Long       string `json:"status_text_full"`
+			Hold       *struct {
+				ReasonText string `json:"reason_text"`
+			} `json:"hold"`
+		}
+		if err := json.Unmarshal(body[list], &rows); err != nil {
+			t.Fatalf("GET /api/v1/state %s: %v", list, err)
+		}
+		for _, row := range rows {
+			served++
+			if row.Short == "" || row.Long == "" || strings.Contains(row.Long, row.Identifier) {
+				t.Errorf("GET /api/v1/state %s %s status_text, status_text_full = %q, %q, want a short form and a long form that does not repeat the issue key", list, row.Identifier, row.Short, row.Long)
+			}
+			if list == "held" && (row.Hold == nil || row.Hold.ReasonText != row.Short) {
+				t.Errorf("GET /api/v1/state held %s status_text = %q, want hold.reason_text %+v", row.Identifier, row.Short, row.Hold)
+			}
+		}
+	}
+	if served != 8 {
+		t.Errorf("GET /api/v1/state served %d rows with a sentence, want 8", served)
+	}
+}
+
 func TestHandleState_Budget(t *testing.T) {
 	t.Parallel()
 
@@ -1806,23 +2397,19 @@ func TestHandleState_Budget(t *testing.T) {
 	t.Run("decodes identifier, reason, and the used and budgeted numbers", func(t *testing.T) {
 		t.Parallel()
 
-		usedTokens := int64(1500)
-		unmeasured := 1
 		snap := orchestrator.RuntimeSnapshotResult{
 			GeneratedAt:          fixedTime,
 			BudgetExhaustedCount: 1,
 			BudgetExhausted: []orchestrator.SnapshotBudgetEntry{
 				{
-					IssueID:            "id-budget-1",
-					Identifier:         "MT-649",
-					DisplayID:          "org/repo#649",
-					Reason:             "session_budget",
-					UsedSessions:       3,
-					BudgetSessions:     3,
-					UsedTokens:         &usedTokens,
-					BudgetTokens:       10000,
-					UnmeasuredSessions: &unmeasured,
-					ExhaustedAt:        fixedTime,
+					IssueID:        "id-budget-1",
+					Identifier:     "MT-649",
+					DisplayID:      "org/repo#649",
+					Reason:         "session_budget",
+					UsedSessions:   3,
+					BudgetSessions: 3,
+					BudgetTokens:   10000,
+					ExhaustedAt:    fixedTime,
 				},
 			},
 		}
@@ -1851,17 +2438,11 @@ func TestHandleState_Budget(t *testing.T) {
 		if entry.Reason != "session_budget" {
 			t.Errorf("Reason = %q, want %q", entry.Reason, "session_budget")
 		}
-		if entry.UsedSessions != 3 || entry.BudgetSessions != 3 {
-			t.Errorf("UsedSessions/BudgetSessions = %d/%d, want 3/3", entry.UsedSessions, entry.BudgetSessions)
+		if entry.UsedSessions != 3 || entry.BudgetSessions == nil || *entry.BudgetSessions != 3 {
+			t.Errorf("UsedSessions/BudgetSessions = %d/%v, want 3/3", entry.UsedSessions, entry.BudgetSessions)
 		}
-		if entry.UsedTokens == nil || *entry.UsedTokens != 1500 {
-			t.Errorf("UsedTokens = %v, want 1500", entry.UsedTokens)
-		}
-		if entry.BudgetTokens != 10000 {
-			t.Errorf("BudgetTokens = %d, want 10000", entry.BudgetTokens)
-		}
-		if entry.UnmeasuredSessions == nil || *entry.UnmeasuredSessions != 1 {
-			t.Errorf("UnmeasuredSessions = %v, want 1", entry.UnmeasuredSessions)
+		if entry.BudgetTokens == nil || *entry.BudgetTokens != 10000 {
+			t.Errorf("BudgetTokens = %v, want 10000", entry.BudgetTokens)
 		}
 	})
 
@@ -1905,13 +2486,16 @@ func TestHandleState_Budget(t *testing.T) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		raw, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
+		var rawMap map[string]json.RawMessage
+		if err := json.NewDecoder(resp.Body).Decode(&rawMap); err != nil {
+			t.Fatalf("decode body: %v", err)
 		}
-		for _, forbidden := range []string{"max_sessions", "max_tokens", "max_consecutive_absences"} {
-			if strings.Contains(string(raw), forbidden) {
-				t.Errorf("response body contains %q, want absent", forbidden)
+		delete(rawMap, "attention")
+		for key, raw := range rawMap {
+			for _, forbidden := range []string{"max_sessions", "max_tokens", "max_consecutive_absences"} {
+				if strings.Contains(string(raw), forbidden) {
+					t.Errorf("response member %q contains %q, want absent", key, forbidden)
+				}
 			}
 		}
 	})
@@ -1938,22 +2522,15 @@ func TestHandleIssueDetail(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/MT-100")
-		if err != nil {
-			t.Fatalf("GET /api/v1/MT-100: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-		}
+		status, body := getJSON[issueDetailResponse](t, ts, "/api/v1/MT-100")
 
-		body := decodeJSON[issueDetailResponse](t, resp)
-		if body.IssueIdentifier != "MT-100" {
-			t.Errorf("IssueIdentifier = %q, want %q", body.IssueIdentifier, "MT-100")
+		if status != http.StatusOK || body.IssueIdentifier != "MT-100" || body.Status != "running" {
+			t.Errorf("GET /api/v1/MT-100 = %d %q %q, want %d %q %q",
+				status, body.IssueIdentifier, body.Status, http.StatusOK, "MT-100", "running")
 		}
-		if body.Status != "running" {
-			t.Errorf("Status = %q, want %q", body.Status, "running")
+		if body.StatusText == "" || body.StatusTextFull == "" || body.StatusText != body.Running.StatusText {
+			t.Errorf("GET /api/v1/MT-100 status_text = %q, want the running row's sentence %q", body.StatusText, body.Running.StatusText)
 		}
 	})
 
@@ -1961,22 +2538,11 @@ func TestHandleIssueDetail(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/NONEXISTENT")
-		if err != nil {
-			t.Fatalf("GET /api/v1/NONEXISTENT: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
-		}
+		status, body := getJSON[errorResponse](t, ts, "/api/v1/NONEXISTENT")
 
-		var body errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode error: %v", err)
-		}
-		if body.Error.Code != "issue_not_found" {
-			t.Errorf("error code = %q, want %q", body.Error.Code, "issue_not_found")
+		if status != http.StatusNotFound || body.Error.Code != "issue_not_found" {
+			t.Errorf("GET /api/v1/NONEXISTENT = %d %q, want %d %q", status, body.Error.Code, http.StatusNotFound, "issue_not_found")
 		}
 	})
 
@@ -1984,31 +2550,354 @@ func TestHandleIssueDetail(t *testing.T) {
 		t.Parallel()
 
 		ts := testServer(t, failingSnapshot("connection refused"), acceptingRefresh())
-		resp, err := http.Get(ts.URL + "/api/v1/MT-100")
-		if err != nil {
-			t.Fatalf("GET /api/v1/MT-100: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
 
-		if resp.StatusCode != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
-		}
+		status, body := getJSON[errorResponse](t, ts, "/api/v1/MT-100")
 
-		var body errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatalf("decode error response: %v", err)
+		if status != http.StatusServiceUnavailable {
+			t.Errorf("GET /api/v1/MT-100 status = %d, want %d", status, http.StatusServiceUnavailable)
 		}
-
-		wantMsg := "orchestrator state snapshot unavailable"
-		if body.Error.Message != wantMsg {
-			t.Errorf("error message = %q, want %q", body.Error.Message, wantMsg)
+		if wantMsg := "orchestrator state snapshot unavailable"; body.Error.Message != wantMsg {
+			t.Errorf("GET /api/v1/MT-100 error message = %q, want %q", body.Error.Message, wantMsg)
 		}
 	})
+
+	history := []RunHistoryEntry{{ID: 3, IssueID: "id-1", Identifier: "MT-100", Status: "succeeded"}}
+	dbClosed := errors.New("db closed")
+	historyTests := []struct {
+		name       string
+		history    *fakeRunHistory
+		path       string
+		wantStatus int
+		wantCode   string
+		wantMsg    string
+	}{
+		{name: "failed read for a live identifier", history: &fakeRunHistory{err: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{name: "failed read for a non-live identifier", history: &fakeRunHistory{err: dbClosed}, path: "MT-OLD", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{name: "failed totals read", history: &fakeRunHistory{rows: history, totalsErr: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{name: "failed outcome read", history: &fakeRunHistory{rows: history, outcomesErr: dbClosed}, path: "MT-100", wantStatus: http.StatusServiceUnavailable, wantCode: "history_unavailable"},
+		{
+			name: "no live entry and no run", history: &fakeRunHistory{}, path: "MT-OLD", wantStatus: http.StatusNotFound, wantCode: "issue_not_found",
+			wantMsg: `issue identifier "MT-OLD" not found in current state or run history`,
+		},
+	}
+
+	for _, tt := range historyTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := historyServer(t, snap, tt.history)
+
+			status, body := getJSON[errorResponse](t, ts, "/api/v1/"+tt.path)
+
+			if status != tt.wantStatus || body.Error.Code != tt.wantCode {
+				t.Errorf("GET /api/v1/%s = %d %q, want %d %q", tt.path, status, body.Error.Code, tt.wantStatus, tt.wantCode)
+			}
+			if tt.wantMsg != "" && body.Error.Message != tt.wantMsg {
+				t.Errorf("GET /api/v1/%s error message = %q, want %q", tt.path, body.Error.Message, tt.wantMsg)
+			}
+		})
+	}
 }
 
-// TestHandleIssueDetail_Budget fails if the per-issue endpoint stops
-// answering for a budget-blocked issue, or if a surface this change adds
-// names a setting as a thing to change.
+func TestHandleIssueDetail_StatusSentence(t *testing.T) {
+	t.Parallel()
+
+	pending := pendingReactionRows()
+	handedOff := IssueOutcome{Kind: "handed_off", State: "In Review"}
+
+	tests := []struct {
+		name             string
+		snap             orchestrator.RuntimeSnapshotResult
+		history          *fakeRunHistory
+		path             string
+		wantShort        string
+		wantFull         string
+		wantOutcomeShort string
+		wantOutcomeFull  string
+	}{
+		{
+			name: "between stages",
+			snap: orchestrator.RuntimeSnapshotResult{BetweenStages: []orchestrator.SnapshotStageHop{
+				{IssueID: "id-1", Identifier: "MT-1", SourceRule: "specify", TargetRule: "implement", TargetLabel: "stage:implement"},
+			}},
+			history:   &fakeRunHistory{},
+			path:      "MT-1",
+			wantShort: "Between stages: specify to implement",
+			wantFull:  "Moved from stage specify to stage implement, and Sortie added `stage:implement`; implement starts when a poll tick reads that label on the issue.",
+		},
+		{
+			name:      "escalated pending reaction decides when it is not first",
+			snap:      orchestrator.RuntimeSnapshotResult{PendingReactions: []orchestrator.SnapshotPendingReaction{pending[1], pending[0]}},
+			history:   &fakeRunHistory{},
+			path:      "MT-653",
+			wantShort: "CI escalated on #931",
+			wantFull:  "Sortie escalated failing CI on PR #931; it keeps watching the pull request. CI fixes used: 2 of 2.",
+		},
+		{
+			name: "history only, merged by auto-merge",
+			history: &fakeRunHistory{
+				rows:     []RunHistoryEntry{{ID: 5, IssueID: "id-1", Identifier: "MT-1", Status: "succeeded"}},
+				outcomes: map[string]IssueOutcome{"id-1": {Kind: "merged", MergeReactionKind: orchestrator.ReactionKindAutoMerge, PRNumber: 88}},
+			},
+			path:             "MT-1",
+			wantShort:        "Merged #88",
+			wantFull:         "Ended merged: auto-merge merged PR #88.",
+			wantOutcomeShort: "Merged #88",
+			wantOutcomeFull:  "Ended merged: auto-merge merged PR #88.",
+		},
+		{
+			name: "history only, hop ceiling then handoff",
+			history: &fakeRunHistory{
+				rows:     []RunHistoryEntry{{ID: 5, IssueID: "id-2", Identifier: "MT-2", Status: "succeeded", StageTarget: "implement", StageResult: "ceiling"}},
+				outcomes: map[string]IssueOutcome{"id-2": handedOff},
+			},
+			path:             "MT-2",
+			wantShort:        "Handed off to In Review; stage implement not reached",
+			wantFull:         "Handed off to In Review because the hop to stage implement was not made: the issue reached its limit of consecutive stage moves (`dispatch.max_consecutive_hops`).",
+			wantOutcomeShort: "Handed off to In Review",
+			wantOutcomeFull:  "Handed off: Sortie moved the issue to In Review.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := historyServer(t, tt.snap, tt.history)
+
+			status, body := getJSON[issueDetailResponse](t, ts, "/api/v1/"+tt.path)
+
+			if status != http.StatusOK {
+				t.Fatalf("GET /api/v1/%s status = %d, want %d", tt.path, status, http.StatusOK)
+			}
+			if body.StatusText != tt.wantShort || body.StatusTextFull != tt.wantFull {
+				t.Errorf("GET /api/v1/%s status_text, status_text_full = %q, %q, want %q, %q",
+					tt.path, body.StatusText, body.StatusTextFull, tt.wantShort, tt.wantFull)
+			}
+			if row := body.BetweenStages; row != nil && (row.StatusText != body.StatusText || row.StatusTextFull != body.StatusTextFull) {
+				t.Errorf("GET /api/v1/%s between_stages pair = %q, %q, want the top-level pair %q, %q",
+					tt.path, row.StatusText, row.StatusTextFull, body.StatusText, body.StatusTextFull)
+			}
+			if tt.wantOutcomeShort == "" {
+				return
+			}
+			if body.History == nil || len(body.History.Runs) == 0 {
+				t.Fatalf("GET /api/v1/%s history = %+v, want a run", tt.path, body.History)
+			}
+			outcomes := []*issueOutcomeResponse{body.History.IssueOutcome, body.History.Runs[0].IssueOutcome}
+			for _, o := range outcomes {
+				if o == nil || o.StatusText != tt.wantOutcomeShort || o.StatusTextFull != tt.wantOutcomeFull {
+					t.Errorf("GET /api/v1/%s issue_outcome = %+v, want pair %q, %q", tt.path, o, tt.wantOutcomeShort, tt.wantOutcomeFull)
+				}
+			}
+		})
+	}
+}
+
+type totalsHistory struct {
+	*fakeRunHistory
+	totals IssueRunTotals
+}
+
+func (h totalsHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {
+	return h.totals, nil
+}
+
+func nextOutcomesServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader) *httptest.Server {
+	t.Helper()
+	srv := New(Params{
+		SnapshotFn: fixedSnapshot(snap),
+		RefreshFn:  acceptingRefresh(),
+		Logger:     slog.New(slog.DiscardHandler),
+		RunHistory: history,
+		WorkflowShapeFn: func() orchestrator.WorkflowShape {
+			return orchestrator.WorkflowShape{Agent: orchestrator.ShapeAgent{MaxSessions: new(3)}}
+		},
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestHandleIssueDetail_NextOutcomes(t *testing.T) {
+	t.Parallel()
+
+	watching := orchestrator.SnapshotPendingReaction{
+		IssueID: "id-1", Identifier: "MT-1", Kind: orchestrator.ReactionKindCI, ConfigKey: "ci_failure",
+		WatchEndsAt: new(time.Date(2026, 3, 24, 7, 30, 0, 0, time.FixedZone("EST", -5*60*60))),
+	}
+	unwatched := orchestrator.SnapshotPendingReaction{
+		IssueID: "id-1", Identifier: "MT-1", Kind: orchestrator.ReactionKindMergeCompletion, ConfigKey: "merge_completion",
+	}
+	oneRunShort := totalsHistory{
+		fakeRunHistory: &fakeRunHistory{rows: []RunHistoryEntry{{ID: 3, IssueID: "id-1", Identifier: "MT-1", Status: "succeeded"}}},
+		totals:         IssueRunTotals{Usage: orchestrator.SnapshotIssueUsage{Sessions: 2}},
+	}
+	held := "Sortie holds the issue at its session budget (3 of 3 sessions used)."
+
+	tests := []struct {
+		name          string
+		snap          orchestrator.RuntimeSnapshotResult
+		history       RunHistoryReader
+		wantNext      []nextOutcomeResponse
+		wantWatchEnds map[string]string
+	}{
+		{
+			name:    "work session one run short of the session budget holds on both exits",
+			snap:    orchestrator.RuntimeSnapshotResult{Running: []orchestrator.SnapshotRunningEntry{{IssueID: "id-1", Identifier: "MT-1"}}},
+			history: oneRunShort,
+			wantNext: []nextOutcomeResponse{
+				{Condition: "If the run succeeds", Text: held},
+				{Condition: "If the run fails", Text: held},
+			},
+		},
+		{
+			name:     "history only issue serves an empty list",
+			history:  oneRunShort,
+			wantNext: []nextOutcomeResponse{},
+		},
+		{
+			name:          "watch end is served in UTC and null when the kind has none",
+			snap:          orchestrator.RuntimeSnapshotResult{PendingReactions: []orchestrator.SnapshotPendingReaction{watching, unwatched}},
+			wantWatchEnds: map[string]string{"ci": "2026-03-24T12:30:00Z", "merge-completion": ""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := nextOutcomesServer(t, tt.snap, tt.history)
+
+			status, body := getJSON[struct {
+				NextOutcomes     *[]nextOutcomeResponse `json:"next_outcomes"`
+				PendingReactions []struct {
+					Kind        string  `json:"kind"`
+					WatchEndsAt *string `json:"watch_ends_at"`
+				} `json:"pending_reactions"`
+			}](t, ts, "/api/v1/MT-1")
+
+			if status != http.StatusOK || body.NextOutcomes == nil {
+				t.Fatalf("GET /api/v1/MT-1 = %d with next_outcomes %v, want %d with a list", status, body.NextOutcomes, http.StatusOK)
+			}
+			if tt.wantNext != nil && !reflect.DeepEqual(*body.NextOutcomes, tt.wantNext) {
+				t.Errorf("GET /api/v1/MT-1 next_outcomes = %+v, want %+v", *body.NextOutcomes, tt.wantNext)
+			}
+			if len(body.PendingReactions) != len(tt.wantWatchEnds) {
+				t.Fatalf("GET /api/v1/MT-1 pending_reactions = %d rows, want %d", len(body.PendingReactions), len(tt.wantWatchEnds))
+			}
+			for _, row := range body.PendingReactions {
+				got := ""
+				if row.WatchEndsAt != nil {
+					got = *row.WatchEndsAt
+				}
+				if got != tt.wantWatchEnds[row.Kind] {
+					t.Errorf("GET /api/v1/MT-1 %s watch_ends_at = %q, want %q", row.Kind, got, tt.wantWatchEnds[row.Kind])
+				}
+			}
+		})
+	}
+}
+
+func TestHandleIssueDetail_Parked(t *testing.T) {
+	t.Parallel()
+
+	parked := []orchestrator.SnapshotParkedEntry{
+		{IssueID: "id-p", Identifier: "MT-9", Reason: "agent_blocked", Label: "needs-human", ParkedAt: time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)},
+	}
+	otherIssueRow := orchestrator.SnapshotPendingReaction{IssueID: "id-o", Identifier: "MT-700", Kind: "merge", ConfigKey: "merge"}
+	rows := append(pendingReactionRows(), otherIssueRow)
+
+	tests := []struct {
+		name        string
+		snap        orchestrator.RuntimeSnapshotResult
+		identifier  string
+		wantCode    int
+		wantStatus  string
+		wantIssueID string
+		wantKinds   []string
+	}{
+		{
+			name:        "parked issue serves no pending reactions",
+			snap:        orchestrator.RuntimeSnapshotResult{Parked: parked, PendingReactions: rows},
+			identifier:  "MT-9",
+			wantCode:    http.StatusOK,
+			wantStatus:  "parked",
+			wantIssueID: "id-p",
+			wantKinds:   []string{},
+		},
+		{
+			name:        "issue held only by pending reactions serves its own rows",
+			snap:        orchestrator.RuntimeSnapshotResult{PendingReactions: rows},
+			identifier:  "MT-653",
+			wantCode:    http.StatusOK,
+			wantStatus:  "pending_reactions",
+			wantIssueID: "mno345",
+			wantKinds:   []string{"ci", "review"},
+		},
+		{
+			name: "retrying issue keeps its status and still serves its pending reactions",
+			snap: orchestrator.RuntimeSnapshotResult{
+				Retrying:         []orchestrator.SnapshotRetryEntry{{IssueID: "mno345", Identifier: "MT-653"}},
+				PendingReactions: rows,
+			},
+			identifier:  "MT-653",
+			wantCode:    http.StatusOK,
+			wantStatus:  "retrying",
+			wantIssueID: "mno345",
+			wantKinds:   []string{"ci", "review"},
+		},
+		{
+			name:       "identifier in no list answers 404",
+			snap:       orchestrator.RuntimeSnapshotResult{Parked: parked, PendingReactions: rows},
+			identifier: "NONEXISTENT",
+			wantCode:   http.StatusNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := testServer(t, fixedSnapshot(tt.snap), acceptingRefresh())
+
+			resp, err := http.Get(ts.URL + "/api/v1/" + tt.identifier)
+			if err != nil {
+				t.Fatalf("GET /api/v1/%s: %v", tt.identifier, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tt.wantCode {
+				t.Fatalf("GET /api/v1/%s status = %d, want %d", tt.identifier, resp.StatusCode, tt.wantCode)
+			}
+			if tt.wantCode != http.StatusOK {
+				return
+			}
+			body := decodeJSON[issueDetailResponse](t, resp)
+
+			if body.Status != tt.wantStatus {
+				t.Errorf("GET /api/v1/%s status = %q, want %q", tt.identifier, body.Status, tt.wantStatus)
+			}
+			if body.IssueID != tt.wantIssueID {
+				t.Errorf("GET /api/v1/%s issue_id = %q, want %q", tt.identifier, body.IssueID, tt.wantIssueID)
+			}
+			if body.Workspace != nil || body.LastError != nil || body.Attempts == nil || *body.Attempts != (attemptsInfo{}) {
+				t.Errorf("GET /api/v1/%s workspace, attempts, last_error = %+v, %+v, %v, want nil, zero, nil",
+					tt.identifier, body.Workspace, body.Attempts, body.LastError)
+			}
+			if body.PendingReactions == nil {
+				t.Fatalf("GET /api/v1/%s pending_reactions = null, want an array", tt.identifier)
+			}
+			gotKinds := []string{}
+			for _, row := range body.PendingReactions {
+				gotKinds = append(gotKinds, row.Kind)
+			}
+			if !slices.Equal(gotKinds, tt.wantKinds) {
+				t.Errorf("GET /api/v1/%s pending_reactions kinds = %v, want %v", tt.identifier, gotKinds, tt.wantKinds)
+			}
+		})
+	}
+}
+
 func TestHandleIssueDetail_Budget(t *testing.T) {
 	t.Parallel()
 
@@ -2103,117 +2992,244 @@ func TestHandleIssueDetail_Budget(t *testing.T) {
 func TestHandleRefresh(t *testing.T) {
 	t.Parallel()
 
-	t.Run("accepted", func(t *testing.T) {
-		t.Parallel()
+	tests := []struct {
+		name          string
+		refreshFn     RefreshFunc
+		draining      bool
+		wantStatus    int
+		wantQueued    bool
+		wantCoalesced bool
+		wantOps       int
+		wantText      string
+	}{
+		{
+			name: "accepted", refreshFn: acceptingRefresh(),
+			wantStatus: http.StatusAccepted, wantQueued: true, wantOps: 2,
+			wantText: "Tracker poll and reconciliation queued.",
+		},
+		{
+			name: "coalesced", refreshFn: coalescingRefresh(),
+			wantStatus: http.StatusAccepted, wantQueued: true, wantCoalesced: true, wantOps: 2,
+			wantText: "A tracker poll and reconciliation was already queued; this request joined it.",
+		},
+		{
+			name: "rejected during drain even when refreshFn accepts", refreshFn: acceptingRefresh(), draining: true,
+			wantStatus: http.StatusConflict,
+			wantText:   "Nothing queued: Sortie is shutting down.",
+		},
+	}
 
-		ts := testServer(t, fixedSnapshot(orchestrator.RuntimeSnapshotResult{}), acceptingRefresh())
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-		if resp.StatusCode != http.StatusAccepted {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusAccepted)
-		}
+			srv := New(Params{
+				SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+				RefreshFn:  tt.refreshFn,
+				Logger:     slog.New(slog.DiscardHandler),
+			})
+			if tt.draining {
+				srv.SetDraining()
+			}
+			ts := httptest.NewServer(srv.Mux())
+			t.Cleanup(ts.Close)
 
-		body := decodeJSON[refreshResponse](t, resp)
-		if !body.Queued {
-			t.Error("Queued = false, want true")
-		}
-		if body.Coalesced {
-			t.Error("Coalesced = true, want false when accepted")
-		}
-		if body.Operations == nil {
-			t.Fatal("Operations = nil, want non-nil")
-		}
-		if len(body.Operations) != 2 {
-			t.Errorf("len(Operations) = %d, want 2", len(body.Operations))
-		}
-	})
+			resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
+			if err != nil {
+				t.Fatalf("POST /api/v1/refresh: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body := decodeJSON[refreshResponse](t, resp)
 
-	t.Run("coalesced", func(t *testing.T) {
-		t.Parallel()
-
-		ts := testServer(t, fixedSnapshot(orchestrator.RuntimeSnapshotResult{}), coalescingRefresh())
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body := decodeJSON[refreshResponse](t, resp)
-		if !body.Coalesced {
-			t.Error("Coalesced = false, want true when coalesced")
-		}
-		if !body.Queued {
-			t.Error("Queued = false, want true even when coalesced")
-		}
-	})
-
-	t.Run("rejected during drain", func(t *testing.T) {
-		t.Parallel()
-
-		srv := New(Params{
-			SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
-			RefreshFn:  func() bool { return false },
-			Logger:     slog.New(slog.DiscardHandler),
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("POST /api/v1/refresh status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if body.Queued != tt.wantQueued || body.Coalesced != tt.wantCoalesced || len(body.Operations) != tt.wantOps {
+				t.Errorf("POST /api/v1/refresh queued, coalesced, operations = %t, %t, %v, want %t, %t, %d operations",
+					body.Queued, body.Coalesced, body.Operations, tt.wantQueued, tt.wantCoalesced, tt.wantOps)
+			}
+			if body.OutcomeText != tt.wantText {
+				t.Errorf("POST /api/v1/refresh outcome_text = %q, want %q", body.OutcomeText, tt.wantText)
+			}
 		})
-		srv.SetDraining()
+	}
+}
 
-		ts := httptest.NewServer(srv.Mux())
-		t.Cleanup(ts.Close)
+func TestHandleIssueTriggers(t *testing.T) {
+	t.Parallel()
 
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
+	retryNow := func(_ context.Context, identifier string) orchestrator.RetryNowResult {
+		if identifier != "MT-650" {
+			return orchestrator.RetryNowResult{Status: orchestrator.RetryNowNotFound}
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != http.StatusConflict {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
+		return orchestrator.RetryNowResult{Status: orchestrator.RetryNowDue, IssueID: "def456", Identifier: identifier, Attempt: 3}
+	}
+	checkNow := func(_ context.Context, identifier, kind string) orchestrator.CheckNowResult {
+		if identifier != "MT-653" || kind != "ci" {
+			return orchestrator.CheckNowResult{Status: orchestrator.CheckNowNotFound}
 		}
-
-		body := decodeJSON[refreshResponse](t, resp)
-		if body.Queued {
-			t.Error("Queued = true, want false during drain")
+		return orchestrator.CheckNowResult{
+			Status: orchestrator.CheckNowDue, IssueID: "mno345", Identifier: identifier, DisplayID: identifier,
+			Kind: kind, PRNumber: 931, PRRepository: "acme/web",
 		}
-		if body.Coalesced {
-			t.Error("Coalesced = true, want false during drain")
-		}
-		if len(body.Operations) != 0 {
-			t.Errorf("len(Operations) = %d, want 0", len(body.Operations))
-		}
+	}
+	srv := New(Params{
+		SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+		RefreshFn:  acceptingRefresh(),
+		RetryNowFn: retryNow,
+		CheckNowFn: checkNow,
+		Logger:     slog.New(slog.DiscardHandler),
 	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
 
-	t.Run("rejected during drain even when refreshFn accepts", func(t *testing.T) {
-		t.Parallel()
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantText   string
+		wantCode   string
+	}{
+		{name: "scheduled retry", path: "/api/v1/retries/MT-650/run", wantStatus: http.StatusAccepted, wantText: "Retry 3 of MT-650 is due now."},
+		{name: "unknown issue", path: "/api/v1/retries/MT-999/run", wantStatus: http.StatusNotFound, wantCode: "retry_not_found"},
+		{
+			name: "pending reaction check", path: "/api/v1/reactions/MT-653/ci/check", wantStatus: http.StatusAccepted,
+			wantText: "MT-653: a check of PR #931 for CI is queued for the next poll tick.",
+		},
+		{name: "reaction kind the issue lacks", path: "/api/v1/reactions/MT-653/bot-review/check", wantStatus: http.StatusNotFound, wantCode: "reaction_not_found"},
+	}
 
-		srv := New(Params{
-			SnapshotFn: fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
-			RefreshFn:  acceptingRefresh(),
-			Logger:     slog.New(slog.DiscardHandler),
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp, err := http.Post(ts.URL+tt.path, "", nil)
+			if err != nil {
+				t.Fatalf("POST %s: %v", tt.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body := decodeJSON[struct {
+				OutcomeText string `json:"outcome_text"`
+				errorResponse
+			}](t, resp)
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("POST %s status = %d, want %d", tt.path, resp.StatusCode, tt.wantStatus)
+			}
+			if body.OutcomeText != tt.wantText {
+				t.Errorf("POST %s outcome_text = %q, want %q", tt.path, body.OutcomeText, tt.wantText)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Errorf("POST %s error code = %q, want %q", tt.path, body.Error.Code, tt.wantCode)
+			}
 		})
-		srv.SetDraining()
+	}
+}
 
-		ts := httptest.NewServer(srv.Mux())
-		t.Cleanup(ts.Close)
+func TestHandleAcknowledge(t *testing.T) {
+	t.Parallel()
 
-		resp, err := http.Post(ts.URL+"/api/v1/refresh", "", nil)
-		if err != nil {
-			t.Fatalf("POST /api/v1/refresh: %v", err)
+	const (
+		recordedID = "464f9ff8ea54c4c6cfb43af394234d57"
+		repeatedID = "0b8e1c52a7d94f3e8a61c9d27f4b5e30"
+		failingID  = "9c3d7a10e5b84f26b1a0d8e47c2f6a95"
+	)
+	firstAt := time.Date(2026, 2, 24, 20, 0, 0, 0, time.UTC)
+	hold := func(id string) orchestrator.AttentionCause {
+		return orchestrator.AttentionCause{
+			ID:   id,
+			Kind: orchestrator.AttentionKindBudgetHeld,
+			Budget: &orchestrator.SnapshotBudgetEntry{
+				IssueID: "ghi789", Identifier: "MT-651", Reason: "session_budget", UsedSessions: 3, BudgetSessions: 3, ExhaustedAt: firstAt,
+			},
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != http.StatusConflict {
-			t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
+	}
+	acknowledge := func(_ context.Context, id string) orchestrator.AcknowledgeResult {
+		switch id {
+		case recordedID:
+			return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeRecorded, Cause: hold(id), AcknowledgedAt: firstAt.Add(13*time.Minute + 5*time.Second)}
+		case repeatedID:
+			return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeAlready, Cause: hold(id), AcknowledgedAt: firstAt}
+		case failingID:
+			return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeFailed}
 		}
-
-		body := decodeJSON[refreshResponse](t, resp)
-		if body.Queued {
-			t.Error("Queued = true, want false during drain")
-		}
+		return orchestrator.AcknowledgeResult{Status: orchestrator.AcknowledgeNotFound}
+	}
+	srv := New(Params{
+		SnapshotFn:    fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+		RefreshFn:     acceptingRefresh(),
+		AcknowledgeFn: acknowledge,
+		Logger:        slog.New(slog.DiscardHandler),
 	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+
+	tests := []struct {
+		name        string
+		id          string
+		wantStatus  int
+		wantAlready bool
+		wantAt      string
+		wantText    string
+		wantCode    string
+	}{
+		{
+			name:       "recorded item",
+			id:         recordedID,
+			wantStatus: http.StatusOK,
+			wantAt:     "2026-02-24T20:13:05Z",
+			wantText:   "Acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears.",
+		},
+		{
+			name:        "item acknowledged before keeps its first time",
+			id:          repeatedID,
+			wantStatus:  http.StatusOK,
+			wantAlready: true,
+			wantAt:      "2026-02-24T20:00:00Z",
+			wantText:    "Already acknowledged MT-651 (Session budget reached). It comes back only if a new cause appears.",
+		},
+		{name: "unknown item", id: "ffffffffffffffffffffffffffffffff", wantStatus: http.StatusNotFound, wantCode: "attention_item_not_found"},
+		{name: "acknowledgement not saved", id: failingID, wantStatus: http.StatusInternalServerError, wantCode: "acknowledgement_not_saved"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := "/api/v1/attention/" + tt.id + "/acknowledge"
+			resp, err := http.Post(ts.URL+path, "", nil)
+			if err != nil {
+				t.Fatalf("POST %s: %v", path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body := decodeJSON[struct {
+				acknowledgeResponse
+				errorResponse
+			}](t, resp)
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Errorf("POST %s status = %d, want %d", path, resp.StatusCode, tt.wantStatus)
+			}
+			if body.Error.Code != tt.wantCode {
+				t.Errorf("POST %s error code = %q, want %q", path, body.Error.Code, tt.wantCode)
+			}
+			if body.OutcomeText != tt.wantText {
+				t.Errorf("POST %s outcome_text = %q, want %q", path, body.OutcomeText, tt.wantText)
+			}
+			if body.AlreadyAcknowledged != tt.wantAlready {
+				t.Errorf("POST %s already_acknowledged = %t, want %t", path, body.AlreadyAcknowledged, tt.wantAlready)
+			}
+			if tt.wantAt == "" {
+				return
+			}
+			if !body.Acknowledged || body.ID != tt.id {
+				t.Errorf("POST %s acknowledged = %t, id = %q, want true, %q", path, body.Acknowledged, body.ID, tt.id)
+			}
+			if body.AcknowledgedAt == nil || body.AcknowledgedAt.Format(time.RFC3339) != tt.wantAt {
+				t.Errorf("POST %s acknowledged_at = %v, want %s", path, body.AcknowledgedAt, tt.wantAt)
+			}
+		})
+	}
 }
 
 func TestMethodNotAllowed(t *testing.T) {
@@ -2227,12 +3243,9 @@ func TestMethodNotAllowed(t *testing.T) {
 		path   string
 	}{
 		{name: "POST /api/v1/state", method: http.MethodPost, path: "/api/v1/state"},
-		{name: "PUT /api/v1/state", method: http.MethodPut, path: "/api/v1/state"},
-		{name: "DELETE /api/v1/state", method: http.MethodDelete, path: "/api/v1/state"},
 		{name: "GET /api/v1/refresh", method: http.MethodGet, path: "/api/v1/refresh"},
-		{name: "PUT /api/v1/refresh", method: http.MethodPut, path: "/api/v1/refresh"},
+		{name: "POST /api/v1/events", method: http.MethodPost, path: "/api/v1/events"},
 		{name: "POST /api/v1/MT-100", method: http.MethodPost, path: "/api/v1/MT-100"},
-		{name: "DELETE /api/v1/MT-100", method: http.MethodDelete, path: "/api/v1/MT-100"},
 	}
 
 	for _, tt := range tests {
@@ -2256,58 +3269,12 @@ func TestMethodNotAllowed(t *testing.T) {
 				t.Errorf("Content-Type = %q, want %q", ct, "application/json; charset=utf-8")
 			}
 
-			var body errorResponse
-			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-				t.Fatalf("decode error response: %v", err)
-			}
+			body := decodeJSON[errorResponse](t, resp)
+
 			if body.Error.Code != "method_not_allowed" {
 				t.Errorf("error code = %q, want %q", body.Error.Code, "method_not_allowed")
 			}
 		})
-	}
-}
-
-func TestStateResponseJSON(t *testing.T) {
-	t.Parallel()
-
-	fixedTime := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
-
-	resp := stateResponse{
-		GeneratedAt: fixedTime,
-		Counts:      stateCounts{Running: 1, Retrying: 0},
-		Running: []runningEntryResponse{
-			{
-				IssueID:         "id-1",
-				IssueIdentifier: "MT-1",
-				State:           "In Progress",
-				StartedAt:       fixedTime,
-				LastEventAt:     fixedTime,
-				Tokens: tokenInfo{
-					InputTokens:  new(int64(10)),
-					OutputTokens: new(int64(5)),
-					TotalTokens:  new(int64(15)),
-				},
-			},
-		},
-		Retrying:    []retryEntryResponse{},
-		AgentTotals: orchestrator.SnapshotAgentTotals{},
-		RateLimits:  map[string]any{},
-	}
-
-	data, err := json.Marshal(resp)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
-
-	for _, key := range []string{"generated_at", "counts", "running", "retrying", "agent_totals", "rate_limits"} {
-		if _, ok := m[key]; !ok {
-			t.Errorf("missing JSON key %q", key)
-		}
 	}
 }
 
@@ -2845,5 +3812,270 @@ func TestStateRouteNullsUnmeasuredFigures(t *testing.T) {
 		if got, present := measuredZeroTokens[key]; !present || got != float64(0) {
 			t.Errorf("measured-zero tokens.%s = %#v (present=%v), want present and 0, not null", key, got, present)
 		}
+	}
+}
+
+type fakeRunHistory struct {
+	rows        []RunHistoryEntry
+	err         error
+	totalsErr   error
+	outcomes    map[string]IssueOutcome
+	outcomesErr error
+	passes      map[PassKey]PassActivity
+	passesErr   error
+	onQuery     func(RunHistoryQuery)
+	groups      []IssueGroupKey
+	onGroups    func(IssueGroupQuery)
+	events      map[string][]orchestrator.RunEvent
+}
+
+func (f *fakeRunHistory) QueryRuns(_ context.Context, q RunHistoryQuery) ([]RunHistoryEntry, error) {
+	if f.onQuery != nil {
+		f.onQuery(q)
+	}
+	return f.rows, f.err
+}
+
+func (f *fakeRunHistory) QueryIssueGroups(_ context.Context, q IssueGroupQuery) ([]IssueGroupKey, error) {
+	if f.onGroups != nil {
+		f.onGroups(q)
+	}
+	return f.groups, f.err
+}
+
+func (f *fakeRunHistory) IssueTotals(context.Context, string) (IssueRunTotals, error) {
+	return IssueRunTotals{}, f.totalsErr
+}
+
+func (f *fakeRunHistory) IssueOutcomes(context.Context, []string) (map[string]IssueOutcome, error) {
+	return f.outcomes, f.outcomesErr
+}
+
+func (f *fakeRunHistory) PassActivities(context.Context, []PassRef) (map[PassKey]PassActivity, error) {
+	return f.passes, f.passesErr
+}
+
+func (f *fakeRunHistory) RunEvents(_ context.Context, dispatchID string, newest int) ([]orchestrator.RunEvent, error) {
+	events := f.events[dispatchID]
+	if newest > 0 {
+		events = events[max(len(events)-newest, 0):]
+	}
+	return events, f.err
+}
+
+func historyServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader) *httptest.Server {
+	t.Helper()
+	return eventsServer(t, snap, history, nil)
+}
+
+func eventsServer(t *testing.T, snap orchestrator.RuntimeSnapshotResult, history RunHistoryReader, runEvents RunEventsFunc) *httptest.Server {
+	t.Helper()
+	srv := New(Params{
+		SnapshotFn:  fixedSnapshot(snap),
+		RefreshFn:   acceptingRefresh(),
+		Logger:      slog.New(slog.DiscardHandler),
+		StartedAt:   time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC),
+		RunHistory:  history,
+		RunEventsFn: runEvents,
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestLastStageOf(t *testing.T) {
+	t.Parallel()
+
+	chains := [][]string{{"plan", "build", "review"}, {"fix", "review"}}
+
+	tests := []struct {
+		name   string
+		runs   []RunHistoryEntry
+		chains [][]string
+		want   *lastStageResponse
+	}{
+		{"newest run decides", []RunHistoryEntry{{RuleName: "build"}, {RuleName: "plan"}}, chains, &lastStageResponse{Chain: chains[0], Rule: "build"}},
+		{"reaction run skipped", []RunHistoryEntry{{RuleName: "fix", ReactionKind: "ci"}, {RuleName: "build"}}, chains, &lastStageResponse{Chain: chains[0], Rule: "build"}},
+		{"ci result row never decides", []RunHistoryEntry{{Status: "ci_failed"}, {RuleName: "plan"}}, chains, &lastStageResponse{Chain: chains[0], Rule: "plan"}},
+		{"previous picks the chain", []RunHistoryEntry{{RuleName: "review", StagePrevious: "fix"}}, chains, &lastStageResponse{Chain: chains[1], Rule: "review"}},
+		{"no deciding run", []RunHistoryEntry{{Status: "ci_failed"}, {RuleName: "fix", ReactionKind: "ci"}}, chains, nil},
+		{"empty chains", []RunHistoryEntry{{RuleName: "build"}}, nil, nil},
+		{"rule on no chain", []RunHistoryEntry{{RuleName: "deploy"}}, chains, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := lastStageOf(tt.runs, tt.chains)
+
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("lastStageOf(%+v, %v) = %+v, want %+v", tt.runs, tt.chains, got, tt.want)
+			}
+		})
+	}
+}
+
+type servedEvent struct {
+	Seq      int64  `json:"seq"`
+	Event    string `json:"event"`
+	Message  string `json:"message"`
+	Text     string `json:"text"`
+	ToolLine string `json:"tool_line"`
+}
+
+type servedEventsBody struct {
+	FirstSeq     *int64         `json:"first_seq"`
+	Events       []servedEvent  `json:"events"`
+	RecentEvents *[]servedEvent `json:"recent_events"`
+	Error        struct {
+		Code string `json:"code"`
+	} `json:"error"`
+}
+
+func liveRunEvents(first, last int64) []orchestrator.RunEvent {
+	at := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	var events []orchestrator.RunEvent
+	for seq := first; seq <= last; seq++ {
+		event := orchestrator.RunEvent{Seq: seq, At: at.Add(time.Duration(seq) * time.Second), Event: domain.EventNotification, Message: fmt.Sprintf("step %d", seq)}
+		if seq%3 == 0 {
+			event.Event, event.ToolName, event.DurationMS = domain.EventToolResult, "Bash", 2400
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func TestRunEventsServed(t *testing.T) {
+	t.Parallel()
+
+	live := orchestrator.RuntimeSnapshotResult{Running: []orchestrator.SnapshotRunningEntry{
+		{IssueID: "id-1", Identifier: "MT-1", DispatchID: "d-live", StartedAt: time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)},
+	}}
+	memory := func(dispatchID string) ([]orchestrator.RunEvent, bool) {
+		return liveRunEvents(81, 200), dispatchID == "d-live"
+	}
+	noDispatchID := &fakeRunHistory{rows: []RunHistoryEntry{
+		{ID: 3, IssueID: "id-2", Identifier: "MT-2", Status: "succeeded", DispatchID: new("")},
+		{ID: 2, IssueID: "id-2", Identifier: "MT-2", Status: "succeeded"},
+	}}
+
+	tests := []struct {
+		name         string
+		snap         orchestrator.RuntimeSnapshotResult
+		history      *fakeRunHistory
+		path         string
+		wantStatus   int
+		wantCode     string
+		wantFirstSeq int64
+		wantCount    int
+	}{
+		{name: "route serves every memory event", snap: live, history: &fakeRunHistory{}, path: "/api/v1/runs/d-live/events", wantStatus: 200, wantFirstSeq: 81, wantCount: 120},
+		{name: "recent_events is the newest 50", snap: live, history: &fakeRunHistory{}, path: "/api/v1/MT-1", wantStatus: 200, wantFirstSeq: 151, wantCount: 50},
+		{name: "run without rows is not retained", snap: live, history: &fakeRunHistory{}, path: "/api/v1/runs/d-gone/events", wantStatus: 404, wantCode: "run_events_not_retained"},
+		{name: "runs without a dispatch ID serve no recent_events", history: noDispatchID, path: "/api/v1/MT-2", wantStatus: 200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := eventsServer(t, tt.snap, tt.history, memory)
+
+			status, body := getJSON[servedEventsBody](t, ts, tt.path)
+
+			if status != tt.wantStatus || body.Error.Code != tt.wantCode {
+				t.Fatalf("GET %s = %d %q, want %d %q", tt.path, status, body.Error.Code, tt.wantStatus, tt.wantCode)
+			}
+			served := body.Events
+			if body.RecentEvents != nil {
+				served = *body.RecentEvents
+			} else if strings.HasPrefix(tt.path, "/api/v1/MT-") {
+				t.Fatalf("GET %s recent_events = null, want an array", tt.path)
+			}
+			if len(served) != tt.wantCount {
+				t.Fatalf("GET %s served %d events, want %d", tt.path, len(served), tt.wantCount)
+			}
+			if body.FirstSeq != nil && *body.FirstSeq != tt.wantFirstSeq {
+				t.Errorf("GET %s first_seq = %d, want %d", tt.path, *body.FirstSeq, tt.wantFirstSeq)
+			}
+			for i, event := range served {
+				if want := tt.wantFirstSeq + int64(i); event.Seq != want {
+					t.Errorf("GET %s event %d seq = %d, want %d", tt.path, i, event.Seq, want)
+				}
+				if event.Text == "" || event.Text == "Status not available" {
+					t.Errorf("GET %s event %d (%s) text = %q, want a worded sentence", tt.path, i, event.Event, event.Text)
+				}
+			}
+		})
+	}
+}
+
+func TestRunEventsServeToolLine(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	retained := func(string) ([]orchestrator.RunEvent, bool) {
+		return []orchestrator.RunEvent{
+			{Seq: 1, At: at, Event: domain.EventToolResult, ToolName: "Bash", ToolKind: domain.ToolKindShell, ToolArgument: "go test ./..."},
+		}, true
+	}
+	ts := eventsServer(t, orchestrator.RuntimeSnapshotResult{}, &fakeRunHistory{}, retained)
+
+	status, body := getJSON[servedEventsBody](t, ts, "/api/v1/runs/d-1/events")
+
+	if status != http.StatusOK || len(body.Events) != 1 {
+		t.Fatalf("GET /api/v1/runs/d-1/events = %d with %d events, want 200 with 1", status, len(body.Events))
+	}
+	if got, want := body.Events[0].ToolLine, "go test ./..."; got != want {
+		t.Errorf("GET /api/v1/runs/d-1/events tool_line = %q, want %q", got, want)
+	}
+}
+
+func TestStateStallInstants(t *testing.T) {
+	t.Parallel()
+
+	started := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	lastEvent := started.Add(10 * time.Second)
+	tests := []struct {
+		name          string
+		timeoutMS     int
+		lastEvent     time.Time
+		wantLastEvent *time.Time
+		wantQuiet     *time.Time
+		wantStall     *time.Time
+	}{
+		{name: "before any event", timeoutMS: 60_000, wantQuiet: new(started.Add(30 * time.Second)), wantStall: new(started.Add(60 * time.Second))},
+		{name: "after an event", timeoutMS: 60_000, lastEvent: lastEvent, wantLastEvent: &lastEvent, wantQuiet: new(lastEvent.Add(30 * time.Second)), wantStall: new(lastEvent.Add(60 * time.Second))},
+		{name: "stall detection off", lastEvent: lastEvent, wantLastEvent: &lastEvent},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := orchestrator.NewState(5000, 4, 0, nil, orchestrator.AgentTotals{})
+			state.StallTimeoutMS = tt.timeoutMS
+			state.Running["id-1"] = &orchestrator.RunningEntry{
+				Issue: domain.Issue{ID: "id-1", Identifier: "MT-1"}, Identifier: "MT-1", StartedAt: started, LastAgentTimestamp: tt.lastEvent,
+			}
+			ts := historyServer(t, orchestrator.RuntimeSnapshot(state, started.Add(time.Hour)), nil)
+
+			status, body := getJSON[stateResponse](t, ts, "/api/v1/state")
+
+			if status != http.StatusOK || len(body.Running) != 1 {
+				t.Fatalf("GET /api/v1/state = %d with %d running rows, want 200 with 1", status, len(body.Running))
+			}
+			row := body.Running[0]
+			for name, pair := range map[string][2]*time.Time{
+				"last_event_at": {row.LastEventAt, tt.wantLastEvent},
+				"quiet_at":      {row.QuietAt, tt.wantQuiet},
+				"stall_at":      {row.StallAt, tt.wantStall},
+			} {
+				if got, want := pair[0], pair[1]; (got == nil) != (want == nil) || got != nil && !got.Equal(*want) {
+					t.Errorf("running row %s = %v, want %v", name, got, want)
+				}
+			}
+		})
 	}
 }

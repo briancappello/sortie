@@ -26,20 +26,28 @@ const (
 type ReviewDecision string
 
 const (
-	// ReviewDecisionApproved indicates the PR has been approved and
-	// no later CHANGES_REQUESTED supersedes the approval.
+	// ReviewDecisionApproved indicates no changes request stands, no
+	// approval rule is unmet, and the forge reports approval or its
+	// approval rules met. GitLab Enterprise reports approval when no rule
+	// applies, so the value does not prove a person approved.
 	ReviewDecisionApproved ReviewDecision = "APPROVED"
 
 	// ReviewDecisionChangesRequested indicates at least one reviewer
 	// has requested changes and the request is the most recent review.
 	ReviewDecisionChangesRequested ReviewDecision = "CHANGES_REQUESTED"
 
-	// ReviewDecisionReviewRequired indicates the PR requires review
-	// but no qualifying review has been submitted yet.
+	// ReviewDecisionReviewRequired indicates no changes request stands
+	// and an approval rule is unmet, counted as the forge's merge gate
+	// counts approvals.
 	ReviewDecisionReviewRequired ReviewDecision = "REVIEW_REQUIRED"
 
-	// ReviewDecisionNotRequired indicates the PR does not require
-	// review under the active branch protection policy.
+	// ReviewDecisionReviewRequested indicates none of the other decisions
+	// holds and a requested or assigned reviewer has not approved. Only
+	// adapters that fold reviewer requests return it.
+	ReviewDecisionReviewRequested ReviewDecision = "REVIEW_REQUESTED"
+
+	// ReviewDecisionNotRequired indicates none of the other decisions
+	// holds.
 	ReviewDecisionNotRequired ReviewDecision = "NOT_REQUIRED"
 )
 
@@ -111,6 +119,10 @@ type PRMergeStatus struct {
 	// closed-without-merge condition tests Closed && !Merged rather
 	// than Closed alone.
 	Closed bool
+
+	// URL is the pull request's web page as the provider reports it; empty
+	// when the provider reports none.
+	URL string
 }
 
 // MergeResult carries the outcome of a successful merge call.

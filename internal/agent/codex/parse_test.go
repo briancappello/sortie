@@ -3,12 +3,9 @@ package codex
 import (
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
-	"github.com/sortie-ai/sortie/internal/agent/agenttest"
 	"github.com/sortie-ai/sortie/internal/domain"
 )
 
@@ -124,27 +121,6 @@ func TestParsePassthroughConfig(t *testing.T) {
 	})
 }
 
-// TestNormalizeBreakdown_CacheWriteTokensStaysZero pins that codex's
-// wire breakdown carries no cache-write count: a heavily cached
-// breakdown still normalizes to CacheWriteTokens 0, and a two-event
-// sequence built from it satisfies the shared usage contract with no
-// cache-write component anywhere in the chain.
-func TestNormalizeBreakdown_CacheWriteTokensStaysZero(t *testing.T) {
-	t.Parallel()
-
-	first := normalizeBreakdown(tokenUsageBreakdown{InputTokens: 20000, CachedInputTokens: 18000, OutputTokens: 500})
-	second := normalizeBreakdown(tokenUsageBreakdown{InputTokens: 40000, CachedInputTokens: 36000, OutputTokens: 900})
-
-	if first.CacheWriteTokens != 0 || second.CacheWriteTokens != 0 {
-		t.Errorf("normalizeBreakdown CacheWriteTokens = (%d, %d), want (0, 0)", first.CacheWriteTokens, second.CacheWriteTokens)
-	}
-
-	agenttest.AssertUsageContract(t, []domain.AgentEvent{
-		{Type: domain.EventTokenUsage, Usage: first},
-		{Type: domain.EventTurnCompleted, Usage: second},
-	})
-}
-
 func TestNormalizeBreakdown(t *testing.T) {
 	t.Parallel()
 
@@ -157,6 +133,11 @@ func TestNormalizeBreakdown(t *testing.T) {
 			name: "inputTokens already includes cachedInputTokens",
 			in:   tokenUsageBreakdown{InputTokens: 27428, CachedInputTokens: 13696, OutputTokens: 30, ReasoningOutputTokens: 18, TotalTokens: 27458},
 			want: domain.TokenUsage{InputTokens: 27428, OutputTokens: 30, TotalTokens: 27458, CacheReadTokens: 13696},
+		},
+		{
+			name: "cacheWriteInputTokens is a cache write inside inputTokens",
+			in:   tokenUsageBreakdown{InputTokens: 518, CachedInputTokens: 114, CacheWriteInputTokens: 42, OutputTokens: 47, TotalTokens: 565},
+			want: domain.TokenUsage{InputTokens: 518, OutputTokens: 47, TotalTokens: 565, CacheReadTokens: 114, CacheWriteTokens: 42},
 		},
 		{
 			name: "zero value",
@@ -186,7 +167,7 @@ func TestParseTokenUsageUpdated(t *testing.T) {
 
 	t.Run("valid payload", func(t *testing.T) {
 		t.Parallel()
-		raw := json.RawMessage(`{"threadId":"th-1","turnId":"tn-1","tokenUsage":{"last":{"totalTokens":150,"inputTokens":100,"cachedInputTokens":10,"outputTokens":50},"total":{"totalTokens":300,"inputTokens":200,"cachedInputTokens":20,"outputTokens":100}}}`)
+		raw := json.RawMessage(`{"threadId":"th-1","turnId":"tn-1","tokenUsage":{"last":{"totalTokens":150,"inputTokens":100,"cachedInputTokens":10,"outputTokens":50},"total":{"totalTokens":300,"inputTokens":200,"cachedInputTokens":20,"cacheWriteInputTokens":7,"outputTokens":100}}}`)
 		got, err := parseTokenUsageUpdated(raw)
 		if err != nil {
 			t.Fatalf("parseTokenUsageUpdated() error = %v", err)
@@ -196,6 +177,9 @@ func TestParseTokenUsageUpdated(t *testing.T) {
 		}
 		if got.TokenUsage.Total.InputTokens != 200 {
 			t.Errorf("TokenUsage.Total.InputTokens = %d, want 200", got.TokenUsage.Total.InputTokens)
+		}
+		if got.TokenUsage.Total.CacheWriteInputTokens != 7 {
+			t.Errorf("TokenUsage.Total.CacheWriteInputTokens = %d, want 7", got.TokenUsage.Total.CacheWriteInputTokens)
 		}
 		if got.TokenUsage.Last.OutputTokens != 50 {
 			t.Errorf("TokenUsage.Last.OutputTokens = %d, want 50", got.TokenUsage.Last.OutputTokens)
@@ -211,9 +195,6 @@ func TestParseTokenUsageUpdated(t *testing.T) {
 	})
 }
 
-// TestParseModelRerouted_MalformedPayload asserts a model/rerouted
-// notification whose params cannot be unmarshalled into
-// modelReroutedParams returns a non-nil error.
 func TestParseModelRerouted_MalformedPayload(t *testing.T) {
 	t.Parallel()
 
@@ -230,10 +211,11 @@ func TestMapCodexErrorInfo(t *testing.T) {
 		info string
 		want domain.AgentErrorKind
 	}{
-		{"Unauthorized", domain.ErrResponseError},
+		{"Unauthorized", domain.ErrCredentialUnverified},
+		{"unauthorized", domain.ErrCredentialUnverified},
 		{"BadRequest", domain.ErrResponseError},
 		{"ContextWindowExceeded", domain.ErrTurnFailed},
-		{"UsageLimitExceeded", domain.ErrTurnFailed},
+		{"UsageLimitExceeded", domain.ErrUsageLimit},
 		{"SandboxError", domain.ErrTurnFailed},
 		{"HttpConnectionFailed", domain.ErrTurnFailed},
 		{"ResponseStreamConnectionFailed", domain.ErrTurnFailed},
@@ -254,45 +236,6 @@ func TestMapCodexErrorInfo(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestSummarizeItem(t *testing.T) {
-	t.Parallel()
-
-	t.Run("short item not truncated", func(t *testing.T) {
-		t.Parallel()
-		got := summarizeItem("agentMessage", "item-001")
-		want := "[agentMessage] item-001"
-		if got != want {
-			t.Errorf("summarizeItem() = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("long item truncated with ellipsis suffix", func(t *testing.T) {
-		t.Parallel()
-		// Prefix "[agentMessage] " is 15 chars; ID of 250 chars makes 265 total.
-		// redact.Truncate keeps first 200 runes then appends "…" (1 rune) -> 201 runes.
-		longID := strings.Repeat("x", 250)
-		got := summarizeItem("agentMessage", longID)
-		runeCount := utf8.RuneCountInString(got)
-		if runeCount != 201 {
-			t.Errorf("summarizeItem() rune count = %d, want 201", runeCount)
-		}
-		if !strings.HasSuffix(got, "…") {
-			t.Errorf("summarizeItem() does not end with ellipsis: %q", got[max(0, len(got)-10):])
-		}
-	})
-
-	t.Run("exactly 200 runes not truncated", func(t *testing.T) {
-		t.Parallel()
-		// Prefix is 15 chars; ID of 185 chars makes exactly 200 total.
-		exactID := strings.Repeat("z", 185)
-		got := summarizeItem("agentMessage", exactID)
-		want := "[agentMessage] " + exactID
-		if got != want {
-			t.Errorf("summarizeItem() = %q, want %q", got, want)
-		}
-	})
 }
 
 func TestNormalizeSandbox(t *testing.T) {

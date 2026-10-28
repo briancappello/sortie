@@ -3,16 +3,18 @@
 package probe
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sortie-ai/sortie/internal/agent/agenttest/launchtest"
 	"github.com/sortie-ai/sortie/internal/agent/clientprotocol"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	"github.com/sortie-ai/sortie/tools/qualify/e2e"
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
-	"github.com/sortie-ai/sortie/tools/qualify/procgroup"
 )
 
 // endToEndTurnBound bounds the isolated end-to-end run's agent turn;
@@ -43,24 +45,17 @@ func buildProtocolLaunch(coords Coordinates) (string, domain.AgentAdapter, error
 }
 
 // teardownRun cancels the workflow, joins it within the shutdown deadline,
-// registers every process group the harness's adapter observer captured with
-// fixture's tracker, and reports whether every group exited clean and the
-// first actual protocol session id the observer saw.
+// registers every launch record the harness's adapter observer captured with
+// fixture's tracker, and reports whether every record was released with no
+// cleanup error and the first actual protocol session id the observer saw.
 func teardownRun(cancel func(), done <-chan struct{}, harness *e2e.Harness, fixture *sharedFixture) (groupClean bool, sessionID string) {
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(procgroup.ShutdownDeadline):
-	}
+	waittest.ReceiveWithin(done, e2e.ShutdownDeadline)
 
-	pgids := harness.Agent().PGIDs()
-	for _, pgid := range pgids {
-		fixture.tracker.register(pgid)
-	}
 	groupClean = true
-	for _, pgid := range pgids {
-		present, presentErr := procgroup.Present(pgid)
-		if presentErr != nil || present {
+	for _, g := range harness.Agent().Groups() {
+		fixture.tracker.register(g)
+		if launchtest.ReleaseError(g.Released()) != nil {
 			groupClean = false
 		}
 	}
@@ -92,12 +87,14 @@ func induceEndToEnd(t *testing.T, coords Coordinates, fixture *sharedFixture, id
 
 	cancel, done := e2e.StartWorkflow(t, harness)
 
-	deadline := time.Now().Add(harness.Observation())
-	condition := e2e.ObserveTerminalCondition(t, harness)
-	for !condition.Reached() && time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
+	var condition e2e.TerminalCondition
+	_ = waittest.UntilWithin(harness.Observation(), 200*time.Millisecond, func() error {
 		condition = e2e.ObserveTerminalCondition(t, harness)
-	}
+		if !condition.Reached() {
+			return errors.New("terminal condition not reached")
+		}
+		return nil
+	})
 
 	groupClean, sessionID := teardownRun(cancel, done, harness, fixture)
 	return e2e.TerminalRecord(condition, groupClean, sessionID, identityName, identityVersion)

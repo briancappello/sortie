@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/waittest"
 
 	"github.com/sortie-ai/sortie/tools/qualify/evidence"
 )
@@ -89,20 +90,19 @@ func ceilingHarness(t *testing.T) (*Harness, *spendingAgent) {
 func awaitRunHistory(t *testing.T, harness *Harness) []persistence.RunHistory {
 	t.Helper()
 
-	deadline := time.Now().Add(harness.Observation())
-	for {
-		rows, err := harness.store.QueryRunHistoryByIssue(context.Background(), issueID)
+	var rows []persistence.RunHistory
+	waittest.Until(t, func() error {
+		var err error
+		rows, err = harness.store.QueryRunHistoryByIssue(context.Background(), issueID)
 		if err != nil {
 			t.Fatalf("query run history: %v", err)
 		}
-		if len(rows) > 0 {
-			return rows
+		if len(rows) == 0 {
+			return fmt.Errorf("no run history row for %s; the run never ended", issueIdentifier)
 		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("no run history row for %s within %s; the run never ended", issueIdentifier, harness.Observation())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return nil
+	})
+	return rows
 }
 
 // awaitTokenBudgetHold polls until the issue is held out of dispatch by the
@@ -111,22 +111,21 @@ func awaitRunHistory(t *testing.T, harness *Harness) []persistence.RunHistory {
 func awaitTokenBudgetHold(t *testing.T, harness *Harness) orchestrator.SnapshotBudgetEntry {
 	t.Helper()
 
-	deadline := time.Now().Add(harness.Observation())
-	for {
+	var hold orchestrator.SnapshotBudgetEntry
+	waittest.Until(t, func() error {
 		snapshot, err := harness.orchestrator.SnapshotFunc()()
 		if err != nil {
 			t.Fatalf("runtime snapshot: %v", err)
 		}
 		for _, entry := range snapshot.BudgetExhausted {
 			if entry.IssueID == issueID {
-				return entry
+				hold = entry
+				return nil
 			}
 		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("issue %s never entered the budget hold within %s", issueIdentifier, harness.Observation())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return fmt.Errorf("issue %s never entered the budget hold", issueIdentifier)
+	})
+	return hold
 }
 
 func TestTokenCeilingStopsTheRunAndDispatchesNoOther(t *testing.T) {

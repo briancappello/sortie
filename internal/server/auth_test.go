@@ -189,3 +189,23 @@ func TestSessionToken_ControlTokenAcceptedOnSessionRoutes(t *testing.T) {
 		}
 	}
 }
+
+// The dashboard's action routes change runtime state, so a configured
+// control token guards them like refresh.
+func TestDashboardActions_RequireControlToken(t *testing.T) {
+	t.Parallel()
+
+	h := newAuthHarness(t, testControlToken, nil)
+	for _, path := range []string{
+		"/api/v1/retries/LIVE-1/run",
+		"/api/v1/attention/0123456789abcdef0123456789abcdef/acknowledge",
+		"/api/v1/reactions/LIVE-1/ci/check",
+	} {
+		if got := h.do(t, http.MethodPost, path, ""); got != http.StatusUnauthorized {
+			t.Errorf("POST %s without a token = %d, want 401", path, got)
+		}
+		if got := h.do(t, http.MethodPost, path, "Bearer "+testControlToken); got == http.StatusUnauthorized || got == http.StatusForbidden {
+			t.Errorf("POST %s with the control token = %d, want it past authentication", path, got)
+		}
+	}
+}

@@ -562,6 +562,14 @@ func TestAssertLiveUsageCase(t *testing.T) {
 			},
 		},
 		{
+			name: "measured turn flagged unaccounted passes the same figure checks",
+			kind: usageTestKindIncremental,
+			tc: UsageReportingCase{
+				Events: []domain.AgentEvent{{Type: domain.EventTokenUsage, Usage: usageOf(10, 2), Model: "gpt-6-astra"}},
+				Result: domain.TurnResult{UsageMeasured: true, Usage: usageOf(10, 2), SpendUnaccounted: true},
+			},
+		},
+		{
 			name: "local session under a remote rule resolves the declared pair",
 			kind: usageTestKindWithRule,
 			tc: UsageReportingCase{

@@ -2,7 +2,7 @@
 
 Working notes for anyone changing Sortie's GitHub Copilot CLI adapter in `internal/agent/copilot`.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-28
 
 ## Where to get the volatile facts
 
@@ -24,15 +24,15 @@ The adapter opens the runtime's session-state tree only by a known ID, and it va
 
 ## Preflight, and the fake-binary trap
 
-`StartSession` runs a version canary before it will hand back a session, local-mode only; it checks that the binary runs under Node.js 22 or later and nothing else. The credential itself is proven separately: before the working session's first turn, a shared step (`internal/agent/agentcore`) starts a verification session and sends one fixed request. This CLI reports a refused or absent credential only on stderr with a failing exit, so the step reports it as the shared early-exit report carrying that message. A stored `gh` login passes the step.
+`StartSession` runs a version canary before it will hand back a session, local-mode only: the shared runtime version query (`internal/agent/agentcore`), which fails when the binary does not answer `--version` with a zero exit, as under a Node.js older than 22. It checks nothing else. The credential itself is proven separately: before the working session's first turn, unless a recent proof of the same setup stands, a shared step (`internal/agent/agentcore`) starts a verification session and sends one fixed request. This CLI reports a refused or absent credential only on stderr with a failing exit, so the step reports it as the shared early-exit report carrying that message. A stored `gh` login passes the step.
 
-This is the thing that ruins an afternoon when writing tests. A stand-in binary that exits zero and prints something unparseable never reaches a turn, because the version canary rejected it first, and the failure surfaces as an agent-not-found error that looks nothing like a parse problem. In SSH mode the canary is skipped, so a broken remote binary instead fails later, at the credential-verification step or the first turn, with a different error kind. Know which mode your test is in.
+This is the thing that ruins an afternoon when writing tests. A stand-in binary that does not answer `--version` with a zero exit never reaches a turn, because the version canary rejects it first, and the failure surfaces as the shared early-exit report at session start, which looks nothing like a parse problem. In SSH mode the canary is skipped, so a broken remote binary instead fails later, at the credential-verification step or the first turn, with a different error kind. Know which mode your test is in.
 
 ## Token accounting lives off the event stream
 
 The adapter reads no token figure from the event stream. The session-state journal is its only source, an on-disk record the adapter reads after the subprocess exits.
 
-That journal is session-cumulative across every process that resumes the session, not per-invocation. A second turn's record includes the first turn's spend. Recovering one run's own contribution means subtracting a baseline: the record that predates the run. The adapter resolves that baseline once, at its first read attempt, and the consequence is unforgiving. Miss the first attempt on a session someone else started and the boundary record is gone for good; the run then marks recovery unavailable and reports no further figure for the rest of the run rather than reporting a figure inflated by a previous run's spend. Journal reads are also skipped in SSH mode, on an ID that fails the path-segment check, and on a file that breaches the size or line caps.
+That journal is session-cumulative across every process that resumes the session, not per-invocation. A second turn's record includes the first turn's spend. Recovering one run's own contribution means subtracting a baseline held in an `agentcore.ResumeBaseline`. `StartSession` seeds it with zero for a session the run creates and with the resume usage handed over for a resumed one. With no hand-over, a local launch whose id passes the path-segment check reads the journal's newest record once: a journal without a record, or a missing file, seeds zero, and any other failure leaves the baseline unknown. No outcome fails `StartSession`. The read at the end of every started turn (cancelled ones included) compares the newest record with the baseline's latest reading. Equal totals mean the turn wrote no record, so it reports no figure and emits no `token_usage` event; otherwise the baseline turns the record into the run figure. An unknown baseline takes the record as its starting point, so that turn reports no figure and `SpendUnaccounted`. A skipped or failed read reports no figure and nothing is abandoned: the next turn reads again. Journal reads are also skipped in SSH mode, on an ID that fails the path-segment check, and on a file that breaches the size or line caps. A turn that reports no figure after the CLI served output also reports `SpendUnaccounted`, so every SSH-mode turn that streamed output does.
 
 The practical rule: a usage figure from this adapter is run-cumulative and never decreases, a failed journal read never lowers a figure already reported, and the "measured" flag distinguishes an unknown spend from a genuine zero. Assertions that ignore that distinction pass for the wrong reason.
 
@@ -40,7 +40,54 @@ The registered kind declares `turn_end` arrival and `per_model` attribution: the
 
 There is a third source worth knowing about even though the adapter does not read it. This CLI can export OpenTelemetry, and its spans carry the per-request input and output token counts that the JSON stream does not. An operator who exports the relevant variables into Sortie's environment gets them in the subprocess too, since it inherits that environment, and ends up with a token breakdown the adapter itself cannot see. That is the answer to give when someone needs per-request accounting today rather than a change here.
 
-The model name is the shutdown record's `modelMetrics` key whose token count grew the most since the previous record, breaking a tie by whichever trimmed name sorts first. A record naming no model, or one where no key grew, leaves the field blank rather than falling back to the operator-configured `copilot-cli.model` passthrough value, which is the model requested rather than the model the runtime reported using.
+The model name is the shutdown record's `modelMetrics` key whose token count grew the most since the previous record, breaking a tie by whichever trimmed name sorts first. A record naming no model, or one where no key grew, leaves the field blank rather than falling back to the operator-configured `copilot-cli.model` passthrough value, which is the model requested rather than the model the runtime reported using. The usage event also carries the newest shutdown record's `modelMetrics` per model, under the shared resume baseline seeded from the source of the combined seed.
+
+## Quota windows are pulled, not streamed
+
+Neither the JSON stream nor the session-state journal carries a quota figure. The runtime's quota snapshot event is ephemeral and never reaches the journal, so the adapter asks for the quotas after a turn that reached the runtime has ended. A cancelled turn and a credential-verification session do not ask. A pull the runtime cannot answer ends the session's pulls; any other failure leaves the next turn to try again.
+
+There are two routes, tried in one pull. Both yield one reading per quota that is not unlimited. Test the unlimited flag, not the entitlement: the SDK documents `-1` for an unlimited entitlement, while a live answer for an unlimited quota carries `0`.
+
+The endpoint route is `GET https://api.github.com/copilot_internal/user` with `Authorization: token <T>`. `T` is the first non-empty of `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, read from the turn's environment. The fields read, trimmed:
+
+```json
+{
+  "quota_reset_date_utc": "2026-11-01T00:00:00.000Z",
+  "quota_snapshots": {
+    "premium_interactions": {
+      "unlimited": false,
+      "percent_remaining": 0.0,
+      "entitlement": 20000,
+      "timestamp_utc": "2026-10-28T00:34:20.549Z"
+    },
+    "chat": { "unlimited": true, "percent_remaining": 100.0 }
+  }
+}
+```
+
+`percent_remaining` is the share left, so the used share is its complement. `timestamp_utc` is when the snapshot was taken, and `quota_reset_date_utc` is the instant the quotas reset. The answer is fresh on every call. The sibling `quota_reset_date` is a bare date and is not read. A 401, 403, or 404 falls through to the headless route. Any other HTTP error is reported as its status code alone. The token goes in that one header and nowhere else, and the response body is never logged.
+
+The headless route runs when no token variable is set, or when the endpoint refuses the token. It starts `copilot --headless --no-auto-update --stdio` as an auxiliary command, locally or over the session's SSH launch, and speaks JSON-RPC with `Content-Length` framing on the standard streams. The exchange is `connect` first, with the parameters `@github/copilot-sdk` sends, then `account.getQuota` with `{}`, then stdin closes. The answer, trimmed:
+
+```json
+{
+  "quotaSnapshots": {
+    "premium_interactions": {
+      "isUnlimitedEntitlement": false,
+      "entitlementRequests": 20000,
+      "usedRequests": 20000,
+      "remainingPercentage": 0,
+      "resetDate": "2026-10-28T00:15:43.579Z"
+    }
+  }
+}
+```
+
+Two traps live in this answer. First, the runtime serves it from a cached copy of the endpoint's answer, kept in its user cache file outside `COPILOT_HOME`, with no network round trip. Authenticated headless runs did not refresh that cache, so the figure can trail the endpoint. Second, `resetDate` is the time the cached snapshot was taken, not a reset: it equals the cache's `timestamp_utc` and differs from the endpoint's `quota_reset_date_utc`. The adapter reads it as the observation time and reports no reset on this route. An error answer, such as `Not authenticated`, means the runtime holds no GitHub sign-in of its own, and it ends the session's pulls.
+
+A custom provider reports no quota. With `COPILOT_PROVIDER_BASE_URL` set in the runtime's environment the turn spends no Copilot quota, so the pull returns unsupported before any request on either route.
+
+The endpoint request is made from Sortie's host, also for a remote session. A token that only the remote host sets is invisible there, so such a session reaches the quotas through the headless route on the remote host.
 
 ## Approvals
 
@@ -62,7 +109,7 @@ The adapter enforces no read deadline and no turn deadline of its own; both are 
 
 ## Sortie's own tools
 
-The worker generates one MCP configuration file per session and the adapter passes it by file reference. The flag on this CLI is additive rather than replacing, but the adapter still routes an operator-supplied config through the same merge into one file, and a collision on our reserved server key fails the attempt rather than silently overwriting. When an operator value is passed through on its own, the adapter distinguishes inline JSON from a file path by prefix, because the flag itself does: a bare path is read as inline JSON and fails to parse. The runtime starts the tool server with the environment it inherited plus the configuration file's `env` block, and a block entry wins over an inherited variable of the same name. The block carries every `SORTIE_`-prefixed variable, credentials and the dispatch identity included, so the tool server sees them regardless of what the runtime itself inherited. In an execution environment's VM the adapter passes `@<guest path>` instead (`LaunchTarget.GuestPath`), and the `sortie-tools` entry there is the guest relay with no env block: the tool server and its credentials stay on the host.
+The worker generates one MCP configuration file per session and the adapter passes it by file reference. On a local launch the file is derived from the generated one: it names an operator header value by the environment variable that carries it instead of holding the value, and it keeps the env block described below. The flag on this CLI is additive rather than replacing, but the adapter still routes an operator-supplied config through the same merge into one file, and a collision on our reserved server key fails the attempt rather than silently overwriting. When an operator value is passed through on its own, the adapter distinguishes inline JSON from a file path by prefix, because the flag itself does: a bare path is read as inline JSON and fails to parse. The runtime starts the tool server with the environment it inherited plus the configuration file's `env` block, and a block entry wins over an inherited variable of the same name. The block carries every `SORTIE_`-prefixed variable, credentials and the dispatch identity included, so the tool server sees them regardless of what the runtime itself inherited. On an SSH launch no file is passed: the runtime receives an inline declaration of Sortie's tool server, by the address of the launch's reverse forward with the bearer carried by environment variable name, beside the operator's HTTP servers. Operator stdio servers are left out, and the tool server's env block never leaves the orchestrator host. In an execution environment's VM the adapter passes `@<guest path>` of the generated file instead (`LaunchTarget.GuestPath`), and the `sortie-tools` entry there is the guest relay with no env block: the tool server and its credentials stay on the host.
 
 Whether Sortie's tools reach an agent at all is a per-adapter property. The mechanism depends on what the CLI accepts, so what works here does not carry to the rest of the fleet.
 

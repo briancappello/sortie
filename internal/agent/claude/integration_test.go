@@ -3,9 +3,11 @@ package claude
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/credentialtest"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest/fakemodel"
@@ -19,8 +21,6 @@ func skipUnlessIntegration(t *testing.T) {
 	}
 }
 
-// Session persistence is off so repeated runs leave nothing in ~/.claude,
-// which makes a session started with this config impossible to resume.
 func singleTurnIntegrationConfig(t *testing.T) map[string]any {
 	t.Helper()
 	model := os.Getenv("SORTIE_CLAUDE_MODEL")
@@ -28,6 +28,8 @@ func singleTurnIntegrationConfig(t *testing.T) map[string]any {
 		model = "claude-haiku-4-5"
 	}
 	return map[string]any{
+		// Off so repeated runs leave nothing in ~/.claude; such a session
+		// cannot be resumed.
 		"session_persistence": false,
 		"model":               model,
 	}
@@ -39,6 +41,14 @@ func integrationCommand(t *testing.T) string {
 		return cmd
 	}
 	return "claude"
+}
+
+func usageWindowsOf(events []domain.AgentEvent) []domain.UsageWindow {
+	var windows []domain.UsageWindow
+	for _, e := range events {
+		windows = append(windows, e.UsageWindows...)
+	}
+	return windows
 }
 
 func TestIntegration_StartSession(t *testing.T) {
@@ -122,12 +132,19 @@ func TestIntegration_StartSession_InvalidCommand(t *testing.T) {
 func TestIntegration_ScriptedModel(t *testing.T) {
 	skipUnlessIntegration(t)
 
-	fakemodel.AssertConformance(t, fakemodel.Binding{
+	binding := fakemodel.Binding{
 		Kind: "claude-code",
 		// Persistence stays on: the continuation scenario resumes a session the
 		// runtime stored, and the files stay in the test's temporary home.
-		Passthrough: map[string]any{"model": "claude-haiku-4-5"},
-		Read:        fakemodel.ReadFile,
+		Passthrough:         map[string]any{"model": "claude-haiku-4-5"},
+		UserInstructions:    filepath.Join(".claude", "CLAUDE.md"),
+		ProjectInstructions: "CLAUDE.md",
+		Read:                fakemodel.ReadFile,
+		SSH: &fakemodel.SSHVariant{
+			Package:       "@anthropic-ai/claude-code",
+			HostCommand:   integrationCommand(t),
+			RemoteCommand: func(fakemodel.Environment) string { return "claude" },
+		},
 		Launch: func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
 			return fakemodel.Launch{
 				Config: domain.AgentConfig{
@@ -161,6 +178,93 @@ func TestIntegration_ScriptedModel(t *testing.T) {
 				t.Error("state.work.Observed() = false after a scripted turn, want true")
 			}
 		},
+	}
+
+	fakemodel.AssertConformance(t, binding)
+
+	t.Run("subscription rate limits", func(t *testing.T) {
+		const oauthSentinel = "sortie-scripted-oauth-token-731948265"
+		subscription := binding
+		subscription.Launch = func(t *testing.T, env fakemodel.Environment) fakemodel.Launch {
+			launch := binding.Launch(t, env)
+			launch.Env["ANTHROPIC_API_KEY"] = ""
+			launch.Env["ANTHROPIC_AUTH_TOKEN"] = ""
+			return launch
+		}
+
+		run := fakemodel.RunCustomTurn(t, subscription, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{{
+				Text: "ok",
+				Header: http.Header{
+					"Anthropic-Ratelimit-Unified-Status":                 {"allowed_warning"},
+					"Anthropic-Ratelimit-Unified-Reset":                  {"4102444800"},
+					"Anthropic-Ratelimit-Unified-Representative-Claim":   {"five_hour"},
+					"Anthropic-Ratelimit-Unified-5h-Utilization":         {"0.9"},
+					"Anthropic-Ratelimit-Unified-5h-Reset":               {"4102444800"},
+					"Anthropic-Ratelimit-Unified-5h-Surpassed-Threshold": {"0.9"},
+					"Anthropic-Ratelimit-Unified-5h-Status":              {"allowed_warning"},
+				},
+			}},
+			Prompt:   "Reply with the word ok.",
+			Sentinel: oauthSentinel,
+		})
+
+		if run.Result.ExitReason != domain.EventTurnCompleted {
+			t.Fatalf("TurnResult.ExitReason = %q, want %q (err %v)", run.Result.ExitReason, domain.EventTurnCompleted, run.Err)
+		}
+		for _, ex := range run.Exchanges {
+			if got, want := ex.Header.Get("Authorization"), "Bearer "+oauthSentinel; ex.Kind == fakemodel.ExchangeTurn && got != want {
+				t.Errorf("turn exchange %d Authorization = %q, want %q", ex.Seq, got, want)
+			}
+		}
+		fakemodel.AssertContainment(t, run)
+
+		warned := usageWindowsOf(run.Events)
+		if len(warned) != 1 {
+			t.Fatalf("usage windows of the warned turn = %+v, want exactly one", warned)
+		}
+		if w := warned[0]; w.Key != "five_hour" || w.Label != "5-hour limit" || w.Status != domain.UsageWindowWarning {
+			t.Errorf("warned window = {Key %q, Label %q, Status %q}, want {%q, %q, %q}", w.Key, w.Label, w.Status, "five_hour", "5-hour limit", domain.UsageWindowWarning)
+		}
+		if w := warned[0]; w.UsedPercent == nil || *w.UsedPercent != 90 {
+			t.Errorf("warned window UsedPercent = %v, want 90", warned[0].UsedPercent)
+		}
+		if w, want := warned[0], time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC); !w.ResetsAt.Equal(want) {
+			t.Errorf("warned window ResetsAt = %v, want %v", w.ResetsAt, want)
+		}
+
+		refused := fakemodel.RunCustomTurn(t, subscription, fakemodel.CustomTurn{
+			Script: []fakemodel.Response{{
+				Status: http.StatusTooManyRequests,
+				Header: http.Header{
+					"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+					"Anthropic-Ratelimit-Unified-Reset":                {"4102444800"},
+					"Anthropic-Ratelimit-Unified-Representative-Claim": {"five_hour"},
+					"Anthropic-Ratelimit-Unified-Overage-Status":       {"rejected"},
+				},
+			}},
+			Prompt:   "Reply with the word ok.",
+			Sentinel: oauthSentinel,
+		})
+
+		var agentErr *domain.AgentError
+		if !errors.As(refused.Err, &agentErr) {
+			t.Fatalf("refused turn error = %v, want *domain.AgentError", refused.Err)
+		}
+		if agentErr.Kind != domain.ErrUsageLimit || agentErr.UsageLimit == nil {
+			t.Fatalf("refused turn error kind = %q (UsageLimit %v), want %q with a UsageLimit", agentErr.Kind, agentErr.UsageLimit, domain.ErrUsageLimit)
+		}
+		if want := time.Unix(4102444800, 0); !agentErr.UsageLimit.ResetsAt.Equal(want) {
+			t.Errorf("UsageLimit.ResetsAt = %v, want %v", agentErr.UsageLimit.ResetsAt, want)
+		}
+
+		rejected := usageWindowsOf(refused.Events)
+		if len(rejected) != 1 {
+			t.Fatalf("usage windows of the refused turn = %+v, want exactly one", rejected)
+		}
+		if w := rejected[0]; w.Key != "five_hour" || w.Status != domain.UsageWindowExhausted {
+			t.Errorf("refused window = {Key %q, Status %q}, want {%q, %q}", w.Key, w.Status, "five_hour", domain.UsageWindowExhausted)
+		}
 	})
 }
 

@@ -116,6 +116,38 @@ func (a *HulyAdapter) FetchIssueStatesByIDs(ctx context.Context, issueIDs []stri
 	return out, err
 }
 
+// FetchIssueStatesAndLabelsByIDs returns the current state and every label
+// of each issue found, keyed by issue id. An issue is omitted exactly when
+// [HulyAdapter.FetchIssueStatesByIDs] omits it.
+func (a *HulyAdapter) FetchIssueStatesAndLabelsByIDs(ctx context.Context, issueIDs []string) (map[string]domain.IssueStateAndLabels, error) {
+	var out map[string]domain.IssueStateAndLabels
+	err := trackermetrics.Track(a.recorder(), "fetch_states_and_labels_by_ids", func() error {
+		states, err := a.statesBy(ctx, "_id", issueIDs, func(i hulyIssue) string { return i.ID })
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(states))
+		for id := range states {
+			ids = append(ids, id)
+		}
+		labels := map[string][]string{}
+		if len(ids) > 0 {
+			if labels, err = a.labelsByIssue(ctx, ids); err != nil {
+				return err
+			}
+		}
+		out = make(map[string]domain.IssueStateAndLabels, len(states))
+		for id, state := range states {
+			out[id] = domain.IssueStateAndLabels{State: state, Labels: issuekit.NormalizeLabels(labels[id])}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FetchIssueStatesByIdentifiers returns the current state name of each
 // issue found, keyed by identifier.
 func (a *HulyAdapter) FetchIssueStatesByIdentifiers(ctx context.Context, identifiers []string) (map[string]string, error) {

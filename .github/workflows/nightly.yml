@@ -3,11 +3,6 @@ name: Nightly
 
 on:
   schedule:
-    # Two or more live days a week keep the previous live sample inside the
-    # MONITOR_LOOKBACK runs the incident policy reads, even when one live run
-    # is lost; one a week does not. integration-live runs unless the
-    # scripted-only cron fired, so an edit here that misses that condition
-    # runs the live tier more often, never less.
     - cron: "17 2 * * 0,2,3,5,6"
     - cron: "17 2 * * 1,4"
   workflow_dispatch:
@@ -110,6 +105,55 @@ jobs:
             clientprotocol_command: "gemini --acp --skip-trust --approval-mode yolo"
             clientprotocol_asking_command: "gemini --acp"
             clientprotocol_model_base_url_env: GOOGLE_GEMINI_BASE_URL
+            clientprotocol_profile: tools/qualify/profiles/gemini-cli.json
+
+          - name: GitHub Copilot CLI - ACP
+            adapter: acp-copilot
+            kind: agent
+            guard: SORTIE_CLIENTPROTOCOL_TEST
+            credential_env: COPILOT_PROVIDER_API_KEY
+            run_filter: ^TestIntegration_ScriptedModel$/^credential_verification_context$
+            test_path: ./internal/agent/clientprotocol/...
+            timeout: 300s
+            node: true
+            install: npm install -g @github/copilot
+            version_cmd: copilot --version
+            source: "npm: @github/copilot (unpinned, installs latest)"
+            clientprotocol_command: "env COPILOT_PROVIDER_TYPE=anthropic COPILOT_OFFLINE=1 COPILOT_MODEL=scripted-model copilot --acp"
+            clientprotocol_model_base_url_env: COPILOT_PROVIDER_BASE_URL
+            clientprotocol_user_instructions: .copilot/copilot-instructions.md
+
+          - name: OpenCode - ACP
+            adapter: acp-opencode
+            kind: agent
+            guard: SORTIE_CLIENTPROTOCOL_TEST
+            credential_env: GOOGLE_GENERATIVE_AI_API_KEY
+            run_filter: ^TestIntegration_ScriptedModel$/^credential_verification_context$
+            test_path: ./internal/agent/clientprotocol/...
+            timeout: 300s
+            node: true
+            install: npm install -g --ignore-scripts=false @opencode/cli@2
+            version_cmd: opencode --version
+            source: "npm: @opencode/cli@2 (latest 2.x)"
+            clientprotocol_command: "opencode acp"
+            clientprotocol_model_base_url_env: OPENCODE_CONFIG
+            clientprotocol_model_document: '{"$schema":"https://opencode.ai/config.json","model":"scripted/scripted-model","provider":{"scripted":{"npm":"@ai-sdk/google","name":"scripted","options":{"baseURL":"{url}/v1beta","apiKey":"{env:GOOGLE_GENERATIVE_AI_API_KEY}"},"models":{"scripted-model":{"name":"scripted-model"}}}}}'
+
+          - name: Kiro CLI - ACP (scripted)
+            adapter: acp-kiro
+            kind: agent
+            guard: SORTIE_CLIENTPROTOCOL_TEST
+            credential_env: KIRO_API_KEY
+            run_filter: ^TestIntegration_ScriptedModel$/^credential_verification_context$
+            test_path: ./internal/agent/clientprotocol/...
+            timeout: 300s
+            node: false
+            install: curl -fsSL https://cli.kiro.dev/install | bash
+            version_cmd: kiro-cli --version
+            source: "curl https://cli.kiro.dev/install (unpinned, installs latest)"
+            clientprotocol_command: "kiro-cli acp -a --model scripted-model"
+            clientprotocol_model_document_path: .kiro/settings/cli.json
+            clientprotocol_model_document: '{"api.krs.service":{"endpoint":"{url}","region":"us-east-1"},"api.cps.service":{"endpoint":"{url}","region":"us-east-1"},"api.codewhisperer.service":{"endpoint":"{url}","region":"us-east-1"}}'
 
           - name: Jira
             adapter: jira
@@ -216,7 +260,7 @@ jobs:
 
       - name: Set up Node.js
         if: ${{ matrix.node }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -255,14 +299,7 @@ jobs:
 
       - name: Enable Codex sandbox namespaces
         if: matrix.adapter == 'codex'
-        run: |
-          # Bubblewrap needs user namespaces on the disposable Ubuntu runner.
-          if [ -f /proc/sys/kernel/unprivileged_userns_clone ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
+        run: scripts/codex-sandbox-enable.sh
 
       - name: Run integration check
         id: check
@@ -281,6 +318,9 @@ jobs:
           SORTIE_CLIENTPROTOCOL_ASKING_COMMAND: ${{ matrix.clientprotocol_asking_command }}
           SORTIE_CLIENTPROTOCOL_PROFILE: ${{ matrix.clientprotocol_profile }}
           SORTIE_CLIENTPROTOCOL_MODEL_BASE_URL_ENV: ${{ matrix.clientprotocol_model_base_url_env }}
+          SORTIE_CLIENTPROTOCOL_USER_INSTRUCTIONS: ${{ matrix.clientprotocol_user_instructions }}
+          SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT: ${{ matrix.clientprotocol_model_document }}
+          SORTIE_CLIENTPROTOCOL_MODEL_DOCUMENT_PATH: ${{ matrix.clientprotocol_model_document_path }}
           GH_TOKEN: ${{ secrets.SORTIE_COPILOT_TOKEN }}
         run: |
           # The runner's default bash uses -e; disable it so a failing test is
@@ -371,7 +411,7 @@ jobs:
 
       - name: Upload integration report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ format(matrix.tier == 'live' && 'nightly-{0}-live-{1}' || 'nightly-{0}-{1}', matrix.adapter, github.run_attempt) }}
           path: ${{ runner.temp }}/nightly-report/
@@ -463,7 +503,7 @@ jobs:
             guard: SORTIE_CLIENTPROTOCOL_TEST
             credential_env: GEMINI_API_KEY
             run_filter: Integration
-            skip_filter: ^TestIntegration_ScriptedModel$
+            skip_filter: ^(TestIntegration_ScriptedModel|TestIntegration_ToolForcingTurn)$
             tier: live
             test_path: ./internal/agent/clientprotocol/...
             timeout: 900s
@@ -518,7 +558,6 @@ jobs:
     name: Notify Discord
     runs-on: ubuntu-latest
     needs: [integration, integration-live, hook-stress]
-    # A failed or cancelled nightly is the one worth reporting.
     if: always()
     timeout-minutes: 5
 
@@ -529,7 +568,6 @@ jobs:
           persist-credentials: false
 
       - name: Post nightly outcome
-        # A notification failure must not redden a nightly whose tests passed.
         continue-on-error: true
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_CI }}

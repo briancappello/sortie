@@ -2,7 +2,8 @@
 // The binary accepts an optional positional workflow file path (default
 // ./WORKFLOW.md), a --log-level flag to control log verbosity,
 // a --log-format flag to select text or JSON output encoding, --port
-// and --host flags for the HTTP observability server, and a "validate"
+// and --host flags for the HTTP observability server, a --once flag that
+// finishes the work one poll finds and then exits, and a "validate"
 // subcommand for offline workflow file validation. Short aliases -h
 // (help) and -V (version) are supported alongside their long forms.
 // The HTTP server starts by default on port 7678; --port 0 disables it.
@@ -11,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -34,7 +36,9 @@ import (
 	"github.com/sortie-ai/sortie/internal/notify/route"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/persistence"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
+	"github.com/sortie-ai/sortie/internal/runstats"
 	"github.com/sortie-ai/sortie/internal/server"
 	"github.com/sortie-ai/sortie/internal/tool/trackerapi"
 	"github.com/sortie-ai/sortie/internal/workspace"
@@ -48,7 +52,9 @@ import (
 	_ "github.com/sortie-ai/sortie/internal/agent/opencode"
 	_ "github.com/sortie-ai/sortie/internal/environment/local"
 	_ "github.com/sortie-ai/sortie/internal/environment/smolvm"
+	_ "github.com/sortie-ai/sortie/internal/notify/discord"
 	_ "github.com/sortie-ai/sortie/internal/notify/slack"
+	_ "github.com/sortie-ai/sortie/internal/notify/telegram"
 	_ "github.com/sortie-ai/sortie/internal/notify/webhook"
 	_ "github.com/sortie-ai/sortie/internal/scm/gitea"
 	_ "github.com/sortie-ai/sortie/internal/scm/github"
@@ -59,10 +65,33 @@ import (
 	_ "github.com/sortie-ai/sortie/internal/tracker/linear"
 )
 
+// exitCodeWorkFailed is the exit status of a --once run whose work did not
+// succeed. It differs from the 1 that startup failures return, so a CI job
+// can tell the two apart.
+const exitCodeWorkFailed = 2
+
+// onceExitCode maps the result of a --once run to the process exit status.
+// An interruption outranks a failed poll, which outranks failed work.
+func onceExitCode(res orchestrator.OnceResult) int {
+	switch {
+	case res.Interrupted:
+		return exitCodeWorkFailed
+	case res.PollFailed:
+		return 1
+	case len(res.NotSucceeded) > 0:
+		return exitCodeWorkFailed
+	}
+	return 0
+}
+
 // serverShutdownTimeout controls how long [run] waits for the HTTP server
 // to drain active connections on graceful shutdown. Overridden in tests to
 // exercise the shutdown-error path without a 5-second wait.
 var serverShutdownTimeout = 5 * time.Second
+
+// startupDone, when set, is called once startup has finished and the
+// orchestrator is about to run. Tests set it to stop [run] without a deadline.
+var startupDone func()
 
 // abandonCh is created by main before [run] is called, and the signal
 // goroutine closes it on a second interrupt so every in-flight shutdown
@@ -233,6 +262,22 @@ func labelFixCommandActive(cfg config.ServiceConfig) bool {
 	return cfg.LabelCommands.Provider != "" && cfg.LabelCommands.FixLabel != ""
 }
 
+// modelUseSource serves the HTTP server's model usage from the store, so the
+// server needs no persistence import.
+func modelUseSource(store *persistence.Store) server.ModelUseFunc {
+	return func(ctx context.Context) ([]server.ModelUse, error) {
+		uses, err := store.ListModelUse(ctx)
+		if err != nil {
+			return nil, err
+		}
+		served := make([]server.ModelUse, 0, len(uses))
+		for _, use := range uses {
+			served = append(served, server.ModelUse(use))
+		}
+		return served, nil
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
@@ -290,6 +335,7 @@ func handleSignals(sigCh <-chan os.Signal, abandon chan struct{}) {
 }
 
 func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
+	startedAt := time.Now()
 	br, code := boot(ctx, bootParams{args: args, stdout: stdout, stderr: stderr})
 	if code != 0 || br.mgr == nil {
 		return code
@@ -333,10 +379,28 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		return 1
 	}
 
+	downloader := pricing.NewDownloader(dbPath, br.logger)
+	br.mgr.SetDownloader(downloader)
+
+	startupRates := br.mgr.Rates()
+	// A failed fill must not stop the start: the earlier rows read unpriced
+	// and the next start fills them again.
+	if recorded, err := store.RecordUnrecordedRunCosts(ctx, func(run persistence.UnrecordedRun) persistence.RunCostRecord {
+		return recordedCostOf(run, startupRates)
+	}); err != nil {
+		br.logger.Error("failed to record costs of earlier runs", slog.Any("error", err))
+	} else if recorded > 0 {
+		br.logger.Info("recorded costs of earlier runs", slog.Int("runs", recorded))
+	}
+
 	pendingRetries, err := store.LoadRetryEntriesForRecovery(ctx, time.Now().UnixMilli())
 	if err != nil {
 		br.logger.Error("failed to load retry entries", slog.Any("error", err))
 		return 1
+	}
+
+	if err := store.DeleteAllLivePasses(ctx); err != nil {
+		br.logger.Error("failed to clear live passes", slog.Any("error", err))
 	}
 
 	var totals orchestrator.AgentTotals
@@ -363,7 +427,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		totals,
 	)
 	state.TokenWarningThreshold = br.cfg.Agent.TokenWarningThreshold()
+	state.MaxSessions = br.cfg.Agent.MaxSessions
+	state.MaxCostUSD = br.cfg.Agent.MaxCostUSD
 	orchestrator.PopulateRetries(state, pendingRetries, br.logger)
+
+	usageLimitHolds, err := store.LoadUsageLimitHolds(ctx)
+	if err != nil {
+		br.logger.Error("failed to load usage limit holds, starting with none", slog.Any("error", err))
+	} else {
+		orchestrator.PopulateUsageLimitHolds(state, usageLimitHolds)
+	}
 
 	parkedRows, err := store.ListParkedIssues(ctx)
 	if err != nil {
@@ -384,6 +457,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		br.logger.Warn("failed to load budget hold notices, starting with none", slog.Any("error", err))
 	} else {
 		orchestrator.PopulateBudgetHoldNotices(state, budgetHoldNoticeRows, br.logger)
+	}
+
+	attentionAcknowledgementRows, err := store.ListAttentionAcknowledgements(ctx)
+	if err != nil {
+		br.logger.Warn("failed to load attention acknowledgements, starting with none", slog.Any("error", err))
+	} else {
+		orchestrator.PopulateAttentionAcknowledgements(state, attentionAcknowledgementRows, br.logger)
 	}
 
 	agentCtor, err := registry.Agents.Get(br.cfg.Agent.Kind)
@@ -533,6 +613,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	var scmAdapter domain.SCMAdapter
+	var scmProvider string
 	var reviewConfig orchestrator.ReviewReactionConfig
 	var autoMergeConfig orchestrator.AutoMergeReactionConfig
 	var autoMergeConfigured bool
@@ -580,7 +661,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	// requests of the configured repository; validation has made them
 	// name the same provider. It is built when either needs it.
 	repositoryProvider := orchestrator.RepositoryProvider(br.cfg.Environment)
-	scmProvider := repositoryProvider
+	scmProvider = repositoryProvider
 	if len(activeKindNames) > 0 {
 		scmProvider = activeProviders[0]
 	}
@@ -767,34 +848,36 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	recoveryEnabled := br.cfg.Tracker.HandoffState != "" && (ciProvider != nil || scmAdapter != nil)
 	recoveryOutcome := orchestrator.PendingReactionRecoveryResult{}
 	var recoveryErr error
+	recoveryNow := time.Now().UTC()
+	recoveryLookback := orchestrator.PendingReactionRecoveryLookback
+	recoveryParams := orchestrator.PendingReactionRecoveryParams{
+		WorkspaceRoot:                     br.cfg.Workspace.Root,
+		TrackerAdapter:                    br.trackerAdapter,
+		HandoffState:                      br.cfg.Tracker.HandoffState,
+		TerminalStates:                    br.cfg.Tracker.TerminalStates,
+		CIProvider:                        ciProvider,
+		SCMAdapter:                        scmAdapter,
+		SCMMetadata:                       orchestrator.SCMMetadataSource(br.cfg.Environment),
+		AutoMergeReactionConfigured:       autoMergeConfigured,
+		ReviewReactionConfigured:          reviewActive,
+		BotReviewReactionConfigured:       botReviewConfigured,
+		MergeConflictReactionConfigured:   mergeConflictConfigured,
+		LabelReviewReactionConfigured:     labelReviewConfigured,
+		LabelFixReactionConfigured:        labelFixConfigured,
+		MergeCompletionReactionConfigured: mergeCompletionConfigured,
+		RecoveryLookback:                  recoveryLookback,
+		MaxCandidates:                     orchestrator.PendingReactionRecoveryMaxCandidates,
+		NowFunc: func() time.Time {
+			return recoveryNow
+		},
+		Logger: br.logger,
+	}
 	if recoveryEnabled {
-		recoveryNow := time.Now().UTC()
-		recoveryLookback := orchestrator.PendingReactionRecoveryLookback
 		recoveryCutoff := recoveryNow.Add(-recoveryLookback)
 		var recoveryRuns []persistence.RunHistory
 		recoveryRuns, recoveryErr = store.LoadLatestSuccessfulRunsForReactionRecovery(ctx, recoveryCutoff, orchestrator.PendingReactionRecoveryMaxCandidates)
 		if recoveryErr == nil {
-			recoveryOutcome, recoveryErr = orchestrator.RecoverPendingReactions(ctx, state, recoveryRuns, orchestrator.PendingReactionRecoveryParams{
-				WorkspaceRoot:                     br.cfg.Workspace.Root,
-				TrackerAdapter:                    br.trackerAdapter,
-				HandoffState:                      br.cfg.Tracker.HandoffState,
-				TerminalStates:                    br.cfg.Tracker.TerminalStates,
-				CIProvider:                        ciProvider,
-				SCMAdapter:                        scmAdapter,
-				SCMMetadata:                       orchestrator.SCMMetadataSource(br.cfg.Environment),
-				AutoMergeReactionConfigured:       autoMergeConfigured,
-				BotReviewReactionConfigured:       botReviewConfigured,
-				MergeConflictReactionConfigured:   mergeConflictConfigured,
-				LabelReviewReactionConfigured:     labelReviewConfigured,
-				LabelFixReactionConfigured:        labelFixConfigured,
-				MergeCompletionReactionConfigured: mergeCompletionConfigured,
-				RecoveryLookback:                  recoveryLookback,
-				MaxCandidates:                     orchestrator.PendingReactionRecoveryMaxCandidates,
-				NowFunc: func() time.Time {
-					return recoveryNow
-				},
-				Logger: br.logger,
-			})
+			recoveryOutcome, recoveryErr = orchestrator.RecoverPendingReactions(ctx, state, recoveryRuns, recoveryParams)
 		}
 	}
 	recoveryLogAttrs := []any{
@@ -819,6 +902,18 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	} else {
 		recoveryLogAttrs = append(recoveryLogAttrs, slog.Bool("success", true))
 		br.logger.Info("pending reaction recovery completed", recoveryLogAttrs...)
+	}
+
+	restored, restoreErr := orchestrator.RestoreReactionEscalations(ctx, state, store, recoveryParams)
+	restoreLogAttrs := []any{
+		slog.Int("applied", restored.Applied),
+		slog.Int("rebuilt", restored.Rebuilt),
+		slog.Int("ended", restored.Ended),
+	}
+	if restoreErr != nil {
+		br.logger.Error("reaction escalation restore failed", append(restoreLogAttrs, slog.Any("error", restoreErr))...)
+	} else {
+		br.logger.Info("reaction escalation restore completed", restoreLogAttrs...)
 	}
 
 	// Attempt to bind the HTTP server before constructing metrics so
@@ -865,15 +960,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	// reads only tool metadata, never executing the tools, so the
 	// connection is not needed beyond construction.
 	//
-	// The notification entries come from the live configuration, so a reload
-	// that adds or removes an agent.message subscriber changes what the next
-	// session advertises.
+	// The money ceiling and the notification entries come from the live
+	// configuration, so a reload that sets agent.max_cost_usd or changes an
+	// agent.message subscriber changes what the next session advertises.
 	sessionToolFunc := func(ctx context.Context, issueID, workspacePath string) (*domain.ToolRegistry, error) {
 		sessionTools, err := BuildSessionToolRegistry(ctx, br.logger, SessionToolParams{
 			TrackerAdapter:        br.trackerAdapter,
 			Project:               br.cfg.Tracker.Project,
 			DBPath:                dbPath,
 			MaxTokens:             br.cfg.Agent.MaxTokens,
+			MaxCostUSD:            br.mgr.Config().Agent.MaxCostUSD,
 			MaxSessions:           br.cfg.Agent.MaxSessions,
 			TokenWarningThreshold: br.mgr.Config().Agent.TokenWarningThreshold(),
 			Notifications:         br.mgr.Config().Notifications.Backends,
@@ -899,6 +995,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		SessionAPIURL:                     sessionAPIURL,
 		Logger:                            br.logger,
 		TrackerAdapter:                    br.trackerAdapter,
+		TrackerKind:                       br.cfg.Tracker.Kind,
+		TrackerProject:                    br.cfg.Tracker.Project,
 		Router:                            route.NewRouter(br.trackerAdapter, registry.Notifiers.Get),
 		AgentAdapter:                      agentAdapter,
 		AgentAdapterByKind:                agentAdapterByKind,
@@ -913,6 +1011,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		CIProvider:                        ciProvider,
 		SCMAdapter:                        scmAdapter,
 		PullRequestOpenerFunc:             pullRequestOpeners(sharedSCM, scmProvider),
+		SCMProvider:                       scmProvider,
 		ReviewConfig:                      reviewConfig,
 		ReviewConfigured:                  reviewActive,
 		AutoMergeConfig:                   autoMergeConfig,
@@ -929,32 +1028,39 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		MergeCompletionReactionConfigured: mergeCompletionConfigured,
 		BlockerResolver:                   br.blockerResolver,
 		AbandonCh:                         abandonCh,
+		Rates:                             startupRates,
+		Once:                              br.once,
 	})
 
 	var srv *server.Server
 	if serverEnabled {
-		rawTokenRates, tokenRatesPresent := br.cfg.ExtensionValue("token_rates")
-		tokenRates, _ := server.ParseTokenRates(rawTokenRates, tokenRatesPresent)
-
 		planProjects := newPlanProjects(br.trackerAdapter, br.cfg, br.mgr.Config, func() domain.TrackerStates {
 			return br.mgr.Config().Tracker.States()
 		})
 		defer planProjects.Close()
 
 		addr := net.JoinHostPort(br.serverHost, strconv.Itoa(br.serverPort))
+		stats := statsSource{
+			dbPath:       dbPath,
+			workflowPath: br.path,
+			stages:       func() runstats.Stages { return dispatchStages(br.mgr.Config().Dispatch) },
+		}
 		srv = server.New(server.Params{
 			SnapshotFn:       o.SnapshotFunc(),
 			RefreshFn:        o.RefreshFunc(),
+			RetryNowFn:       o.RetryNowFunc(),
+			AcknowledgeFn:    o.AcknowledgeFunc(),
+			CheckNowFn:       o.CheckNowFunc(),
+			WorkflowShapeFn:  o.WorkflowShape,
+			HealthFn:         o.Health,
 			Logger:           br.logger,
 			Addr:             addr,
 			Version:          Version,
-			StartedAt:        time.Now(),
-			SlotFunc:         func() int { return br.mgr.Config().Agent.MaxConcurrentAgents },
+			StartedAt:        startedAt,
 			MetricsRegistry:  promMetrics.Registry(),
 			DBPingFn:         func(ctx context.Context) error { return store.Ping(ctx) },
 			PreflightFn:      o.PreflightOK,
 			WorkflowLoadedFn: func() bool { return br.mgr.Config().Tracker.Kind != "" },
-			TokenRates:       tokenRates,
 			ControlToken:     br.controlToken,
 			SessionTokenFn:   o.SessionTokenFunc(),
 			HoldFn:           server.HoldFunc(o.HoldFunc()),
@@ -968,39 +1074,28 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			PlanSatisfaction: store,
 			PlanProjects:     planProjects,
 			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
-			RunHistoryFn: func(ctx context.Context, limit int) ([]server.RunHistoryEntry, error) {
-				runs, err := store.QueryRecentRunHistory(ctx, limit, 0)
-				if err != nil {
-					return nil, err
-				}
-				out := make([]server.RunHistoryEntry, len(runs))
-				for i, r := range runs {
-					out[i] = server.RunHistoryEntry{
-						Identifier:     r.Identifier,
-						DisplayID:      r.DisplayID,
-						Attempt:        r.Attempt,
-						Status:         r.Status,
-						WorkflowFile:   r.WorkflowFile,
-						StartedAt:      r.StartedAt,
-						CompletedAt:    r.CompletedAt,
-						Error:          r.Error,
-						TurnsCompleted: r.TurnsCompleted,
-						RuleName:       r.RuleName,
-						ChainID:        r.ChainID,
-						StagePrevious:  r.StagePrevious,
-						StageTarget:    r.StageTarget,
-						StageResult:    r.StageResult,
-					}
-				}
-				return out, nil
+			RunHistory:       runHistoryReader{store: store},
+			RunEventsFn:      o.RunEvents,
+			RunEventsAfterFn: o.RunEventsAfter,
+			Stats:            stats.report,
+
+			ModelUse:           modelUseSource(store),
+			ConfiguredModelsFn: o.ConfiguredModels,
+			RatesFn:            br.mgr.Rates,
+			PriceDownloads:     downloader,
+			WorkflowLoadFn: func() (time.Time, error) {
+				status := br.mgr.LoadStatus()
+				return status.LastLoadAt, status.LastError
 			},
+			MaskErrorFn: o.MaskError,
 		})
 		o.AddObserver(srv)
+		br.mgr.SetLoadNotifier(srv.OnStateChange)
 
+		br.logger.Info("http server listening",
+			slog.String("addr", ln.Addr().String()),
+		)
 		go func() {
-			br.logger.Info("http server listening",
-				slog.String("addr", ln.Addr().String()),
-			)
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				br.logger.Error("http server error", slog.Any("error", err))
 			}
@@ -1015,6 +1110,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		}()
 	}
 
+	if startupDone != nil {
+		startupDone()
+	}
+	go downloader.Run(ctx, br.mgr.RefreshRates)
+	if br.once && br.cfg.Agent.MaxSessions == 0 && br.cfg.Agent.MaxTokens == 0 && br.cfg.Agent.MaxCostUSD == 0 {
+		br.logger.Warn("--once keeps starting sessions for an issue until it leaves the active states because agent.max_sessions, agent.max_tokens, and agent.max_cost_usd are all 0; set one of them to cap the run")
+	}
 	o.Run(ctx)
 
 	if srv != nil {
@@ -1026,5 +1128,50 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	br.logger.Info("shutting down")
-	return 0
+	if !br.once {
+		return 0
+	}
+
+	res := o.OnceResult()
+	exitCode := onceExitCode(res)
+	br.logger.Info("once run finished",
+		slog.Int("issues", res.Issues),
+		slog.Int("not_succeeded", len(res.NotSucceeded)),
+		slog.Int("not_run", res.NotRun),
+		slog.Bool("interrupted", res.Interrupted),
+		slog.Bool("poll_failed", res.PollFailed),
+		slog.Int("exit_code", exitCode),
+	)
+	if br.onceResultPath != "" {
+		if err := writeOnceResult(br.onceResultPath, res); err != nil {
+			br.logger.Error("failed to write once result file", slog.Any("error", err))
+		}
+	}
+	return exitCode
+}
+
+type onceResultFile struct {
+	Issues []onceResultIssue `json:"issues"`
+}
+
+type onceResultIssue struct {
+	Identifier string `json:"identifier"`
+	Outcome    string `json:"outcome"`
+}
+
+// writeOnceResult replaces the file at path with the latest outcome of every
+// issue in res.
+func writeOnceResult(path string, res orchestrator.OnceResult) error {
+	file := onceResultFile{Issues: make([]onceResultIssue, 0, len(res.Outcomes))}
+	for _, recorded := range res.Outcomes {
+		file.Issues = append(file.Issues, onceResultIssue{
+			Identifier: recorded.Identifier,
+			Outcome:    string(recorded.Outcome),
+		})
+	}
+	data, err := json.Marshal(file)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }

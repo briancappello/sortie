@@ -222,16 +222,16 @@ func TestEnforceInFlightTokenCeiling_StopsHeldRun(t *testing.T) {
 	state := NewState(5000, 4, 100, nil, AgentTotals{})
 	var cancelled int
 	state.Running["ISS-HELD"] = &RunningEntry{
-		Identifier:             "ISS-HELD-ident",
-		HeldSince:              time.Now(),
-		TokenCeilingCancelFunc: func() { cancelled++ },
+		Identifier:        "ISS-HELD-ident",
+		HeldSince:         time.Now(),
+		CeilingCancelFunc: func() { cancelled++ },
 	}
 	store := &fakeTokenStore{responses: []tokenStoreResponse{{}}}
 
 	driveEvent(state, "ISS-HELD", domain.TokenUsage{InputTokens: 150, TotalTokens: 150}, store, &spyMetrics{}, discardLogger())
 
-	if cancelled != 1 || state.Running["ISS-HELD"].TokenCeilingStopRequest == nil {
-		t.Errorf("held run over the token ceiling: cancels = %d, stop request %v, want stopped", cancelled, state.Running["ISS-HELD"].TokenCeilingStopRequest)
+	if cancelled != 1 || state.Running["ISS-HELD"].CeilingStopRequest == nil {
+		t.Errorf("held run over the token ceiling: cancels = %d, stop request %v, want stopped", cancelled, state.Running["ISS-HELD"].CeilingStopRequest)
 	}
 }
 

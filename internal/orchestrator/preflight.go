@@ -12,8 +12,16 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/maputil"
+	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
+
+// PreflightFailedPrefix leads the text of a failed [PreflightResult].
+const PreflightFailedPrefix = "dispatch preflight failed: "
+
+// preflightCheckWorkflowLoad is the [PreflightError.Check] of a workflow file
+// that cannot be loaded.
+const preflightCheckWorkflowLoad = "workflow_load"
 
 // PreflightError represents a single preflight validation failure.
 type PreflightError struct {
@@ -66,7 +74,7 @@ func (r PreflightResult) Error() string {
 	for i, e := range r.Errors {
 		msgs[i] = e.Message
 	}
-	return "dispatch preflight failed: " + strings.Join(msgs, "; ")
+	return PreflightFailedPrefix + strings.Join(msgs, "; ")
 }
 
 // PreflightParams holds the dependencies for preflight validation.
@@ -102,6 +110,9 @@ type PreflightParams struct {
 
 	// LookupEnv reads Sortie's own environment. Nil is [os.LookupEnv].
 	LookupEnv func(name string) (string, bool)
+	// RatesFunc returns the price rates in force. A nil func reads as no
+	// rates.
+	RatesFunc func() *pricing.Rates
 }
 
 // ValidateDispatchConfig runs all dispatch preflight checks.
@@ -119,7 +130,7 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 	// misleading. The operator must fix the workflow file first.
 	if err := params.ReloadWorkflow(); err != nil {
 		errs = append(errs, PreflightError{
-			Check:   "workflow_load",
+			Check:   preflightCheckWorkflowLoad,
 			Message: "workflow file cannot be loaded: " + err.Error(),
 		})
 		return PreflightResult{Errors: errs}
@@ -267,10 +278,9 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 			}
 		}
 
-		// A kind whose declared disposition delivers no channel on a
-		// local launch can neither call nor be told about Sortie's
-		// tools for any of its sessions.
-		if registered && !agentMeta.MCPInjection.DeliversTools(false) {
+		// A kind that delivers no tool channel can neither call nor be told
+		// about Sortie's tools.
+		if registered && !agentMeta.MCPDialect.DeliversTools() {
 			warns = append(warns, PreflightWarning{
 				Check:   "agent.kind.no_tool_channel",
 				Message: "agent kind " + strconv.Quote(ref.Kind) + " has no tool execution channel: Sortie's tools are neither advertised nor callable for it",
@@ -304,6 +314,16 @@ func ValidateDispatchConfig(params PreflightParams) PreflightResult {
 
 	errs = append(errs, stageCollisions(cfg)...)
 	errs = append(errs, unforwardedAgentCredentials(cfg, params)...)
+
+	if settings := moneyCeilingSettings(cfg.Agent); len(settings) > 0 && !ratesInForce(params).SourceConfigured() {
+		for _, setting := range settings {
+			warns = append(warns, PreflightWarning{
+				Check: setting.Key + ".no_rate_source",
+				Message: setting.Key + " is set but no price source is configured: price_table.embedded and price_table.fetch are off " +
+					"and no token_rates entry or operator price table is set, so no run can be priced",
+			})
+		}
+	}
 
 	// Workspace root must exist and be writable.
 	if cfg.Workspace.Root != "" {
@@ -367,6 +387,43 @@ func unforwardedAgentCredentials(cfg config.ServiceConfig, params PreflightParam
 		}
 	}
 	return errs
+}
+
+// moneyCeilingSetting is one money setting above 0 with the consequence of
+// its kind reporting no token usage.
+type moneyCeilingSetting struct {
+	Key     string
+	NoUsage string
+}
+
+// moneyCeilingSettings returns each money setting of agent above 0, in the
+// order per-issue, daily, weekly, monthly.
+func moneyCeilingSettings(agent config.AgentConfig) []moneyCeilingSetting {
+	var settings []moneyCeilingSetting
+	if agent.MaxCostUSD > 0 {
+		settings = append(settings, moneyCeilingSetting{
+			Key:     "agent.max_cost_usd",
+			NoUsage: "the per-issue money ceiling can never be reached for it",
+		})
+	}
+	for _, def := range spendWindowDefs {
+		if def.ceiling(agent) > 0 {
+			settings = append(settings, moneyCeilingSetting{
+				Key:     def.setting,
+				NoUsage: "the " + string(def.window) + " spend ceiling counts none of its spend",
+			})
+		}
+	}
+	return settings
+}
+
+// ratesInForce returns the rates params carries; a nil RatesFunc reads as
+// no rates.
+func ratesInForce(params PreflightParams) *pricing.Rates {
+	if params.RatesFunc == nil {
+		return nil
+	}
+	return params.RatesFunc()
 }
 
 // agentKindOrigin identifies the front-matter field that first

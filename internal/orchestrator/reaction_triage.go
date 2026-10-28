@@ -20,6 +20,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/environment"
+	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
@@ -830,10 +831,12 @@ func reactionTriageGate(
 	if !run.Applied {
 		run.Applied = true
 		logTriageApplied(ctx, log, req, *outcome)
+		recordTriageOutcome(ctx, params, pending, req, *outcome, log)
 
 		switch outcome.Disposition {
 		case TriageHandled:
 			markTriageDispatched(params, run, req, log, ctx)
+			recordTriageAction(ctx, params, pending, log)
 			return triageHandled
 		case TriageEscalate:
 			markTriageDispatched(params, run, req, log, ctx)
@@ -854,6 +857,84 @@ func reactionTriageGate(
 		markTriageDispatched(params, run, req, log, ctx)
 	}
 	return triageHandled
+}
+
+// recordTriageAction records that triage handled the entry's reaction in
+// place of an agent run.
+func recordTriageAction(ctx context.Context, params ReconcileParams, pending *PendingReaction, log *slog.Logger) {
+	now := time.Now().UTC()
+	if params.NowFunc != nil {
+		now = params.NowFunc().UTC()
+	}
+	recordReactionActivity(ctx, params.Store, pending.IssueID, pending.StageLineage,
+		persistence.ReactionActivityAction, []string{pending.Kind}, now, log)
+}
+
+// reactionTriageOutcomeStore is the pair of store methods the recorded triage
+// answers need. Satisfied by [persistence.Store].
+type reactionTriageOutcomeStore interface {
+	RecordReactionTriageOutcome(ctx context.Context, outcome persistence.ReactionTriageOutcome) error
+	LatestReactionTriageDisposition(ctx context.Context, issueID, kind, fingerprint string) (disposition string, found bool, err error)
+}
+
+// recordTriageOutcome appends the answer a pass just applied. A failed write
+// is logged and the pass proceeds: the answer has already taken effect.
+func recordTriageOutcome(
+	ctx context.Context,
+	params ReconcileParams,
+	pending *PendingReaction,
+	req ReactionTriageRequest,
+	outcome ReactionTriageOutcome,
+	log *slog.Logger,
+) {
+	if params.Store == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if params.NowFunc != nil {
+		now = params.NowFunc().UTC()
+	}
+	if err := params.Store.RecordReactionTriageOutcome(ctx, persistence.ReactionTriageOutcome{
+		IssueID:     pending.IssueID,
+		Kind:        req.Kind,
+		Fingerprint: req.Fingerprint,
+		Disposition: string(outcome.Disposition),
+		Fallback:    outcome.Fallback,
+		Elapsed:     outcome.Elapsed,
+		ChainID:     pending.StageLineage.ChainID,
+		RecordedAt:  now,
+	}); err != nil {
+		log.Warn("failed to record reaction triage outcome",
+			slog.String("reaction_kind", req.Kind),
+			slog.String("fingerprint", req.Fingerprint),
+			slog.Any("error", err),
+		)
+	}
+}
+
+// triageHandledFor reports whether the newest answer recorded for the
+// fingerprint is handled. It compares the recorded disposition and not the
+// gate verdict, because the gate replays a memoized escalate as handled. A
+// failed read reads as not handled.
+func triageHandledFor(
+	ctx context.Context,
+	store reactionTriageOutcomeStore,
+	pending *PendingReaction,
+	fingerprint string,
+	log *slog.Logger,
+) bool {
+	if store == nil {
+		return false
+	}
+	disposition, found, err := store.LatestReactionTriageDisposition(ctx, pending.IssueID, pending.Kind, fingerprint)
+	if err != nil {
+		log.Warn("failed to read reaction triage outcome",
+			slog.String("reaction_kind", pending.Kind),
+			slog.Any("error", err),
+		)
+		return false
+	}
+	return found && disposition == string(TriageHandled)
 }
 
 // markTriageDispatched marks the reaction fingerprint dispatched and
@@ -954,18 +1035,14 @@ const (
 	// EscalationTriggerTriage is the escalation a triage command asked
 	// for, with no budget spent on the subject.
 	EscalationTriggerTriage ReactionEscalationTrigger = "triage"
-)
 
-// buildTriageEscalationComment returns the operator-facing comment for
-// an escalation a triage command requested. One builder serves all four
-// kinds. subject is the short phrase naming what was triaged: "ref <head
-// sha>" for CI, and "PR #<number>" for the three pull-request kinds, the
-// same subjects the budget escalations name.
-func buildTriageEscalationComment(kind string, subject string) string {
-	return fmt.Sprintf(
-		"The %s triage command requested human attention for %s.\n\n"+
-			"Sortie ran the configured triage command before dispatching a continuation "+
-			"and the command answered \"escalate\", so no continuation was dispatched and "+
-			"no retry or continuation budget was spent. Manual intervention required.",
-		kind, subject)
-}
+	// EscalationTriggerRefused is the escalation a kind fires when the
+	// forge or the tracker answered a write with an authentication or
+	// payload error, so repeating the write cannot help.
+	EscalationTriggerRefused ReactionEscalationTrigger = "refused"
+
+	// EscalationTriggerMissingMergeCommit is the escalation merge
+	// completion fires when the grace period for the forge to report the
+	// merge commit of a merged pull request has run out.
+	EscalationTriggerMissingMergeCommit ReactionEscalationTrigger = "missing_merge_commit"
+)

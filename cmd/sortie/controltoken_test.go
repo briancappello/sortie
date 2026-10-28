@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/redact"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 func TestResolveControlToken(t *testing.T) {
@@ -110,10 +110,7 @@ func TestRunNonLoopbackHostWithoutControlTokenRefused(t *testing.T) {
 	wfPath := setupRunDir(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--host", "0.0.0.0", "--port", strconv.Itoa(freePort(t)), wfPath}, &stdout, &stderr)
+	code := run(waittest.Context(t), []string{"--host", "0.0.0.0", "--port", strconv.Itoa(freePort(t)), wfPath}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr.String())
 	}
@@ -133,10 +130,7 @@ func TestRunNonLoopbackHostWithControlTokenStarts(t *testing.T) {
 	port := freePort(t)
 
 	var stdout, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), runTestTimeout)
-	defer cancel()
-
-	code := run(ctx, []string{"--host", "0.0.0.0", "--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
+	code := runUntilStarted(t, []string{"--host", "0.0.0.0", "--port", strconv.Itoa(port), wfPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}

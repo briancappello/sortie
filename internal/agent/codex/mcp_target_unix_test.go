@@ -3,6 +3,7 @@
 package codex
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,23 +12,23 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/agent/agentcore"
 	"github.com/sortie-ai/sortie/internal/agent/agenttest"
+	"github.com/sortie-ai/sortie/internal/agent/sshutil"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/registry"
 )
 
-// TestMCPOverridesByLaunchTarget asserts, for each launch target, whether
-// the session passes the generated MCP servers to the runtime. codex
-// renders them from the host copy of the file as override arguments, so
-// the path itself never reaches the runtime; a carried launch runs those
-// arguments where the environment runs the runtime.
+// TestMCPOverridesByLaunchTarget asserts that a local and a carried launch
+// pass the generated stdio tool server to the runtime as an override
+// argument rendered from the host copy of the file, so the path itself never
+// reaches the runtime; a carried launch runs those arguments where the
+// environment runs the runtime.
 func TestMCPOverridesByLaunchTarget(t *testing.T) {
-	// Not parallel: the SSH case puts a fake ssh first on PATH.
 	tests := []struct {
 		name    string
 		target  string
 		wantMCP bool
 	}{
 		{name: "local", target: "local", wantMCP: true},
-		{name: "ssh gets no servers", target: "ssh"},
 		{name: "environment carrier gets the servers", target: "carrier", wantMCP: true},
 	}
 	for _, tt := range tests {
@@ -46,13 +47,7 @@ func TestMCPOverridesByLaunchTarget(t *testing.T) {
 				MCPConfigPath: mcpPath,
 			}
 			var carrier *agenttest.FakeCarrier
-			switch tt.target {
-			case "ssh":
-				sshDir := t.TempDir()
-				agenttest.WriteScript(t, sshDir, "ssh", "exit 0\n")
-				t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-				params.SSHHost = "build-host"
-			case "carrier":
+			if tt.target == "carrier" {
 				carrier = &agenttest.FakeCarrier{HostWorkspace: ws, GuestWorkspace: "/workspace"}
 				params.Carrier = carrier
 			}
@@ -61,13 +56,15 @@ func TestMCPOverridesByLaunchTarget(t *testing.T) {
 			if agentErr != nil {
 				t.Fatalf("ResolveLaunchTarget() error = %v", agentErr)
 			}
-			args, agentErr := mcpOverrideArgs(target, params.MCPConfigPath)
+			tools, agentErr := agentcore.ResolveToolDelivery(context.Background(), params, target, registry.MCPDialectMCPServersTOML, nil)
 			if agentErr != nil {
-				t.Fatalf("mcpOverrideArgs() error = %v", agentErr)
+				t.Fatalf("ResolveToolDelivery() error = %v", agentErr)
 			}
+			t.Cleanup(func() { _ = tools.Close() })
+			args := tools.Delivery(sshutil.ForwardOutcome{}).Args
 			hasServer := slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "mcp_servers.sortie-tools=") })
 			if hasServer != tt.wantMCP {
-				t.Errorf("mcpOverrideArgs() = %q, sortie-tools override present = %v, want %v", args, hasServer, tt.wantMCP)
+				t.Errorf("delivery args = %q, sortie-tools override present = %v, want %v", args, hasServer, tt.wantMCP)
 			}
 			if carrier == nil {
 				return
