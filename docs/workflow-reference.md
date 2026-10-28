@@ -1943,7 +1943,7 @@ The VM trusts smolvm's interception certificate through `SSL_CERT_FILE`, `NODE_E
 <host_prefix...> smolvm machine exec --name sortie-ENG-42 -i -w /workspace -e ... -- opencode acp
 ```
 
-The prefix process runs with the session's full host environment, `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` included. The agent behind it does not get them. This is how [`acp-broker`](https://github.com/briancappello/agentic-orchestration/blob/main/acp-broker/docs/guide.md) runs on the host while the agent runs in the VM. Hooks, verification commands, triage, auxiliary agent commands, and git inspection never run behind the prefix.
+The prefix process runs with the session's full host environment, `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` included. The agent behind it does not get them. This is how [`acp-broker`](https://github.com/ortusnova/agentic-orchestration/blob/main/acp-broker/docs/guide.md) runs on the host while the agent runs in the VM. Hooks, verification commands, triage, auxiliary agent commands, and git inspection never run behind the prefix.
 
 Under `local`, the session launch is the prefix followed by the agent command, the same launch as a prefix written into `agent.command`. Unlike a prefix in `agent.command`, `host_prefix` does not wrap auxiliary commands or version canaries.
 
