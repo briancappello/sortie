@@ -58,9 +58,9 @@ export interface SpendBudgetProps {
 /** Renders the operator's spend ceilings: one meter per configured window, shortest window first. */
 export function SpendBudget({ ceiling, isEstimateNoted }: SpendBudgetProps) {
   return (
-    <div className="flex flex-col gap-sm">
+    <div className="flex flex-col gap-sm rounded-lg border border-line bg-canvas p-md">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm text-body-md">
-        <h3 className="text-ink">Budget</h3>
+        <h3 className="font-medium text-ink">Budget</h3>
         {isEstimateNoted ? (
           <span className="text-body-sm text-ink-muted">Estimated at API prices</span>
         ) : undefined}

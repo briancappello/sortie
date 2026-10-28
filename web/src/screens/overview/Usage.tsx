@@ -92,9 +92,9 @@ interface UsageKindBlockProps {
 
 function UsageKindBlock({ kind, usage, windows, now }: UsageKindBlockProps) {
   return (
-    <div className="flex flex-col gap-sm">
+    <div className="flex flex-col gap-sm rounded-lg border border-line bg-canvas p-md">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-sm text-body-md">
-        <h3 className="text-ink">{kind}</h3>
+        <h3 className="font-medium text-ink">{kind}</h3>
         {isStale(usage.reported_at, now) ? (
           <span className="text-body-sm text-ink-muted">
             Reported {fmtUtcStamp(usage.reported_at)}
@@ -138,14 +138,16 @@ export function Usage({ ceiling, rateLimits, kinds, now }: UsageProps) {
     return undefined;
   }
   return (
-    <section className="flex flex-col gap-md">
+    <section className="flex flex-col gap-sm">
       <h2 className="font-heading text-h7 font-semibold text-ink">Usage</h2>
-      {hasBudget ? (
-        <SpendBudget ceiling={ceiling} isEstimateNoted={reported.length > 0} />
-      ) : undefined}
-      {reported.map(({ kind, usage, windows }) => (
-        <UsageKindBlock key={kind} kind={kind} usage={usage} windows={windows} now={now} />
-      ))}
+      <div className="grid gap-md md:grid-cols-2">
+        {hasBudget ? (
+          <SpendBudget ceiling={ceiling} isEstimateNoted={reported.length > 0} />
+        ) : undefined}
+        {reported.map(({ kind, usage, windows }) => (
+          <UsageKindBlock key={kind} kind={kind} usage={usage} windows={windows} now={now} />
+        ))}
+      </div>
     </section>
   );
 }
