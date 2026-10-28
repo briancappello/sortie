@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -105,7 +106,12 @@ func TestHeadlessQuota(t *testing.T) {
 
 		_, captured, err := runHeadlessQuota(t, headlessReplies(t))
 
-		want := []string{"connect", "account.getQuota", "stdin-closed"}
+		want := []string{"connect", "account.getQuota"}
+		// Windows ends the server's process tree at once, so it never reads
+		// the closed stdin that a Unix server reads before its stop grace.
+		if runtime.GOOS != "windows" {
+			want = append(want, "stdin-closed")
+		}
 		if err != nil || !slices.Equal(captured, want) {
 			t.Errorf("headlessQuota() events = %q, error %v, want %q and nil", captured, err, want)
 		}
