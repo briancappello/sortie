@@ -14,6 +14,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/redact"
 	"github.com/sortie-ai/sortie/internal/sentence"
+	"github.com/sortie-ai/sortie/internal/worker"
 )
 
 // stateResponse is the JSON wire format for GET /api/v1/state.
@@ -48,6 +49,10 @@ type stateResponse struct {
 	Config *configResponse `json:"config,omitempty"`
 
 	Health *stateHealthResponse `json:"health,omitempty"`
+
+	// Workers lists the checked-in workers, the queue and the live leases
+	// under environment.kind remote; omitted under any other kind.
+	Workers *worker.State `json:"workers,omitempty"`
 }
 
 type stateCounts struct {
@@ -1412,6 +1417,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if health != nil {
 		resp.Health = toStateHealthResponse(*health, words)
 	}
+	resp.Workers = s.workersState()
 	s.attachActivePRLoops(r, &resp, snap, words.Shape)
 	writeJSON(w, s.logger, http.StatusOK, resp)
 
