@@ -6814,3 +6814,15 @@ Fix {{ .issue.identifier }}: {{ .issue.title }}
 ---
 
 _This document is derived strictly from the Sortie Architecture Specification (Sections 5, 6, 9.4, and 10) and informed by end-to-end testing experience (tasks 7.11–7.13). It is the authoritative user-facing reference for workflow authors._
+
+## Remote environment and the worker API (fork)
+
+`environment.kind: remote` hands each run to the matcher in `internal/worker` instead of starting it on this host. Workers dial out to Sortie and are never dialed. A job goes only to a worker whose capabilities include every capability the job requires and whose free run slots and disk cover it. A running machine uses a run slot and disk; a stopped one uses only disk. A job is leased to one worker, which renews the lease; an expired lease ends the attempt.
+
+Worker API:
+
+- `POST /api/v1/workers/checkin` with `{id, capabilities, free:{run_slots, disk_mb}}`.
+- `POST /api/v1/workers/{id}/poll` returns `{job, lease}` or 204.
+- `POST /api/v1/workers/{id}/jobs/{job}/renew` extends the lease; 409 when it is lost.
+- `POST /api/v1/workers/{id}/jobs/{job}/stop` drops the lease and frees the run slot.
+- `GET /api/v1/workers` returns workers, pending jobs and leases.
