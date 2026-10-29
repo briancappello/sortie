@@ -10,3 +10,7 @@ This repository is the agentic-orchestration fork of [Sortie](https://github.com
 - Keep fork work in fork-owned packages and files, with small hooks in upstream files, so each merge stays small. Fork database migrations are numbered from 1001 and fork ADRs from 1001, so upstream's numbers never collide with them.
 
 Last merged upstream commit: `c48b724b` (2026-10-28).
+
+## Worker leases
+
+Jobs for `environment.kind: remote` are matched to workers in `internal/worker`. The lease rule sits behind the `worker.Leaser` interface. Until upstream #1499 settles, the fork follows a fixed-duration rule (`TTLLeaser`): one worker holds a job at a time, a lease lasts its TTL from the grant or last renewal, and an expired lease ends the attempt and returns the worker's run slot and disk. Replacing the rule means implementing `Leaser`.

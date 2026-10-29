@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Remote environment matching and the worker API (`internal/worker`): `environment.kind: remote` jobs go to a worker that dialed out and checked in with `POST /api/v1/workers/checkin`, whose capabilities include every capability the job requires and whose free run slots and disk cover it (a stopped machine holds only disk). A worker polls (`POST /api/v1/workers/{id}/poll`), renews its lease (`.../jobs/{job}/renew`, 409 when lost) and stops a job (`.../jobs/{job}/stop`); `GET /api/v1/workers` lists workers, pending jobs and leases. The lease rule sits behind the `Leaser` interface; the default holds a lease for a fixed TTL, and an expired lease ends the attempt and returns the slot and disk.
+
 - `GET /api/v1/plan/graph` gives each story, under plan control, its review gate, approver, satisfaction (with the merge commit and pull request, or the unverified reason), the blockers it waits on with their reasons, and a proposed supersede from a cited no-change claim. The response also names the plan-control states in `plan_states`. The fields are null without plan control.
 
 - A broker serving HTTP viewers reports its address and viewer token to Sortie once its listener is up (`POST /api/v1/{identifier}/broker`, with the run's session token), retrying with backoff while the session lives. `/api/v1/state` and the per-issue detail show each run's `broker.http_url`, and `GET /api/v1/{identifier}/broker` returns the address with the token to the control token only.
