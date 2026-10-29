@@ -290,7 +290,7 @@ Prefer a deploy key, or a token scoped to the one repository, with write access:
 **After each run** that ended normally, and after `after_run`, Sortie exports the issue branch:
 
 - Only committed work leaves the VM. Uncommitted changes stay there for the next run, so tell the agent to commit.
-- The bundle must name only the issue branch, and be at most `max_bundle_mib`.
+- The bundle must name only the issue branch, and be at most `max_bundle_mib`. It carries only the commits the mirror lacks, so a large repository exports small runs. smolvm caps a command's output at about 11 MiB, which bounds a run's new commits whatever `max_bundle_mib` says.
 - Nothing new, or no issue branch in the VM, means no push.
 - Sortie pushes with a lease. It replaces its own earlier push, so the agent may rebase. It never overwrites a commit someone else pushed: the run fails with `branch moved upstream`, and the next run shows the agent that commit.
 - With `provider`, Sortie then finds the open pull request for the branch, or opens one against `base`. The agent can suggest the title and body of a new pull request in `.sortie/pr.json` (`{"title": "...", "body": "..."}`). Without that file, the title is `<identifier>: <issue title>`.

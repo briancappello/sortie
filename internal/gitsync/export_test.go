@@ -5,6 +5,7 @@ package gitsync
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,7 +98,7 @@ func TestExport_ImportsCommittedWorkOnly(t *testing.T) {
 	out := filepath.Join(f.guestDir, "out.bundle")
 	want := [][]string{
 		{"git", "rev-parse", "--verify", "--quiet", "refs/heads/sortie/ENG-60"},
-		{"sh", "-c", `umask 077 && mkdir -p "$1" && rm -f -- "$1/out.bundle" && git bundle create --quiet "$1/out.bundle" "$2"`, "sh", f.guestDir, "refs/heads/sortie/ENG-60"},
+		{"sh", "-c", exportBundleScript, "sh", f.guestDir, "refs/heads/sortie/ENG-60", "refs/remotes/origin/main", "refs/remotes/origin/sortie/ENG-60"},
 		{"cat", "--", out},
 		{"rm", "-f", "--", out},
 	}
@@ -214,6 +215,76 @@ func TestExport_RefusesAnOversizedBundle(t *testing.T) {
 		t.Errorf("mirror refs =\n%s\nwant them unchanged:\n%s", got, refs)
 	}
 	f.assertNoExportLeft()
+}
+
+// bigBase gives the upstream's main a random blob of size bytes, so a
+// bundle that carries the base's history is larger than size.
+func bigBase(t *testing.T, f *syncFixture, size int) {
+	t.Helper()
+	blob := make([]byte, size)
+	if _, err := rand.Read(blob); err != nil {
+		t.Fatal(err)
+	}
+	f.up.commit("history.bin", string(blob))
+}
+
+func TestExport_BundleCarriesOnlyTheRunsWork(t *testing.T) {
+	t.Run("new branch", func(t *testing.T) {
+		f := newSyncFixture(t, "ENG-70", config.SmolvmRepository{MaxBundleMiB: 1})
+		bigBase(t, f, 3<<20)
+		if err := f.syncer.Seed(context.Background(), f.env, f.ws); err != nil {
+			t.Fatalf("Seed() error = %v", err)
+		}
+		head := f.agentCommit("feature.txt", []byte("feature\n"))
+
+		res, err := f.syncer.Export(context.Background(), f.env, f.ws)
+		if err != nil {
+			t.Fatalf("Export() error = %v, want the base's history left out of the bundle", err)
+		}
+		if res.Commit != head || !res.Pushed {
+			t.Errorf("Export() = %+v, want %s pushed", res, head)
+		}
+		if got := f.up.git("rev-parse", "sortie/ENG-70"); got != head {
+			t.Errorf("upstream sortie/ENG-70 = %s, want %s", got, head)
+		}
+		f.assertNoExportLeft()
+	})
+	t.Run("on an earlier push", func(t *testing.T) {
+		f := newSyncFixture(t, "ENG-71", config.SmolvmRepository{MaxBundleMiB: 1})
+		f.up.git("checkout", "--quiet", "-b", "sortie/ENG-71")
+		bigBase(t, f, 3<<20)
+		f.up.git("checkout", "--quiet", "main")
+		if err := f.syncer.Seed(context.Background(), f.env, f.ws); err != nil {
+			t.Fatalf("Seed() error = %v", err)
+		}
+		head := f.agentCommit("more.txt", []byte("more\n"))
+
+		// Sortie never pushed this branch, so the lease refuses the push;
+		// the import before it shows the bundle fit.
+		_, err := f.syncer.Export(context.Background(), f.env, f.ws)
+		if !errors.Is(err, ErrBranchMoved) {
+			t.Fatalf("Export() error = %v, want only the lease's refusal, after the import", err)
+		}
+		m := f.syncer.mirror.Dir()
+		if got := fixtureGit(t, f.up.env, m, "--git-dir="+m, "rev-parse", "refs/sortie/incoming/ENG-71"); got != head {
+			t.Errorf("refs/sortie/incoming/ENG-71 = %s, want %s", got, head)
+		}
+	})
+	t.Run("nothing new on a large base", func(t *testing.T) {
+		f := newSyncFixture(t, "ENG-72", config.SmolvmRepository{MaxBundleMiB: 1})
+		bigBase(t, f, 3<<20)
+		f.up.commit("small.txt", "small\n")
+		if err := f.syncer.Seed(context.Background(), f.env, f.ws); err != nil {
+			t.Fatalf("Seed() error = %v", err)
+		}
+		res, err := f.syncer.Export(context.Background(), f.env, f.ws)
+		if err != nil {
+			t.Fatalf("Export() error = %v, want the tip alone bundled", err)
+		}
+		if res.Commit != f.up.git("rev-parse", "main") || res.Pushed {
+			t.Errorf("Export() = %+v, want the base commit and no push", res)
+		}
+	})
 }
 
 func TestExport_RefusesABranchThatIsNotACommit(t *testing.T) {

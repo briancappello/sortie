@@ -1975,7 +1975,7 @@ So `after_create` starts in a checked-out repository. It installs dependencies a
 
 **Export after each run.** After every run that ends normally, after `after_run`, and before any tracker handoff, Sortie exports the issue branch:
 
-1. The VM writes a bundle of `refs/heads/<issue branch>` outside the workspace.
+1. The VM writes a bundle of `refs/heads/<issue branch>` outside the workspace. The bundle leaves out the commits of the VM's `origin/<base>` and `origin/<issue branch>`, which the mirror already holds, so it carries the run's work and not the repository's history; a branch with nothing new is bundled as its tip alone. smolvm caps a command's output at about 11 MiB, so a run whose new commits bundle larger than that fails the export, whatever `max_bundle_mib` allows.
 2. Sortie reads it out, up to `max_bundle_mib`. A larger bundle fails the export.
 3. A bundle that names any ref other than `refs/heads/<issue branch>` fails the export.
 4. Sortie imports the branch into the mirror only.
