@@ -153,6 +153,42 @@ func RepositoryProvider(cfg config.EnvironmentConfig) string {
 	return cfg.Smolvm.Repository.Provider
 }
 
+// issueRepository returns cfg with its repository set to the one the
+// issue runs in, and that repository's name. A workspace already seeded
+// keeps the repository its record names; otherwise the issue's
+// repository label names it, and an issue without one runs in the
+// default. A name the workflow does not list is an error. cfg is
+// returned unchanged when it configures no repository.
+func issueRepository(cfg config.EnvironmentConfig, workspacePath string, labels []string) (config.EnvironmentConfig, string, error) {
+	if !configuresRepository(cfg) {
+		return cfg, "", nil
+	}
+	if workspacePath != "" {
+		rec, ok, err := workspace.ReadRepositoryRecord(workspacePath)
+		if err != nil {
+			return cfg, "", fmt.Errorf("read the workspace's repository record: %w", err)
+		}
+		if ok {
+			repo, found := cfg.Smolvm.RepositoryNamed(rec.Name)
+			if !found {
+				return cfg, "", fmt.Errorf("the workspace was seeded from repository %q, which environment.smolvm.repositories no longer lists", rec.Name)
+			}
+			cfg.Smolvm.Repository = repo
+			return cfg, rec.Name, nil
+		}
+	}
+	name := config.IssueRepositoryName(labels)
+	if name == "" {
+		return cfg, cfg.Smolvm.Repository.Name, nil
+	}
+	repo, found := cfg.Smolvm.RepositoryNamed(name)
+	if !found {
+		return cfg, "", fmt.Errorf("the issue names repository %q, which environment.smolvm.repositories does not list", name)
+	}
+	cfg.Smolvm.Repository = repo
+	return cfg, name, nil
+}
+
 // PullRequestOpenerFunc returns the pull request opener of the SCM
 // provider cfg's repository names, built from the same settings the SCM
 // reactions use. It is called only when [RepositoryProvider] is not
@@ -246,4 +282,19 @@ func (u unavailableEnvironment) Remove(context.Context, environment.Workspace) e
 
 func (u unavailableEnvironment) Sweep(context.Context, environment.SweepParams) error {
 	return u.failure()
+}
+
+// RepositoriesProvider returns the SCM provider of the first configured
+// repository that names one, or "" when cfg configures no repository or
+// none names a provider. Validation makes every named provider the same.
+func RepositoriesProvider(cfg config.EnvironmentConfig) string {
+	if !configuresRepository(cfg) {
+		return ""
+	}
+	for _, repo := range cfg.Smolvm.AllRepositories() {
+		if repo.Provider != "" {
+			return repo.Provider
+		}
+	}
+	return ""
 }

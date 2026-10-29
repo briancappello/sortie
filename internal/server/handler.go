@@ -80,6 +80,7 @@ type runningEntryResponse struct {
 	DispatchedAt        *time.Time             `json:"dispatched_at"`
 	LastEventAt         *time.Time             `json:"last_event_at"`
 	WorkspacePath       string                 `json:"workspace_path"`
+	Repository          string                 `json:"repository,omitempty"`
 	SSHHost             string                 `json:"ssh_host,omitempty"`
 	Environment         *environmentInfo       `json:"environment,omitempty"`
 	Broker              *brokerInfo            `json:"broker"`
@@ -719,6 +720,7 @@ func toRunningEntryResponse(e orchestrator.SnapshotRunningEntry, nowArgs ...time
 		QuietAt:             utcOrNil(e.QuietAt),
 		StallAt:             utcOrNil(e.StallAt),
 		WorkspacePath:       e.WorkspacePath,
+		Repository:          e.Repository,
 		SSHHost:             e.SSHHost,
 		Environment:         toEnvironmentInfo(e.Environment),
 		Broker:              toBrokerInfo(e.BrokerURL),

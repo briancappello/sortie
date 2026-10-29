@@ -202,6 +202,9 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 	if len(p.MissingCapabilities) > 0 {
 		return r, UnsupportedError(p.MissingCapabilities)
 	}
+	if len(p.UnlistedRepositories) > 0 {
+		return r, UnlistedRepositoriesError(p.UnlistedRepositories)
+	}
 
 	nodes := map[string]Node{}
 	for _, n := range p.graph.Nodes {
@@ -338,4 +341,18 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 		}
 	}
 	return r, nil
+}
+
+// UnlistedRepositoriesError is the payload error an apply returns when
+// stories name repositories the workflow does not list. It writes
+// nothing.
+func UnlistedRepositoriesError(unlisted []UnlistedRepository) error {
+	names := make([]string, 0, len(unlisted))
+	for _, u := range unlisted {
+		names = append(names, fmt.Sprintf("%s (%s)", u.PlanKey, u.Repository))
+	}
+	return &domain.TrackerError{
+		Kind:    domain.ErrTrackerPayload,
+		Message: "stories name repositories the workflow does not list in environment.smolvm.repositories: " + strings.Join(names, ", "),
+	}
 }

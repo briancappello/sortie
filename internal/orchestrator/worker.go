@@ -359,10 +359,11 @@ type WorkerDeps struct {
 	// the goroutine returns. Must be concurrency-safe.
 	OnExit func(issueID string, result WorkerResult)
 
-	// OnWorkspaceReady reports the prepared workspace path before the agent
-	// starts. Called from the worker goroutine; must be concurrency-safe.
+	// OnWorkspaceReady reports the prepared workspace path, and the name of
+	// the repository it was seeded from (empty for none or an unnamed one),
+	// before the agent starts. Called from the worker goroutine; must be concurrency-safe.
 	// Nil disables it.
-	OnWorkspaceReady func(issueID, path string)
+	OnWorkspaceReady func(issueID, path, repository string)
 
 	// OnTurnStarted reports turnsStarted before each turn runs. Called from
 	// the worker goroutine; must be concurrency-safe. Nil disables it.
@@ -1002,7 +1003,37 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	if resolveEnvironment == nil {
 		resolveEnvironment = buildEnvironment
 	}
-	resolvedEnv, envErr := resolveEnvironment(cfg.Environment)
+	// The environment instance is shared by every repository: it is
+	// resolved from the block as written.
+	envBlock := cfg.Environment
+	// The attempt runs in the issue's repository: the one its workspace
+	// was seeded from, or the one the issue names.
+	var repoName string
+	var issueRepoErr error
+	if pathResult, pathErr := workspace.ComputePath(cfg.Workspace.Root, issue.Identifier); pathErr == nil {
+		cfg.Environment, repoName, issueRepoErr = issueRepository(cfg.Environment, pathResult.Path, issue.Labels)
+	} else {
+		cfg.Environment, repoName, issueRepoErr = issueRepository(cfg.Environment, "", issue.Labels)
+	}
+	if issueRepoErr != nil {
+		cancelledAtEnding = ctx.Err() != nil
+		report(WorkerResult{
+			IssueID:          issue.ID,
+			Identifier:       issue.Identifier,
+			ExitKind:         exitKindAtEnding(ctx, cancelledAtEnding),
+			Error:            fmt.Errorf("workspace preparation: repository: %w", issueRepoErr),
+			AgentAdapter:     agentKind,
+			Attempt:          attempt,
+			SSHHost:          deps.SSHHost,
+			Usage:            localUsage,
+			UsageMeasured:    localMeasured,
+			UnaccountedTurns: localUnaccounted,
+			ModelName:        localModelName,
+			APIRequestCount:  localRequestCount,
+		})
+		return
+	}
+	resolvedEnv, envErr := resolveEnvironment(envBlock)
 	if envErr != nil {
 		cancelledAtEnding = ctx.Err() != nil
 		report(WorkerResult{
@@ -1123,9 +1154,21 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	workspaceEnv = resolvedEnv
 	workspaceInstance = wsResult.Instance
 	wsTarget := workspace.NewTarget(workspaceEnv, wsResult.Key, wsResult.Path, issue.ID, issue.Identifier)
-	logger.Info("workspace prepared", slog.String("workspace", wsResult.Path))
+	// A named repository is recorded, so the workspace keeps it; the
+	// unnamed single repository is the only one there can be.
+	if repo != nil && repoName != "" {
+		if _, recorded, _ := workspace.ReadRepositoryRecord(wsResult.Path); !recorded {
+			if err := workspace.WriteRepositoryRecord(wsResult.Path, workspace.RepositoryRecord{Name: repoName}); err != nil {
+				logger.Warn("failed to record the workspace's repository", slog.Any("error", err))
+			}
+		}
+	}
+	if repo == nil {
+		repoName = ""
+	}
+	logger.Info("workspace prepared", slog.String("workspace", wsResult.Path), slog.String("repository", repoName))
 	if deps.OnWorkspaceReady != nil {
-		deps.OnWorkspaceReady(issue.ID, wsResult.Path)
+		deps.OnWorkspaceReady(issue.ID, wsResult.Path, repoName)
 	}
 
 	// finishWorkspace runs the after_run hook best-effort on every exit path

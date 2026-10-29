@@ -7,7 +7,7 @@
   "required": ["schema_version", "source_digest", "nodes", "parents", "blocks", "unplanned_changes"],
   "properties": {
     "schema_version": {
-      "description": "Version of this format. Readers refuse versions they do not support. Version 2 adds the optional story fields release, review, approved_by, and approved_at.",
+      "description": "Version of this format. Readers refuse versions they do not support. Version 2 adds the optional story fields release, review, approved_by, approved_at, and repository.",
       "const": 2
     },
     "source_digest": {
@@ -108,6 +108,11 @@
           "description": "Version 2, stories only. When the story was approved, in RFC 3339.",
           "type": "string",
           "format": "date-time"
+        },
+        "repository": {
+          "description": "Version 2, stories only, optional. The name of the repository, as the workflow's environment.smolvm.repositories lists it, the story runs in. Absent means the workflow's default repository.",
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
         }
       }
     },

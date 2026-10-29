@@ -261,5 +261,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `environment.smolvm.repository.provider`: string, optional; must match every active SCM reaction's provider and name an adapter that opens pull requests
 - `environment.smolvm.repository.project`: string, required when `provider` is set; `owner/repo`
 - `environment.smolvm.repository.max_bundle_mib`: positive integer, default `512`
+- `environment.smolvm.repository.name`: optional string, `[a-z0-9]+(-[a-z0-9]+)*`
+- `environment.smolvm.repositories`: list of `repository` blocks, each with a required unique `name`; mutually exclusive with `repository`; every `provider` set must be the same
+- `environment.smolvm.default_repository`: string naming a listed entry; required when `repositories` has two or more entries, defaults to the one entry otherwise
 - `environment.smolvm.pass_env`: list of variable names, default empty
 - `environment.smolvm.ssh_agent`: boolean, default `false`

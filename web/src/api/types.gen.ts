@@ -714,6 +714,7 @@ export interface RunningEntryResponse {
   dispatched_at: string | null;
   last_event_at: string | null;
   workspace_path: string;
+  repository?: string;
   ssh_host?: string;
   environment?: EnvironmentInfo;
   broker: BrokerInfo | null;
