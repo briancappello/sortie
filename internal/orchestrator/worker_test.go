@@ -1437,6 +1437,66 @@ func TestRunWorkerAttempt(t *testing.T) {
 		}
 	})
 
+	t.Run("prompt_reads_a_missing_description", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			name      string
+			candidate string
+			fetched   string
+			fetchErr  error
+			want      string
+			reads     int
+		}{
+			{name: "candidate without description", fetched: "the story's spec", want: "desc=[the story's spec]", reads: 1},
+			{name: "candidate with description", candidate: "from the candidate", fetched: "unused", want: "desc=[from the candidate]", reads: 0},
+			{name: "read fails", fetchErr: errors.New("collaborator down"), want: "desc=[]", reads: 1},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := defaultWorkerConfig(t.TempDir())
+				cfg.Agent.MaxTurns = 1
+				ec := newExitCapture()
+				var prompt0 string
+				tracker := &mockTrackerAdapter{fetchIssueByIDFn: func(context.Context, string) (domain.Issue, error) {
+					return domain.Issue{ID: "issue-1", Description: tc.fetched}, tc.fetchErr
+				}}
+				deps := WorkerDeps{
+					TrackerAdapter: tracker,
+					AgentAdapter: &mockAgentAdapter{
+						runTurnFn: func(_ context.Context, session domain.Session, params domain.RunTurnParams) (domain.TurnResult, error) {
+							if prompt0 == "" {
+								prompt0 = params.Prompt
+							}
+							return domain.TurnResult{SessionID: session.ID, ExitReason: domain.EventTurnCompleted}, nil
+						},
+					},
+					ConfigFunc: func() config.ServiceConfig { return cfg },
+					PromptTemplateByIDFunc: func(_ string) *prompt.Template {
+						return mustParseTemplate(t, "desc=[{{ .issue.description }}]")
+					},
+					OnEvent: func(_ string, _ domain.AgentEvent) {},
+					OnExit:  ec.onExit,
+					Logger:  discardLogger(),
+				}
+				issue := workerTestIssue()
+				issue.Description = tc.candidate
+				RunWorkerAttempt(context.Background(), issue, nil, deps)
+				if result := ec.waitResult(t); result.ExitKind != WorkerExitNormal {
+					t.Fatalf("ExitKind = %q, want %q", result.ExitKind, WorkerExitNormal)
+				}
+				if first, _, _ := strings.Cut(prompt0, "\n"); first != tc.want {
+					t.Errorf("first prompt line = %q, want %q", first, tc.want)
+				}
+				tracker.fetchIssueByIDMu.Lock()
+				reads := len(tracker.fetchIssueByIDCalls)
+				tracker.fetchIssueByIDMu.Unlock()
+				if reads < tc.reads || (tc.reads == 0 && reads != 0) {
+					t.Errorf("FetchIssueByID calls = %d, want %d", reads, tc.reads)
+				}
+			})
+		}
+	})
+
 	t.Run("tracker_state_refresh_failure", func(t *testing.T) {
 		t.Parallel()
 
