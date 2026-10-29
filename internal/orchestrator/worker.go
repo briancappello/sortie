@@ -707,6 +707,8 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 		deps.Metrics = &domain.NoopMetrics{}
 	}
 
+	issue = withDescription(ctx, issue, deps.TrackerAdapter, logger)
+
 	// localMeasured mirrors the run's measurement state on the worker
 	// goroutine. It starts true (a run that never enters a turn spent
 	// exactly zero), flips false before the first RunTurn, and back true on
@@ -2167,4 +2169,29 @@ func buildToolAdvertisement(reg *domain.ToolRegistry, project string) string {
 	sb.WriteString("All responses are JSON: {\"success\": true, \"data\": ...} or {\"success\": false, \"error\": {\"kind\": \"...\", \"message\": \"...\"}}.\n")
 
 	return sb.String()
+}
+
+// descriptionReadTimeout bounds the one issue read [withDescription] makes.
+const descriptionReadTimeout = 15 * time.Second
+
+// withDescription returns issue with its description read from the
+// tracker when the candidate carries none. Some adapters leave descriptions
+// out of candidate reads (Huly reads each one from its collaborator
+// service), and a prompt rendered from such a candidate gives the agent the
+// title alone. A failed read keeps the candidate and logs a warning, so the
+// run still starts.
+func withDescription(ctx context.Context, issue domain.Issue, tracker domain.TrackerAdapter, logger *slog.Logger) domain.Issue {
+	if issue.Description != "" || tracker == nil || issue.ID == "" {
+		return issue
+	}
+	readCtx, cancel := context.WithTimeout(ctx, descriptionReadTimeout)
+	defer cancel()
+	full, err := tracker.FetchIssueByID(readCtx, issue.ID)
+	if err != nil {
+		logger.Warn("could not read the issue's description; the prompt carries its title only",
+			slog.String("issue_id", issue.ID), slog.String("issue_identifier", issue.Identifier), slog.Any("error", err))
+		return issue
+	}
+	issue.Description = full.Description
+	return issue
 }
