@@ -51,7 +51,9 @@ func TestExpiredLeaseEndsAttempt(t *testing.T) {
 	m := newM(c, func(id string) { ended = append(ended, id) })
 	m.CheckIn(Worker{ID: "a", Free: Resources{1, 100}})
 	m.Submit(Job{ID: "j", DiskMB: 10})
-	m.Poll("a")
+	if _, _, _, err := m.Poll("a"); err != nil {
+		t.Fatal(err)
+	}
 	c.t = c.t.Add(30 * time.Second)
 	if _, err := m.Renew("j", "a"); err != nil {
 		t.Fatal(err)
@@ -74,7 +76,9 @@ func TestSlotsAndDisk(t *testing.T) {
 	m.CheckIn(Worker{ID: "a", Free: Resources{1, 100}})
 	m.Submit(Job{ID: "j", DiskMB: 40})
 	m.Submit(Job{ID: "k", DiskMB: 40})
-	m.Poll("a")
+	if _, _, _, err := m.Poll("a"); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, ok, _ := m.Poll("a"); ok {
 		t.Fatal("no run slot left")
 	}
