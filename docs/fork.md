@@ -14,3 +14,7 @@ Last merged upstream commit: `c48b724b` (2026-10-28).
 ## Worker leases
 
 Jobs for `environment.kind: remote` are matched to workers in `internal/worker`. The lease rule sits behind the `worker.Leaser` interface. Until upstream #1499 settles, the fork follows a fixed-duration rule (`TTLLeaser`): one worker holds a job at a time, a lease lasts its TTL from the grant or last renewal, and an expired lease ends the attempt and returns the worker's run slot and disk. Replacing the rule means implementing `Leaser`.
+
+## Plan sync from the workbench
+
+The agentic-orchestration workbench syncs the plan on its own, with no Sync step for the user. It calls `POST /api/v1/plan/sync` with `"apply": false` to preview, then applies that preview with `"apply": true` and the preview's `preview_id`. After a sync that released a story, it calls `POST /api/v1/refresh` so the released story is dispatched on the next tick instead of the next poll. Both routes take the control token. Nothing else in Sortie changes for this.
