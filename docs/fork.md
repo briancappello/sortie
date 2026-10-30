@@ -13,7 +13,7 @@ Last merged upstream commit: `c48b724b` (2026-10-28).
 
 ## Worker leases
 
-Jobs for `environment.kind: remote` are matched to workers in `internal/worker`, wired into the orchestrator in `internal/orchestrator/remote.go` and served by `internal/server/worker.go`. The lease rule sits behind the `worker.Leaser` interface. Until upstream #1499 settles, the fork follows a fixed-duration rule (`TTLLeaser`): one worker holds a job at a time, a lease lasts its TTL from the grant or last renewal, and an expired lease ends the attempt and returns the worker's run slot and disk. Replacing the rule means implementing `Leaser`.
+Jobs for `environment.kind: remote` are matched to workers in `internal/worker`, wired into the orchestrator in `internal/orchestrator/remote.go`, configured in `internal/config/environment_remote.go` and served by `internal/server/worker.go`, following the `agent-platform/worker-api` (protocol 1) and `agent-platform/worker-dispatch` specs. The lease rule sits behind the `worker.Leaser` interface. Until upstream #1499 settles, the fork follows a fixed-duration rule (`TTLLeaser`): one worker holds a job at a time, a lease lasts its TTL from the grant or last renewal, and an expired lease ends the attempt as failed; the worker's run slot, CPUs and memory return, and its disk stays counted as a stopped machine's until the worker's next check-in. Replacing the rule means implementing `Leaser`.
 
 ## Plan sync from the workbench
 

@@ -25,12 +25,6 @@ const (
 	// on a worker that dials Sortie. Nothing of the issue runs on
 	// Sortie's host.
 	EnvironmentKindRemote = "remote"
-
-	// DefaultWorkerIdentityHeader names the worker of a worker API
-	// request when worker.identity_header is unset.
-	DefaultWorkerIdentityHeader = "X-Sortie-Worker"
-
-	defaultRemoteLeaseTTLMS = 60000
 )
 
 // Defaults applied to the environment.smolvm block.
@@ -82,31 +76,6 @@ type EnvironmentConfig struct {
 	// when Kind is [EnvironmentKindRemote]; under any other kind it is
 	// the zero value.
 	Remote RemoteConfig
-}
-
-// RemoteConfig holds the environment.remote settings and the worker
-// identity header the remote kind's worker API reads.
-type RemoteConfig struct {
-	// IdentityHeader is worker.identity_header: the request header that
-	// names the worker of a worker API request.
-	IdentityHeader string
-
-	// Requires lists the capabilities a worker must declare to run a
-	// job.
-	Requires []string
-
-	// CPUs, MemoryMiB and DiskMiB are what each job's machine needs
-	// free on a worker.
-	CPUs      int
-	MemoryMiB int
-	DiskMiB   int
-
-	// Flows names the flows each run reaches; an offer carries a token
-	// for each.
-	Flows []string
-
-	// LeaseTTLMS is how long a lease lasts without a heartbeat.
-	LeaseTTLMS int
 }
 
 // SmolvmConfig holds the environment.smolvm settings.
@@ -308,76 +277,6 @@ func parseHostPrefix(m map[string]any) ([]string, error) {
 		prefix = append(prefix, s)
 	}
 	return prefix, nil
-}
-
-// buildRemoteConfig parses environment.remote and worker.identity_header
-// for the remote kind.
-func buildRemoteConfig(value any, worker map[string]any) (RemoteConfig, error) {
-	const field = environmentField + ".remote"
-	var m map[string]any
-	if value != nil {
-		var ok bool
-		m, ok = value.(map[string]any)
-		if !ok {
-			return RemoteConfig{}, typeError(field, "mapping", value)
-		}
-	}
-	cfg := RemoteConfig{IdentityHeader: DefaultWorkerIdentityHeader, LeaseTTLMS: defaultRemoteLeaseTTLMS}
-	header, present, err := requireStringField(worker, "identity_header", "worker.identity_header")
-	if err != nil {
-		return RemoteConfig{}, err
-	}
-	if present {
-		if header == "" || strings.ContainsAny(header, " \t:") {
-			return RemoteConfig{}, &ConfigError{Field: "worker.identity_header", Message: fmt.Sprintf("must be an HTTP header name, got %q", header)}
-		}
-		cfg.IdentityHeader = header
-	}
-	for _, sizing := range []struct {
-		key string
-		dst *int
-	}{
-		{"cpus", &cfg.CPUs},
-		{"memory_mib", &cfg.MemoryMiB},
-		{"disk_mib", &cfg.DiskMiB},
-		{"lease_ttl_ms", &cfg.LeaseTTLMS},
-	} {
-		if v, exists := m[sizing.key]; !exists || v == nil {
-			continue
-		}
-		n, err := coerceIntField(m, sizing.key, field+"."+sizing.key)
-		if err != nil {
-			return RemoteConfig{}, err
-		}
-		if n < 0 || (sizing.key == "lease_ttl_ms" && n == 0) {
-			return RemoteConfig{}, &ConfigError{Field: field + "." + sizing.key, Message: fmt.Sprintf("must not be negative or a zero lease, got %d", n)}
-		}
-		*sizing.dst = n
-	}
-	for _, list := range []struct {
-		key string
-		dst *[]string
-	}{
-		{"requires", &cfg.Requires},
-		{"flows", &cfg.Flows},
-	} {
-		raw, exists := m[list.key]
-		if !exists || raw == nil {
-			continue
-		}
-		items, ok := raw.([]any)
-		if !ok {
-			return RemoteConfig{}, typeError(field+"."+list.key, "list", raw)
-		}
-		for i, item := range items {
-			s, ok := item.(string)
-			if !ok || s == "" {
-				return RemoteConfig{}, &ConfigError{Field: fmt.Sprintf("%s.%s[%d]", field, list.key, i), Message: "must be a non-empty string"}
-			}
-			*list.dst = append(*list.dst, s)
-		}
-	}
-	return cfg, nil
 }
 
 // buildSmolvmConfig parses environment.smolvm for the smolvm kind.

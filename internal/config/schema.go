@@ -163,14 +163,7 @@ var knownFieldsRegistry = map[string]SectionSchema{
 				{Name: "pass_env", Type: FieldStringList},
 				{Name: "ssh_agent", Type: FieldBool},
 			}},
-			{Name: "remote", Type: FieldMap, Nested: []FieldDef{
-				{Name: "requires", Type: FieldStringList},
-				{Name: "cpus", Type: FieldInt},
-				{Name: "memory_mib", Type: FieldInt},
-				{Name: "disk_mib", Type: FieldInt},
-				{Name: "flows", Type: FieldStringList},
-				{Name: "lease_ttl_ms", Type: FieldInt},
-			}},
+			{Name: "remote", Type: FieldMap, Nested: remoteSchemaFields},
 		},
 	},
 }
