@@ -150,9 +150,10 @@ const (
 // path instead of an event; it travels on the same channel so it is applied
 // before any event the agent emits afterwards.
 type agentEventMsg struct {
-	IssueID   string
-	Event     domain.AgentEvent
-	Workspace string
+	IssueID    string
+	Event      domain.AgentEvent
+	Workspace  string
+	Repository string
 }
 
 // turnStartedMsg pairs an issue ID with the worker's started-turn count,
@@ -643,6 +644,7 @@ func (o *Orchestrator) applyAgentEvent(ctx context.Context, msg agentEventMsg, e
 	if msg.Workspace != "" {
 		if entry, ok := o.state.Running[msg.IssueID]; ok {
 			entry.WorkspacePath = msg.Workspace
+			entry.Repository = msg.Repository
 		}
 		return
 	}
@@ -1638,9 +1640,9 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 					)
 				}
 			},
-			OnWorkspaceReady: func(issueID, path string) {
+			OnWorkspaceReady: func(issueID, path, repository string) {
 				select {
-				case o.agentEventCh <- agentEventMsg{IssueID: issueID, Workspace: path}:
+				case o.agentEventCh <- agentEventMsg{IssueID: issueID, Workspace: path, Repository: repository}:
 				case <-ctx.Done():
 				}
 			},

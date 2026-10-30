@@ -132,6 +132,10 @@ func TestEnvironmentConfig_SmolvmFull(t *testing.T) {
 				Project:      "org/app",
 				MaxBundleMiB: 64,
 			},
+			Repositories: []SmolvmRepository{{
+				URL: "git@github.com:org/app.git", Base: "main", BranchPrefix: "agent/",
+				Provider: "github", Project: "org/app", MaxBundleMiB: 64,
+			}},
 			PassEnv:  []string{"GOFLAGS"},
 			SSHAgent: true,
 		},

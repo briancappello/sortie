@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/registry"
 )
@@ -18,6 +19,11 @@ import (
 type Tracker struct {
 	Adapter domain.TrackerAdapter
 	Meta    registry.TrackerMeta
+
+	// Repositories returns the names of the repositories the workflow
+	// lets Sortie open. Nil means the workflow is not consulted, and a
+	// preview refuses no repository.
+	Repositories func() []string
 
 	// States returns the workflow's states. Nil means plan control is
 	// off. Plan control is on when it reports a release state.
@@ -120,6 +126,17 @@ type ApprovalOp struct {
 	At      string `json:"at"`
 }
 
+// RepositoryLabelPrefix starts the label a sync keeps on a story that
+// names its repository.
+const RepositoryLabelPrefix = config.RepositoryLabelPrefix
+
+// UnlistedRepository is a story naming a repository the workflow does
+// not list. A preview holding one cannot be applied.
+type UnlistedRepository struct {
+	PlanKey    string `json:"plan_key"`
+	Repository string `json:"repository"`
+}
+
 // ReviewLabelPrefix starts every review label a sync keeps on a story.
 const ReviewLabelPrefix = "sortie-review:"
 
@@ -163,22 +180,23 @@ type Counts struct {
 // Preview lists the writes that make the tracker match a graph's approved
 // nodes. It writes nothing. Every slice is non-nil.
 type Preview struct {
-	SourceDigest        string                     `json:"source_digest"`
-	TrackerDigest       string                     `json:"tracker_digest"`
-	Counts              Counts                     `json:"counts"`
-	Creates             []CreateOp                 `json:"creates"`
-	Updates             []UpdateOp                 `json:"updates"`
-	Parents             []ParentOp                 `json:"parents"`
-	RelationsAdded      []RelationOp               `json:"relations_added"`
-	RelationsRemoved    []RelationOp               `json:"relations_removed"`
-	Orphans             []IssueRef                 `json:"orphans"`
-	Releases            []ReleaseOp                `json:"releases"`
-	Labels              []LabelOp                  `json:"labels"`
-	Approvals           []ApprovalOp               `json:"approvals"`
-	SkippedDrafts       []string                   `json:"skipped_drafts"`
-	UnplannedChanges    []string                   `json:"unplanned_changes"`
-	MissingCapabilities []registry.WriteCapability `json:"missing_capabilities"`
-	Unsupported         []string                   `json:"unsupported"`
+	SourceDigest         string                     `json:"source_digest"`
+	TrackerDigest        string                     `json:"tracker_digest"`
+	Counts               Counts                     `json:"counts"`
+	Creates              []CreateOp                 `json:"creates"`
+	Updates              []UpdateOp                 `json:"updates"`
+	Parents              []ParentOp                 `json:"parents"`
+	RelationsAdded       []RelationOp               `json:"relations_added"`
+	RelationsRemoved     []RelationOp               `json:"relations_removed"`
+	Orphans              []IssueRef                 `json:"orphans"`
+	Releases             []ReleaseOp                `json:"releases"`
+	Labels               []LabelOp                  `json:"labels"`
+	Approvals            []ApprovalOp               `json:"approvals"`
+	SkippedDrafts        []string                   `json:"skipped_drafts"`
+	UnplannedChanges     []string                   `json:"unplanned_changes"`
+	MissingCapabilities  []registry.WriteCapability `json:"missing_capabilities"`
+	Unsupported          []string                   `json:"unsupported"`
+	UnlistedRepositories []UnlistedRepository       `json:"unlisted_repositories"`
 
 	graph    Graph
 	existing map[string]domain.PlanIssue
@@ -207,23 +225,24 @@ func ComputePreview(ctx context.Context, g Graph, t Tracker) (Preview, error) {
 
 func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 	p := Preview{
-		SourceDigest:        g.SourceDigest,
-		TrackerDigest:       TrackerDigest(issues),
-		Creates:             []CreateOp{},
-		Updates:             []UpdateOp{},
-		Parents:             []ParentOp{},
-		RelationsAdded:      []RelationOp{},
-		RelationsRemoved:    []RelationOp{},
-		Orphans:             []IssueRef{},
-		Releases:            []ReleaseOp{},
-		Labels:              []LabelOp{},
-		Approvals:           []ApprovalOp{},
-		Unsupported:         []string{},
-		SkippedDrafts:       []string{},
-		UnplannedChanges:    append([]string{}, g.UnplannedChanges...),
-		MissingCapabilities: []registry.WriteCapability{},
-		graph:               g,
-		existing:            map[string]domain.PlanIssue{},
+		SourceDigest:         g.SourceDigest,
+		TrackerDigest:        TrackerDigest(issues),
+		Creates:              []CreateOp{},
+		Updates:              []UpdateOp{},
+		Parents:              []ParentOp{},
+		RelationsAdded:       []RelationOp{},
+		RelationsRemoved:     []RelationOp{},
+		Orphans:              []IssueRef{},
+		Releases:             []ReleaseOp{},
+		Labels:               []LabelOp{},
+		Approvals:            []ApprovalOp{},
+		Unsupported:          []string{},
+		UnlistedRepositories: []UnlistedRepository{},
+		SkippedDrafts:        []string{},
+		UnplannedChanges:     append([]string{}, g.UnplannedChanges...),
+		MissingCapabilities:  []registry.WriteCapability{},
+		graph:                g,
+		existing:             map[string]domain.PlanIssue{},
 	}
 
 	byID := map[string]domain.PlanIssue{}
@@ -300,6 +319,9 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 				approvalsSkipped = true
 			}
 			p.planOps(n, issue, ok, release, backlog, approvals)
+		}
+		if n.Kind == KindStory && g.SchemaVersion >= 2 {
+			p.repositoryOp(t, n, issue, ok)
 		}
 		if !ok {
 			op := CreateOp{PlanKey: n.PlanKey, Kind: n.Kind, Title: strings.TrimSpace(n.Title), ParentKey: parentKey}
@@ -472,7 +494,7 @@ func TrackerDigest(issues []domain.PlanIssue) string {
 		blockers := slices.Sorted(slices.Values(i.BlockedBy))
 		var review []string
 		for _, l := range i.Labels {
-			if strings.HasPrefix(strings.ToLower(l), ReviewLabelPrefix) {
+			if strings.HasPrefix(strings.ToLower(l), ReviewLabelPrefix) || strings.HasPrefix(strings.ToLower(l), RepositoryLabelPrefix) {
 				review = append(review, strings.ToLower(l))
 			}
 		}
@@ -488,4 +510,40 @@ func TrackerDigest(issues []domain.PlanIssue) string {
 	slices.Sort(lines)
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// repositoryOp keeps a story's one repository label: the label of the
+// repository the node names, and none when it names none. A name the
+// workflow does not list is recorded in UnlistedRepositories instead.
+func (p *Preview) repositoryOp(t Tracker, n Node, issue domain.PlanIssue, exists bool) {
+	if n.Repository != "" && t.Repositories != nil && !slices.Contains(t.Repositories(), n.Repository) {
+		p.UnlistedRepositories = append(p.UnlistedRepositories, UnlistedRepository{PlanKey: n.PlanKey, Repository: n.Repository})
+		return
+	}
+	id := ""
+	if exists {
+		id = issue.ID
+	}
+	want := ""
+	if n.Repository != "" {
+		want = RepositoryLabelPrefix + n.Repository
+	}
+	op := LabelOp{PlanKey: n.PlanKey, IssueID: id, Remove: []string{}}
+	has := false
+	for _, l := range issue.Labels {
+		if !strings.HasPrefix(strings.ToLower(l), RepositoryLabelPrefix) {
+			continue
+		}
+		if want != "" && strings.EqualFold(l, want) {
+			has = true
+		} else {
+			op.Remove = append(op.Remove, l)
+		}
+	}
+	if want != "" && !has {
+		op.Add = want
+	}
+	if op.Add != "" || len(op.Remove) > 0 {
+		p.Labels = append(p.Labels, op)
+	}
 }

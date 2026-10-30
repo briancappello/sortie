@@ -149,7 +149,10 @@ var knownFieldsRegistry = map[string]SectionSchema{
 				{Name: "storage_gib", Type: FieldInt},
 				{Name: "allow_hosts", Type: FieldStringList},
 				{Name: "credentials", Type: FieldSequence},
+				{Name: "repositories", Type: FieldSequence},
+				{Name: "default_repository", Type: FieldString},
 				{Name: "repository", Type: FieldMap, Nested: []FieldDef{
+					{Name: "name", Type: FieldString},
 					{Name: "url", Type: FieldString},
 					{Name: "base", Type: FieldString},
 					{Name: "branch_prefix", Type: FieldString},
@@ -945,7 +948,7 @@ func adapterProviders(cfg ServiceConfig) []string {
 	}
 	add(cfg.CIFeedback.Kind)
 	add(cfg.LabelCommands.Provider)
-	if repo := cfg.Environment.Smolvm.Repository; repo != nil {
+	for _, repo := range cfg.Environment.Smolvm.AllRepositories() {
 		add(repo.Provider)
 	}
 	return providers

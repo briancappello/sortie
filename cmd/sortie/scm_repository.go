@@ -20,22 +20,50 @@ func scmReactionProviderSetting(name string) string {
 	return "reactions." + name + ".provider"
 }
 
-// checkRepositoryProvider fails when cfg's repository names a provider
-// that differs from the provider of an active SCM reaction, since one
-// SCM adapter serves the repository and every such reaction, or that
-// names no registered SCM adapter able to open pull requests. A
-// configuration without a repository provider passes. The failure is a
-// [*config.ConfigError] for the repository provider whose message names
-// the other setting. It constructs no adapter.
+// checkRepositoryProvider fails when a configured repository names a
+// provider that differs from the provider of an active SCM reaction or
+// of another repository, since one SCM adapter serves every repository
+// and every such reaction, or that names no registered SCM adapter able
+// to open pull requests. A configuration without a repository provider
+// passes. The failure is a [*config.ConfigError] for the repository
+// provider whose message names the other setting. It constructs no
+// adapter.
 func checkRepositoryProvider(cfg config.ServiceConfig) error {
-	provider := orchestrator.RepositoryProvider(cfg.Environment)
-	if provider == "" {
+	if orchestrator.RepositoriesProvider(cfg.Environment) == "" {
 		return nil
 	}
+	first, firstField := "", ""
+	for i, repo := range cfg.Environment.Smolvm.AllRepositories() {
+		if repo.Provider == "" {
+			continue
+		}
+		field := repositoryProviderField
+		if len(cfg.Environment.Smolvm.Repositories) > 0 && cfg.Environment.Smolvm.DefaultRepository != "" {
+			field = fmt.Sprintf("environment.smolvm.repositories[%d].provider", i)
+		}
+		if first == "" {
+			first, firstField = repo.Provider, field
+		} else if repo.Provider != first {
+			return &config.ConfigError{
+				Field: field,
+				Message: fmt.Sprintf("is %q but %s is %q: every repository shares one SCM adapter, so they must name the same provider",
+					repo.Provider, firstField, first),
+			}
+		}
+		if err := checkOneRepositoryProvider(cfg, field, repo.Provider); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkOneRepositoryProvider checks the provider one repository names
+// at field, as [checkRepositoryProvider] describes.
+func checkOneRepositoryProvider(cfg config.ServiceConfig, field, provider string) error {
 	for _, kind := range activeSCMReactionKinds(cfg) {
 		if kind.active && kind.provider != provider {
 			return &config.ConfigError{
-				Field: repositoryProviderField,
+				Field: field,
 				Message: fmt.Sprintf("is %q but %s is %q: the repository and every active SCM reaction share one SCM adapter, so they must name the same provider",
 					provider, scmReactionProviderSetting(kind.name), kind.provider),
 			}
@@ -44,13 +72,13 @@ func checkRepositoryProvider(cfg config.ServiceConfig) error {
 	meta, ok := registry.SCMAdapters.Meta(provider)
 	if !ok {
 		return &config.ConfigError{
-			Field:   repositoryProviderField,
+			Field:   field,
 			Message: fmt.Sprintf("names %q, which is no registered SCM adapter (registered: %v)", provider, registry.SCMAdapters.Kinds()),
 		}
 	}
 	if !meta.OpensPullRequests {
 		return &config.ConfigError{
-			Field:   repositoryProviderField,
+			Field:   field,
 			Message: fmt.Sprintf("names %q, whose SCM adapter cannot open pull requests", provider),
 		}
 	}

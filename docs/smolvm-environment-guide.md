@@ -271,7 +271,9 @@ repository:
   max_bundle_mib: 512        # default
 ```
 
-**The mirror.** Sortie keeps a bare mirror of `url` under its state directory, at `<state dir>/repos/<hash>.git`, where `<state dir>` is the directory that holds the database. Only Sortie writes it, with hooks and the filesystem monitor off and every object checked. Git data moves between the mirror and the VM only as bundles, and Sortie never runs `git` on the repository inside the VM.
+To let issues run in several repositories, list them under `repositories`, each with a `name`, and name the default in `default_repository`. An issue runs in the repository its `sortie-repository:<name>` label names, which plan sync keeps from the plan, and its workspace stays with the repository it was seeded from. See [Several repositories](workflow-reference.md#several-repositories).
+
+**The mirror.** Sortie keeps a bare mirror of each `url` under its state directory, at `<state dir>/repos/<hash>.git`, where `<state dir>` is the directory that holds the database. Only Sortie writes it, with hooks and the filesystem monitor off and every object checked. Git data moves between the mirror and the VM only as bundles, and Sortie never runs `git` on the repository inside the VM.
 
 **Host git credentials.** Sortie fetches and pushes with the host's own git: the SSH agent, a credential helper, or an SSH deploy key configured for the user Sortie runs as. They never enter the VM. Check them as that user before you start Sortie:
 

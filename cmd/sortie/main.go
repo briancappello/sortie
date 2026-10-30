@@ -661,7 +661,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	// One SCM adapter serves every active SCM reaction and the pull
 	// requests of the configured repository; validation has made them
 	// name the same provider. It is built when either needs it.
-	repositoryProvider := orchestrator.RepositoryProvider(br.cfg.Environment)
+	repositoryProvider := orchestrator.RepositoriesProvider(br.cfg.Environment)
 	scmProvider = repositoryProvider
 	if len(activeKindNames) > 0 {
 		scmProvider = activeProviders[0]
@@ -728,6 +728,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 		br.logger.Info("pull requests for pushed issue branches enabled",
 			slog.String("provider", repositoryProvider),
 			slog.String("project", br.cfg.Environment.Smolvm.Repository.Project),
+			slog.Any("repositories", br.cfg.Environment.Smolvm.RepositoryNames()),
 		)
 	}
 

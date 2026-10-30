@@ -46,12 +46,15 @@ const (
 	environmentHostPrefixPath = environmentField + ".host_prefix"
 	smolvmField               = environmentField + ".smolvm"
 	smolvmRepositoryField     = smolvmField + ".repository"
+	smolvmRepositoriesField   = smolvmField + ".repositories"
+	smolvmDefaultRepoField    = smolvmField + ".default_repository"
 	smolvmCredentialsField    = smolvmField + ".credentials"
 	maxHostNameLength         = 253
 )
 
 var (
 	envVarNamePattern        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	repositoryNamePattern    = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 	credentialNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	hostLabelPattern         = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 	environmentKindsAccepted = []string{EnvironmentKindLocal, EnvironmentKindSmolvm, EnvironmentKindRemote}
@@ -132,8 +135,19 @@ type SmolvmConfig struct {
 	Credentials []SmolvmCredential
 
 	// Repository configures the host-owned repository the guest
-	// workspace is seeded from and exported to. Nil when absent.
+	// workspace is seeded from and exported to by default: the single
+	// repository block, or the default_repository entry of the
+	// repositories list. Nil when neither is set.
 	Repository *SmolvmRepository
+
+	// Repositories lists every repository Sortie may open, in written
+	// order: the repositories list, or the single repository block as
+	// its one entry. Nil when neither is set.
+	Repositories []SmolvmRepository
+
+	// DefaultRepository names the entry of Repositories an issue that
+	// names no repository uses. Empty for the single repository block.
+	DefaultRepository string
 
 	// PassEnv lists host variable names copied into the guest in plain
 	// text.
@@ -165,6 +179,11 @@ type SmolvmCredential struct {
 
 // SmolvmRepository configures the host-owned repository mirror.
 type SmolvmRepository struct {
+	// Name identifies the repository to plan stories and issues.
+	// Required in the repositories list, matching
+	// [a-z0-9]+(-[a-z0-9]+)*; optional in the single repository block.
+	Name string
+
 	// URL is the upstream the host fetches and pushes with its own
 	// credentials. Required.
 	URL string
@@ -421,8 +440,7 @@ func buildSmolvmConfig(value any) (SmolvmConfig, error) {
 		return SmolvmConfig{}, err
 	}
 
-	cfg.Repository, err = parseSmolvmRepository(m)
-	if err != nil {
+	if err := parseSmolvmRepositories(m, &cfg); err != nil {
 		return SmolvmConfig{}, err
 	}
 
@@ -649,6 +667,126 @@ func parseSmolvmRepository(m map[string]any) (*SmolvmRepository, error) {
 	if !ok {
 		return nil, typeError(smolvmRepositoryField, "mapping", raw)
 	}
+	return parseRepositoryEntry(entry, smolvmRepositoryField)
+}
+
+// RepositoryNamed returns the configured repository called name, and
+// whether there is one. The single repository block answers its own
+// name, which may be empty.
+func (c SmolvmConfig) RepositoryNamed(name string) (*SmolvmRepository, bool) {
+	for _, r := range c.AllRepositories() {
+		if r.Name == name {
+			return &r, true
+		}
+	}
+	return nil, false
+}
+
+// AllRepositories returns Repositories, or the one Repository when only
+// that is set.
+func (c SmolvmConfig) AllRepositories() []SmolvmRepository {
+	if len(c.Repositories) == 0 && c.Repository != nil {
+		return []SmolvmRepository{*c.Repository}
+	}
+	return c.Repositories
+}
+
+// RepositoryNames lists the names of the configured repositories in
+// written order, leaving out an unnamed single repository block.
+func (c SmolvmConfig) RepositoryNames() []string {
+	var names []string
+	for _, r := range c.AllRepositories() {
+		if r.Name != "" {
+			names = append(names, r.Name)
+		}
+	}
+	return names
+}
+
+// parseSmolvmRepositories reads environment.smolvm.repository, or
+// environment.smolvm.repositories with default_repository, into cfg.
+func parseSmolvmRepositories(m map[string]any, cfg *SmolvmConfig) error {
+	single, err := parseSmolvmRepository(m)
+	if err != nil {
+		return err
+	}
+	rawList, listSet := m["repositories"]
+	listSet = listSet && rawList != nil
+	def, defSet, err := requireStringField(m, "default_repository", smolvmDefaultRepoField)
+	if err != nil {
+		return err
+	}
+	if single != nil {
+		if listSet {
+			return &ConfigError{Field: smolvmRepositoriesField, Message: "cannot be set together with repository; list the one repository under repositories instead"}
+		}
+		if defSet {
+			return &ConfigError{Field: smolvmDefaultRepoField, Message: "applies to repositories, not to the single repository block"}
+		}
+		cfg.Repository = single
+		cfg.Repositories = []SmolvmRepository{*single}
+		return nil
+	}
+	if !listSet {
+		if defSet {
+			return &ConfigError{Field: smolvmDefaultRepoField, Message: "is set but repositories lists none"}
+		}
+		return nil
+	}
+	list, ok := rawList.([]any)
+	if !ok {
+		return typeError(smolvmRepositoriesField, "sequence", rawList)
+	}
+	if len(list) == 0 {
+		return &ConfigError{Field: smolvmRepositoriesField, Message: "must list at least one repository"}
+	}
+	seen := map[string]bool{}
+	repos := make([]SmolvmRepository, 0, len(list))
+	for i, elem := range list {
+		field := fmt.Sprintf("%s[%d]", smolvmRepositoriesField, i)
+		entry, ok := elem.(map[string]any)
+		if !ok {
+			return typeError(field, "mapping", elem)
+		}
+		repo, err := parseRepositoryEntry(entry, field)
+		if err != nil {
+			return err
+		}
+		if repo.Name == "" {
+			return &ConfigError{Field: field + ".name", Message: "is required and must be a non-empty string"}
+		}
+		if seen[repo.Name] {
+			return &ConfigError{Field: field + ".name", Message: fmt.Sprintf("%q is listed more than once", repo.Name)}
+		}
+		seen[repo.Name] = true
+		repos = append(repos, *repo)
+	}
+	if def == "" {
+		if len(repos) > 1 {
+			return &ConfigError{Field: smolvmDefaultRepoField, Message: "is required when repositories lists more than one repository"}
+		}
+		def = repos[0].Name
+	}
+	if !seen[def] {
+		return &ConfigError{Field: smolvmDefaultRepoField, Message: fmt.Sprintf("names %q, which repositories does not list", def)}
+	}
+	cfg.Repositories = repos
+	cfg.DefaultRepository = def
+	cfg.Repository, _ = cfg.RepositoryNamed(def)
+	return nil
+}
+
+// parseRepositoryEntry reads one repository mapping at field, applying
+// its defaults.
+func parseRepositoryEntry(entry map[string]any, field string) (*SmolvmRepository, error) {
+	name, _, err := requireStringField(entry, "name", field+".name")
+	if err != nil {
+		return nil, err
+	}
+	if name != "" && !repositoryNamePattern.MatchString(name) {
+		return nil, &ConfigError{Field: field + ".name", Message: fmt.Sprintf("%q must match [a-z0-9]+(-[a-z0-9]+)*", name)}
+	}
+	smolvmRepositoryField := field
 
 	url, err := requiredString(entry, "url", smolvmRepositoryField+".url")
 	if err != nil {
@@ -698,6 +836,7 @@ func parseSmolvmRepository(m map[string]any) (*SmolvmRepository, error) {
 	}
 
 	return &SmolvmRepository{
+		Name:         name,
 		URL:          url,
 		Base:         base,
 		BranchPrefix: prefix,
@@ -725,4 +864,20 @@ func typeError(field, want string, got any) *ConfigError {
 		Field:   field,
 		Message: "expected " + want + ", got " + typeutil.DescribeYAMLType(got),
 	}
+}
+
+// RepositoryLabelPrefix starts the label plan sync keeps on a story that
+// names its repository: the prefix followed by the repository's name.
+const RepositoryLabelPrefix = "sortie-repository:"
+
+// IssueRepositoryName returns the repository name the labels of an issue
+// carry under [RepositoryLabelPrefix], or "" when they carry none. Labels
+// compare case-insensitively.
+func IssueRepositoryName(labels []string) string {
+	for _, l := range labels {
+		if name, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(l)), RepositoryLabelPrefix); ok && name != "" {
+			return name
+		}
+	}
+	return ""
 }

@@ -142,7 +142,7 @@ func trackerWrites(kind string) []registry.WriteCapability {
 // replaced; otherwise only the configured project is served.
 func newPlanProjects(adapter domain.TrackerAdapter, cfg config.ServiceConfig, current func() config.ServiceConfig, states func() domain.TrackerStates) *plan.Projects {
 	meta, _ := registry.Trackers.Meta(cfg.Tracker.Kind)
-	def := plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta, States: states})
+	def := plan.NewSyncer(plan.Tracker{Adapter: adapter, Meta: meta, States: states, Repositories: workflowRepositories(current)})
 	var factory plan.TrackerFactory
 	if _, ok := adapter.(domain.PlanProjectEnsurer); ok {
 		factory = func(_ context.Context, project string) (plan.Tracker, func(), error) {
@@ -175,7 +175,7 @@ func projectTracker(cfg config.ServiceConfig, project string, states func() doma
 	if closer, ok := adapter.(io.Closer); ok {
 		release = func() { _ = closer.Close() }
 	}
-	return plan.Tracker{Adapter: adapter, Meta: meta, States: states}, release, nil
+	return plan.Tracker{Adapter: adapter, Meta: meta, States: states, Repositories: workflowRepositories(func() config.ServiceConfig { return cfg })}, release, nil
 }
 
 // newPlanTracker is planTracker; tests substitute a fake tracker.
@@ -209,7 +209,10 @@ func planTracker(workflowPath string) (plan.Tracker, string, func(), error) {
 		closeFn = func() { _ = closer.Close() }
 	}
 	states := cfg.Tracker.States()
-	return plan.Tracker{Adapter: adapter, Meta: meta, States: func() domain.TrackerStates { return states }}, cfg.Tracker.Kind, closeFn, nil
+	return plan.Tracker{
+		Adapter: adapter, Meta: meta, States: func() domain.TrackerStates { return states },
+		Repositories: workflowRepositories(func() config.ServiceConfig { return cfg }),
+	}, cfg.Tracker.Kind, closeFn, nil
 }
 
 // errorKind names an error's category for reports: a tracker error kind,
@@ -246,6 +249,9 @@ func writePlanText(w io.Writer, r planSyncReport) {
 		}
 		for _, u := range pv.Unsupported {
 			p("  not written: %s", u)
+		}
+		for _, u := range pv.UnlistedRepositories {
+			p("  refused %s: repository %q is not listed in environment.smolvm.repositories", u.PlanKey, u.Repository)
 		}
 		for _, op := range pv.Creates {
 			line := fmt.Sprintf("  create %s %s %q", op.Kind, op.PlanKey, op.Title)
@@ -290,5 +296,25 @@ func writePlanText(w io.Writer, r planSyncReport) {
 		if res.Failed != nil {
 			p("stopped at %s %s: %s", res.Failed.Op, res.Failed.PlanKey, res.Failed.Error)
 		}
+	}
+}
+
+// workflowRepositories returns the names of the repositories the current
+// workflow lets Sortie open, for plan sync to refuse any other. A
+// workflow that lists none refuses every name.
+func workflowRepositories(current func() config.ServiceConfig) func() []string {
+	if current == nil {
+		return nil
+	}
+	return func() []string {
+		cfg := current()
+		if cfg.Environment.Kind != config.EnvironmentKindSmolvm {
+			return []string{}
+		}
+		names := cfg.Environment.Smolvm.RepositoryNames()
+		if names == nil {
+			names = []string{}
+		}
+		return names
 	}
 }

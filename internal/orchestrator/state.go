@@ -235,6 +235,11 @@ type RunningEntry struct {
 	// which may have changed via reload.
 	WorkspacePath string
 
+	// Repository names the configured repository the workspace was
+	// seeded from, populated with WorkspacePath. Empty when the workflow
+	// places no repository or its one repository is unnamed.
+	Repository string
+
 	// Environment describes the execution environment instance the
 	// workspace runs in, as [State.DescribeEnvironment] described it at
 	// dispatch. Zero when it names none.
@@ -1840,6 +1845,7 @@ type SnapshotRunningEntry struct {
 	Skills              []domain.SkillCall        `json:"skills,omitempty"`
 	APIRequestsMeasured bool                      `json:"api_requests_measured"`
 	WorkspacePath       string                    `json:"workspace_path"`
+	Repository          string                    `json:"repository,omitempty"`
 	Environment         *SnapshotEnvironment      `json:"environment,omitempty"`
 	SSHHost             string                    `json:"ssh_host,omitempty"`
 	ToolTimeMs          int64                     `json:"tool_time_ms"`
@@ -2311,6 +2317,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			Skills:              slices.Clone(entry.Skills),
 			APIRequestsMeasured: requestsMeasured,
 			WorkspacePath:       entry.WorkspacePath,
+			Repository:          entry.Repository,
 			Environment:         snapshotEnvironment(entry.Environment),
 			SSHHost:             entry.SSHHost,
 			ToolTimeMs:          entry.ToolTimeMs,

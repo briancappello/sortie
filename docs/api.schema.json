@@ -3822,6 +3822,9 @@
         "reaction_kind": {
           "type": "string"
         },
+        "repository": {
+          "type": "string"
+        },
         "requests_by_model": {
           "additionalProperties": {
             "type": "integer"

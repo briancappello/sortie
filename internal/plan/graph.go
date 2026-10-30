@@ -71,6 +71,10 @@ type Node struct {
 	Review     string    `json:"review,omitempty"`
 	ApprovedBy *Approver `json:"approved_by,omitempty"`
 	ApprovedAt string    `json:"approved_at,omitempty"`
+
+	// Repository names the configured repository a story runs in.
+	// Version 2, stories only, optional: absent means the default.
+	Repository string `json:"repository,omitempty"`
 }
 
 // Approver names the person who approved a story.
@@ -165,19 +169,22 @@ func missing(where string, obj map[string]json.RawMessage, fields []string) []st
 // checkVersion2 checks the version 2 story fields: absent in version 1,
 // stories only, and well formed.
 func (g Graph) checkVersion2(where string, n Node) []string {
-	set := n.Release != nil || n.Review != "" || n.ApprovedBy != nil || n.ApprovedAt != ""
+	set := n.Release != nil || n.Review != "" || n.ApprovedBy != nil || n.ApprovedAt != "" || n.Repository != ""
 	if !set {
 		return nil
 	}
 	if g.SchemaVersion < 2 {
-		return []string{where + ": release, review, approved_by, and approved_at need schema_version 2"}
+		return []string{where + ": release, review, approved_by, approved_at, and repository need schema_version 2"}
 	}
 	var problems []string
 	if n.Kind != KindStory {
-		problems = append(problems, where+": release, review, approved_by, and approved_at are for stories only")
+		problems = append(problems, where+": release, review, approved_by, approved_at, and repository are for stories only")
 	}
 	if n.Review != "" && n.Review != ReviewHuman && n.Review != ReviewCriteria {
 		problems = append(problems, fmt.Sprintf("%s: review %q is not human or criteria", where, n.Review))
+	}
+	if n.Repository != "" && !changeNamePattern.MatchString(n.Repository) {
+		problems = append(problems, fmt.Sprintf("%s: repository %q must match [a-z0-9]+(-[a-z0-9]+)*", where, n.Repository))
 	}
 	if n.ApprovedBy != nil && strings.TrimSpace(n.ApprovedBy.Name) == "" {
 		problems = append(problems, where+": approved_by needs a name")
