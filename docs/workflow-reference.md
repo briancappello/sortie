@@ -2002,10 +2002,10 @@ The worker API is served only while `environment.kind` is `remote`; under any ot
 
 | Route | Body | Answer |
 | ----- | ---- | ------ |
-| `POST /api/v1/worker/checkin` | `{"protocol": 1, "capabilities": [...], "resources": {"cpus", "memory_mib", "disk_mib", "run_slots"}}` | `200 {"protocol": 1, "worker": id}`. A missing field answers `400` with `missing` listing each one, such as `resources.run_slots`; another protocol answers `400 unsupported_protocol`. Each check-in replaces the declaration and records the check-in time. |
-| `POST /api/v1/worker/poll` | none | `200` with one offer, or `204` when no queued job fits. `404` before the worker's first check-in. |
-| `POST /api/v1/worker/jobs/{job}/attempts/{attempt}/heartbeat` | none | `200` with the renewed lease. `409` when the worker no longer holds that attempt's lease. |
-| `POST /api/v1/worker/jobs/{job}/attempts/{attempt}/report` | `{"outcome": "succeeded" \| "failed", "error": "..."}` | `204`; the attempt ends. `409` when the lease expired, was withdrawn or was already reported. |
+| `POST /api/v1/workers/checkin` | `{"protocol": 1, "capabilities": [...], "resources": {"cpus", "memory_mib", "disk_mib", "run_slots"}}` | `200 {"protocol": 1, "worker": id}`. A missing field answers `400` with `missing` listing each one, such as `resources.run_slots`; another protocol answers `400 unsupported_protocol`. Each check-in replaces the declaration and records the check-in time. |
+| `POST /api/v1/workers/poll` | none | `200` with one offer, or `204` when no queued job fits. `404` before the worker's first check-in. |
+| `POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat` | none | `200` with the renewed lease. `409` when the worker no longer holds that attempt's lease. |
+| `POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report` | `{"outcome": "succeeded" \| "failed", "error": "..."}` | `204`; the attempt ends. `409` when the lease expired, was withdrawn or was already reported. |
 
 An offer is `{"protocol": 1, "job", "lease", "run", "flows"}`: the job (id, identifier, attempt, priority, requires, needs, flows), the lease (job, identifier, attempt, worker, expiry), the run descriptor (issue id, identifier, title, URL, attempt, agent kind, workspace key) and one `{"name", "token"}` per flow. The run descriptor holds no credential; a flow's token is the only secret an offer carries.
 

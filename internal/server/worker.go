@@ -10,10 +10,10 @@ import (
 // workerRoutes are the worker API routes of protocol 1, all served by
 // [Server.routeWorker].
 var workerRoutes = []string{
-	"/api/v1/worker/checkin",
-	"/api/v1/worker/poll",
-	"/api/v1/worker/jobs/{job}/attempts/{attempt}/heartbeat",
-	"/api/v1/worker/jobs/{job}/attempts/{attempt}/report",
+	"/api/v1/workers/checkin",
+	"/api/v1/workers/poll",
+	"/api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat",
+	"/api/v1/workers/jobs/{job}/attempts/{attempt}/report",
 }
 
 // routeWorker serves the worker API while the remote environment kind

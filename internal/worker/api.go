@@ -12,16 +12,16 @@ import (
 const DefaultIdentityHeader = "X-Sortie-Worker"
 
 // Prefix is the path every worker API route sits under.
-const Prefix = "/api/v1/worker/"
+const Prefix = "/api/v1/workers/"
 
 // Handler serves worker API protocol 1. Workers dial Sortie; Sortie
 // never dials a worker. The worker's identity is the value of the
 // identityHeader request header, never a path segment.
 //
-//	POST /api/v1/worker/checkin                                  body Declaration
-//	POST /api/v1/worker/poll                                     200 Offer or 204
-//	POST /api/v1/worker/jobs/{job}/attempts/{attempt}/heartbeat  200 lease
-//	POST /api/v1/worker/jobs/{job}/attempts/{attempt}/report     body {outcome, error}
+//	POST /api/v1/workers/checkin                                  body Declaration
+//	POST /api/v1/workers/poll                                     200 Offer or 204
+//	POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat  200 lease
+//	POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report     body {outcome, error}
 func Handler(m *Matcher, identityHeader string) http.Handler {
 	if identityHeader == "" {
 		identityHeader = DefaultIdentityHeader
@@ -37,7 +37,7 @@ func Handler(m *Matcher, identityHeader string) http.Handler {
 			h(w, r, id)
 		}
 	}
-	mux.HandleFunc("POST /api/v1/worker/checkin", identified(func(w http.ResponseWriter, r *http.Request, id string) {
+	mux.HandleFunc("POST /api/v1/workers/checkin", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		d, missing, err := decodeDeclaration(r)
 		switch {
 		case err != nil:
@@ -53,7 +53,7 @@ func Handler(m *Matcher, identityHeader string) http.Handler {
 		m.CheckIn(id, d)
 		reply(w, http.StatusOK, map[string]any{"protocol": Protocol, "worker": id})
 	}))
-	mux.HandleFunc("POST /api/v1/worker/poll", identified(func(w http.ResponseWriter, r *http.Request, id string) {
+	mux.HandleFunc("POST /api/v1/workers/poll", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		offer, ok, err := m.Poll(id)
 		if err != nil {
 			fail(w, err)
@@ -65,7 +65,7 @@ func Handler(m *Matcher, identityHeader string) http.Handler {
 		}
 		reply(w, http.StatusOK, offer)
 	}))
-	mux.HandleFunc("POST /api/v1/worker/jobs/{job}/attempts/{attempt}/heartbeat", identified(func(w http.ResponseWriter, r *http.Request, id string) {
+	mux.HandleFunc("POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		attempt, err := strconv.Atoi(r.PathValue("attempt"))
 		if err != nil {
 			problem(w, http.StatusBadRequest, "invalid_attempt", "attempt must be an integer", nil)
@@ -78,7 +78,7 @@ func Handler(m *Matcher, identityHeader string) http.Handler {
 		}
 		reply(w, http.StatusOK, ls)
 	}))
-	mux.HandleFunc("POST /api/v1/worker/jobs/{job}/attempts/{attempt}/report", identified(func(w http.ResponseWriter, r *http.Request, id string) {
+	mux.HandleFunc("POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		attempt, err := strconv.Atoi(r.PathValue("attempt"))
 		if err != nil {
 			problem(w, http.StatusBadRequest, "invalid_attempt", "attempt must be an integer", nil)
