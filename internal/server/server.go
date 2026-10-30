@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/jobtoken"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
 	"github.com/sortie-ai/sortie/internal/plan"
 	"github.com/sortie-ai/sortie/internal/pricing"
@@ -420,6 +421,12 @@ type Params struct {
 	// that names the worker of a worker API request.
 	WorkerIdentityHeaderFn func() string
 
+	// JobTokensFn returns the issuer of job tokens while the remote
+	// environment kind is selected, and nil otherwise.
+	// POST /api/v1/tokens/introspect answers 404 for every token while it
+	// returns nil. Nil issues no job tokens.
+	JobTokensFn func() *jobtoken.Issuer
+
 	// ControlToken is the bearer token every state-changing endpoint
 	// requires. When empty, those endpoints accept a request that
 	// presents no token; startup permits that only on a loopback bind.
@@ -505,6 +512,7 @@ type Server struct {
 	maskErrorFn        func(string) string
 	workersFn          func() *worker.Matcher
 	workerHeaderFn     func() string
+	jobTokensFn        func() *jobtoken.Issuer
 
 	changes *changeFeed
 	timing  streamTiming
@@ -587,6 +595,7 @@ func New(params Params) *Server {
 		maskErrorFn:        params.MaskErrorFn,
 		workersFn:          params.WorkersFn,
 		workerHeaderFn:     params.WorkerIdentityHeaderFn,
+		jobTokensFn:        params.JobTokensFn,
 		changes:            newChangeFeed(),
 		timing: streamTiming{
 			heartbeat:      15 * time.Second,
@@ -628,6 +637,7 @@ func New(params Params) *Server {
 	for _, route := range workerRoutes {
 		mux.HandleFunc(route, s.routeWorker)
 	}
+	mux.HandleFunc("/api/v1/tokens/introspect", s.controlRoute(scopeOperator, s.handleIntrospect))
 	mux.HandleFunc("/api/v1/events", s.routeEvents)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))

@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/sortie-ai/sortie/internal/jobtoken"
 	"github.com/sortie-ai/sortie/internal/worker"
 )
 
@@ -45,4 +46,18 @@ func (s *Server) workersState() *worker.State {
 		return nil
 	}
 	return new(m.Snapshot())
+}
+
+// handleIntrospect tells a proxy what a job token grants. Its route
+// takes the control token, so a worker cannot ask.
+func (s *Server) handleIntrospect(w http.ResponseWriter, r *http.Request) {
+	var issuer *jobtoken.Issuer
+	if s.jobTokensFn != nil {
+		issuer = s.jobTokensFn()
+	}
+	if issuer == nil {
+		writeErrorJSON(w, s.logger, http.StatusNotFound, "not_found", "unknown or ended job token")
+		return
+	}
+	issuer.IntrospectHandler().ServeHTTP(w, r)
 }

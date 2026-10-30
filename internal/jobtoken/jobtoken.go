@@ -90,8 +90,21 @@ func NewIssuer(flows ...Flow) *Issuer {
 // OnLeaseGrant is the matcher's lease-grant hook. It starts a new
 // attempt of jobID, ending any earlier one, and mints one token per flow.
 func (i *Issuer) OnLeaseGrant(jobID string) (map[Flow]Token, error) {
-	out := make(map[Flow]Token, len(i.flows))
-	for _, f := range i.flows {
+	return i.mint(jobID, 0, i.flows)
+}
+
+// Mint starts the given attempt of jobID, ending any earlier one, and
+// mints one token for each of flows. It serves a caller that numbers
+// attempts and names a job's flows itself.
+func (i *Issuer) Mint(jobID string, attempt uint64, flows []Flow) (map[Flow]Token, error) {
+	return i.mint(jobID, attempt, flows)
+}
+
+// mint numbers the attempt one past the last it numbered when attempt
+// is zero.
+func (i *Issuer) mint(jobID string, attempt uint64, flows []Flow) (map[Flow]Token, error) {
+	out := make(map[Flow]Token, len(flows))
+	for _, f := range flows {
 		s, err := newSecret()
 		if err != nil {
 			return nil, err
@@ -101,8 +114,11 @@ func (i *Issuer) OnLeaseGrant(jobID string) (map[Flow]Token, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.revokeLocked(jobID)
-	i.attempts[jobID]++
-	n := i.attempts[jobID]
+	if attempt == 0 {
+		i.attempts[jobID]++
+		attempt = i.attempts[jobID]
+	}
+	n := attempt
 	for f, t := range out {
 		d := hash(t.secret)
 		i.grants[d] = Grant{JobID: jobID, Attempt: n, Flow: f}

@@ -110,13 +110,26 @@ type Offer struct {
 	Flows    []Flow    `json:"flows"`
 }
 
-// TokenMinter mints the token of one flow of a job's offer. It is the
-// one place flow tokens come from.
-type TokenMinter func(job Job, flow string) string
+// Tokens issues the flow tokens of an attempt; it is the one place they
+// come from. The matcher calls Mint once when it grants the attempt's
+// lease, for a token per flow of the job, and Void as soon as the
+// attempt ends, by report, lease expiry or cancel, after which those
+// tokens must be refused. Implementations must be safe for concurrent
+// use; the matcher calls them under its lock.
+type Tokens interface {
+	Mint(job Job) (map[string]string, error)
+	Void(jobID string)
+}
 
-// NoTokens is the minter used until job tokens exist: every token is
+// NoTokens is the issuer used when job tokens are off: every token is
 // empty.
-func NoTokens(Job, string) string { return "" }
+type NoTokens struct{}
+
+// Mint implements [Tokens] with no tokens.
+func (NoTokens) Mint(Job) (map[string]string, error) { return nil, nil }
+
+// Void implements [Tokens].
+func (NoTokens) Void(string) {}
 
 // Outcome is how a job's attempt ended.
 type Outcome struct {
@@ -258,7 +271,7 @@ type State struct {
 type Matcher struct {
 	leaser Leaser
 	now    func() time.Time
-	mint   TokenMinter
+	tokens Tokens
 
 	mu      sync.Mutex
 	workers map[string]*Worker
@@ -273,13 +286,13 @@ type stoppedMachine struct {
 	disk   int64
 }
 
-// NewMatcher returns a matcher using leaser, clock now and minter mint;
-// a nil mint selects [NoTokens].
-func NewMatcher(leaser Leaser, now func() time.Time, mint TokenMinter) *Matcher {
-	if mint == nil {
-		mint = NoTokens
+// NewMatcher returns a matcher using leaser, clock now and token issuer
+// tokens; a nil tokens selects [NoTokens].
+func NewMatcher(leaser Leaser, now func() time.Time, tokens Tokens) *Matcher {
+	if tokens == nil {
+		tokens = NoTokens{}
 	}
-	return &Matcher{leaser: leaser, now: now, mint: mint,
+	return &Matcher{leaser: leaser, now: now, tokens: tokens,
 		workers: map[string]*Worker{}, leased: map[string]Job{},
 		ends: map[string]chan Outcome{}, stopped: map[string]stoppedMachine{}}
 }
@@ -390,13 +403,19 @@ func (m *Matcher) Poll(workerID string) (Offer, bool, error) {
 		if err != nil {
 			continue
 		}
+		toks, err := m.tokens.Mint(j)
+		if err != nil {
+			_ = m.leaser.Release(j.ID, workerID)
+			m.tokens.Void(j.ID)
+			return Offer{}, false, fmt.Errorf("worker: minting job tokens: %w", err)
+		}
 		m.pending = append(m.pending[:i:i], m.pending[i+1:]...)
 		m.leased[j.ID] = j
 		w.Free = sub(w.Free, j.Needs)
 		w.Free.RunSlots--
 		flows := make([]Flow, 0, len(j.Flows))
 		for _, f := range j.Flows {
-			flows = append(flows, Flow{Name: f, Token: m.mint(j, f)})
+			flows = append(flows, Flow{Name: f, Token: toks[f]})
 		}
 		return Offer{Protocol: Protocol, Job: j, Lease: view(ls, j), Run: j.Run, Flows: flows}, true, nil
 	}
@@ -453,6 +472,7 @@ func (m *Matcher) Report(workerID, jobID string, attempt int, out Outcome) error
 		return err
 	}
 	delete(m.leased, jobID)
+	m.tokens.Void(jobID)
 	m.stopped[jobID] = stoppedMachine{worker: workerID, disk: j.Needs.DiskMiB}
 	if w := m.workers[workerID]; w != nil {
 		back := j.Needs
@@ -494,6 +514,7 @@ func (m *Matcher) Cancel(jobID string) {
 		ls := m.leaseOf(jobID)
 		_ = m.leaser.Release(jobID, ls.WorkerID)
 		delete(m.leased, jobID)
+		m.tokens.Void(jobID)
 		if w := m.workers[ls.WorkerID]; w != nil {
 			back := j.Needs
 			back.RunSlots = 1
@@ -516,6 +537,7 @@ func (m *Matcher) ExpireLeases() []string {
 			continue
 		}
 		delete(m.leased, ls.JobID)
+		m.tokens.Void(ls.JobID)
 		if w := m.workers[ls.WorkerID]; w != nil {
 			back := j.Needs
 			back.RunSlots = 1

@@ -110,6 +110,36 @@ func TestTokensEndWithTheAttempt(t *testing.T) {
 	}
 }
 
+func TestMintBindsTheCallersAttemptAndFlows(t *testing.T) {
+	t.Parallel()
+	i := NewIssuer(flowGit)
+	first, err := i.Mint("job-a", 4, []Flow{flowLLM, "mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[flowLLM].Reveal() == "" || first[flowLLM].Reveal() == first["mcp"].Reveal() {
+		t.Fatalf("tokens %v", first)
+	}
+	g, err := i.Check(first["mcp"].Reveal(), "job-a", "mcp")
+	if err != nil || g != (Grant{JobID: "job-a", Attempt: 4, Flow: "mcp"}) {
+		t.Fatalf("grant %+v, %v", g, err)
+	}
+	second, err := i.Mint("job-a", 5, []Flow{flowLLM})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.Lookup(first[flowLLM].Reveal()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("earlier attempt token: %v, want ErrInvalid", err)
+	}
+	if g, err := i.Lookup(second[flowLLM].Reveal()); err != nil || g.Attempt != 5 {
+		t.Fatalf("live attempt %+v, %v", g, err)
+	}
+	i.OnLeaseEnd("job-a")
+	if _, err := i.Lookup(second[flowLLM].Reveal()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("ended attempt token: %v, want ErrInvalid", err)
+	}
+}
+
 func TestTokensAreNotKeptOrShownInClear(t *testing.T) {
 	t.Parallel()
 	i := NewIssuer(flowGit)
@@ -146,11 +176,8 @@ func TestProxiesAskWhatATokenGrants(t *testing.T) {
 	srv := httptest.NewServer(i.IntrospectHandler())
 	defer srv.Close()
 
-	ask := func(auth string) (int, string) {
-		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-		if auth != "" {
-			req.Header.Set("Authorization", auth)
-		}
+	ask := func(body string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(body))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -161,26 +188,28 @@ func TestProxiesAskWhatATokenGrants(t *testing.T) {
 		return resp.StatusCode, b.String()
 	}
 
-	code, body := ask("Bearer " + tok.Reveal())
+	code, body := ask(`{"token":"` + tok.Reveal() + `"}`)
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
 	if strings.Contains(body, tok.Reveal()) {
 		t.Fatal("introspection echoes the token")
 	}
-	var g Grant
+	var g map[string]any
 	if err := json.Unmarshal([]byte(body), &g); err != nil {
 		t.Fatal(err)
 	}
-	if want := (Grant{JobID: "job-a", Attempt: 1, Flow: flowLLM}); !reflect.DeepEqual(g, want) {
-		t.Fatalf("grant %+v, want %+v", g, want)
+	if want := map[string]any{"job": "job-a", "attempt": float64(1), "flow": "llm"}; !reflect.DeepEqual(g, want) {
+		t.Fatalf("grant %v, want %v", g, want)
 	}
 
-	if code, _ := ask("Bearer bogus"); code != http.StatusUnauthorized {
-		t.Fatalf("unknown token status %d", code)
+	for _, b := range []string{`{"token":"bogus"}`, `{}`, `not json`} {
+		if code, _ := ask(b); code != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", b, code)
+		}
 	}
 	i.OnLeaseEnd("job-a")
-	if code, _ := ask("Bearer " + tok.Reveal()); code != http.StatusUnauthorized {
+	if code, _ := ask(`{"token":"` + tok.Reveal() + `"}`); code != http.StatusNotFound {
 		t.Fatalf("ended token status %d", code)
 	}
 }
