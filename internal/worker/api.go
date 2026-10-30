@@ -1,27 +1,35 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // DefaultIdentityHeader is the request header that names the worker
 // when worker.identity_header is unset.
-const DefaultIdentityHeader = "X-Sortie-Worker"
+const DefaultIdentityHeader = "X-Sortie-Worker-Identity"
+
+// ProtocolHeader is the request header every worker API request
+// carries with the protocol version it speaks.
+const ProtocolHeader = "X-Sortie-Worker-Protocol"
 
 // Prefix is the path every worker API route sits under.
 const Prefix = "/api/v1/workers/"
 
 // Handler serves worker API protocol 1. Workers dial Sortie; Sortie
-// never dials a worker. The worker's identity is the value of the
-// identityHeader request header, never a path segment.
+// never dials a worker. Every request carries [ProtocolHeader]; the
+// worker's identity is the value of the identityHeader request header,
+// never a path segment or body field. A refused request changes no
+// state.
 //
-//	POST /api/v1/workers/checkin                                  body Declaration
+//	POST /api/v1/workers/checkin                                  body Declaration; 200 {heartbeat_ms, lease_ms}
 //	POST /api/v1/workers/poll                                     200 Offer or 204
-//	POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat  200 lease
-//	POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report     body {outcome, error}
+//	POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat  200 {expires}
+//	POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report     body {outcome, reason, machine}; 204
 func Handler(m *Matcher, identityHeader string) http.Handler {
 	if identityHeader == "" {
 		identityHeader = DefaultIdentityHeader
@@ -31,27 +39,38 @@ func Handler(m *Matcher, identityHeader string) http.Handler {
 		return func(w http.ResponseWriter, r *http.Request) {
 			id := r.Header.Get(identityHeader)
 			if id == "" {
-				problem(w, http.StatusUnauthorized, "missing_identity", "the "+identityHeader+" header names no worker", nil)
+				problem(w, http.StatusUnauthorized, "missing_identity", "the "+identityHeader+" header names no worker")
 				return
 			}
 			h(w, r, id)
 		}
 	}
 	mux.HandleFunc("POST /api/v1/workers/checkin", identified(func(w http.ResponseWriter, r *http.Request, id string) {
-		d, missing, err := decodeDeclaration(r)
+		d, missing, invalid, err := decodeDeclaration(r)
 		switch {
 		case err != nil:
-			problem(w, http.StatusBadRequest, "invalid_checkin", err.Error(), nil)
+			problem(w, http.StatusBadRequest, "invalid_checkin", err.Error())
 			return
-		case len(missing) > 0:
-			problem(w, http.StatusBadRequest, "invalid_checkin", "check-in declaration is missing fields", missing)
-			return
-		case d.Protocol != Protocol:
-			problem(w, http.StatusBadRequest, "unsupported_protocol", "this Sortie serves worker API protocol "+strconv.Itoa(Protocol), nil)
+		case len(missing) > 0 || len(invalid) > 0:
+			msg := "check-in declaration"
+			if len(missing) > 0 {
+				msg += " is missing " + strings.Join(missing, ", ")
+			}
+			if len(invalid) > 0 {
+				if len(missing) > 0 {
+					msg += ";"
+				}
+				msg += " has invalid " + strings.Join(invalid, ", ")
+			}
+			body := errorBody("invalid_checkin", msg)
+			body["missing"] = nonNil(missing)
+			body["invalid"] = nonNil(invalid)
+			reply(w, http.StatusBadRequest, body)
 			return
 		}
 		m.CheckIn(id, d)
-		reply(w, http.StatusOK, map[string]any{"protocol": Protocol, "worker": id})
+		heartbeat, lease := m.Timings()
+		reply(w, http.StatusOK, map[string]int64{"heartbeat_ms": heartbeat.Milliseconds(), "lease_ms": lease.Milliseconds()})
 	}))
 	mux.HandleFunc("POST /api/v1/workers/poll", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		offer, ok, err := m.Poll(id)
@@ -68,94 +87,128 @@ func Handler(m *Matcher, identityHeader string) http.Handler {
 	mux.HandleFunc("POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		attempt, err := strconv.Atoi(r.PathValue("attempt"))
 		if err != nil {
-			problem(w, http.StatusBadRequest, "invalid_attempt", "attempt must be an integer", nil)
+			problem(w, http.StatusBadRequest, "invalid_attempt", "attempt must be an integer")
 			return
 		}
-		ls, err := m.Heartbeat(id, r.PathValue("job"), attempt)
+		exp, err := m.Heartbeat(id, r.PathValue("job"), attempt)
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		reply(w, http.StatusOK, ls)
+		reply(w, http.StatusOK, exp)
 	}))
 	mux.HandleFunc("POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report", identified(func(w http.ResponseWriter, r *http.Request, id string) {
 		attempt, err := strconv.Atoi(r.PathValue("attempt"))
 		if err != nil {
-			problem(w, http.StatusBadRequest, "invalid_attempt", "attempt must be an integer", nil)
+			problem(w, http.StatusBadRequest, "invalid_attempt", "attempt must be an integer")
 			return
 		}
-		var body struct {
-			Outcome string `json:"outcome"`
-			Error   string `json:"error"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.Outcome != "succeeded" && body.Outcome != "failed") {
-			problem(w, http.StatusBadRequest, "invalid_report", `outcome must be "succeeded" or "failed"`, nil)
+		out, err := decodeReport(r)
+		if err != nil {
+			problem(w, http.StatusBadRequest, "invalid_report", err.Error())
 			return
 		}
-		out := Outcome{Succeeded: body.Outcome == "succeeded", Error: body.Error}
 		if err := m.Report(id, r.PathValue("job"), attempt, out); err != nil {
 			fail(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if v := r.Header.Get(ProtocolHeader); v != strconv.Itoa(Protocol) {
+			body := errorBody("unsupported_protocol", "worker API protocol "+strconv.Quote(v)+" is not served; supported versions: "+strconv.Itoa(Protocol)+"; send "+ProtocolHeader+": "+strconv.Itoa(Protocol))
+			body["supported"] = []int{Protocol}
+			reply(w, http.StatusBadRequest, body)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
-// decodeDeclaration reads a check-in body and names each field it
-// lacks.
-func decodeDeclaration(r *http.Request) (Declaration, []string, error) {
-	var raw struct {
-		Protocol     *int      `json:"protocol"`
-		Capabilities *[]string `json:"capabilities"`
-		Resources    *struct {
-			CPUs      *int   `json:"cpus"`
-			MemoryMiB *int64 `json:"memory_mib"`
-			DiskMiB   *int64 `json:"disk_mib"`
-			RunSlots  *int   `json:"run_slots"`
-		} `json:"resources"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		return Declaration{}, nil, errors.New("check-in body is not a JSON object")
+// decodeDeclaration reads a check-in body. It names, by dotted path,
+// each field that is absent or null and each whose value is invalid.
+func decodeDeclaration(r *http.Request) (Declaration, []string, []string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil || raw == nil {
+		return Declaration{}, nil, nil, errors.New("check-in body is not a JSON object")
 	}
 	var d Declaration
-	var missing []string
-	if raw.Protocol == nil {
-		missing = append(missing, "protocol")
-	} else {
-		d.Protocol = *raw.Protocol
+	var missing, invalid []string
+	field := func(obj map[string]json.RawMessage, key, path string, dst any) {
+		v, ok := obj[key]
+		if !ok || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			missing = append(missing, path)
+			return
+		}
+		if err := json.Unmarshal(v, dst); err != nil {
+			invalid = append(invalid, path)
+		}
 	}
-	if raw.Capabilities == nil {
-		missing = append(missing, "capabilities")
-	} else {
-		d.Capabilities = *raw.Capabilities
+	field(raw, "os", "os", &d.OS)
+	field(raw, "arch", "arch", &d.Arch)
+	field(raw, "kvm", "kvm", &d.KVM)
+	field(raw, "nested", "nested", &d.Nested)
+	field(raw, "backends", "backends", &d.Backends)
+	field(raw, "run_slots", "run_slots", &d.RunSlots)
+	field(raw, "running", "running", &d.Running)
+	var free map[string]json.RawMessage
+	field(raw, "free", "free", &free)
+	if free != nil {
+		field(free, "cpu", "free.cpu", &d.Free.CPU)
+		field(free, "mem_gib", "free.mem_gib", &d.Free.MemGiB)
+		field(free, "disk_gib", "free.disk_gib", &d.Free.DiskGiB)
 	}
-	if raw.Resources == nil {
-		missing = append(missing, "resources.cpus", "resources.memory_mib", "resources.disk_mib", "resources.run_slots")
-		return d, missing, nil
+	for _, n := range []struct {
+		path string
+		v    float64
+	}{
+		{"run_slots", float64(d.RunSlots)}, {"running", float64(d.Running)},
+		{"free.cpu", d.Free.CPU}, {"free.mem_gib", d.Free.MemGiB}, {"free.disk_gib", d.Free.DiskGiB},
+	} {
+		if n.v < 0 {
+			invalid = append(invalid, n.path)
+		}
 	}
-	res := raw.Resources
-	if res.CPUs == nil {
-		missing = append(missing, "resources.cpus")
-	} else {
-		d.Resources.CPUs = *res.CPUs
+	if d.Backends == nil {
+		d.Backends = []string{}
 	}
-	if res.MemoryMiB == nil {
-		missing = append(missing, "resources.memory_mib")
-	} else {
-		d.Resources.MemoryMiB = *res.MemoryMiB
+	return d, missing, invalid, nil
+}
+
+// decodeReport reads a report body: outcome and machine are required,
+// reason is free text.
+func decodeReport(r *http.Request) (Outcome, error) {
+	var body struct {
+		Outcome *string `json:"outcome"`
+		Reason  *string `json:"reason"`
+		Machine *string `json:"machine"`
 	}
-	if res.DiskMiB == nil {
-		missing = append(missing, "resources.disk_mib")
-	} else {
-		d.Resources.DiskMiB = *res.DiskMiB
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return Outcome{}, errors.New(`report body must be {"outcome", "reason", "machine"}`)
 	}
-	if res.RunSlots == nil {
-		missing = append(missing, "resources.run_slots")
-	} else {
-		d.Resources.RunSlots = *res.RunSlots
+	if body.Outcome == nil || (*body.Outcome != "succeeded" && *body.Outcome != "failed") {
+		return Outcome{}, errors.New(`outcome must be "succeeded" or "failed"`)
 	}
-	return d, missing, nil
+	if body.Machine == nil {
+		return Outcome{}, errors.New(`machine must be "running", "stopped" or "deleted"`)
+	}
+	switch m := Machine(*body.Machine); m {
+	case MachineRunning, MachineStopped, MachineDeleted:
+	default:
+		return Outcome{}, errors.New(`machine must be "running", "stopped" or "deleted"`)
+	}
+	out := Outcome{Succeeded: *body.Outcome == "succeeded", Machine: Machine(*body.Machine)}
+	if body.Reason != nil {
+		out.Reason = *body.Reason
+	}
+	return out, nil
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func reply(w http.ResponseWriter, code int, v any) {
@@ -164,21 +217,21 @@ func reply(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func problem(w http.ResponseWriter, code int, kind, msg string, missing []string) {
-	body := map[string]any{"error": map[string]any{"code": kind, "message": msg}}
-	if missing != nil {
-		body["missing"] = missing
-	}
-	reply(w, code, body)
+func errorBody(code, msg string) map[string]any {
+	return map[string]any{"error": map[string]any{"code": code, "message": msg}}
+}
+
+func problem(w http.ResponseWriter, code int, kind, msg string) {
+	reply(w, code, errorBody(kind, msg))
 }
 
 func fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrUnknownWorker):
-		problem(w, http.StatusNotFound, "unknown_worker", "check in before polling", nil)
+		problem(w, http.StatusConflict, "not_checked_in", "check in before polling")
 	case errors.Is(err, ErrLeaseLost), errors.Is(err, ErrUnknownLease):
-		problem(w, http.StatusConflict, "lease_lost", err.Error(), nil)
+		problem(w, http.StatusConflict, "lease_lost", err.Error())
 	default:
-		problem(w, http.StatusInternalServerError, "internal", err.Error(), nil)
+		problem(w, http.StatusInternalServerError, "internal", err.Error())
 	}
 }

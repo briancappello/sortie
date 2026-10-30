@@ -590,6 +590,29 @@
       ],
       "type": "object"
     },
+    "Capacity": {
+      "properties": {
+        "cpu": {
+          "type": "number"
+        },
+        "disk_gib": {
+          "type": "number"
+        },
+        "mem_gib": {
+          "type": "number"
+        },
+        "run_slots": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_slots",
+        "cpu",
+        "mem_gib",
+        "disk_gib"
+      ],
+      "type": "object"
+    },
     "ChainGroup": {
       "properties": {
         "cost_partial_runs": {
@@ -814,7 +837,10 @@
     },
     "Declaration": {
       "properties": {
-        "capabilities": {
+        "arch": {
+          "type": "string"
+        },
+        "backends": {
           "anyOf": [
             {
               "items": {
@@ -827,17 +853,34 @@
             }
           ]
         },
-        "protocol": {
+        "free": {
+          "$ref": "#/$defs/Free"
+        },
+        "kvm": {
+          "type": "boolean"
+        },
+        "nested": {
+          "type": "boolean"
+        },
+        "os": {
+          "type": "string"
+        },
+        "run_slots": {
           "type": "integer"
         },
-        "resources": {
-          "$ref": "#/$defs/Resources"
+        "running": {
+          "type": "integer"
         }
       },
       "required": [
-        "protocol",
-        "capabilities",
-        "resources"
+        "os",
+        "arch",
+        "kvm",
+        "nested",
+        "backends",
+        "run_slots",
+        "running",
+        "free"
       ],
       "type": "object"
     },
@@ -923,6 +966,25 @@
       },
       "required": [
         "error"
+      ],
+      "type": "object"
+    },
+    "Free": {
+      "properties": {
+        "cpu": {
+          "type": "number"
+        },
+        "disk_gib": {
+          "type": "number"
+        },
+        "mem_gib": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "cpu",
+        "mem_gib",
+        "disk_gib"
       ],
       "type": "object"
     },
@@ -1463,6 +1525,25 @@
       ],
       "type": "object"
     },
+    "Issue": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "identifier",
+        "title"
+      ],
+      "type": "object"
+    },
     "IssueDetailResponse": {
       "properties": {
         "attempts": {
@@ -1905,27 +1986,11 @@
         "attempt": {
           "type": "integer"
         },
-        "flows": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "id": {
           "type": "string"
         },
-        "identifier": {
-          "type": "string"
-        },
-        "needs": {
-          "$ref": "#/$defs/Resources"
+        "issue": {
+          "$ref": "#/$defs/Issue"
         },
         "priority": {
           "anyOf": [
@@ -1937,33 +2002,16 @@
             }
           ]
         },
-        "queued_at": {
-          "format": "date-time",
-          "type": "string"
-        },
         "requires": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/Requires"
         }
       },
       "required": [
         "id",
-        "identifier",
         "attempt",
         "priority",
-        "requires",
-        "needs",
-        "flows",
-        "queued_at"
+        "issue",
+        "requires"
       ],
       "type": "object"
     },
@@ -2001,21 +2049,17 @@
           "format": "date-time",
           "type": "string"
         },
-        "identifier": {
+        "job": {
           "type": "string"
         },
-        "job_id": {
-          "type": "string"
-        },
-        "worker_id": {
+        "worker": {
           "type": "string"
         }
       },
       "required": [
-        "job_id",
-        "identifier",
+        "job",
         "attempt",
-        "worker_id",
+        "worker",
         "expires"
       ],
       "type": "object"
@@ -2628,6 +2672,10 @@
         "job": {
           "$ref": "#/$defs/Job"
         },
+        "queued_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "waiting": {
           "anyOf": [
             {
@@ -2644,6 +2692,7 @@
       },
       "required": [
         "job",
+        "queued_at",
         "waiting"
       ],
       "type": "object"
@@ -2996,26 +3045,36 @@
       ],
       "type": "object"
     },
-    "Resources": {
+    "Requires": {
       "properties": {
-        "cpus": {
-          "type": "integer"
+        "capabilities": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "disk_mib": {
-          "type": "integer"
+        "cpu": {
+          "type": "number"
         },
-        "memory_mib": {
-          "type": "integer"
+        "disk_gib": {
+          "type": "number"
         },
-        "run_slots": {
-          "type": "integer"
+        "mem_gib": {
+          "type": "number"
         }
       },
       "required": [
-        "cpus",
-        "memory_mib",
-        "disk_mib",
-        "run_slots"
+        "capabilities",
+        "cpu",
+        "mem_gib",
+        "disk_gib"
       ],
       "type": "object"
     },
@@ -6018,11 +6077,11 @@
     },
     "Worker": {
       "properties": {
+        "available": {
+          "$ref": "#/$defs/Capacity"
+        },
         "declaration": {
           "$ref": "#/$defs/Declaration"
-        },
-        "free": {
-          "$ref": "#/$defs/Resources"
         },
         "id": {
           "type": "string"
@@ -6035,8 +6094,8 @@
       "required": [
         "id",
         "declaration",
-        "free",
-        "last_check_in"
+        "last_check_in",
+        "available"
       ],
       "type": "object"
     },

@@ -35,7 +35,8 @@ func workerPost(t *testing.T, ts *httptest.Server, path, body string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("X-Worker", "w1")
+	req.Header.Set("X-Worker", "taichi")
+	req.Header.Set(worker.ProtocolHeader, "1")
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -44,35 +45,42 @@ func workerPost(t *testing.T, ts *httptest.Server, path, body string) int {
 	return resp.StatusCode
 }
 
-const checkInBody = `{"protocol":1,"capabilities":["linux"],"resources":{"cpus":4,"memory_mib":4096,"disk_mib":1000,"run_slots":1}}`
+const checkInBody = `{"os":"linux","arch":"x86_64","kvm":true,"nested":true,"backends":["smolvm"],"run_slots":2,"running":1,"free":{"cpu":16,"mem_gib":52,"disk_gib":210}}`
 
-// The worker API is served under the remote kind only.
-func TestWorkerAPIServedUnderRemoteKindOnly(t *testing.T) {
+// worker-api: Mounted under the remote kind.
+func TestMountedUnderTheRemoteKind(t *testing.T) {
 	t.Parallel()
 
-	var m *worker.Matcher
+	m := worker.NewMatcher(worker.NewTTLLeaser(time.Minute), time.Now, nil)
 	ts := workerTestServer(t, func() *worker.Matcher { return m })
+	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
+		t.Fatalf("check-in under remote = %d, want 200", got)
+	}
+}
+
+// worker-api: Not mounted under smolvm; worker-dispatch: Other kinds
+// unchanged. The server gets no matcher under any kind but remote.
+func TestNotMountedUnderSmolvm(t *testing.T) {
+	t.Parallel()
+
+	ts := workerTestServer(t, func() *worker.Matcher { return nil })
 	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusNotFound {
 		t.Fatalf("check-in under another kind = %d, want 404", got)
 	}
 	if body := getJSONMap(t, ts.URL+"/api/v1/state"); body["workers"] != nil {
 		t.Fatalf("state lists workers under another kind: %v", body["workers"])
 	}
-	m = worker.NewMatcher(worker.NewTTLLeaser(time.Minute), time.Now, nil)
-	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
-		t.Fatalf("check-in under remote = %d, want 200", got)
-	}
 }
 
-// Workers and leases are visible in state.
-func TestStateListsWorkersAndLeases(t *testing.T) {
+// worker-dispatch: A running remote job.
+func TestARunningRemoteJob(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	m := worker.NewMatcher(worker.NewTTLLeaser(time.Minute), func() time.Time { return now }, nil)
 	ts := workerTestServer(t, func() *worker.Matcher { return m })
-	m.Submit(worker.Job{ID: "D1", Identifier: "ONS-7", Attempt: 2})
-	m.Submit(worker.Job{ID: "D2", Identifier: "ONS-8", Requires: []string{"gpu"}})
+	m.Submit(worker.Job{ID: "ONS-7", Attempt: 1})
+	m.Submit(worker.Job{ID: "ONS-8", Attempt: 1, Requires: worker.Requires{Capabilities: []string{"gpu"}}})
 	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
 		t.Fatal(got)
 	}
@@ -86,7 +94,9 @@ func TestStateListsWorkersAndLeases(t *testing.T) {
 	}
 	w := workers[0].(map[string]any)
 	decl, _ := w["declaration"].(map[string]any)
-	if w["id"] != "w1" || w["last_check_in"] != "2026-10-29T12:00:00Z" || decl["capabilities"] == nil || decl["resources"] == nil {
+	free, _ := decl["free"].(map[string]any)
+	if w["id"] != "taichi" || w["last_check_in"] != "2026-10-29T12:00:00Z" || decl["os"] != "linux" ||
+		decl["nested"] != true || decl["running"] != float64(1) || free["disk_gib"] != float64(210) {
 		t.Fatalf("worker = %v", w)
 	}
 	leases, _ := ws["leases"].([]any)
@@ -94,7 +104,7 @@ func TestStateListsWorkersAndLeases(t *testing.T) {
 		t.Fatalf("leases = %v", ws["leases"])
 	}
 	l := leases[0].(map[string]any)
-	if l["job_id"] != "D1" || l["identifier"] != "ONS-7" || l["attempt"] != float64(2) || l["worker_id"] != "w1" || l["expires"] != "2026-10-29T12:01:00Z" {
+	if l["job"] != "ONS-7" || l["attempt"] != float64(1) || l["worker"] != "taichi" || l["expires"] != "2026-10-29T12:01:00Z" {
 		t.Fatalf("lease = %v", l)
 	}
 	queue, _ := ws["queue"].([]any)
@@ -126,7 +136,7 @@ func introspect(t *testing.T, ts *httptest.Server, auth, token string) (int, map
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("X-Worker", "w1")
+	req.Header.Set("X-Worker", "taichi")
 	if auth != "" {
 		req.Header.Set("Authorization", "Bearer "+auth)
 	}
@@ -144,7 +154,7 @@ type issuerTokens struct{ i *jobtoken.Issuer }
 
 func (x issuerTokens) Mint(j worker.Job) (map[string]string, error) {
 	flows := make([]jobtoken.Flow, 0, len(j.Flows))
-	for _, f := range j.Flows {
+	for f := range j.Flows {
 		flows = append(flows, jobtoken.Flow(f))
 	}
 	toks, err := x.i.Mint(j.ID, uint64(j.Attempt), flows)
@@ -166,21 +176,25 @@ func TestIntrospectJobTokens(t *testing.T) {
 	issuer := jobtoken.NewIssuer()
 	m := worker.NewMatcher(worker.NewTTLLeaser(time.Minute), time.Now, issuerTokens{issuer})
 	ts := introspectServer(t, m, func() *jobtoken.Issuer { return issuer })
-	m.Submit(worker.Job{ID: "D1", Identifier: "ONS-7", Attempt: 1, Flows: []string{"stdio", "egress", "mcp", "bundles", "usage"}})
+	flows := map[string]string{}
+	for _, f := range []string{"stdio", "egress", "mcp", "bundles", "usage"} {
+		flows[f] = "https://edge.example/" + f
+	}
+	m.Submit(worker.Job{ID: "ONS-7", Attempt: 1, Flows: flows})
 	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
 		t.Fatal(got)
 	}
-	offer, ok, err := m.Poll("w1")
+	offer, ok, err := m.Poll("taichi")
 	if !ok || err != nil || len(offer.Flows) != 5 {
 		t.Fatalf("offer %+v ok=%v err=%v", offer, ok, err)
 	}
-	mcp := offer.Flows[2]
-	if mcp.Name != "mcp" || mcp.Token == "" {
+	mcp := offer.Flows["mcp"]
+	if mcp.URL != "https://edge.example/mcp" || mcp.Token == "" {
 		t.Fatalf("flow %+v", mcp)
 	}
 
 	status, body := introspect(t, ts, testControlToken, mcp.Token)
-	if status != http.StatusOK || body["job"] != "D1" || body["attempt"] != float64(1) || body["flow"] != "mcp" {
+	if status != http.StatusOK || body["job"] != "ONS-7" || body["attempt"] != float64(1) || body["flow"] != "mcp" {
 		t.Fatalf("introspect = %d %v", status, body)
 	}
 	if status, _ := introspect(t, ts, "", mcp.Token); status != http.StatusUnauthorized {
@@ -200,13 +214,13 @@ func TestIntrospectJobTokens(t *testing.T) {
 	if !strings.Contains(string(state), `"leases"`) {
 		t.Fatalf("state lists no lease: %s", state)
 	}
-	for _, f := range offer.Flows {
+	for name, f := range offer.Flows {
 		if strings.Contains(string(state), f.Token) {
-			t.Fatalf("state shows the %s token", f.Name)
+			t.Fatalf("state shows the %s token", name)
 		}
 	}
 
-	if err := m.Report("w1", "D1", 1, worker.Outcome{Succeeded: true}); err != nil {
+	if err := m.Report("taichi", "ONS-7", 1, worker.Outcome{Succeeded: true, Machine: worker.MachineStopped}); err != nil {
 		t.Fatal(err)
 	}
 	if status, _ := introspect(t, ts, testControlToken, mcp.Token); status != http.StatusNotFound {

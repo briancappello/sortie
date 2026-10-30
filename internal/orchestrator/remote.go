@@ -2,15 +2,16 @@ package orchestrator
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/jobtoken"
 	"github.com/sortie-ai/sortie/internal/worker"
-	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
 // leaseSweepInterval is how often the orchestrator ends attempts whose
@@ -39,7 +40,7 @@ type jobTokens struct{ issuer *jobtoken.Issuer }
 
 func (t jobTokens) Mint(j worker.Job) (map[string]string, error) {
 	flows := make([]jobtoken.Flow, 0, len(j.Flows))
-	for _, f := range j.Flows {
+	for f := range j.Flows {
 		flows = append(flows, jobtoken.Flow(f))
 	}
 	toks, err := t.issuer.Mint(j.ID, uint64(max(j.Attempt, 0)), flows)
@@ -103,42 +104,93 @@ func (o *Orchestrator) expireLeases() {
 	}
 }
 
+// credentialPlaceholder is what the machine holds in place of the
+// credential name; the egress proxy replaces it on the credential's
+// hosts.
+func credentialPlaceholder(name string) string { return "sortie-credential-" + name }
+
 // remoteJob builds the matcher job of one dispatched attempt of issue.
-func remoteJob(ctx context.Context, cfg config.ServiceConfig, issue domain.Issue, attempt *int, agentKind string) worker.Job {
+// Its ID is the issue identifier and its attempt the run history's,
+// counting from 1. Its run descriptor holds no credential: Sortie reads
+// no credential value under the remote kind, and the machine gets each
+// credential the workflow binds only as a placeholder.
+func remoteJob(ctx context.Context, cfg config.ServiceConfig, issue domain.Issue, attempt *int, agentKind, defaultCommand string) worker.Job {
 	rc := cfg.Environment.Remote
-	n := normalizeAttempt(attempt)
-	id := dispatchIDFromContext(ctx)
-	if id == "" {
-		id = rand.Text()
+	n := normalizeAttempt(attempt) + 1
+	caps := slices.Clone(rc.Requires.Capabilities)
+	if rc.Backend != "" && !slices.Contains(caps, rc.Backend) {
+		caps = append(caps, rc.Backend)
 	}
-	key, _ := workspace.SanitizeKey(issue.Identifier)
+	if caps == nil {
+		caps = []string{}
+	}
+	identity := sessionIdentityFrom(ctx)
+	identity.Token = ""
+	env := map[string]string{}
+	for _, v := range buildSessionEnv(sessionEnvParams{
+		Issue: issue, DispatchID: dispatchIDFromContext(ctx), Attempt: attempt, Identity: identity,
+		WorkspacePath: remoteWorkspace, Purpose: sessionPurposeWork,
+	}) {
+		if v.Name != envSessionAPIURL && v.Name != envSessionToken {
+			env[v.Name] = v.Value
+		}
+	}
+	creds := make([]worker.RunCredential, 0, len(rc.Credentials))
+	for _, c := range rc.Credentials {
+		env[c.Env] = credentialPlaceholder(c.Name)
+		creds = append(creds, worker.RunCredential{Name: c.Name, Env: c.Env, Placeholder: credentialPlaceholder(c.Name),
+			Hosts: slices.Clone(c.Hosts), Header: c.Header})
+	}
+	command, args := remoteAgentCommand(cfg.AgentCommand(agentKind, false), defaultCommand)
 	return worker.Job{
-		ID:         id,
-		Identifier: issue.Identifier,
-		Attempt:    n,
-		Priority:   issue.Priority,
-		Requires:   append([]string{}, rc.Requires...),
-		Needs:      worker.Resources{CPUs: rc.CPUs, MemoryMiB: int64(rc.MemoryMiB), DiskMiB: int64(rc.DiskMiB)},
-		Flows:      append([]string{}, rc.Flows...),
+		ID:       issue.Identifier,
+		Attempt:  n,
+		Priority: issue.Priority,
+		Issue:    worker.Issue{ID: issue.ID, Identifier: issue.Identifier, Title: issue.Title},
+		Requires: worker.Requires{Capabilities: caps, CPU: rc.Requires.CPU, MemGiB: rc.Requires.MemGiB, DiskGiB: rc.Requires.DiskGiB},
+		Flows:    maps.Clone(rc.Flows),
 		Run: worker.Run{
-			IssueID:      issue.ID,
-			Identifier:   issue.Identifier,
-			Title:        issue.Title,
-			URL:          issue.URL,
-			Attempt:      n,
-			AgentKind:    agentKind,
-			WorkspaceKey: key,
+			Backend:        rc.Backend,
+			Image:          rc.Image,
+			Command:        command,
+			Args:           args,
+			Env:            env,
+			StallTimeoutMS: cfg.Agent.StallTimeoutMS,
+			SeedPath:       worker.SeedPath(issue.Identifier, n),
+			Credentials:    creds,
 		},
 	}
 }
 
+// remoteWorkspace is the workspace path inside a remote job's machine.
+const remoteWorkspace = "/workspace"
+
+// remoteAgentCommand splits the agent command into the program and its
+// arguments: a list as written, a string on whitespace, and the kind's
+// default command when the workflow sets none.
+func remoteAgentCommand(c domain.AgentCommand, defaultCommand string) (string, []string) {
+	argv := slices.Clone(c.Argv)
+	if len(argv) == 0 {
+		line := c.Line
+		if strings.TrimSpace(line) == "" {
+			line = defaultCommand
+		}
+		argv = strings.Fields(line)
+	}
+	if len(argv) == 0 {
+		return "", []string{}
+	}
+	return argv[0], append([]string{}, argv[1:]...)
+}
+
 // RunRemoteAttempt hands one attempt of issue to the matcher and waits
 // for it to end: by the worker's report, by its lease expiring, or by
-// ctx. Nothing of the issue runs on this host. onExit is called exactly
+// ctx. Nothing of the issue runs on this host. defaultCommand is the
+// agent kind's own command, used when the workflow sets none. onExit is called exactly
 // once with the result, which the orchestrator handles as any worker
 // exit, retries included.
-func RunRemoteAttempt(ctx context.Context, m *worker.Matcher, cfg config.ServiceConfig, issue domain.Issue, attempt *int, agentKind string, onExit func(issueID string, result WorkerResult)) {
-	job := remoteJob(ctx, cfg, issue, attempt, agentKind)
+func RunRemoteAttempt(ctx context.Context, m *worker.Matcher, cfg config.ServiceConfig, issue domain.Issue, attempt *int, agentKind, defaultCommand string, onExit func(issueID string, result WorkerResult)) {
+	job := remoteJob(ctx, cfg, issue, attempt, agentKind, defaultCommand)
 	ended := m.Submit(job)
 	// The run spends nothing on this host. Protocol 1 reports no token
 	// usage, so the run's figures are the zero a run without a turn has.
@@ -178,7 +230,7 @@ func RunRemoteAttempt(ctx context.Context, m *worker.Matcher, cfg config.Service
 		case out.Cancelled:
 			onExit(issue.ID, result(WorkerExitCancelled, nil))
 		default:
-			msg := out.Error
+			msg := out.Reason
 			if msg == "" {
 				msg = "worker reported failure"
 			}

@@ -1713,7 +1713,8 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 		}
 
 		if cfg := deps.ConfigFunc(); isRemoteKind(cfg.Environment) && o.remote != nil {
-			RunRemoteAttempt(ctx, o.remote.matcher, cfg, issue, attempt, agentKind, deps.OnExit)
+			meta, _ := o.preflightParams.AgentRegistry.Meta(agentKind)
+			RunRemoteAttempt(ctx, o.remote.matcher, cfg, issue, attempt, agentKind, meta.DefaultCommand, deps.OnExit)
 			return
 		}
 

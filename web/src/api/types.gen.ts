@@ -138,6 +138,13 @@ export interface BudgetExhaustedResponse {
   status_text_full: string;
 }
 
+export interface Capacity {
+  run_slots: number;
+  cpu: number;
+  mem_gib: number;
+  disk_gib: number;
+}
+
 export interface ChainGroup {
   name: string;
   runs: number;
@@ -185,9 +192,14 @@ export interface ConfigResponse {
 }
 
 export interface Declaration {
-  protocol: number;
-  capabilities: string[] | null;
-  resources: Resources;
+  os: string;
+  arch: string;
+  kvm: boolean;
+  nested: boolean;
+  backends: string[] | null;
+  run_slots: number;
+  running: number;
+  free: Free;
 }
 
 export interface Duration {
@@ -209,6 +221,12 @@ export interface ErrorDetail {
 
 export interface ErrorResponse {
   error: ErrorDetail;
+}
+
+export interface Free {
+  cpu: number;
+  mem_gib: number;
+  disk_gib: number;
 }
 
 export interface Funnel {
@@ -331,6 +349,12 @@ export interface HopDecisionResponse {
   completed_at: string;
 }
 
+export interface Issue {
+  id: string;
+  identifier: string;
+  title: string;
+}
+
 export interface IssueDetailResponse {
   issue_identifier: string;
   issue_id: string;
@@ -404,13 +428,10 @@ export interface IssueResponse {
 
 export interface Job {
   id: string;
-  identifier: string;
   attempt: number;
   priority: number | null;
-  requires: string[] | null;
-  needs: Resources;
-  flows: string[] | null;
-  queued_at: string;
+  issue: Issue;
+  requires: Requires;
 }
 
 export interface LastStageResponse {
@@ -419,10 +440,9 @@ export interface LastStageResponse {
 }
 
 export interface LeaseView {
-  job_id: string;
-  identifier: string;
+  job: string;
   attempt: number;
-  worker_id: string;
+  worker: string;
   expires: string;
 }
 
@@ -551,6 +571,7 @@ export interface PullRequestResponse {
 
 export interface Queued {
   job: Job;
+  queued_at: string;
   waiting: string[] | null;
 }
 
@@ -607,11 +628,11 @@ export interface Report {
   self_review: SelfReview | null;
 }
 
-export interface Resources {
-  cpus: number;
-  memory_mib: number;
-  disk_mib: number;
-  run_slots: number;
+export interface Requires {
+  capabilities: string[] | null;
+  cpu: number;
+  mem_gib: number;
+  disk_gib: number;
 }
 
 export interface RetryEntryResponse {
@@ -1211,8 +1232,8 @@ export interface VerdictCount {
 export interface Worker {
   id: string;
   declaration: Declaration;
-  free: Resources;
   last_check_in: string;
+  available: Capacity;
 }
 
 export interface WorkflowHealthResponse {
