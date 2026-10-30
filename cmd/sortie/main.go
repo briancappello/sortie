@@ -1051,6 +1051,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			SnapshotFn:             o.SnapshotFunc(),
 			WorkersFn:              o.Workers,
 			WorkerIdentityHeaderFn: o.WorkerIdentityHeader,
+			JobTokensFn:            o.JobTokens,
 			RefreshFn:              o.RefreshFunc(),
 			RetryNowFn:             o.RetryNowFunc(),
 			AcknowledgeFn:          o.AcknowledgeFunc(),

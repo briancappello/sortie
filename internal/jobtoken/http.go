@@ -34,18 +34,38 @@ func (i *Issuer) Require(flow Flow, jobOf func(*http.Request) string, next http.
 	})
 }
 
-// IntrospectHandler answers a proxy asking what the bearer token it was
-// shown grants: 200 with the [Grant] as JSON, or 401 when the token is
-// unknown or its attempt ended. The response never echoes the token.
+// maxIntrospectBody bounds the JSON body of an introspection request.
+const maxIntrospectBody = 4 << 10
+
+type introspectRequest struct {
+	Token string `json:"token"`
+}
+
+type introspectReply struct {
+	Job     string `json:"job"`
+	Attempt uint64 `json:"attempt"`
+	Flow    Flow   `json:"flow"`
+}
+
+// IntrospectHandler answers a proxy asking what a token it was shown
+// grants. The request body is {"token"}; the answer is 200 with
+// {"job", "attempt", "flow"} for a live token, and 404 for any other
+// or for an unreadable body. The answer never echoes the token. The
+// caller authenticates the proxy before this handler.
 func (i *Issuer) IntrospectHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		g, err := i.Lookup(bearer(r))
+		var req introspectRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIntrospectBody)).Decode(&req); err != nil {
+			http.Error(w, "unknown or ended job token", http.StatusNotFound)
+			return
+		}
+		g, err := i.Lookup(req.Token)
 		if err != nil {
-			http.Error(w, "invalid or ended job token", http.StatusUnauthorized)
+			http.Error(w, "unknown or ended job token", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(g)
+		_ = json.NewEncoder(w).Encode(introspectReply{Job: g.JobID, Attempt: g.Attempt, Flow: g.Flow})
 	})
 }

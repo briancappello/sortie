@@ -19,7 +19,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
-	"github.com/sortie-ai/sortie/internal/worker"
 	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
@@ -184,10 +183,6 @@ type unaccountedTurnsMsg struct {
 // OrchestratorParams holds the construction-time dependencies for
 // [NewOrchestrator]. All fields are required unless documented otherwise.
 type OrchestratorParams struct {
-	// WorkerTokenMinter mints each flow token of a worker offer under the
-	// remote environment kind. Nil mints empty tokens.
-	WorkerTokenMinter worker.TokenMinter
-
 	State           *State
 	Logger          *slog.Logger
 	TrackerAdapter  domain.TrackerAdapter
@@ -584,7 +579,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		workflowPath = params.WorkflowManager.WorkflowAbsPath()
 	}
 	o.environments = newEnvironmentResolver(params.DBPath, workflowPath, logger)
-	o.remote = newRemoteWorkers(time.Now, params.WorkerTokenMinter)
+	o.remote = newRemoteWorkers(time.Now)
 	if o.preflightParams.EnvironmentFunc == nil {
 		o.preflightParams.EnvironmentFunc = o.environments.resolve
 	}

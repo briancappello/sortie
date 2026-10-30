@@ -3,6 +3,7 @@ package worker
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -286,11 +287,8 @@ func TestCheckIn(t *testing.T) {
 // credential; heartbeat renews the lease; report ends the attempt.
 func TestPollHeartbeatReport(t *testing.T) {
 	c := &clock{time.Unix(0, 0)}
-	var minted []string
-	m := NewMatcher(NewTTLLeaser(time.Minute), c.now, func(j Job, flow string) string {
-		minted = append(minted, j.ID+"/"+flow)
-		return "tok-" + flow
-	})
+	toks := &fakeTokens{}
+	m := NewMatcher(NewTTLLeaser(time.Minute), c.now, toks)
 	a := api{t, Handler(m, "X-Worker-Id")}
 	if r := a.post("w", "/api/v1/worker/poll", ""); r.Code != http.StatusNotFound {
 		t.Fatalf("poll before check-in: %d", r.Code)
@@ -313,8 +311,8 @@ func TestPollHeartbeatReport(t *testing.T) {
 	if offer.Protocol != 1 || offer.Job.ID != "j" || offer.Lease.WorkerID != "w" || offer.Lease.Attempt != 3 || offer.Run.Identifier != "ONS-1" {
 		t.Fatalf("%+v", offer)
 	}
-	if !reflect.DeepEqual(offer.Flows, []Flow{{"git", "tok-git"}, {"tracker", "tok-tracker"}}) || !reflect.DeepEqual(minted, []string{"j/git", "j/tracker"}) {
-		t.Fatalf("flows %+v minted %v", offer.Flows, minted)
+	if !reflect.DeepEqual(offer.Flows, []Flow{{"git", "tok-j-3-git"}, {"tracker", "tok-j-3-tracker"}}) || !reflect.DeepEqual(toks.minted, []string{"j/3"}) {
+		t.Fatalf("flows %+v minted %v", offer.Flows, toks.minted)
 	}
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal(r.Body.Bytes(), &raw)
@@ -349,6 +347,78 @@ func TestPollHeartbeatReport(t *testing.T) {
 	}
 	if r := a.post("w", "/api/v1/worker/jobs/j/attempts/3/report", `{"outcome":"succeeded"}`); r.Code != http.StatusConflict {
 		t.Fatalf("second report: %d", r.Code)
+	}
+}
+
+type fakeTokens struct {
+	minted, voided []string
+	err            error
+}
+
+func (f *fakeTokens) Mint(j Job) (map[string]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.minted = append(f.minted, fmt.Sprintf("%s/%d", j.ID, j.Attempt))
+	out := map[string]string{}
+	for _, fl := range j.Flows {
+		out[fl] = fmt.Sprintf("tok-%s-%d-%s", j.ID, j.Attempt, fl)
+	}
+	return out, nil
+}
+
+func (f *fakeTokens) Void(jobID string) { f.voided = append(f.voided, jobID) }
+
+// An attempt's tokens are minted once at the grant and voided on every
+// way the attempt ends: report, lease expiry and cancel.
+func TestTokensMintedAtGrantAndVoidedAtEnd(t *testing.T) {
+	c := &clock{time.Unix(0, 0)}
+	toks := &fakeTokens{}
+	m := NewMatcher(NewTTLLeaser(time.Minute), c.now, toks)
+	m.CheckIn("w", decl(nil, Resources{CPUs: 8, MemoryMiB: 8192, DiskMiB: 100, RunSlots: 3}))
+	for _, id := range []string{"r", "e", "c"} {
+		m.Submit(Job{ID: id, Attempt: 1, Flows: []string{"stdio", "mcp"}})
+	}
+	for range 3 {
+		if _, ok, err := m.Poll("w"); !ok || err != nil {
+			t.Fatal(ok, err)
+		}
+	}
+	if !reflect.DeepEqual(toks.minted, []string{"r/1", "e/1", "c/1"}) || len(toks.voided) != 0 {
+		t.Fatalf("minted %v voided %v", toks.minted, toks.voided)
+	}
+	if err := m.Report("w", "r", 1, Outcome{Succeeded: true}); err != nil {
+		t.Fatal(err)
+	}
+	m.Cancel("c")
+	if !reflect.DeepEqual(toks.voided, []string{"r", "c"}) {
+		t.Fatalf("voided %v", toks.voided)
+	}
+	c.t = c.t.Add(2 * time.Minute)
+	m.ExpireLeases()
+	if !reflect.DeepEqual(toks.voided, []string{"r", "c", "e"}) {
+		t.Fatalf("voided %v", toks.voided)
+	}
+}
+
+// A grant whose tokens cannot be minted is undone: the job stays
+// queued and the worker keeps its slot.
+func TestFailedMintLeavesJobQueued(t *testing.T) {
+	c := &clock{time.Unix(0, 0)}
+	toks := &fakeTokens{err: errors.New("no entropy")}
+	m := NewMatcher(NewTTLLeaser(time.Minute), c.now, toks)
+	m.CheckIn("w", decl(nil, big()))
+	m.Submit(Job{ID: "j", Flows: []string{"stdio"}})
+	if _, ok, err := m.Poll("w"); ok || err == nil {
+		t.Fatalf("poll ok=%v err=%v", ok, err)
+	}
+	s := m.Snapshot()
+	if len(s.Queue) != 1 || len(s.Leases) != 0 || s.Workers[0].Free != big() {
+		t.Fatalf("%+v", s)
+	}
+	toks.err = nil
+	if _, ok, err := m.Poll("w"); !ok || err != nil {
+		t.Fatalf("retry ok=%v err=%v", ok, err)
 	}
 }
 

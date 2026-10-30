@@ -8,6 +8,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/jobtoken"
 	"github.com/sortie-ai/sortie/internal/worker"
 	"github.com/sortie-ai/sortie/internal/workspace"
 )
@@ -17,16 +18,42 @@ import (
 const leaseSweepInterval = time.Second
 
 // remoteWorkers holds the matcher the remote environment kind hands
-// runs to, and the lease rule it uses.
+// runs to, the lease rule it uses, and the issuer of its job tokens.
 type remoteWorkers struct {
 	leaser  *worker.TTLLeaser
 	matcher *worker.Matcher
+	tokens  *jobtoken.Issuer
 }
 
-func newRemoteWorkers(now func() time.Time, mint worker.TokenMinter) *remoteWorkers {
+func newRemoteWorkers(now func() time.Time) *remoteWorkers {
 	leaser := worker.NewTTLLeaser(time.Duration(60000) * time.Millisecond)
-	return &remoteWorkers{leaser: leaser, matcher: worker.NewMatcher(leaser, now, mint)}
+	tokens := jobtoken.NewIssuer()
+	return &remoteWorkers{leaser: leaser, tokens: tokens,
+		matcher: worker.NewMatcher(leaser, now, jobTokens{tokens})}
 }
+
+// jobTokens gives the matcher the issuer's tokens: one per flow of the
+// job, bound to its attempt, minted at the lease grant and revoked when
+// the attempt ends.
+type jobTokens struct{ issuer *jobtoken.Issuer }
+
+func (t jobTokens) Mint(j worker.Job) (map[string]string, error) {
+	flows := make([]jobtoken.Flow, 0, len(j.Flows))
+	for _, f := range j.Flows {
+		flows = append(flows, jobtoken.Flow(f))
+	}
+	toks, err := t.issuer.Mint(j.ID, uint64(max(j.Attempt, 0)), flows)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(toks))
+	for f, tok := range toks {
+		out[string(f)] = tok.Reveal()
+	}
+	return out, nil
+}
+
+func (t jobTokens) Void(jobID string) { t.issuer.OnLeaseEnd(jobID) }
 
 // applyConfig takes the lease duration of cfg's remote block.
 func (r *remoteWorkers) applyConfig(cfg config.EnvironmentConfig) {
@@ -47,6 +74,15 @@ func (o *Orchestrator) Workers() *worker.Matcher {
 		return nil
 	}
 	return o.remote.matcher
+}
+
+// JobTokens returns the issuer of job tokens while the current
+// configuration selects the remote environment kind, and nil otherwise.
+func (o *Orchestrator) JobTokens() *jobtoken.Issuer {
+	if o.Workers() == nil {
+		return nil
+	}
+	return o.remote.tokens
 }
 
 // WorkerIdentityHeader returns worker.identity_header of the current
