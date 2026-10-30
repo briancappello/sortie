@@ -1969,49 +1969,85 @@ The VM trusts smolvm's interception certificate through `SSL_CERT_FILE`, `NODE_E
 environment:
   kind: remote
   remote:
-    requires: [linux, amd64]       # optional capabilities every worker must declare
-    cpus: 2                        # optional, free CPUs a job needs on a worker
-    memory_mib: 4096               # optional
-    disk_mib: 20480                # optional
-    flows: [git, tracker]          # optional, flows each run reaches
-    lease_ttl_ms: 60000            # optional
+    image: ghcr.io/example/agent:1           # required, machine image reference
+    backend: smolvm                          # optional, isolation backend
+    requires:                                # optional, what a job needs of a worker
+      capabilities: [nested]
+      cpu: 4
+      mem_gib: 8
+      disk_gib: 20
+    credentials:                             # optional, placeholders only
+      - name: anthropic
+        env: ANTHROPIC_API_KEY
+        hosts: [api.anthropic.com]
+    flows:                                   # required, one URL per data-plane flow
+      stdio:   { url: wss://edge.example/stdio }
+      egress:  { url: https://egress.example:3128 }
+      mcp:     { url: https://edge.example/mcp }
+      bundles: { url: https://edge.example/bundles }
+      usage:   { url: https://edge.example/usage }
+    lease_ttl_ms: 60000                      # optional
 worker:
-  identity_header: X-Sortie-Worker # optional
+  identity_header: X-Sortie-Worker-Identity  # optional
 ```
 
-The `remote` kind runs nothing of an issue on Sortie's host. Each dispatched attempt becomes a job in the worker matcher, carrying the issue identifier, the attempt number, the requirements above and the issue's plan priority. Workers dial Sortie over the worker API and are never dialed. A worker runs the job and reports its outcome; the outcome ends the attempt as any worker exit does: success takes the continuation path, failure and an expired lease take the failure retry path with backoff, and a cancellation withdraws the job.
+The `remote` kind runs nothing of an issue on Sortie's host. Each dispatched attempt becomes a job in the worker matcher. The job's ID is the issue identifier, and its attempt is the run history's attempt, so a first dispatch is attempt `1`. The job also carries the issue, the requirements above and the issue's plan priority. Workers dial Sortie over the worker API, and Sortie never dials a worker. A worker runs the job and reports its outcome. The outcome ends the attempt as a local run with the same exit ends it: success takes the continuation path, failure and an expired lease take the failure retry path with backoff, and a cancellation withdraws the job. The next attempt is a new job attempt with new tokens. Sortie never resumes an old attempt on another worker.
 
-The matcher offers queued jobs in priority order, lower first and a job without a priority last, then oldest first. A job goes only to a worker that declares every capability in `requires`, a free run slot, and at least `cpus`, `memory_mib` and `disk_mib` free. A running machine uses a run slot, its CPUs, memory and disk; a stopped one holds only its disk. For each queued job, `GET /api/v1/state` says why it waits.
+The matcher offers queued jobs in priority order, lower first and a job without a priority last, then oldest first. A job goes only to a worker that has all of these:
+
+- every capability in `requires.capabilities` and the `backend`. A worker's capabilities are its `os`, its `arch`, `kvm` and `nested` when it declares them `true`, and each of its `backends`.
+- a free run slot: it declares fewer `running` machines than `run_slots`.
+- at least `cpu`, `mem_gib` and `disk_gib` free.
+
+A running machine uses a run slot. A stopped machine uses only disk, which the worker counts in its free disk. Between check-ins, Sortie counts what it handed out. A taken job uses a run slot and its sizes. A report of a stopped machine returns all except the disk, a deleted machine returns everything, and a running machine returns nothing. An expired or withdrawn lease counts as a stopped machine. The next check-in replaces the count with the worker's declaration, so a worker declares what is free after all the machines it holds. For each queued job, `GET /api/v1/state` says why it waits, for example `worker p1: no nested virtualization`.
 
 `environment.remote` fields:
 
-| Field          | Type             | Required | Default | Description |
-| -------------- | ---------------- | -------- | ------- | ----------- |
-| `requires`     | list of strings  | No       | `[]`    | Capabilities a worker must declare to take a job. |
-| `cpus`         | integer          | No       | `0`     | Free CPUs a job needs. Must not be negative. |
-| `memory_mib`   | integer          | No       | `0`     | Free memory a job needs, in MiB. Must not be negative. |
-| `disk_mib`     | integer          | No       | `0`     | Free disk a job needs, in MiB. Must not be negative. |
-| `flows`        | list of strings  | No       | `[]`    | Flows each run reaches. An offer carries a job token for each. |
-| `lease_ttl_ms` | integer          | No       | `60000` | How long a lease lasts after its grant or last heartbeat. Must be positive. |
+| Field          | Type             | Required | Default  | Description |
+| -------------- | ---------------- | -------- | -------- | ----------- |
+| `image`        | string           | Yes      | _(none)_ | The machine image reference in the run descriptor. |
+| `backend`      | string           | No       | `smolvm` | The isolation backend in the run descriptor. Each job also requires it as a capability. |
+| `requires.capabilities` | list of strings | No | `[]`   | Capabilities a worker must declare to take a job, such as `nested`, `kvm`, a backend name, an OS or an architecture. |
+| `requires.cpu` | number           | No       | `0`      | Free CPUs a job needs. Must not be negative. |
+| `requires.mem_gib` | number       | No       | `0`      | Free memory a job needs, in GiB. Must not be negative. |
+| `requires.disk_gib` | number      | No       | `0`      | Free disk a job needs, in GiB. Must not be negative. |
+| `credentials`  | list of maps     | No       | `[]`     | Credentials the agent needs, each `{name, env, hosts, header}` with the rules of `environment.smolvm.credentials`. The machine sets `env` to the placeholder `sortie-credential-<name>`, which the egress proxy replaces on requests to `hosts`. Sortie never reads the value. |
+| `flows.<flow>.url` | string       | Yes      | _(none)_ | The URL a worker reaches each data-plane flow at: `stdio`, `egress`, `mcp`, `bundles` and `usage`. All five are required, and no other flow is accepted. Each URL is absolute, uses `http`, `https`, `ws` or `wss`, and holds no user information. |
+| `lease_ttl_ms` | integer          | No       | `60000`  | How long a lease lasts after its grant or last heartbeat. Must be positive. |
 
-`worker.identity_header` names the request header that carries the worker's identity, `X-Sortie-Worker` by default. Sortie takes the identity from that header only, never from the path, so put Sortie behind a proxy that authenticates each worker and sets the header. `remote` cannot be combined with `worker.ssh_hosts`; validation fails with an error that names both settings.
+`worker.identity_header` names the request header that carries the worker's identity, `X-Sortie-Worker-Identity` by default. Sortie takes the identity from that header only, never from the path or the body. Put Sortie behind a proxy that authenticates each worker by its client certificate and sets the header. `remote` cannot be combined with `worker.ssh_hosts`. Validation fails with an error that names both settings.
 
 ##### Worker API protocol 1
 
-The worker API is served only while `environment.kind` is `remote`; under any other kind its routes answer `404`. Every request names its worker in `worker.identity_header`; without it the answer is `401`. Errors carry `{"error": {"code", "message"}}`.
+The worker API is served only while `environment.kind` is `remote`. Under any other kind, its routes answer `404`. Every request carries `X-Sortie-Worker-Protocol: 1`. A request with another value or no value answers `400` with `"supported": [1]` and changes no state. Every request names its worker in `worker.identity_header`. Without it, the answer is `401` and no state changes. Errors carry `{"error": {"code", "message"}}`.
 
 | Route | Body | Answer |
 | ----- | ---- | ------ |
-| `POST /api/v1/workers/checkin` | `{"protocol": 1, "capabilities": [...], "resources": {"cpus", "memory_mib", "disk_mib", "run_slots"}}` | `200 {"protocol": 1, "worker": id}`. A missing field answers `400` with `missing` listing each one, such as `resources.run_slots`; another protocol answers `400 unsupported_protocol`. Each check-in replaces the declaration and records the check-in time. |
-| `POST /api/v1/workers/poll` | none | `200` with one offer, or `204` when no queued job fits. `404` before the worker's first check-in. |
-| `POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat` | none | `200` with the renewed lease. `409` when the worker no longer holds that attempt's lease. |
-| `POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report` | `{"outcome": "succeeded" \| "failed", "error": "..."}` | `204`; the attempt ends. `409` when the lease expired, was withdrawn or was already reported. |
+| `POST /api/v1/workers/checkin` | `{"os", "arch", "kvm", "nested", "backends", "run_slots", "running", "free": {"cpu", "mem_gib", "disk_gib"}}`, all required | `200 {"heartbeat_ms", "lease_ms"}`: `lease_ms` is `lease_ttl_ms`, and `heartbeat_ms` is a third of it. A field that is absent or null answers `400` with `missing` listing each one by dotted path, such as `free.disk_gib`. A field of the wrong type or a negative number answers `400` with `invalid`. A refused check-in keeps the previous declaration. Each accepted check-in replaces the declaration and records the check-in time. |
+| `POST /api/v1/workers/poll` | none | `200` with one offer, or `204` when no queued job fits. `409` before the worker's first check-in. |
+| `POST /api/v1/workers/jobs/{job}/attempts/{attempt}/heartbeat` | none | `200 {"expires"}` with the renewed expiry. `409` when the worker does not hold a live lease on that attempt; the worker then stops the job's machine. |
+| `POST /api/v1/workers/jobs/{job}/attempts/{attempt}/report` | `{"outcome": "succeeded" \| "failed", "reason": "...", "machine": "running" \| "stopped" \| "deleted"}`; `reason` is optional free text | `204`: the attempt ends and the lease is released. `400` for another `outcome` or `machine`. `409` from a worker that does not hold the attempt's live lease, or for an attempt that already ended. A refused report changes nothing. |
 
-An offer is `{"protocol": 1, "job", "lease", "run", "flows"}`: the job (id, identifier, attempt, priority, requires, needs, flows), the lease (job, identifier, attempt, worker, expiry), the run descriptor (issue id, identifier, title, URL, attempt, agent kind, workspace key) and one `{"name", "token"}` per flow. The run descriptor holds no credential; a flow's token is the only secret an offer carries.
+An offer is `{"job", "lease", "run", "flows"}`:
 
-Sortie checks leases every second. An expired lease ends its attempt, and a later heartbeat or report for it answers `409`.
+- `job`: `{"id", "attempt", "priority", "issue": {"id", "identifier", "title"}, "requires": {"capabilities", "cpu", "mem_gib", "disk_gib"}}`.
+- `lease`: `{"expires"}`, an RFC 3339 time.
+- `run`: the run descriptor (see below).
+- `flows`: `{"stdio", "egress", "mcp", "bundles", "usage"}`, each `{"url", "token"}`. The URL comes from `environment.remote.flows`, and the token is that flow's job token.
 
-Each flow token is a job token: Sortie mints one per flow when it grants the lease, bound to that job, that attempt and that flow, with 256 random bits, and keeps only its SHA-256 digest. The tokens are void as soon as the attempt ends, by report, lease expiry, cancel or shutdown, and a new attempt gets new ones. No token appears in the log or in `GET /api/v1/state`. A proxy asks what a token grants with `POST /api/v1/tokens/introspect` and body `{"token": "..."}`, using Sortie's control token: the answer is `200 {"job", "attempt", "flow"}` for a live token and `404` for any other. Without the control token the answer is `401`, so a worker cannot ask.
+The run descriptor is `{"backend", "image", "command", "args", "env", "stall_timeout_ms", "seed_path", "credentials"}`:
+
+- `command` and `args` are the agent command of the run's agent kind: `agent.command` when it applies to that kind, otherwise the kind's default command. A list is passed as written. A string is split on whitespace. Sortie adds no adapter flags.
+- `env` holds the agent process variables `SORTIE_ISSUE_ID`, `SORTIE_ISSUE_IDENTIFIER`, `SORTIE_DISPATCH_ID`, `SORTIE_ATTEMPT`, `SORTIE_RULE`, `SORTIE_CHAIN_ID`, `SORTIE_SESSION_PURPOSE` (`work`), and `SORTIE_WORKSPACE` (`/workspace`). It also holds each credential's placeholder. It holds no `SORTIE_API_URL` and no `SORTIE_SESSION_TOKEN`.
+- `stall_timeout_ms` is `agent.stall_timeout_ms`.
+- `seed_path` is where the worker fetches the workspace seed on the `bundles` flow: `/jobs/{job}/attempts/{attempt}/seed`.
+- `credentials` lists each credential's `name`, `env`, `placeholder`, `hosts` and `header`, never its value.
+
+The run descriptor holds no model key, forge or tracker token, deploy key, or session token. A flow's token is the only secret an offer carries.
+
+Sortie checks leases every second. An expired lease ends its attempt as failed. A later heartbeat or report for it answers `409`.
+
+Each flow token is a job token. Sortie mints one per flow when it grants the lease. Each token is bound to that job, that attempt and that flow, holds 256 random bits, and Sortie keeps only its SHA-256 digest. The tokens become void as soon as the attempt ends, by report, lease expiry, cancel or shutdown, and a new attempt gets new ones. No token appears in the log or in `GET /api/v1/state`. That state lists each worker with its `declaration`, `last_check_in` and the `available` capacity Sortie counts. It lists each live lease as `{"job", "attempt", "worker", "expires"}`, and each queued job with `queued_at` and why it waits. A proxy asks what a token grants with `POST /api/v1/tokens/introspect` and body `{"token": "..."}`, using Sortie's control token. The answer is `200 {"job", "attempt", "flow"}` for a live token and `404` for any other. Without the control token, the answer is `401`, so a worker cannot ask.
 
 #### Host prefix
 
@@ -5029,7 +5065,7 @@ When `worker.ssh_hosts` is absent or empty, all agents run locally on the host w
 | `worker.ssh_strict_host_key_checking`   | string           | No       | `accept-new`                   | OpenSSH `StrictHostKeyChecking` value: `accept-new`, `yes`, or `no`.                       |
 | `worker.ssh_pass_env`                   | list of strings  | No       | _(absent)_                     | Names of environment variables to carry from Sortie's own environment into a remote session. Written literally; an entry given as a `$VAR` reference is ignored. |
 | `worker.ssh_disallow_pass_env`          | list of strings  | No       | _(absent)_                     | Names of environment variables Sortie never carries into a remote session. Written literally; an entry given as a `$VAR` reference is ignored. |
-| `worker.identity_header`               | string           | No       | `X-Sortie-Worker`              | Under `environment.kind: remote`, the request header that names the worker of a worker API request. See [Kind `remote`](#kind-remote). |
+| `worker.identity_header`               | string           | No       | `X-Sortie-Worker-Identity`     | Under `environment.kind: remote`, the request header that names the worker of a worker API request. See [Kind `remote`](#kind-remote). |
 
 #### SSH Hook Environment
 
