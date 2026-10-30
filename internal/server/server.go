@@ -19,6 +19,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/plan"
 	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/server/ui"
+	"github.com/sortie-ai/sortie/internal/worker"
 )
 
 // SnapshotFunc returns a point-in-time capture of the orchestrator's
@@ -409,6 +410,16 @@ type Params struct {
 	// When nil, the route serves no error text.
 	MaskErrorFn func(string) string
 
+	// WorkersFn returns the worker matcher while the remote environment
+	// kind is selected, and nil otherwise. The worker API answers 404
+	// while it returns nil, and GET /api/v1/state lists workers and
+	// leases while it does not. Nil serves no worker API.
+	WorkersFn func() *worker.Matcher
+
+	// WorkerIdentityHeaderFn returns worker.identity_header, the header
+	// that names the worker of a worker API request.
+	WorkerIdentityHeaderFn func() string
+
 	// ControlToken is the bearer token every state-changing endpoint
 	// requires. When empty, those endpoints accept a request that
 	// presents no token; startup permits that only on a loopback bind.
@@ -492,6 +503,8 @@ type Server struct {
 	priceDownloads     *pricing.Downloader
 	workflowLoadFn     func() (time.Time, error)
 	maskErrorFn        func(string) string
+	workersFn          func() *worker.Matcher
+	workerHeaderFn     func() string
 
 	changes *changeFeed
 	timing  streamTiming
@@ -572,6 +585,8 @@ func New(params Params) *Server {
 		priceDownloads:     params.PriceDownloads,
 		workflowLoadFn:     params.WorkflowLoadFn,
 		maskErrorFn:        params.MaskErrorFn,
+		workersFn:          params.WorkersFn,
+		workerHeaderFn:     params.WorkerIdentityHeaderFn,
 		changes:            newChangeFeed(),
 		timing: streamTiming{
 			heartbeat:      15 * time.Second,
@@ -610,6 +625,9 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/retries/{identifier}/run", s.controlRoute(scopeOperator, s.handleRetryNow))
 	mux.HandleFunc("/api/v1/attention/{id}/acknowledge", s.controlRoute(scopeOperator, s.handleAcknowledge))
 	mux.HandleFunc("/api/v1/reactions/{identifier}/{kind}/check", s.controlRoute(scopeOperator, s.handleCheckNow))
+	for _, route := range workerRoutes {
+		mux.HandleFunc(route, s.routeWorker)
+	}
 	mux.HandleFunc("/api/v1/events", s.routeEvents)
 	mux.HandleFunc("/api/v1/{identifier}", s.routeIssueDetail)
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
