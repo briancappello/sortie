@@ -230,18 +230,18 @@ func TestIdentityFromHeader(t *testing.T) {
 	c := &clock{time.Unix(0, 0)}
 	m := newM(c)
 	a := api{t, Handler(m, "X-Worker-Id")}
-	r := a.post("", "/api/v1/worker/checkin", fullCheckIn)
+	r := a.post("", "/api/v1/workers/checkin", fullCheckIn)
 	if r.Code != http.StatusUnauthorized {
 		t.Fatal(r.Code)
 	}
-	req := httptest.NewRequest("POST", "/api/v1/worker/checkin", strings.NewReader(fullCheckIn))
+	req := httptest.NewRequest("POST", "/api/v1/workers/checkin", strings.NewReader(fullCheckIn))
 	req.Header.Set(DefaultIdentityHeader, "w")
 	rec := httptest.NewRecorder()
 	a.h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a header other than the configured one named a worker: %d", rec.Code)
 	}
-	if r := a.post("w", "/api/v1/worker/checkin", fullCheckIn); r.Code != http.StatusOK {
+	if r := a.post("w", "/api/v1/workers/checkin", fullCheckIn); r.Code != http.StatusOK {
 		t.Fatal(r.Code, r.Body)
 	}
 	if r := a.post("w", "/api/v1/workers/x/poll", ""); r.Code != http.StatusNotFound {
@@ -257,7 +257,7 @@ func TestCheckIn(t *testing.T) {
 	c := &clock{time.Unix(100, 0)}
 	m := newM(c)
 	a := api{t, Handler(m, "X-Worker-Id")}
-	r := a.post("w", "/api/v1/worker/checkin", `{"protocol":1,"resources":{"cpus":4,"disk_mib":1}}`)
+	r := a.post("w", "/api/v1/workers/checkin", `{"protocol":1,"resources":{"cpus":4,"disk_mib":1}}`)
 	if r.Code != http.StatusBadRequest {
 		t.Fatal(r.Code)
 	}
@@ -268,13 +268,13 @@ func TestCheckIn(t *testing.T) {
 	if want := []string{"capabilities", "resources.memory_mib", "resources.run_slots"}; !reflect.DeepEqual(body.Missing, want) {
 		t.Fatalf("missing %v want %v", body.Missing, want)
 	}
-	if r := a.post("w", "/api/v1/worker/checkin", strings.Replace(fullCheckIn, `"protocol":1`, `"protocol":2`, 1)); r.Code != http.StatusBadRequest || !strings.Contains(r.Body.String(), "unsupported_protocol") {
+	if r := a.post("w", "/api/v1/workers/checkin", strings.Replace(fullCheckIn, `"protocol":1`, `"protocol":2`, 1)); r.Code != http.StatusBadRequest || !strings.Contains(r.Body.String(), "unsupported_protocol") {
 		t.Fatal(r.Code, r.Body)
 	}
 	if len(m.Snapshot().Workers) != 0 {
 		t.Fatal("a rejected check-in was recorded")
 	}
-	if r := a.post("w", "/api/v1/worker/checkin", fullCheckIn); r.Code != http.StatusOK {
+	if r := a.post("w", "/api/v1/workers/checkin", fullCheckIn); r.Code != http.StatusOK {
 		t.Fatal(r.Code)
 	}
 	w := m.Snapshot().Workers[0]
@@ -290,17 +290,17 @@ func TestPollHeartbeatReport(t *testing.T) {
 	toks := &fakeTokens{}
 	m := NewMatcher(NewTTLLeaser(time.Minute), c.now, toks)
 	a := api{t, Handler(m, "X-Worker-Id")}
-	if r := a.post("w", "/api/v1/worker/poll", ""); r.Code != http.StatusNotFound {
+	if r := a.post("w", "/api/v1/workers/poll", ""); r.Code != http.StatusNotFound {
 		t.Fatalf("poll before check-in: %d", r.Code)
 	}
-	a.post("w", "/api/v1/worker/checkin", fullCheckIn)
-	if r := a.post("w", "/api/v1/worker/poll", ""); r.Code != http.StatusNoContent {
+	a.post("w", "/api/v1/workers/checkin", fullCheckIn)
+	if r := a.post("w", "/api/v1/workers/poll", ""); r.Code != http.StatusNoContent {
 		t.Fatalf("empty queue: %d", r.Code)
 	}
 	ended := m.Submit(Job{ID: "j", Identifier: "ONS-1", Attempt: 3, Flows: []string{"git", "tracker"},
 		Run: Run{IssueID: "1", Identifier: "ONS-1", Attempt: 3}})
 	m.Submit(Job{ID: "k"})
-	r := a.post("w", "/api/v1/worker/poll", "")
+	r := a.post("w", "/api/v1/workers/poll", "")
 	if r.Code != http.StatusOK {
 		t.Fatal(r.Code)
 	}
@@ -319,33 +319,33 @@ func TestPollHeartbeatReport(t *testing.T) {
 	if strings.Contains(string(raw["run"]), "tok-") || strings.Contains(string(raw["job"]), "tok-") {
 		t.Fatalf("a credential is in the run descriptor: %s", raw["run"])
 	}
-	if r := a.post("w", "/api/v1/worker/poll", ""); r.Code != http.StatusNoContent {
+	if r := a.post("w", "/api/v1/workers/poll", ""); r.Code != http.StatusNoContent {
 		t.Fatalf("one offer per free slot: %d", r.Code)
 	}
 
 	c.t = c.t.Add(50 * time.Second)
-	r = a.post("w", "/api/v1/worker/jobs/j/attempts/3/heartbeat", "")
+	r = a.post("w", "/api/v1/workers/jobs/j/attempts/3/heartbeat", "")
 	var ls LeaseView
 	_ = json.Unmarshal(r.Body.Bytes(), &ls)
 	if r.Code != http.StatusOK || !ls.Expires.Equal(c.t.Add(time.Minute)) {
 		t.Fatal(r.Code, r.Body)
 	}
-	if r := a.post("w", "/api/v1/worker/jobs/j/attempts/2/heartbeat", ""); r.Code != http.StatusConflict {
+	if r := a.post("w", "/api/v1/workers/jobs/j/attempts/2/heartbeat", ""); r.Code != http.StatusConflict {
 		t.Fatalf("another attempt: %d", r.Code)
 	}
-	if r := a.post("x", "/api/v1/worker/jobs/j/attempts/3/heartbeat", ""); r.Code != http.StatusConflict {
+	if r := a.post("x", "/api/v1/workers/jobs/j/attempts/3/heartbeat", ""); r.Code != http.StatusConflict {
 		t.Fatalf("another worker: %d", r.Code)
 	}
-	if r := a.post("w", "/api/v1/worker/jobs/j/attempts/3/report", `{"outcome":"done"}`); r.Code != http.StatusBadRequest {
+	if r := a.post("w", "/api/v1/workers/jobs/j/attempts/3/report", `{"outcome":"done"}`); r.Code != http.StatusBadRequest {
 		t.Fatal(r.Code)
 	}
-	if r := a.post("w", "/api/v1/worker/jobs/j/attempts/3/report", `{"outcome":"failed","error":"tests failed"}`); r.Code != http.StatusNoContent {
+	if r := a.post("w", "/api/v1/workers/jobs/j/attempts/3/report", `{"outcome":"failed","error":"tests failed"}`); r.Code != http.StatusNoContent {
 		t.Fatal(r.Code, r.Body)
 	}
 	if o := outcome(t, ended); o.Succeeded || o.Error != "tests failed" {
 		t.Fatalf("%+v", o)
 	}
-	if r := a.post("w", "/api/v1/worker/jobs/j/attempts/3/report", `{"outcome":"succeeded"}`); r.Code != http.StatusConflict {
+	if r := a.post("w", "/api/v1/workers/jobs/j/attempts/3/report", `{"outcome":"succeeded"}`); r.Code != http.StatusConflict {
 		t.Fatalf("second report: %d", r.Code)
 	}
 }
@@ -437,13 +437,13 @@ func TestLateHeartbeatAfterExpiry(t *testing.T) {
 	c := &clock{time.Unix(0, 0)}
 	m := newM(c)
 	a := api{t, Handler(m, "X-Worker-Id")}
-	a.post("w", "/api/v1/worker/checkin", fullCheckIn)
+	a.post("w", "/api/v1/workers/checkin", fullCheckIn)
 	m.Submit(Job{ID: "j"})
-	a.post("w", "/api/v1/worker/poll", "")
+	a.post("w", "/api/v1/workers/poll", "")
 	c.t = c.t.Add(2 * time.Minute)
 	m.ExpireLeases()
 	for _, p := range []string{"heartbeat", "report"} {
-		if r := a.post("w", "/api/v1/worker/jobs/j/attempts/0/"+p, `{"outcome":"succeeded"}`); r.Code != http.StatusConflict {
+		if r := a.post("w", "/api/v1/workers/jobs/j/attempts/0/"+p, `{"outcome":"succeeded"}`); r.Code != http.StatusConflict {
 			t.Fatalf("late %s: %d", p, r.Code)
 		}
 	}
@@ -474,10 +474,10 @@ func TestWorkersDialOut(t *testing.T) {
 		path, body string
 		code       int
 	}{
-		{"/api/v1/worker/checkin", fullCheckIn, 200},
-		{"/api/v1/worker/poll", "", 200},
-		{"/api/v1/worker/jobs/j/attempts/0/heartbeat", "", 200},
-		{"/api/v1/worker/jobs/j/attempts/0/report", `{"outcome":"succeeded"}`, 204},
+		{"/api/v1/workers/checkin", fullCheckIn, 200},
+		{"/api/v1/workers/poll", "", 200},
+		{"/api/v1/workers/jobs/j/attempts/0/heartbeat", "", 200},
+		{"/api/v1/workers/jobs/j/attempts/0/report", `{"outcome":"succeeded"}`, 204},
 	} {
 		if got := post(step.path, step.body); got != step.code {
 			t.Fatalf("%s: %d", step.path, got)
@@ -485,5 +485,17 @@ func TestWorkersDialOut(t *testing.T) {
 	}
 	if o := outcome(t, ended); !o.Succeeded {
 		t.Fatal(o)
+	}
+}
+
+// The worker API lives under /api/v1/workers/; the singular path is not served.
+func TestWorkerAPIPathIsPlural(t *testing.T) {
+	c := &clock{time.Unix(0, 0)}
+	a := api{t, Handler(newM(c), "X-Worker-Id")}
+	if r := a.post("w", "/api/v1/worker/checkin", fullCheckIn); r.Code != http.StatusNotFound {
+		t.Fatalf("singular path: %d, want 404", r.Code)
+	}
+	if r := a.post("w", "/api/v1/workers/checkin", fullCheckIn); r.Code != http.StatusOK {
+		t.Fatalf("plural path: %d, want 200", r.Code)
 	}
 }

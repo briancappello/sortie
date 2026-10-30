@@ -52,14 +52,14 @@ func TestWorkerAPIServedUnderRemoteKindOnly(t *testing.T) {
 
 	var m *worker.Matcher
 	ts := workerTestServer(t, func() *worker.Matcher { return m })
-	if got := workerPost(t, ts, "/api/v1/worker/checkin", checkInBody); got != http.StatusNotFound {
+	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusNotFound {
 		t.Fatalf("check-in under another kind = %d, want 404", got)
 	}
 	if body := getJSONMap(t, ts.URL+"/api/v1/state"); body["workers"] != nil {
 		t.Fatalf("state lists workers under another kind: %v", body["workers"])
 	}
 	m = worker.NewMatcher(worker.NewTTLLeaser(time.Minute), time.Now, nil)
-	if got := workerPost(t, ts, "/api/v1/worker/checkin", checkInBody); got != http.StatusOK {
+	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
 		t.Fatalf("check-in under remote = %d, want 200", got)
 	}
 }
@@ -73,10 +73,10 @@ func TestStateListsWorkersAndLeases(t *testing.T) {
 	ts := workerTestServer(t, func() *worker.Matcher { return m })
 	m.Submit(worker.Job{ID: "D1", Identifier: "ONS-7", Attempt: 2})
 	m.Submit(worker.Job{ID: "D2", Identifier: "ONS-8", Requires: []string{"gpu"}})
-	if got := workerPost(t, ts, "/api/v1/worker/checkin", checkInBody); got != http.StatusOK {
+	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
 		t.Fatal(got)
 	}
-	if got := workerPost(t, ts, "/api/v1/worker/poll", ""); got != http.StatusOK {
+	if got := workerPost(t, ts, "/api/v1/workers/poll", ""); got != http.StatusOK {
 		t.Fatal(got)
 	}
 	ws, _ := getJSONMap(t, ts.URL+"/api/v1/state")["workers"].(map[string]any)
@@ -167,7 +167,7 @@ func TestIntrospectJobTokens(t *testing.T) {
 	m := worker.NewMatcher(worker.NewTTLLeaser(time.Minute), time.Now, issuerTokens{issuer})
 	ts := introspectServer(t, m, func() *jobtoken.Issuer { return issuer })
 	m.Submit(worker.Job{ID: "D1", Identifier: "ONS-7", Attempt: 1, Flows: []string{"stdio", "egress", "mcp", "bundles", "usage"}})
-	if got := workerPost(t, ts, "/api/v1/worker/checkin", checkInBody); got != http.StatusOK {
+	if got := workerPost(t, ts, "/api/v1/workers/checkin", checkInBody); got != http.StatusOK {
 		t.Fatal(got)
 	}
 	offer, ok, err := m.Poll("w1")
