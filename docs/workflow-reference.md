@@ -1804,7 +1804,7 @@ A backend secret MUST be given as a reference to a `SORTIE_`-prefixed environmen
 
 ```yaml
 environment:
-  kind: smolvm                     # local (default) or smolvm
+  kind: smolvm                     # local (default), smolvm or remote
   host_prefix: [acp-broker, -http, 127.0.0.1:7701, --]   # optional
   smolvm:
     binary: smolvm                 # optional
@@ -1839,9 +1839,10 @@ Without the block, the kind is `local`, and Sortie runs all of these on its own 
 
 | Field         | Type             | Required | Default  | Dynamic Reload | Description |
 | ------------- | ---------------- | -------- | -------- | -------------- | ----------- |
-| `kind`        | string           | No       | `local`  | Environments created after the reload | `local` or `smolvm`. Any other value fails validation with an error that names `environment.kind` and the value. |
+| `kind`        | string           | No       | `local`  | Environments created after the reload | `local`, `smolvm` or `remote`. Any other value fails validation with an error that names `environment.kind` and the value. |
 | `host_prefix` | list of strings  | No       | _(none)_ | Future session launches | An argv that stays on Sortie's host in front of the agent session launch and the credential verification launch. See [Host prefix](#host-prefix). The list must not be empty, and no element may be an empty string. |
 | `smolvm`      | map              | With `kind: smolvm` | _(none)_ | Environments created after the reload | The settings of the `smolvm` kind. Under any other kind the block is ignored and not validated. |
+| `remote`      | map              | No       | _(none)_ | Future dispatches | The settings of the `remote` kind. See [Kind `remote`](#kind-remote). Under any other kind the block is ignored and not validated. |
 
 The kind is not overridable by a `SORTIE_*` environment variable. Unknown keys under `environment`, `environment.smolvm`, and `environment.smolvm.repository` draw an `unknown_sub_key` warning from `sortie validate`.
 
@@ -1961,6 +1962,54 @@ A credential binding keeps a secret out of the VM:
 - The binding's hosts are added to the VM's allowlist. smolvm opens the whole network to a VM that has a binding and no allowlist, so Sortie always passes the hosts.
 
 The VM trusts smolvm's interception certificate through `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, and similar variables that smolvm sets. A client that ignores all of them cannot use a binding.
+
+#### Kind `remote`
+
+```yaml
+environment:
+  kind: remote
+  remote:
+    requires: [linux, amd64]       # optional capabilities every worker must declare
+    cpus: 2                        # optional, free CPUs a job needs on a worker
+    memory_mib: 4096               # optional
+    disk_mib: 20480                # optional
+    flows: [git, tracker]          # optional, flows each run reaches
+    lease_ttl_ms: 60000            # optional
+worker:
+  identity_header: X-Sortie-Worker # optional
+```
+
+The `remote` kind runs nothing of an issue on Sortie's host. Each dispatched attempt becomes a job in the worker matcher, carrying the issue identifier, the attempt number, the requirements above and the issue's plan priority. Workers dial Sortie over the worker API and are never dialed. A worker runs the job and reports its outcome; the outcome ends the attempt as any worker exit does: success takes the continuation path, failure and an expired lease take the failure retry path with backoff, and a cancellation withdraws the job.
+
+The matcher offers queued jobs in priority order, lower first and a job without a priority last, then oldest first. A job goes only to a worker that declares every capability in `requires`, a free run slot, and at least `cpus`, `memory_mib` and `disk_mib` free. A running machine uses a run slot, its CPUs, memory and disk; a stopped one holds only its disk. For each queued job, `GET /api/v1/state` says why it waits.
+
+`environment.remote` fields:
+
+| Field          | Type             | Required | Default | Description |
+| -------------- | ---------------- | -------- | ------- | ----------- |
+| `requires`     | list of strings  | No       | `[]`    | Capabilities a worker must declare to take a job. |
+| `cpus`         | integer          | No       | `0`     | Free CPUs a job needs. Must not be negative. |
+| `memory_mib`   | integer          | No       | `0`     | Free memory a job needs, in MiB. Must not be negative. |
+| `disk_mib`     | integer          | No       | `0`     | Free disk a job needs, in MiB. Must not be negative. |
+| `flows`        | list of strings  | No       | `[]`    | Flows each run reaches. An offer carries a token for each; until job tokens exist every token is empty. |
+| `lease_ttl_ms` | integer          | No       | `60000` | How long a lease lasts after its grant or last heartbeat. Must be positive. |
+
+`worker.identity_header` names the request header that carries the worker's identity, `X-Sortie-Worker` by default. Sortie takes the identity from that header only, never from the path, so put Sortie behind a proxy that authenticates each worker and sets the header. `remote` cannot be combined with `worker.ssh_hosts`; validation fails with an error that names both settings.
+
+##### Worker API protocol 1
+
+The worker API is served only while `environment.kind` is `remote`; under any other kind its routes answer `404`. Every request names its worker in `worker.identity_header`; without it the answer is `401`. Errors carry `{"error": {"code", "message"}}`.
+
+| Route | Body | Answer |
+| ----- | ---- | ------ |
+| `POST /api/v1/worker/checkin` | `{"protocol": 1, "capabilities": [...], "resources": {"cpus", "memory_mib", "disk_mib", "run_slots"}}` | `200 {"protocol": 1, "worker": id}`. A missing field answers `400` with `missing` listing each one, such as `resources.run_slots`; another protocol answers `400 unsupported_protocol`. Each check-in replaces the declaration and records the check-in time. |
+| `POST /api/v1/worker/poll` | none | `200` with one offer, or `204` when no queued job fits. `404` before the worker's first check-in. |
+| `POST /api/v1/worker/jobs/{job}/attempts/{attempt}/heartbeat` | none | `200` with the renewed lease. `409` when the worker no longer holds that attempt's lease. |
+| `POST /api/v1/worker/jobs/{job}/attempts/{attempt}/report` | `{"outcome": "succeeded" \| "failed", "error": "..."}` | `204`; the attempt ends. `409` when the lease expired, was withdrawn or was already reported. |
+
+An offer is `{"protocol": 1, "job", "lease", "run", "flows"}`: the job (id, identifier, attempt, priority, requires, needs, flows), the lease (job, identifier, attempt, worker, expiry), the run descriptor (issue id, identifier, title, URL, attempt, agent kind, workspace key) and one `{"name", "token"}` per flow. The run descriptor holds no credential; a flow's token is the only secret an offer carries.
+
+Sortie checks leases every second. An expired lease ends its attempt, and a later heartbeat or report for it answers `409`.
 
 #### Host prefix
 
@@ -4978,6 +5027,7 @@ When `worker.ssh_hosts` is absent or empty, all agents run locally on the host w
 | `worker.ssh_strict_host_key_checking`   | string           | No       | `accept-new`                   | OpenSSH `StrictHostKeyChecking` value: `accept-new`, `yes`, or `no`.                       |
 | `worker.ssh_pass_env`                   | list of strings  | No       | _(absent)_                     | Names of environment variables to carry from Sortie's own environment into a remote session. Written literally; an entry given as a `$VAR` reference is ignored. |
 | `worker.ssh_disallow_pass_env`          | list of strings  | No       | _(absent)_                     | Names of environment variables Sortie never carries into a remote session. Written literally; an entry given as a `$VAR` reference is ignored. |
+| `worker.identity_header`               | string           | No       | `X-Sortie-Worker`              | Under `environment.kind: remote`, the request header that names the worker of a worker API request. See [Kind `remote`](#kind-remote). |
 
 #### SSH Hook Environment
 

@@ -184,6 +184,12 @@ export interface ConfigResponse {
   token_rates: Record<string, TokenRateResponse> | null;
 }
 
+export interface Declaration {
+  protocol: number;
+  capabilities: string[] | null;
+  resources: Resources;
+}
+
 export interface Duration {
   p50: number | null;
   p95: number | null;
@@ -396,9 +402,28 @@ export interface IssueResponse {
   state?: string;
 }
 
+export interface Job {
+  id: string;
+  identifier: string;
+  attempt: number;
+  priority: number | null;
+  requires: string[] | null;
+  needs: Resources;
+  flows: string[] | null;
+  queued_at: string;
+}
+
 export interface LastStageResponse {
   chain: string[] | null;
   rule: string;
+}
+
+export interface LeaseView {
+  job_id: string;
+  identifier: string;
+  attempt: number;
+  worker_id: string;
+  expires: string;
 }
 
 export interface ModelPriceResponse {
@@ -524,6 +549,11 @@ export interface PullRequestResponse {
   head_sha?: string;
 }
 
+export interface Queued {
+  job: Job;
+  waiting: string[] | null;
+}
+
 export interface ReactionCheckResponse {
   observed_at: string;
   head_sha?: string;
@@ -575,6 +605,13 @@ export interface Report {
   by_origin: Group[] | null;
   skill_calls: SkillCallReport | null;
   self_review: SelfReview | null;
+}
+
+export interface Resources {
+  cpus: number;
+  memory_mib: number;
+  disk_mib: number;
+  run_slots: number;
 }
 
 export interface RetryEntryResponse {
@@ -1029,6 +1066,12 @@ export interface StagePositionResponse {
   hop_ceiling: number;
 }
 
+export interface State {
+  workers: Worker[] | null;
+  queue: Queued[] | null;
+  leases: LeaseView[] | null;
+}
+
 export interface StateCounts {
   running: number;
   retrying: number;
@@ -1069,6 +1112,7 @@ export interface StateResponse {
   spend_ceiling?: SpendCeilingResponse;
   config?: ConfigResponse;
   health?: StateHealthResponse;
+  workers?: State;
 }
 
 export interface Summary {
@@ -1162,6 +1206,13 @@ export interface UsageWindowResponse {
 export interface VerdictCount {
   verdict: string;
   runs: number;
+}
+
+export interface Worker {
+  id: string;
+  declaration: Declaration;
+  free: Resources;
+  last_check_in: string;
 }
 
 export interface WorkflowHealthResponse {

@@ -812,6 +812,35 @@
       ],
       "type": "object"
     },
+    "Declaration": {
+      "properties": {
+        "capabilities": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "type": "integer"
+        },
+        "resources": {
+          "$ref": "#/$defs/Resources"
+        }
+      },
+      "required": [
+        "protocol",
+        "capabilities",
+        "resources"
+      ],
+      "type": "object"
+    },
     "Duration": {
       "properties": {
         "mean": {
@@ -1871,6 +1900,73 @@
       "required": [],
       "type": "object"
     },
+    "Job": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "flows": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "needs": {
+          "$ref": "#/$defs/Resources"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queued_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "requires": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "identifier",
+        "attempt",
+        "priority",
+        "requires",
+        "needs",
+        "flows",
+        "queued_at"
+      ],
+      "type": "object"
+    },
     "LastStageResponse": {
       "properties": {
         "chain": {
@@ -1893,6 +1989,34 @@
       "required": [
         "chain",
         "rule"
+      ],
+      "type": "object"
+    },
+    "LeaseView": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "expires": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "worker_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "identifier",
+        "attempt",
+        "worker_id",
+        "expires"
       ],
       "type": "object"
     },
@@ -2499,6 +2623,31 @@
       ],
       "type": "object"
     },
+    "Queued": {
+      "properties": {
+        "job": {
+          "$ref": "#/$defs/Job"
+        },
+        "waiting": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "job",
+        "waiting"
+      ],
+      "type": "object"
+    },
     "ReactionCheckResponse": {
       "properties": {
         "actionable_comments": {
@@ -2844,6 +2993,29 @@
         "by_origin",
         "skill_calls",
         "self_review"
+      ],
+      "type": "object"
+    },
+    "Resources": {
+      "properties": {
+        "cpus": {
+          "type": "integer"
+        },
+        "disk_mib": {
+          "type": "integer"
+        },
+        "memory_mib": {
+          "type": "integer"
+        },
+        "run_slots": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpus",
+        "memory_mib",
+        "disk_mib",
+        "run_slots"
       ],
       "type": "object"
     },
@@ -5017,6 +5189,55 @@
       ],
       "type": "object"
     },
+    "State": {
+      "properties": {
+        "leases": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LeaseView"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Queued"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Worker"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workers",
+        "queue",
+        "leases"
+      ],
+      "type": "object"
+    },
     "StateCounts": {
       "properties": {
         "attention": {
@@ -5253,6 +5474,9 @@
         },
         "version": {
           "type": "string"
+        },
+        "workers": {
+          "$ref": "#/$defs/State"
         }
       },
       "required": [
@@ -5789,6 +6013,30 @@
       "required": [
         "verdict",
         "runs"
+      ],
+      "type": "object"
+    },
+    "Worker": {
+      "properties": {
+        "declaration": {
+          "$ref": "#/$defs/Declaration"
+        },
+        "free": {
+          "$ref": "#/$defs/Resources"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_check_in": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "declaration",
+        "free",
+        "last_check_in"
       ],
       "type": "object"
     },

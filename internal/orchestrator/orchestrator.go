@@ -19,6 +19,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/persistence"
 	"github.com/sortie-ai/sortie/internal/pricing"
 	"github.com/sortie-ai/sortie/internal/prompt"
+	"github.com/sortie-ai/sortie/internal/worker"
 	"github.com/sortie-ai/sortie/internal/workflow"
 )
 
@@ -183,6 +184,10 @@ type unaccountedTurnsMsg struct {
 // OrchestratorParams holds the construction-time dependencies for
 // [NewOrchestrator]. All fields are required unless documented otherwise.
 type OrchestratorParams struct {
+	// WorkerTokenMinter mints each flow token of a worker offer under the
+	// remote environment kind. Nil mints empty tokens.
+	WorkerTokenMinter worker.TokenMinter
+
 	State           *State
 	Logger          *slog.Logger
 	TrackerAdapter  domain.TrackerAdapter
@@ -400,6 +405,10 @@ type Orchestrator struct {
 	// configuration for workers, cleanups, and reaction triage.
 	environments *environmentResolver
 
+	// remote holds the worker matcher the remote environment kind hands
+	// runs to.
+	remote *remoteWorkers
+
 	// ciTriage is the frozen ci_failure triage configuration, captured once
 	// at construction. Unlike every other CI feedback field, it does not
 	// reach the reconcile pass from the reloaded config, so a script or
@@ -575,6 +584,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		workflowPath = params.WorkflowManager.WorkflowAbsPath()
 	}
 	o.environments = newEnvironmentResolver(params.DBPath, workflowPath, logger)
+	o.remote = newRemoteWorkers(time.Now, params.WorkerTokenMinter)
 	if o.preflightParams.EnvironmentFunc == nil {
 		o.preflightParams.EnvironmentFunc = o.environments.resolve
 	}
@@ -817,12 +827,16 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	o.prepareReportedModels(ctx)
 	o.activateReconstructedRetries()
 
+	leaseSweep := time.NewTicker(leaseSweepInterval)
+	defer leaseSweep.Stop()
 	tickTimer := time.NewTimer(0)
 	defer tickTimer.Stop()
 	o.pollHealth.schedule(time.Now())
 
 	for {
 		select {
+		case <-leaseSweep.C:
+			o.expireLeases()
 		case <-ctx.Done():
 			if o.once != nil {
 				o.once.interrupted = true
@@ -1028,6 +1042,7 @@ func (o *Orchestrator) updateGauges(now time.Time) {
 // reload takes effect.
 func (o *Orchestrator) applyWorkerConfig(cfg config.ServiceConfig) []config.Advisory {
 	wc := ParseWorkerConfig(cfg.ExtensionSection("worker"), cfg.ExtensionEnvRefPaths("worker"))
+	o.remote.applyConfig(cfg.Environment)
 	o.hostPool.Update(wc.SSHHosts, wc.MaxPerHost)
 	o.sshStrictHostKeyChecking = wc.SSHStrictHostKeyChecking
 	o.sshPassEnv = wc.SSHPassEnv
@@ -1700,6 +1715,11 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 			Posture:               posture,
 
 			VerificationCache: o.verificationCache,
+		}
+
+		if cfg := deps.ConfigFunc(); isRemoteKind(cfg.Environment) && o.remote != nil {
+			RunRemoteAttempt(ctx, o.remote.matcher, cfg, issue, attempt, agentKind, deps.OnExit)
+			return
 		}
 
 		RunWorkerAttempt(ctx, issue, attempt, deps)
