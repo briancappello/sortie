@@ -3,6 +3,7 @@
 package smolvm
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -299,34 +300,65 @@ func TestIntegration_ConnectionFailedOnRealExits(t *testing.T) {
 		t.Fatalf("Prepare() error = %v", err)
 	}
 
-	run := func(ws environment.Workspace, argv ...string) (int, []string) {
+	launch := func(ws environment.Workspace, l domain.CarrierLaunch) (*exec.Cmd, *strings.Builder) {
 		t.Helper()
-		hostArgv, err := ie.env.LaunchArgv(ws, domain.CarrierLaunch{Argv: argv})
+		hostArgv, err := ie.env.LaunchArgv(ws, l)
 		if err != nil {
 			t.Fatalf("LaunchArgv() error = %v", err)
 		}
 		cmd := exec.CommandContext(ctx, hostArgv[0], hostArgv[1:]...) //nolint:gosec // G204: the test's own smolvm launch
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
-		return procutil.ExtractExitCode(cmd.Run()), strings.Split(stderr.String(), "\n")
+		return cmd, &stderr
+	}
+	checkLaunch := func(name string, ws environment.Workspace, want bool, l domain.CarrierLaunch) {
+		t.Helper()
+		cmd, stderr := launch(ws, l)
+		exit := procutil.ExtractExitCode(cmd.Run())
+		if got := ie.env.ConnectionFailed(ws, exit, strings.Split(stderr.String(), "\n")); got != want {
+			t.Errorf("%s: ConnectionFailed(%d, %q) = %v, want %v", name, exit, stderr.String(), got, want)
+		}
 	}
 	check := func(name string, ws environment.Workspace, want bool, argv ...string) {
 		t.Helper()
-		exit, tail := run(ws, argv...)
-		if got := ie.env.ConnectionFailed(ws, exit, tail); got != want {
-			t.Errorf("%s: ConnectionFailed(%d, %q) = %v, want %v", name, exit, tail, got, want)
-		}
+		checkLaunch(name, ws, want, domain.CarrierLaunch{Argv: argv})
 	}
 
 	check("guest exit 1", ws, false, "sh", "-c", "echo guest-err >&2; exit 1")
-	check("guest prints smolvm's line", ws, false, "sh", "-c", "echo 'Error: vm not found: other' >&2; exit 1")
+	check("guest prints a report, then more", ws, false, "sh", "-c",
+		`echo '{"error":{"code":"NOT_FOUND","message":"vm not found: other"}}' >&2; echo more >&2; exit 1`)
+	check("guest prints JSON that is not a report", ws, false, "sh", "-c", `echo '{"error":"NOT_FOUND"}' >&2; exit 1`)
 	check("missing guest program", ws, false, "no-such-agent-program")
+	t.Setenv("SORTIE_SMOLVM_TEST_UNSET_SECRET", "")
+	if err := os.Unsetenv("SORTIE_SMOLVM_TEST_UNSET_SECRET"); err != nil {
+		t.Fatal(err)
+	}
+	checkLaunch("unset secret", ws, true, domain.CarrierLaunch{Argv: []string{"true"}, SecretEnv: []string{"SORTIE_SMOLVM_TEST_UNSET_SECRET"}})
 	missing := ws
 	missing.Key = key + "-missing"
 	check("missing VM", missing, true, "true")
+
+	// The VM stops under a running command once the command has
+	// started.
+	cmd, stderr := launch(ws, domain.CarrierLaunch{Argv: []string{"sh", "-c", "echo started; exec sleep 300"}})
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the long command: %v", err)
+	}
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "started\n" {
+		t.Fatalf("long command output = %q, %v, want started", line, err)
+	}
 	if err := ie.env.cli.Stop(ctx, VMName(key)); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
+	exit := procutil.ExtractExitCode(cmd.Wait())
+	if !ie.env.ConnectionFailed(ws, exit, strings.Split(stderr.String(), "\n")) {
+		t.Errorf("VM stopped mid-command: ConnectionFailed(%d, %q) = false, want true", exit, stderr.String())
+	}
+
 	check("stopped VM", ws, true, "true")
 }
 

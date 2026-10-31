@@ -206,10 +206,18 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 	flags, rest := parseFakeFlags(args[2:])
 	name := flags.last("--name")
 	idx := slices.IndexFunc(state.Machines, func(m fakeMachine) bool { return m.Name == name })
-	notFound := func() int {
-		say(stderr, "Error: vm not found: %s\n", name)
+	// fail reports smolvm's own failure as smolvm 1.32.4 does: as its
+	// JSON report with --error-format json, else as an "Error:" line.
+	fail := func(code, message string) int {
+		if flags.last("--error-format") == "json" {
+			report, _ := json.Marshal(map[string]any{"error": map[string]string{"code": code, "message": message}})
+			say(stderr, "%s\n", report)
+		} else {
+			say(stderr, "Error: %s\n", message)
+		}
 		return 1
 	}
+	notFound := func() int { return fail(codeNotFound, "vm not found: "+name) }
 
 	switch args[1] {
 	case "ls":
@@ -226,8 +234,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "create":
 		if idx >= 0 {
-			say(stderr, "Error: machine already exists: %s\n", name)
-			return 1
+			return fail(codeConfig, fmt.Sprintf("config operation failed: create machine: machine '%s' already exists or is being created", name))
 		}
 		m := fakeMachine{Name: name, State: StateCreated, Labels: map[string]string{}, Image: flags.last("--from")}
 		for _, l := range flags.all("--label") {
@@ -267,8 +274,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 			return notFound()
 		}
 		if state.Machines[idx].State != StateRunning {
-			say(stderr, "Error: agent operation failed: connect: machine '%s' is not running. Start it with 'smolvm machine start --name %s'; if a start is already in progress, retry once it finishes.\n", name, name)
-			return 1
+			return fail(codeSmolvm, fmt.Sprintf("agent operation failed: connect: machine '%s' is not running. Start it with 'smolvm machine start --name %s'; if a start is already in progress, retry once it finishes.", name, name))
 		}
 		say(stdout, "%s\n", strings.Join(rest, " "))
 		return 0
@@ -301,7 +307,7 @@ func parseFakeFlags(args []string) (fakeFlags, []string) {
 	valued := map[string]bool{
 		"--name": true, "-n": true, "--from": true, "--cpus": true, "--mem": true, "--storage": true,
 		"--label": true, "--allow-host-pattern": true, "--credential": true, "-v": true,
-		"--mount-socket": true, "-w": true, "-e": true, "--secret-env": true,
+		"--mount-socket": true, "-w": true, "-e": true, "--secret-env": true, "--error-format": true,
 	}
 	flags := fakeFlags{}
 	for i := 0; i < len(args); i++ {

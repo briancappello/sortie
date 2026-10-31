@@ -139,7 +139,7 @@ func TestExecArgs(t *testing.T) {
 		Interactive: true,
 	}, []string{"sh", "-c", "echo -- hi"})
 	want := []string{
-		"machine", "exec", "--name", "sortie-VM-1", "-i", "-w", "/workspace",
+		"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-i", "-w", "/workspace",
 		"-e", "SORTIE_ISSUE_ID=1", "--secret-env", "TOKEN=TOKEN", "--", "sh", "-c", "echo -- hi",
 	}
 	if !slices.Equal(got, want) {
@@ -158,7 +158,7 @@ func TestCreateArgs_CredentialHeader(t *testing.T) {
 		t.Fatalf("createArgs() error = %v", err)
 	}
 	want := []string{
-		"machine", "create", "--name", "n", "--from", "/p",
+		"machine", "create", "--error-format", "json", "--name", "n", "--from", "/p",
 		"--credential", "a=A_KEY@a.example",
 		"--credential", "b=B_KEY@b.example,*.b.example:set-header=X-Api-Key",
 	}
@@ -194,7 +194,37 @@ func TestCLIErrorMessage(t *testing.T) {
 	if got := err.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
+	if IsNotFound(err) {
+		t.Error("IsNotFound() without a failure code = true, want false")
+	}
+
+	err.Code, err.Message = "NOT_FOUND", "vm not found: sortie-VM-1"
+	want = `smolvm machine start (machine "sortie-VM-1"): exit code 1: NOT_FOUND: vm not found: sortie-VM-1`
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
 	if !IsNotFound(err) {
 		t.Error("IsNotFound() = false, want true")
+	}
+	err.ExitCode = 2
+	if IsNotFound(err) {
+		t.Error("IsNotFound() with exit code 2 = true, want false")
+	}
+}
+
+func TestParseErrorReport(t *testing.T) {
+	t.Parallel()
+
+	code, message, ok := parseErrorReport(`{"error":{"code":"CONFIG_ERROR","message":"config operation failed: resolve secret 'X': env_unset"}}`)
+	if !ok || code != "CONFIG_ERROR" || message != "config operation failed: resolve secret 'X': env_unset" {
+		t.Errorf("parseErrorReport() = %q, %q, %v", code, message, ok)
+	}
+	if _, _, ok := parseErrorReport(`{"error":{"code":"NOT_FOUND","message":""}}`); !ok {
+		t.Error("parseErrorReport() with an empty message = false, want true")
+	}
+	for _, line := range []string{"", "Error: vm not found: x", "{", `{"error":null}`, `{"error":{}}`, `[{"error":{"code":"NOT_FOUND","message":"x"}}]`, `{"error":{"code":"NOT_FOUND","message":null}}`} {
+		if _, _, ok := parseErrorReport(line); ok {
+			t.Errorf("parseErrorReport(%q) = true, want false", line)
+		}
 	}
 }

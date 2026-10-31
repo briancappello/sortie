@@ -75,7 +75,7 @@ func TestRelease_StopsTheRunningVM(t *testing.T) {
 	if err := f.env.Release(context.Background(), f.ws); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "stop", "--name", "sortie-VM-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "stop", "--error-format", "json", "--name", "sortie-VM-1"})
 	machines := f.fake.state().Machines
 	if len(machines) != 1 || machines[0].State != StateStopped {
 		t.Errorf("machines = %+v, want sortie-VM-1 stopped and still present", machines)
@@ -126,7 +126,7 @@ func TestResume(t *testing.T) {
 		wantArgvs [][]string
 	}{
 		{name: "stopped VM starts", state: StateStopped, wantReady: true,
-			wantArgvs: append([][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)},
+			wantArgvs: append([][]string{listArgv, {"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"}}, toolListenerCalls()...)},
 		{name: "running VM", state: StateRunning, wantReady: true, wantArgvs: [][]string{listArgv}},
 		{name: "no VM", wantArgvs: [][]string{listArgv}},
 	}
@@ -161,7 +161,7 @@ func TestRemove_DeletesTheVMThenItsStateDirectory(t *testing.T) {
 	if err := f.env.Remove(context.Background(), f.ws); err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "delete", "-f", "--name", "sortie-VM-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"})
 	if got := f.machineNames(t); !slices.Equal(got, []string{"sortie-VM-2"}) {
 		t.Errorf("machines = %q, want only sortie-VM-2 left", got)
 	}
@@ -186,9 +186,9 @@ func TestRemove_WithoutVM(t *testing.T) {
 		},
 		{
 			name:     "VM gone before the delete",
-			fail:     map[string]fakeFailure{"machine delete": {Exit: 1, Stderr: "Error: vm not found: sortie-VM-1\n"}},
+			fail:     map[string]fakeFailure{"machine delete": {Exit: 1, Stderr: `{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}` + "\n"}},
 			machines: func(f prepareFixture) []fakeMachine { return []fakeMachine{f.ownedVM("VM-1", StateStopped)} },
-			wantArgv: [][]string{listArgv, {"machine", "delete", "-f", "--name", "sortie-VM-1"}},
+			wantArgv: [][]string{listArgv, {"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"}},
 		},
 	}
 	for _, tt := range tests {
@@ -287,7 +287,7 @@ func TestSweep_SelectsLeftoverVMs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sweep() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "delete", "-f", "--name", "sortie-GONE-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-1"})
 	want := []string{
 		present.Name, running.Name, otherWorkflow.Name, unmanaged.Name, unlabeled.Name, traversal.Name, mismatched.Name,
 	}
@@ -313,8 +313,8 @@ func TestSweep_ContinuesPastAFailedDelete(t *testing.T) {
 		t.Fatal("Sweep() error = nil, want the delete failures")
 	}
 	assertArgvs(t, f, listArgv,
-		[]string{"machine", "delete", "-f", "--name", "sortie-GONE-1"},
-		[]string{"machine", "delete", "-f", "--name", "sortie-GONE-2"})
+		[]string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-1"},
+		[]string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-2"})
 	assertExists(t, keyDir, true)
 }
 
@@ -369,6 +369,6 @@ func TestSweepUnselected(t *testing.T) {
 	if err := SweepUnselected(context.Background(), params, p); err != nil {
 		t.Fatalf("SweepUnselected() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "delete", "-f", "--name", "sortie-GONE-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-1"})
 	assertExists(t, keyDir, false)
 }

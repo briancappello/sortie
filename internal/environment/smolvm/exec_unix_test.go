@@ -76,12 +76,12 @@ func TestCommand_Argv(t *testing.T) {
 		{
 			name: "root without stdin streams output",
 			spec: environment.CommandSpec{Argv: []string{"sh", "-c", "uname -n > created-on"}, Env: sessionEnv(f.ws.HostPath)},
-			want: []string{"machine", "exec", "--name", "sortie-VM-1", "--stream", "-w", "/workspace"},
+			want: []string{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "--stream", "-w", "/workspace"},
 		},
 		{
 			name: "subdirectory with stdin is interactive",
 			spec: environment.CommandSpec{Argv: []string{"git", "hash-object", "--stdin-paths"}, Dir: "sub/dir", Env: sessionEnv(f.ws.HostPath), Stdin: true},
-			want: []string{"machine", "exec", "--name", "sortie-VM-1", "-i", "-w", "/workspace/sub/dir"},
+			want: []string{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-i", "-w", "/workspace/sub/dir"},
 		},
 	}
 	for _, tt := range tests {
@@ -167,7 +167,7 @@ func TestLaunchArgv(t *testing.T) {
 		AgentEnv: []string{"OPENCODE_CONFIG_CONTENT={\"a\": 1}"},
 	}
 	head := []string{
-		f.fake.Binary, "machine", "exec", "--name", "sortie-VM-1", "-i", "-w", "/workspace",
+		f.fake.Binary, "machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-i", "-w", "/workspace",
 		"-e", "SORTIE_ISSUE_ID=10001",
 		"-e", "SORTIE_ISSUE_IDENTIFIER=VM-1",
 		"-e", "SORTIE_ATTEMPT=2",
@@ -226,7 +226,7 @@ func TestConnectionFailed(t *testing.T) {
 		"",
 		"  tip: to pass '--bogus' as a value, use '-- --bogus'",
 		"",
-		"Usage: smolvm machine exec --name <NAME> <COMMAND>...",
+		"Usage: smolvm machine exec --error-format <ERROR_FORMAT> --name <NAME> <COMMAND>...",
 		"",
 		"For more information, try '--help'.",
 	}
@@ -236,33 +236,41 @@ func TestConnectionFailed(t *testing.T) {
 		tail []string
 		want bool
 	}{
-		// smolvm 1.32.4's messages, measured, and 1.26.1's older wording
-		// of the not-running report.
-		{"vm not found", 1, []string{"Error: vm not found: sortie-VM-1"}, true},
-		{"vm not running", 1, []string{"Error: agent operation failed: connect: machine 'sortie-VM-1' is not running. Start it with 'smolvm machine start --name sortie-VM-1'; if a start is already in progress, retry once it finishes."}, true},
-		{"vm not running, 1.26.1", 1, []string{"Error: agent operation failed: connect: machine 'sortie-VM-1' is not running. Use 'smolvm machine start --name sortie-VM-1' first."}, true},
-		{"vm lost while running", 1, []string{"started", "Error: io operation failed: connection closed"}, true},
-		{"secret not resolved", 1, []string{"Error: config operation failed: resolve secret 'FOO': env_unset"}, true},
+		// smolvm 1.32.4's reports with --error-format json, measured.
+		{"vm not found", 1, []string{`{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}`}, true},
+		{"vm not running", 1, []string{`{"error":{"code":"SMOLVM_ERROR","message":"agent operation failed: connect: machine 'sortie-VM-1' is not running. Start it with 'smolvm machine start --name sortie-VM-1'; if a start is already in progress, retry once it finishes."}}`}, true},
+		{"vm lost while running", 1, []string{"started", `{"error":{"code":"SMOLVM_ERROR","message":"io operation failed: connection closed"}}`}, true},
+		{"secret not resolved", 1, []string{`{"error":{"code":"CONFIG_ERROR","message":"config operation failed: resolve secret 'FOO': env_unset"}}`}, true},
 		{"usage error", 2, usage, true},
-		{"trailing blank lines", 1, []string{"Error: vm not found: sortie-VM-1", "", "  "}, true},
+		{"trailing blank lines", 1, []string{`{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}`, "", "  "}, true},
+		{"leading and trailing spaces", 1, []string{`  {"error":{"code":"INTERRUPTED","message":"x"}}  `}, true},
+		{"reworded message", 1, []string{`{"error":{"code":"NOT_FOUND","message":"no such machine"}}`}, true},
 
 		{"guest exit 1", 1, []string{"guest-err"}, false},
 		{"guest exit 1 without output", 1, nil, false},
-		{"guest exit 7", 7, []string{"Error: vm not found: sortie-VM-1"}, false},
+		{"guest exit 7 with a report", 7, []string{`{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}`}, false},
 		{"missing guest program", 255, []string{"executable file `opencode` not found in $PATH: No such file or directory"}, false},
 		{"missing guest directory", 255, []string{"chdir `/workspace/x`: No such file or directory"}, false},
-		{"another VM", 1, []string{"Error: vm not found: sortie-VM-2"}, false},
-		{"another VM not running", 1, []string{"Error: agent operation failed: connect: machine 'sortie-VM-10' is not running."}, false},
-		{"smolvm line followed by guest output", 1, []string{"Error: vm not found: sortie-VM-1", "more guest output"}, false},
+		{"text report", 1, []string{"Error: vm not found: sortie-VM-1"}, false},
+		{"command failed", 1, []string{`{"error":{"code":"COMMAND_FAILED","message":"command failed"}}`}, false},
+		{"unknown code", 1, []string{`{"error":{"code":"SOMETHING_NEW","message":"x"}}`}, false},
+		{"empty code", 1, []string{`{"error":{"code":"","message":"x"}}`}, false},
+		{"no message", 1, []string{`{"error":{"code":"NOT_FOUND"}}`}, false},
+		{"code not a string", 1, []string{`{"error":{"code":1,"message":"x"}}`}, false},
+		{"extra key in error", 1, []string{`{"error":{"code":"NOT_FOUND","message":"x","hint":"y"}}`}, false},
+		{"extra top-level key", 1, []string{`{"error":{"code":"NOT_FOUND","message":"x"},"level":"error"}`}, false},
+		{"two objects", 1, []string{`{"error":{"code":"NOT_FOUND","message":"x"}} {"a":1}`}, false},
+		{"trailing text", 1, []string{`{"error":{"code":"NOT_FOUND","message":"x"}} more`}, false},
+		{"report followed by guest output", 1, []string{`{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}`, "more guest output"}, false},
 		{"guest clap usage error", 2, []string{"Usage: opencode acp [OPTIONS]", "", "For more information, try '--help'."}, false},
-		{"killed", -1, []string{"Error: vm not found: sortie-VM-1"}, false},
+		{"killed", -1, []string{`{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}`}, false},
 	}
 	for _, tt := range tests {
 		if got := env.ConnectionFailed(ws, tt.exit, tt.tail); got != tt.want {
 			t.Errorf("%s: ConnectionFailed(%d, %q) = %v, want %v", tt.name, tt.exit, tt.tail, got, tt.want)
 		}
 	}
-	if env.ConnectionFailed(environment.Workspace{}, 1, []string{"Error: vm not found: sortie-"}) {
+	if env.ConnectionFailed(environment.Workspace{}, 1, []string{`{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-"}}`}) {
 		t.Error("ConnectionFailed() without a workspace key = true, want false")
 	}
 }
@@ -286,6 +294,52 @@ func TestConnectionFailed_ClassifiesSmolvmsOwnExit(t *testing.T) {
 		exit := procutil.ExtractExitCode(runErr)
 		if tail := strings.Split(stderr.String(), "\n"); !f.env.ConnectionFailed(ws, exit, tail) {
 			t.Errorf("%s: ConnectionFailed(%d, %q) = false, want true", name, exit, tail)
+		}
+	}
+}
+
+// Each failure code smolvm documents reaches ConnectionFailed through
+// the launch argv: every code of smolvm's own failure is a connection
+// failure, and COMMAND_FAILED, the guest's own stderr, and a usage
+// error of the guest command are not.
+func TestConnectionFailed_EachCodeThroughTheLaunch(t *testing.T) {
+	t.Parallel()
+
+	report := func(code string) string {
+		return `{"error":{"code":"` + code + `","message":"m"}}` + "\n"
+	}
+	tests := []struct {
+		name    string
+		failure fakeFailure
+		want    bool
+	}{
+		{"NOT_FOUND", fakeFailure{Exit: 1, Stderr: report("NOT_FOUND")}, true},
+		{"CONFLICT", fakeFailure{Exit: 1, Stderr: report("CONFLICT")}, true},
+		{"INTERRUPTED", fakeFailure{Exit: 1, Stderr: "partial guest output\n" + report("INTERRUPTED")}, true},
+		{"CONFIG_ERROR", fakeFailure{Exit: 1, Stderr: report("CONFIG_ERROR")}, true},
+		{"INVALID_STATE", fakeFailure{Exit: 1, Stderr: report("INVALID_STATE")}, true},
+		{"STORAGE_ERROR", fakeFailure{Exit: 1, Stderr: report("STORAGE_ERROR")}, true},
+		{"MOUNT_ERROR", fakeFailure{Exit: 1, Stderr: report("MOUNT_ERROR")}, true},
+		{"KVM_UNAVAILABLE", fakeFailure{Exit: 1, Stderr: report("KVM_UNAVAILABLE")}, true},
+		{"HYPERVISOR_UNAVAILABLE", fakeFailure{Exit: 1, Stderr: report("HYPERVISOR_UNAVAILABLE")}, true},
+		{"SMOLVM_ERROR", fakeFailure{Exit: 1, Stderr: report("SMOLVM_ERROR")}, true},
+		{"COMMAND_FAILED", fakeFailure{Exit: 1, Stderr: report("COMMAND_FAILED")}, false},
+		{"guest stderr", fakeFailure{Exit: 1, Stderr: "guest-err\n"}, false},
+		{"guest JSON that is not a report", fakeFailure{Exit: 1, Stderr: `{"error":"NOT_FOUND"}` + "\n"}, false},
+		{"missing guest program", fakeFailure{Exit: 255, Stderr: "executable file `opencode` not found in $PATH: No such file or directory\n"}, false},
+	}
+	for _, tt := range tests {
+		f := newPrepareFixture(t, fakeState{Fail: map[string]fakeFailure{"machine exec": tt.failure}}, nil)
+		argv, err := f.env.LaunchArgv(f.ws, domain.CarrierLaunch{Argv: []string{"opencode", "acp"}})
+		if err != nil {
+			t.Fatalf("%s: LaunchArgv() error = %v", tt.name, err)
+		}
+		cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // G204: the fake smolvm
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		exit := procutil.ExtractExitCode(cmd.Run())
+		if got := f.env.ConnectionFailed(f.ws, exit, strings.Split(stderr.String(), "\n")); got != tt.want {
+			t.Errorf("%s: ConnectionFailed(%d, %q) = %v, want %v", tt.name, exit, stderr.String(), got, tt.want)
 		}
 	}
 }
@@ -330,7 +384,7 @@ func TestAfterCreate_LinksTheControlDirectory(t *testing.T) {
 	if err := f.env.AfterCreate(context.Background(), f.ws); err != nil {
 		t.Fatalf("AfterCreate() error = %v", err)
 	}
-	want := [][]string{{"machine", "exec", "--name", "sortie-VM-1", "-w", "/", "--", "sh", "-c",
+	want := [][]string{{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-w", "/", "--", "sh", "-c",
 		"if [ -e '/workspace/.sortie' ] || [ -L '/workspace/.sortie' ]; then exit 17; fi\n" +
 			"exec ln -s '/run/sortie/control' '/workspace/.sortie'"}}
 	if got := f.fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {

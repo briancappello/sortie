@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -61,6 +62,14 @@ type CLIError struct {
 	// with every registered secret value masked.
 	Stderr string
 
+	// Code and Message are smolvm's own report of the failure, from
+	// the error line --error-format json makes it write last on
+	// standard error, such as "NOT_FOUND". Both are "" when the
+	// last line is not that report, as for a usage error or a failure
+	// of the command run in a machine.
+	Code    string
+	Message string
+
 	// Err is the underlying error from running the process.
 	Err error
 }
@@ -80,7 +89,9 @@ func (e *CLIError) Error() string {
 	} else if e.Err != nil {
 		fmt.Fprintf(&b, ": %v", e.Err)
 	}
-	if summary := stderrSummary(e.Stderr); summary != "" {
+	if e.Code != "" {
+		fmt.Fprintf(&b, ": %s: %s", e.Code, e.Message)
+	} else if summary := stderrSummary(e.Stderr); summary != "" {
 		b.WriteString(": ")
 		b.WriteString(summary)
 	}
@@ -103,10 +114,81 @@ func stderrSummary(stderr string) string {
 }
 
 // IsNotFound reports whether err is a [CLIError] from an invocation that
-// addressed a machine smolvm does not know.
+// addressed a machine smolvm does not know. It suits the machine
+// lifecycle commands; a command run in a machine writes to the same
+// standard error.
 func IsNotFound(err error) bool {
 	var cliErr *CLIError
-	return errors.As(err, &cliErr) && cliErr.ExitCode == 1 && strings.Contains(cliErr.Stderr, "vm not found:")
+	return errors.As(err, &cliErr) && cliErr.ExitCode == 1 && cliErr.Code == codeNotFound
+}
+
+// errorFormat selects smolvm's machine-readable failure report. Every
+// machine subcommand takes it after its own name.
+var errorFormat = []string{"--error-format", "json"}
+
+// machineArgs returns the arguments of the machine subcommand sub with
+// rest, selecting the JSON failure report.
+func machineArgs(sub string, rest ...string) []string {
+	args := make([]string, 0, 4+len(rest))
+	args = append(args, "machine", sub)
+	args = append(args, errorFormat...)
+	return append(args, rest...)
+}
+
+// smolvm's failure codes, which it documents as stable, except
+// COMMAND_FAILED, which Sortie does not read. Each failure smolvm
+// reports itself carries one; a failure of the command run in a
+// machine carries none.
+const (
+	codeNotFound              = "NOT_FOUND"
+	codeConflict              = "CONFLICT"
+	codeInterrupted           = "INTERRUPTED"
+	codeConfig                = "CONFIG_ERROR"
+	codeInvalidState          = "INVALID_STATE"
+	codeStorage               = "STORAGE_ERROR"
+	codeMount                 = "MOUNT_ERROR"
+	codeKVMUnavailable        = "KVM_UNAVAILABLE"
+	codeHypervisorUnavailable = "HYPERVISOR_UNAVAILABLE"
+	codeSmolvm                = "SMOLVM_ERROR"
+)
+
+// parseErrorReport returns the code and message of line when it is
+// exactly smolvm's JSON failure report: one object whose only key,
+// "error", holds exactly a non-empty string "code" and a string
+// "message".
+func parseErrorReport(line string) (code, message string, ok bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "{") {
+		return "", "", false
+	}
+	var report struct {
+		Error *struct {
+			Code    *string `json:"code"`
+			Message *string `json:"message"`
+		} `json:"error"`
+	}
+	dec := json.NewDecoder(strings.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&report); err != nil || dec.More() {
+		return "", "", false
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", "", false
+	}
+	if report.Error == nil || report.Error.Code == nil || report.Error.Message == nil || *report.Error.Code == "" {
+		return "", "", false
+	}
+	return *report.Error.Code, *report.Error.Message, true
+}
+
+// lastLine returns the last non-blank line of text, trimmed.
+func lastLine(lines []string) string {
+	for _, line := range slices.Backward(lines) {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // Machine states reported by the machine listing.
@@ -203,7 +285,7 @@ func createArgs(spec CreateSpec) ([]string, error) {
 	if spec.Name == "" || spec.Pack == "" {
 		return nil, errors.New("smolvm machine create needs a name and a pack")
 	}
-	args := []string{"machine", "create", "--name", spec.Name, "--from", spec.Pack}
+	args := machineArgs("create", "--name", spec.Name, "--from", spec.Pack)
 	for _, sizing := range []struct {
 		flag  string
 		value int
@@ -293,7 +375,7 @@ type ExecOptions struct {
 // ExecArgs returns the arguments, without the program, of an invocation
 // that runs argv in the machine name.
 func ExecArgs(name string, opts ExecOptions, argv []string) []string {
-	args := []string{"machine", "exec", "--name", name}
+	args := machineArgs("exec", "--name", name)
 	switch {
 	case opts.Detach:
 		args = append(args, "-d")
@@ -359,6 +441,7 @@ func (c *CLI) run(ctx context.Context, subcommand []string, machine string, args
 		Stderr:   string(stderr.Bytes()),
 		Err:      err,
 	}
+	cliErr.Code, cliErr.Message, _ = parseErrorReport(lastLine(strings.Split(cliErr.Stderr, "\n")))
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.Exited() {
 		cliErr.ExitCode = exitErr.ExitCode()
@@ -457,7 +540,7 @@ func (v semver) compare(w semver) int {
 
 // List returns every machine smolvm knows.
 func (c *CLI) List(ctx context.Context) ([]Machine, error) {
-	out, err := c.run(ctx, []string{"machine", "ls"}, "", []string{"machine", "ls", "--json"})
+	out, err := c.run(ctx, []string{"machine", "ls"}, "", machineArgs("ls", "--json"))
 	if err != nil {
 		return nil, err
 	}
@@ -476,20 +559,20 @@ func (c *CLI) Create(ctx context.Context, spec CreateSpec) error {
 
 // Start starts the machine name.
 func (c *CLI) Start(ctx context.Context, name string) error {
-	_, err := c.run(ctx, []string{"machine", "start"}, name, []string{"machine", "start", "--name", name})
+	_, err := c.run(ctx, []string{"machine", "start"}, name, machineArgs("start", "--name", name))
 	return err
 }
 
 // Stop stops the machine name. Stopping a machine that is not running
 // succeeds.
 func (c *CLI) Stop(ctx context.Context, name string) error {
-	_, err := c.run(ctx, []string{"machine", "stop"}, name, []string{"machine", "stop", "--name", name})
+	_, err := c.run(ctx, []string{"machine", "stop"}, name, machineArgs("stop", "--name", name))
 	return err
 }
 
 // Delete deletes the machine name without asking for confirmation.
 func (c *CLI) Delete(ctx context.Context, name string) error {
-	_, err := c.run(ctx, []string{"machine", "delete"}, name, []string{"machine", "delete", "-f", "--name", name})
+	_, err := c.run(ctx, []string{"machine", "delete"}, name, machineArgs("delete", "-f", "--name", name))
 	return err
 }
 

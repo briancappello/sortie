@@ -135,7 +135,7 @@ func TestCLIList_ParsesRecordedListing(t *testing.T) {
 	if len(machines) != 2 || machines[0].Name != "ag1" || !machines[1].Running() {
 		t.Errorf("List() = %+v, want ag1 and a running ee-fixture", machines)
 	}
-	if calls := fake.argvs(); len(calls) != 1 || !slices.Equal(calls[0], []string{"machine", "ls", "--json"}) {
+	if calls := fake.argvs(); len(calls) != 1 || !slices.Equal(calls[0], []string{"machine", "ls", "--error-format", "json", "--json"}) {
 		t.Errorf("calls = %q, want machine ls --json", calls)
 	}
 }
@@ -168,12 +168,12 @@ func TestCLI_LifecycleArgv(t *testing.T) {
 		t.Fatalf("Delete() error = %v", err)
 	}
 	want := [][]string{
-		{"machine", "create", "--name", "sortie-VM-1", "--from", "/packs/base.smolmachine"},
-		{"machine", "start", "--name", "sortie-VM-1"},
-		{"machine", "exec", "--name", "sortie-VM-1", "-w", "/workspace", "--", "uname", "-n"},
-		{"machine", "stop", "--name", "sortie-VM-1"},
-		{"machine", "stop", "--name", "sortie-VM-1"},
-		{"machine", "delete", "-f", "--name", "sortie-VM-1"},
+		{"machine", "create", "--error-format", "json", "--name", "sortie-VM-1", "--from", "/packs/base.smolmachine"},
+		{"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"},
+		{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-w", "/workspace", "--", "uname", "-n"},
+		{"machine", "stop", "--error-format", "json", "--name", "sortie-VM-1"},
+		{"machine", "stop", "--error-format", "json", "--name", "sortie-VM-1"},
+		{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"},
 	}
 	if got := fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 		t.Errorf("calls = %q, want %q", got, want)
@@ -203,7 +203,7 @@ func TestCLI_WrapsFailures(t *testing.T) {
 		if strings.Join(cliErr.Args, " ") != name || cliErr.Machine != "gone" || cliErr.ExitCode != 1 {
 			t.Errorf("%s: CLIError = %+v, want Args %q, machine gone, exit code 1", name, cliErr, name)
 		}
-		if !IsNotFound(err) || !strings.Contains(err.Error(), "Error: vm not found: gone") {
+		if !IsNotFound(err) || cliErr.Code != "NOT_FOUND" || !strings.Contains(err.Error(), "NOT_FOUND: vm not found: gone") {
 			t.Errorf("%s: error = %q, want a not-found error quoting smolvm", name, err)
 		}
 	}

@@ -104,15 +104,15 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-var listArgv = []string{"machine", "ls", "--json"}
+var listArgv = []string{"machine", "ls", "--error-format", "json", "--json"}
 
 // toolListenerCalls are the calls that start the guest side of the tool
 // channel in the running VM sortie-VM-1: the socat check, then the
 // detached listener.
 func toolListenerCalls() [][]string {
 	return [][]string{
-		append([]string{"machine", "exec", "--name", "sortie-VM-1", "--"}, toolListenerCheck...),
-		append([]string{"machine", "exec", "--name", "sortie-VM-1", "-d", "--"}, toolListenerArgv...),
+		append([]string{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "--"}, toolListenerCheck...),
+		append([]string{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-d", "--"}, toolListenerArgv...),
 	}
 }
 
@@ -142,7 +142,7 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 	control := filepath.Join(f.ws.HostPath, ".sortie")
 	socket := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock")
 	wantCreate := []string{
-		"machine", "create", "--name", "sortie-VM-1", "--from", f.pack,
+		"machine", "create", "--error-format", "json", "--name", "sortie-VM-1", "--from", f.pack,
 		"--cpus", "2", "--mem", "4096", "--storage", "20",
 		"--label", "sortie.managed=1",
 		"--label", "sortie.workspace=VM-1",
@@ -159,7 +159,7 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 		"-v", control + ":/run/sortie/control",
 		"--mount-socket", socket + ":/run/sortie/tools.sock",
 	}
-	want := append([][]string{listArgv, wantCreate, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
+	want := append([][]string{listArgv, wantCreate, {"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
 	got := f.fake.argvs()
 	if !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 		t.Fatalf("calls:\n got %q\nwant %q", got, want)
@@ -313,7 +313,7 @@ func TestPrepare_StoppedVMIsStarted(t *testing.T) {
 		if err != nil || res.CreatedNow {
 			t.Fatalf("Prepare() with a %s VM = %+v, %v, want CreatedNow false", state, res, err)
 		}
-		want := append([][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
+		want := append([][]string{listArgv, {"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
 		if got := f.fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 			t.Errorf("calls with a %s VM = %q, want %q", state, got, want)
 		}
@@ -346,7 +346,7 @@ func TestPrepare_VMPredatingTheWorkspaceIsRecreated(t *testing.T) {
 			t.Fatalf("%s: Prepare() = %+v, %v, want CreatedNow true", name, res, err)
 		}
 		got := f.fake.argvs()
-		if len(got) != 6 || !slices.Equal(got[1], []string{"machine", "delete", "-f", "--name", "sortie-VM-1"}) ||
+		if len(got) != 6 || !slices.Equal(got[1], []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"}) ||
 			got[2][1] != "create" || got[3][1] != "start" ||
 			!slices.EqualFunc(got[4:], toolListenerCalls(), slices.Equal[[]string]) {
 			t.Errorf("%s: calls = %q, want listing, delete, create, start, and the tool listener", name, got)

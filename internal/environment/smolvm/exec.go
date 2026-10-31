@@ -36,8 +36,8 @@ import (
 //
 // The guest command's exit status is the host process's. A smolvm
 // failure before the guest command started, such as a VM that is not
-// running, exits with status 1 and an "Error:" line on standard error;
-// see [Environment.ConnectionFailed].
+// running, exits with status 1 and smolvm's JSON failure report as the
+// last line of standard error; see [Environment.ConnectionFailed].
 func (e *Environment) Command(ctx context.Context, ws environment.Workspace, spec environment.CommandSpec) (*exec.Cmd, error) {
 	if len(spec.Argv) == 0 {
 		return nil, errors.New("smolvm environment: empty command")
@@ -115,70 +115,54 @@ func (e *Environment) LaunchArgv(ws environment.Workspace, launch domain.Carrier
 // [Environment.LaunchArgv] or [Environment.Command] for ws that exited
 // with exitCode failed before the guest command started, or lost the VM
 // while it ran. That is exit status 1 with the last non-blank line of
-// stderrTail being smolvm's own report that the workspace's VM does not
-// exist, is not running, closed the connection, or that a secret could
-// not be resolved; or exit status 2 with smolvm's own usage error for
-// its exec command. A guest command's own failure, including one that
-// cannot be started in the guest such as a missing program, is not a
-// connection failure. Because the guest command's standard error
-// reaches the same stream, only smolvm's exact line, as the last line,
-// counts, and a report about a VM names the workspace's VM.
+// stderrTail being smolvm's own JSON failure report with a code of
+// [connectionFailureCodes], such as a VM that does not exist or is not
+// running, a closed connection, or a secret that could not be resolved;
+// or exit status 2 with smolvm's usage error for its exec command,
+// which it reports only as text. A guest command's own failure,
+// including one that cannot be started in the guest such as a missing
+// program, is not a connection failure: smolvm passes the guest's
+// standard error through unchanged and adds no report. The guest's
+// standard error reaches the same stream, so only an exact report, as
+// the last line, counts.
 func (*Environment) ConnectionFailed(ws environment.Workspace, exitCode int, stderrTail []string) bool {
 	if ws.Key == "" {
 		return false
 	}
-	lines := make([]string, 0, len(stderrTail))
-	for _, line := range stderrTail {
-		if line = strings.TrimSpace(line); line != "" {
-			lines = append(lines, line)
-		}
-	}
-	if len(lines) == 0 {
+	last := lastLine(stderrTail)
+	if last == "" {
 		return false
 	}
-	last := lines[len(lines)-1]
 	switch exitCode {
 	case 1:
-		return isPreStartFailure(last, VMName(ws.Key))
+		code, _, ok := parseErrorReport(last)
+		return ok && slices.Contains(connectionFailureCodes, code)
 	case 2:
-		return last == usageErrorLast && slices.ContainsFunc(lines, func(line string) bool {
-			return strings.HasPrefix(line, usageErrorUsagePrefix)
+		return last == usageErrorLast && slices.ContainsFunc(stderrTail, func(line string) bool {
+			return strings.HasPrefix(strings.TrimSpace(line), usageErrorUsagePrefix)
 		})
 	}
 	return false
 }
 
-// smolvm's reports, measured from smolvm 1.32.4, of an exec that never
-// reached the guest command or lost the VM under it.
-const (
-	vmNotFoundPrefix    = "Error: vm not found: "
-	notRunningPrefix    = "Error: agent operation failed: connect: machine '"
-	notRunningSuffix    = "' is not running."
-	connectionClosed    = "Error: io operation failed: connection closed"
-	unresolvedRefPrefix = "Error: config operation failed: resolve secret '"
-	unresolvedRefSuffix = "': env_unset"
+// connectionFailureCodes are the failure codes smolvm's exec reports for
+// a failure of its own, before the guest command started or under it.
+// smolvm 1.32.4 reports a missing VM as [codeNotFound], a stopped VM
+// and a connection lost mid-command as [codeSmolvm], and an unset
+// --secret-env variable as [codeConfig]. COMMAND_FAILED is left out: it
+// reports a command's failure, not smolvm's.
+var connectionFailureCodes = []string{
+	codeNotFound, codeConflict, codeInterrupted, codeConfig, codeInvalidState,
+	codeStorage, codeMount, codeKVMUnavailable, codeHypervisorUnavailable, codeSmolvm,
+}
 
-	// A usage error ends with these lines, with exit status 2.
+// smolvm's usage error for its exec command, which it writes as text
+// even with --error-format json, ends with these lines, with exit
+// status 2.
+const (
 	usageErrorUsagePrefix = "Usage: smolvm machine exec "
 	usageErrorLast        = "For more information, try '--help'."
 )
-
-// isPreStartFailure reports whether line, the last line smolvm's exec
-// wrote to standard error, is its report of a failure that kept the
-// guest command from running, or ended it, in the VM name.
-func isPreStartFailure(line, name string) bool {
-	switch {
-	case line == vmNotFoundPrefix+name:
-		return true
-	case strings.HasPrefix(line, notRunningPrefix+name+notRunningSuffix):
-		return true
-	case line == connectionClosed:
-		return true
-	case strings.HasPrefix(line, unresolvedRefPrefix) && strings.HasSuffix(line, unresolvedRefSuffix):
-		return true
-	}
-	return false
-}
 
 // guestDir returns the guest working directory for dir, a directory
 // relative to the workspace root.
