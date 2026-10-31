@@ -2054,7 +2054,7 @@ Each flow token is a job token. Sortie mints one per flow when it grants the lea
 `host_prefix` is an argv that stays on Sortie's host. Sortie launches the agent session, and its credential verification session, as the prefix followed by the launch the environment builds:
 
 ```text
-<host_prefix...> smolvm machine exec --name sortie-ENG-42 -i -w /workspace -e ... -- opencode acp
+<host_prefix...> smolvm machine exec --error-format json --name sortie-ENG-42 -i -w /workspace -e ... -- opencode acp
 ```
 
 The prefix process runs with the session's full host environment, `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` included. The agent behind it does not get them. This is how [`acp-broker`](https://github.com/ortusnova/agentic-orchestration/blob/main/acp-broker/docs/guide.md) runs on the host while the agent runs in the VM. Hooks, verification commands, triage, auxiliary agent commands, and git inspection never run behind the prefix.
