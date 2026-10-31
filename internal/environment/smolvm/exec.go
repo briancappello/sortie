@@ -148,7 +148,7 @@ func (*Environment) ConnectionFailed(ws environment.Workspace, exitCode int, std
 	return false
 }
 
-// smolvm's reports, measured from smolvm 1.26, of an exec that never
+// smolvm's reports, measured from smolvm 1.32.4, of an exec that never
 // reached the guest command or lost the VM under it.
 const (
 	vmNotFoundPrefix    = "Error: vm not found: "

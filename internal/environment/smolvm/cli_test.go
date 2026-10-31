@@ -56,6 +56,41 @@ func TestParseMachines_RecordedListing(t *testing.T) {
 	}
 }
 
+func TestParseMachines_RecordedListingMinimumVersion(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "ls-1.32.4.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machines, err := parseMachines(data)
+	if err != nil {
+		t.Fatalf("parseMachines() error = %v", err)
+	}
+	if len(machines) != 2 {
+		t.Fatalf("parseMachines() = %d machines, want 2", len(machines))
+	}
+	running, created := machines[0], machines[1]
+	if running.Name != "ls-fixture-running" || !running.Running() || running.PID == nil || *running.PID != 151903 {
+		t.Errorf("machine = %+v, want ls-fixture-running running with PID 151903", running)
+	}
+	if running.Labels["sortie.workspace"] != "VM-1" || running.Labels["sortie.test"] != "1" {
+		t.Errorf("labels = %v, want sortie.workspace=VM-1 and sortie.test=1", running.Labels)
+	}
+	// Two directory mounts and one socket: smolvm counts only the
+	// directories. A credential binding alone turns the network on.
+	if running.Mounts != 2 || !running.Network {
+		t.Errorf("machine = %+v, want 2 mounts and network on", running)
+	}
+	// A machine never started is created, not stopped.
+	if created.Name != "ls-fixture-stopped" || created.State != StateCreated || created.Running() || created.PID != nil {
+		t.Errorf("machine = %+v, want ls-fixture-stopped created without a PID", created)
+	}
+	if created.Labels["sortie"] != "fixture" || created.Mounts != 0 || created.Network {
+		t.Errorf("machine = %+v, want label sortie=fixture, no mounts, network off", created)
+	}
+}
+
 func TestParseMachines_RejectsNonJSON(t *testing.T) {
 	t.Parallel()
 

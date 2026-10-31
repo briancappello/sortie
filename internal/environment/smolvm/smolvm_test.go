@@ -60,7 +60,7 @@ func TestGuestPathIsTheGuestWorkspace(t *testing.T) {
 	}
 }
 
-// smolvmAcceptedName is the name rule smolvm 1.26 enforces, measured:
+// smolvmAcceptedName is the name rule smolvm 1.32.4 enforces, measured:
 // letters, digits, underscores, and single inner hyphens, starting with
 // a letter or digit.
 var smolvmAcceptedName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_]*(-[A-Za-z0-9_]+)*$`)

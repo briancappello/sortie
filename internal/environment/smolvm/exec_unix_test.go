@@ -236,9 +236,11 @@ func TestConnectionFailed(t *testing.T) {
 		tail []string
 		want bool
 	}{
-		// smolvm 1.26.1's messages, measured.
+		// smolvm 1.32.4's messages, measured, and 1.26.1's older wording
+		// of the not-running report.
 		{"vm not found", 1, []string{"Error: vm not found: sortie-VM-1"}, true},
-		{"vm not running", 1, []string{"Error: agent operation failed: connect: machine 'sortie-VM-1' is not running. Use 'smolvm machine start --name sortie-VM-1' first."}, true},
+		{"vm not running", 1, []string{"Error: agent operation failed: connect: machine 'sortie-VM-1' is not running. Start it with 'smolvm machine start --name sortie-VM-1'; if a start is already in progress, retry once it finishes."}, true},
+		{"vm not running, 1.26.1", 1, []string{"Error: agent operation failed: connect: machine 'sortie-VM-1' is not running. Use 'smolvm machine start --name sortie-VM-1' first."}, true},
 		{"vm lost while running", 1, []string{"started", "Error: io operation failed: connection closed"}, true},
 		{"secret not resolved", 1, []string{"Error: config operation failed: resolve secret 'FOO': env_unset"}, true},
 		{"usage error", 2, usage, true},

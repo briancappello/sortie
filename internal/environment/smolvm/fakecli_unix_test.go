@@ -156,7 +156,7 @@ func writeFakeState(dir string, state fakeState) error {
 	return os.WriteFile(filepath.Join(dir, "state.json"), data, 0o600)
 }
 
-// runFakeSmolvm behaves like the parts of smolvm 1.26 the client drives,
+// runFakeSmolvm behaves like the parts of smolvm 1.32.4 the client drives,
 // with the messages and exit codes measured from the real binary.
 func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 	state, err := readFakeState(dir)
@@ -267,7 +267,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 			return notFound()
 		}
 		if state.Machines[idx].State != StateRunning {
-			say(stderr, "Error: agent operation failed: connect: machine '%s' is not running.\n", name)
+			say(stderr, "Error: agent operation failed: connect: machine '%s' is not running. Start it with 'smolvm machine start --name %s'; if a start is already in progress, retry once it finishes.\n", name, name)
 			return 1
 		}
 		say(stdout, "%s\n", strings.Join(rest, " "))
