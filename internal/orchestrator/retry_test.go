@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
@@ -2043,9 +2044,17 @@ func TestHandleRetryTimer_SSHHostAcquisition(t *testing.T) {
 	})
 }
 
+// The cases run in a synctest bubble, whose clock stands still, so a
+// slow host cannot carry a freshly scheduled entry past its delay.
 func TestIsStaleRetryTimer(t *testing.T) {
 	t.Parallel()
 
+	synctest.Test(t, func(t *testing.T) {
+		testIsStaleRetryTimer(t)
+	})
+}
+
+func testIsStaleRetryTimer(t *testing.T) {
 	tests := []struct {
 		name  string
 		entry *RetryEntry
@@ -2095,14 +2104,9 @@ func TestIsStaleRetryTimer(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := isStaleRetryTimer(tt.entry)
-			if got != tt.want {
-				t.Errorf("isStaleRetryTimer(%+v) = %v, want %v", tt.entry, got, tt.want)
-			}
-		})
+		if got := isStaleRetryTimer(tt.entry); got != tt.want {
+			t.Errorf("%s: isStaleRetryTimer(%+v) = %v, want %v", tt.name, tt.entry, got, tt.want)
+		}
 	}
 }
 
