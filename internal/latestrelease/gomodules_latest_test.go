@@ -1,10 +1,10 @@
 package latestrelease
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 // TestLatest_GoModules fails for every module a go.mod of this
@@ -19,9 +19,7 @@ func TestLatest_GoModules(t *testing.T) {
 	for _, rel := range []string{".", filepath.Join("tools", "qualify")} {
 		dir := filepath.Join(root, rel)
 		t.Run(rel, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			mods, err := GoModules(ctx, dir)
+			mods, err := GoModules(waittest.Context(t), dir)
 			if err != nil {
 				t.Fatal(err)
 			}

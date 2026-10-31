@@ -28,6 +28,21 @@ import (
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
 
+// smolvmLiveBound bounds the smolvm work of one gated test, and of one
+// test VM's deletion. Measured on smolvm 1.32.4: the slowest gated test,
+// TestIntegration_PrepareRealVM, took 31 s while the host ran other
+// builds.
+const smolvmLiveBound = 5 * time.Minute
+
+// liveContext returns a context derived from t.Context() that is done
+// after smolvmLiveBound.
+func liveContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), smolvmLiveBound)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 // integrationPack returns the pack the gated tests create VMs from:
 // SORTIE_SMOLVM_TEST_PACK, or the spike's base pack.
 func integrationPack(t *testing.T) string {
@@ -92,8 +107,7 @@ func TestIntegration_PrepareRealVM(t *testing.T) {
 	ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace, Identifier: key}
 	t.Cleanup(func() { deleteTestVM(t, env, name) })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	machine := func() Machine {
 		t.Helper()
 		machines, err := cli.List(ctx)
@@ -220,7 +234,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 // fails the test when smolvm's residue for its name is left behind.
 func deleteTestVM(t *testing.T, env *Environment, name string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), smolvmLiveBound)
 	defer cancel()
 	if err := env.deleteVM(ctx, name); err != nil {
 		t.Errorf("delete VM %s: %v", name, err)
@@ -264,8 +278,7 @@ func TestIntegration_HookRunsInTheGuest(t *testing.T) {
 	t.Setenv("SORTIE_SESSION_TOKEN", "integration-session-token")
 	t.Setenv("SORTIE_API_URL", "http://127.0.0.1:1/api")
 	key := ie.newKey("SMOLHOOK")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root:       ie.root,
@@ -311,8 +324,7 @@ func TestIntegration_ConnectionFailedOnRealExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	if _, err := ie.env.Prepare(ctx, ws); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -383,8 +395,7 @@ func TestIntegration_ConnectionFailedOnRealExits(t *testing.T) {
 func TestIntegration_ControlDirectoryIsShared(t *testing.T) {
 	ie := newIntegrationEnv(t)
 	key := ie.newKey("SMOLCTL")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	prepare := func() workspace.PrepareResult {
 		t.Helper()
 		res, err := workspace.Prepare(ctx, workspace.PrepareParams{
@@ -464,8 +475,7 @@ func TestIntegration_ExistingSortieEntryFailsPreparation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			key := ie.newKey("SMOLDOT")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
+			ctx := liveContext(t)
 			_, err := workspace.Prepare(ctx, workspace.PrepareParams{
 				Root:          ie.root,
 				Identifier:    key,
@@ -520,8 +530,7 @@ func TestIntegration_ReleaseRemove(t *testing.T) {
 	ie := newIntegrationEnv(t)
 	key := ie.newKey("SMOLREL")
 	name := VMName(key)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root: ie.root, Identifier: key, IssueID: "10001", HookTimeoutMS: 120_000, Environment: ie.env,
@@ -572,8 +581,7 @@ func TestIntegration_Sweep(t *testing.T) {
 	key := ie.newKey("SMOLSWEEP")
 	name := VMName(key)
 	unlabeled := VMName(ie.newKey("SMOLUNL"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	host := filepath.Join(ie.root, key)
 	if err := os.Mkdir(host, 0o750); err != nil {
@@ -652,8 +660,7 @@ func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
 	if err := os.Mkdir(host, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	if _, err := ie.env.Prepare(ctx, environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -672,8 +679,7 @@ func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
 // command ran against it, leaves none of smolvm's residue for its name.
 func TestIntegration_MissingVMLeavesNoResidue(t *testing.T) {
 	ie := newIntegrationEnv(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	for _, step := range []string{"Release", "Remove"} {
 		key := ie.newKey("SMOLRES")
 		host := filepath.Join(ie.root, key)

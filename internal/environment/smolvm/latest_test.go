@@ -1,21 +1,18 @@
 package smolvm
 
 import (
-	"context"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/latestrelease"
+	"github.com/sortie-ai/sortie/internal/waittest"
 )
 
 const smolvmRepo = "smol-machines/smolvm"
 
 func latestSmolvm(t *testing.T) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	latest, err := latestrelease.GitHub(ctx, &http.Client{Timeout: time.Minute}, latestrelease.GitHubAPI, smolvmRepo)
+	latest, err := latestrelease.GitHub(waittest.Context(t), http.DefaultClient, latestrelease.GitHubAPI, smolvmRepo)
 	if err != nil {
 		t.Fatalf("latest smolvm release: %v", err)
 	}
@@ -26,9 +23,7 @@ func TestLatest_SmolvmOnPath(t *testing.T) {
 	latestrelease.Require(t)
 
 	latest := latestSmolvm(t)
-	ctx, cancel := context.WithTimeout(context.Background(), versionCheckTimeout)
-	defer cancel()
-	ours, err := NewCLI(DefaultBinary).Version(ctx)
+	ours, err := NewCLI(DefaultBinary).Version(waittest.Context(t))
 	if err != nil {
 		t.Fatalf("smolvm on PATH: %v", err)
 	}

@@ -3,14 +3,12 @@
 package smolvm
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/environment"
@@ -105,8 +103,7 @@ func TestIntegration_SeedsTheRepositoryBeforeAfterCreate(t *testing.T) {
 	up.git("checkout", "--quiet", "main")
 	syncer := newSyncer(t, up.dir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	prepare := func(key string) {
 		t.Helper()
 		res, err := workspace.Prepare(ctx, workspace.PrepareParams{
@@ -166,8 +163,7 @@ func TestIntegration_ExportsAndPushesTheIssueBranch(t *testing.T) {
 	key := ie.newKey("SMOLEXPORT")
 	syncer := newSyncer(t, up.dir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root:          ie.root,
 		Identifier:    key,
@@ -224,8 +220,7 @@ func TestIntegration_RefreshesOriginBeforeTheNextRun(t *testing.T) {
 	key := ie.newKey("SMOLREFRESH")
 	syncer := newSyncer(t, up.dir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	prepare := func(wantCreated bool) {
 		t.Helper()
 		res, err := workspace.Prepare(ctx, workspace.PrepareParams{
