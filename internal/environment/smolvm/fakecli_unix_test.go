@@ -46,7 +46,7 @@ type fakeFailure struct {
 }
 
 type fakeState struct {
-	// Version is what --version prints; "" prints "smolvm 1.26.1".
+	// Version is what --version prints; "" prints "smolvm 1.32.4".
 	Version string `json:"version"`
 
 	Machines []fakeMachine `json:"machines"`
@@ -197,7 +197,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 	if key == "--version" {
 		version := state.Version
 		if version == "" {
-			version = "smolvm 1.26.1"
+			version = "smolvm 1.32.4"
 		}
 		say(stdout, "%s\n", version)
 		return 0

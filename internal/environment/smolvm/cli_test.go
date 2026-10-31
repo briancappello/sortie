@@ -67,19 +67,29 @@ func TestParseMachines_RejectsNonJSON(t *testing.T) {
 func TestCheckVersion(t *testing.T) {
 	t.Parallel()
 
-	for _, v := range []string{"1.26.0", "1.26.1", "1.26.17"} {
+	for _, v := range []string{"1.32.4", "1.32.5", "1.33.0", "2.0.0", "1.32.4+build.7", "10.0.0"} {
 		if err := CheckVersion(v); err != nil {
 			t.Errorf("CheckVersion(%q) = %v, want nil", v, err)
 		}
 	}
-	for _, v := range []string{"1.30.0", "1.25.9", "1.27.0", "2.26.0", "1.2.6", "0.26.1"} {
+	for _, v := range []string{"1.26.1", "1.32.3", "1.31.9", "0.40.0", "1.4.10", "1.32.4-rc.1"} {
 		err := CheckVersion(v)
 		if err == nil {
 			t.Errorf("CheckVersion(%q) = nil, want a refusal", v)
 			continue
 		}
-		if !strings.Contains(err.Error(), v) || !strings.Contains(err.Error(), "1.26.x") {
-			t.Errorf("CheckVersion(%q) = %q, want it to name %q and 1.26.x", v, err, v)
+		if !strings.Contains(err.Error(), v) || !strings.Contains(err.Error(), "1.32.4") {
+			t.Errorf("CheckVersion(%q) = %q, want it to name %q and 1.32.4", v, err, v)
+		}
+	}
+	for _, v := range []string{"", "1.32", "v1.32.4", "1.32.4.1", "1.32.x", "01.32.4", "1.32.4 garbage", "99999999999999999999.0.0"} {
+		err := CheckVersion(v)
+		if err == nil {
+			t.Errorf("CheckVersion(%q) = nil, want an unparsable version refused", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not a version") || !strings.Contains(err.Error(), "1.32.4") {
+			t.Errorf("CheckVersion(%q) = %q, want it to say not a version and name 1.32.4", v, err)
 		}
 	}
 }

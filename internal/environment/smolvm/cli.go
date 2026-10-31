@@ -2,6 +2,7 @@ package smolvm
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,15 +20,12 @@ import (
 // none.
 const DefaultBinary = "smolvm"
 
-// SupportedVersion is the smolvm release range this package drives.
-// Every flag, JSON field, and error text the client relies on was
-// measured against it.
-const SupportedVersion = "1.26.x"
+// MinimumVersion is the oldest smolvm release this package drives: the
+// release every flag, JSON field, and error text the client relies on
+// was last measured against. Every later release is accepted.
+const MinimumVersion = "1.32.4"
 
 const (
-	supportedMajor = 1
-	supportedMinor = 26
-
 	// stderrTailBytes is how much of a failed invocation's standard
 	// error a [CLIError] keeps: the same tail a workspace hook keeps.
 	stderrTailBytes = 8 * 1024
@@ -383,18 +381,72 @@ func (c *CLI) Version(ctx context.Context) (string, error) {
 	return m[1] + "." + m[2] + "." + m[3] + m[4], nil
 }
 
-// CheckVersion returns an error naming version and [SupportedVersion]
-// when version is outside the supported range.
+// CheckVersion returns an error naming version and [MinimumVersion]
+// when version is older than the minimum or is not a version.
 func CheckVersion(version string) error {
-	m := versionPattern.FindStringSubmatch("smolvm " + version)
-	if m != nil {
-		major, _ := strconv.Atoi(m[1])
-		minor, _ := strconv.Atoi(m[2])
-		if major == supportedMajor && minor == supportedMinor {
-			return nil
-		}
+	got, ok := parseSemver(version)
+	if !ok {
+		return fmt.Errorf("smolvm version %q is not a version; minimum supported: %s", version, MinimumVersion)
 	}
-	return fmt.Errorf("smolvm version %s is not supported; supported: %s", version, SupportedVersion)
+	minimum, _ := parseSemver(MinimumVersion)
+	if got.compare(minimum) < 0 {
+		return fmt.Errorf("smolvm version %s is older than the minimum supported version %s", version, MinimumVersion)
+	}
+	return nil
+}
+
+var semverPattern = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+
+// semver is a parsed release version. Build metadata is dropped because
+// it does not order releases.
+type semver struct {
+	major, minor, patch int
+	prerelease          string
+}
+
+func parseSemver(s string) (semver, bool) {
+	m := semverPattern.FindStringSubmatch(s)
+	if m == nil {
+		return semver{}, false
+	}
+	var v semver
+	var err error
+	if v.major, err = strconv.Atoi(m[1]); err != nil {
+		return semver{}, false
+	}
+	if v.minor, err = strconv.Atoi(m[2]); err != nil {
+		return semver{}, false
+	}
+	if v.patch, err = strconv.Atoi(m[3]); err != nil {
+		return semver{}, false
+	}
+	v.prerelease = strings.TrimPrefix(m[4], "-")
+	return v, true
+}
+
+// compare orders v and w by major, minor, and patch. A prerelease of a
+// version orders before that version; two prereleases of the same
+// version compare by their identifiers as text, which is enough to keep
+// any prerelease of the minimum below the minimum.
+func (v semver) compare(w semver) int {
+	if c := cmp.Compare(v.major, w.major); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(v.minor, w.minor); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(v.patch, w.patch); c != 0 {
+		return c
+	}
+	switch {
+	case v.prerelease == w.prerelease:
+		return 0
+	case v.prerelease == "":
+		return 1
+	case w.prerelease == "":
+		return -1
+	}
+	return strings.Compare(v.prerelease, w.prerelease)
 }
 
 // List returns every machine smolvm knows.

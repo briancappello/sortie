@@ -17,7 +17,7 @@ const versionCheckTimeout = 10 * time.Second
 // kind is proven on, and a credential binding that
 // sets a header, which smolvm's credential flag cannot express, and runs
 // the configured binary's version command once, refusing a binary that cannot be run
-// or whose version is outside [SupportedVersion]. Every refusal is a
+// or whose version is older than [MinimumVersion]. Every refusal is a
 // [*config.ConfigError].
 func CheckHost(cfg config.EnvironmentConfig) error {
 	if runtime.GOOS != "linux" {
@@ -31,8 +31,8 @@ func CheckHost(cfg config.EnvironmentConfig) error {
 		if cred.Header != "" {
 			return &config.ConfigError{
 				Field: fmt.Sprintf("environment.smolvm.credentials[%d].header", i),
-				Message: fmt.Sprintf("smolvm %s has no header option for a credential binding; remove header %q from credential %q",
-					SupportedVersion, cred.Header, cred.Name),
+				Message: fmt.Sprintf("smolvm has no header option for a credential binding; remove header %q from credential %q",
+					cred.Header, cred.Name),
 			}
 		}
 	}
@@ -44,7 +44,7 @@ func CheckHost(cfg config.EnvironmentConfig) error {
 	if err != nil {
 		return &config.ConfigError{
 			Field:   "environment.smolvm.binary",
-			Message: fmt.Sprintf("cannot read the version of smolvm binary %q (supported: %s): %v", cli.Binary(), SupportedVersion, err),
+			Message: fmt.Sprintf("cannot read the version of smolvm binary %q (minimum supported: %s): %v", cli.Binary(), MinimumVersion, err),
 		}
 	}
 	if err := CheckVersion(version); err != nil {

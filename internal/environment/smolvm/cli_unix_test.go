@@ -34,14 +34,14 @@ func TestCLIVersion(t *testing.T) {
 func TestCheckHost_RefusesUnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.30.0"})
+	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.26.1"})
 	err := CheckHost(smolvmConfig(fake.Binary))
 	var cfgErr *config.ConfigError
 	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.binary" {
 		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.binary", err)
 	}
-	if !strings.Contains(err.Error(), "1.30.0") || !strings.Contains(err.Error(), "1.26.x") {
-		t.Errorf("CheckHost() = %q, want it to name 1.30.0 and 1.26.x", err)
+	if !strings.Contains(err.Error(), "1.26.1") || !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %q, want it to name 1.26.1 and 1.32.4", err)
 	}
 	if calls := fake.argvs(); len(calls) != 1 || !slices.Equal(calls[0], []string{"--version"}) {
 		t.Errorf("calls = %q, want exactly one --version", calls)
@@ -57,8 +57,8 @@ func TestCheckHost_RefusesMissingBinary(t *testing.T) {
 	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.binary" {
 		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.binary", err)
 	}
-	if !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "1.26.x") {
-		t.Errorf("CheckHost() = %q, want it to name %s and 1.26.x", err, missing)
+	if !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %q, want it to name %s and 1.32.4", err, missing)
 	}
 }
 
@@ -67,17 +67,33 @@ func TestCheckHost_RefusesFailingVersionCommand(t *testing.T) {
 
 	fake := newFakeSmolvm(t, fakeState{Fail: map[string]fakeFailure{"--version": {Exit: 3, Stderr: "boom\n"}}})
 	err := CheckHost(smolvmConfig(fake.Binary))
-	if err == nil || !strings.Contains(err.Error(), "exit code 3") || !strings.Contains(err.Error(), "1.26.x") {
-		t.Errorf("CheckHost() = %v, want a refusal naming exit code 3 and 1.26.x", err)
+	if err == nil || !strings.Contains(err.Error(), "exit code 3") || !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %v, want a refusal naming exit code 3 and 1.32.4", err)
 	}
 }
 
 func TestCheckHost_AcceptsSupportedVersion(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.26.1"})
-	if err := CheckHost(smolvmConfig(fake.Binary)); err != nil {
-		t.Errorf("CheckHost() = %v, want nil", err)
+	for _, version := range []string{"smolvm 1.32.4", "smolvm 2.0.0"} {
+		fake := newFakeSmolvm(t, fakeState{Version: version})
+		if err := CheckHost(smolvmConfig(fake.Binary)); err != nil {
+			t.Errorf("CheckHost() with %q = %v, want nil", version, err)
+		}
+	}
+}
+
+func TestCheckHost_RefusesUnparsableVersion(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.32"})
+	err := CheckHost(smolvmConfig(fake.Binary))
+	var cfgErr *config.ConfigError
+	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.binary" {
+		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.binary", err)
+	}
+	if !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %q, want it to name the minimum 1.32.4", err)
 	}
 }
 
@@ -95,17 +111,17 @@ func TestCheckHost_RefusesCredentialHeader(t *testing.T) {
 	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.credentials[1].header" {
 		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.credentials[1].header", err)
 	}
-	if !strings.Contains(err.Error(), "no header option") || !strings.Contains(err.Error(), "1.26") {
-		t.Errorf("CheckHost() = %q, want it to say smolvm 1.26 has no header option", err)
+	if !strings.Contains(err.Error(), "no header option") || !strings.Contains(err.Error(), "X-Api-Key") {
+		t.Errorf("CheckHost() = %q, want it to say smolvm has no header option and name X-Api-Key", err)
 	}
 }
 
 func TestCheckHost_RunsThroughTheRegistry(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.30.0"})
+	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.26.1"})
 	err := environment.CheckHost(smolvmConfig(fake.Binary))
-	if err == nil || !strings.Contains(err.Error(), "1.30.0") {
+	if err == nil || !strings.Contains(err.Error(), "1.26.1") {
 		t.Errorf("environment.CheckHost() = %v, want the smolvm kind's version refusal", err)
 	}
 }

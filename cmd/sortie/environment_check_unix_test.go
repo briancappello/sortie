@@ -61,7 +61,7 @@ func writeSmolvmFixture(t *testing.T, version string) (dir, binary, pack string)
 
 // Not parallel: boot sets up the process-wide logger and redaction list.
 func TestBoot_RefusesUnsupportedSmolvmVersion(t *testing.T) {
-	dir, binary, pack := writeSmolvmFixture(t, "1.30.0")
+	dir, binary, pack := writeSmolvmFixture(t, "1.26.1")
 	path := filepath.Join(dir, "WORKFLOW.md")
 	if err := os.WriteFile(path, smolvmWorkflow(binary, pack, 2), 0o600); err != nil {
 		t.Fatal(err)
@@ -73,15 +73,15 @@ func TestBoot_RefusesUnsupportedSmolvmVersion(t *testing.T) {
 	if code == 0 {
 		t.Fatal("boot() exit code = 0, want startup to stop on an unsupported smolvm version")
 	}
-	if msg := stderr.String(); !strings.Contains(msg, "1.30.0") || !strings.Contains(msg, "1.26.x") {
-		t.Errorf("stderr = %q, want it to name 1.30.0 and 1.26.x", msg)
+	if msg := stderr.String(); !strings.Contains(msg, "1.26.1") || !strings.Contains(msg, "1.32.4") {
+		t.Errorf("stderr = %q, want it to name 1.26.1 and 1.32.4", msg)
 	}
 }
 
 func TestWorkflowValidate_ReloadRefusesUnsupportedSmolvmVersion(t *testing.T) {
 	t.Parallel()
 
-	dir, binary, pack := writeSmolvmFixture(t, "1.26.1")
+	dir, binary, pack := writeSmolvmFixture(t, "1.32.4")
 	path := filepath.Join(dir, "WORKFLOW.md")
 	if err := os.WriteFile(path, smolvmWorkflow(binary, pack, 2), 0o600); err != nil {
 		t.Fatal(err)
@@ -95,19 +95,48 @@ func TestWorkflowValidate_ReloadRefusesUnsupportedSmolvmVersion(t *testing.T) {
 		t.Fatalf("NewManager() error = %v, want the supported version accepted", err)
 	}
 
-	writeVersionScript(t, binary, "1.30.0")
+	writeVersionScript(t, binary, "1.26.1")
 	if err := os.WriteFile(path, smolvmWorkflow(binary, pack, 4), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	reloadErr := mgr.Reload()
 
-	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "1.30.0") || !strings.Contains(reloadErr.Error(), "1.26.x") {
-		t.Fatalf("Reload() error = %v, want a refusal naming 1.30.0 and 1.26.x", reloadErr)
+	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "1.26.1") || !strings.Contains(reloadErr.Error(), "1.32.4") {
+		t.Fatalf("Reload() error = %v, want a refusal naming 1.26.1 and 1.32.4", reloadErr)
 	}
 	if mgr.LastLoadError() == nil {
 		t.Error("LastLoadError() = nil, want the rejected reload recorded")
 	}
 	if cpus := mgr.Config().Environment.Smolvm.CPUs; cpus != 2 {
 		t.Errorf("environment.smolvm.cpus after a rejected reload = %d, want the previous 2", cpus)
+	}
+}
+
+func TestWorkflowValidate_ReloadAcceptsNewerSmolvmVersion(t *testing.T) {
+	t.Parallel()
+
+	dir, binary, pack := writeSmolvmFixture(t, "1.32.4")
+	path := filepath.Join(dir, "WORKFLOW.md")
+	if err := os.WriteFile(path, smolvmWorkflow(binary, pack, 2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := workflow.NewManager(path, slog.New(slog.DiscardHandler),
+		workflow.WithValidateFunc(workflowValidate),
+		workflow.WithAgentKindProbe(registry.Agents.Has),
+		workflow.WithRetiredAgents(registry.RetiredAgentOf),
+		workflow.WithAdvisoryFunc(workflowAdvisories))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v, want the minimum version accepted", err)
+	}
+
+	writeVersionScript(t, binary, "2.0.0")
+	if err := os.WriteFile(path, smolvmWorkflow(binary, pack, 4), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload() error = %v, want a newer version accepted", err)
+	}
+	if cpus := mgr.Config().Environment.Smolvm.CPUs; cpus != 4 {
+		t.Errorf("environment.smolvm.cpus after the reload = %d, want 4", cpus)
 	}
 }

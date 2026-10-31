@@ -5,7 +5,7 @@
 // The package drives smolvm through its command line only, with [CLI];
 // it is the one place that knows smolvm's flags, JSON output, and exit
 // codes. The kind's host check, [CheckHost], refuses a smolvm release
-// outside [SupportedVersion].
+// older than [MinimumVersion].
 //
 // [Environment.Prepare] creates and starts the workspace's VM,
 // [Environment.AfterCreate] links the guest workspace's .sortie to the
