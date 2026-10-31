@@ -443,7 +443,7 @@ func (e *Environment) createSpec(name string, ws environment.Workspace, paths ho
 		for _, h := range cred.Hosts {
 			addHost(h)
 		}
-		spec.Credentials = append(spec.Credentials, CredentialBinding{Name: cred.Name, Env: cred.Env, Hosts: cred.Hosts})
+		spec.Credentials = append(spec.Credentials, CredentialBinding{Name: cred.Name, Env: cred.Env, Hosts: cred.Hosts, Header: cred.Header})
 	}
 	return spec, nil
 }

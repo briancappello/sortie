@@ -564,3 +564,62 @@ func TestIntegration_Sweep(t *testing.T) {
 		t.Errorf("unlabeled VM after the sweep = %+v (listed %v), want it left running", m, ok)
 	}
 }
+
+// The binding's header is set on HTTPS requests to its host, replacing
+// the guest's own value, while the guest variable holds a placeholder.
+// It needs egress to httpbin.org, which echoes the request headers.
+//
+// Not parallel: it sets the credential variable in the process
+// environment, where smolvm reads it when the VM starts.
+func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
+	requireSmolvm(t)
+	const variable, value = "SORTIE_SMOLVM_TEST_HEADER_KEY", "integration-header-value"
+	t.Setenv(variable, value)
+	pack := integrationPack(t)
+	if _, err := os.Stat(pack); err != nil {
+		t.Fatalf("pack %s: %v; set SORTIE_SMOLVM_TEST_PACK", pack, err)
+	}
+	root := t.TempDir()
+	built, err := New(environment.Params{
+		Config: config.EnvironmentConfig{Kind: config.EnvironmentKindSmolvm, Smolvm: config.SmolvmConfig{
+			Binary: DefaultBinary,
+			Pack:   pack,
+			Credentials: []config.SmolvmCredential{
+				{Name: "echo", Env: variable, Hosts: []string{"httpbin.org"}, Header: "X-Api-Key"},
+			},
+		}},
+		StateDir:     t.TempDir(),
+		WorkflowPath: filepath.Join(root, "WORKFLOW.md"),
+		Logger:       slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ie := &integrationEnv{env: built.(*Environment), root: root}
+	key := ie.newKey("SMOLHDR")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := ie.env.cli.Delete(ctx, VMName(key)); err != nil && !IsNotFound(err) {
+			t.Errorf("delete VM %s: %v", VMName(key), err)
+		}
+	})
+	host := filepath.Join(root, key)
+	if err := os.Mkdir(host, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if _, err := ie.env.Prepare(ctx, environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	seen, err := ie.guest(ctx, key, "printenv "+variable)
+	if err != nil || !strings.HasPrefix(seen, "SMOL_PLACEHOLDER_") || strings.Contains(seen, value) {
+		t.Errorf("guest %s = %q, %v, want a placeholder", variable, seen, err)
+	}
+	echo, err := ie.guest(ctx, key, `curl -sS -m 30 -H "X-Api-Key: guest-own" https://httpbin.org/headers | jq -r '.headers["X-Api-Key"]'`)
+	if err != nil || strings.TrimSpace(echo) != value {
+		t.Errorf("X-Api-Key received by httpbin.org = %q, %v, want the host's value", echo, err)
+	}
+}

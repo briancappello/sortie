@@ -234,6 +234,37 @@ func TestPrepare_CredentialHostsJoinTheAllowlist(t *testing.T) {
 	if !strings.Contains(create, "--allow-host-pattern openrouter.ai --credential or=OPENROUTER_API_KEY@openrouter.ai") {
 		t.Errorf("create argv = %q, want the credential host on the allowlist", create)
 	}
+	if strings.Contains(create, "set-header") {
+		t.Errorf("create argv = %q, want no header for a binding without one", create)
+	}
+}
+
+func TestPrepare_CredentialHeaderReachesTheBinding(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, func(cfg *config.SmolvmConfig) {
+		cfg.Credentials = []config.SmolvmCredential{
+			{Name: "or", Env: "OPENROUTER_API_KEY", Hosts: []string{"openrouter.ai"}},
+			{Name: "api", Env: "API_KEY", Hosts: []string{"api.example.com", "*.example.net"}, Header: "X-Api-Key"},
+		}
+	})
+	if _, err := f.env.Prepare(context.Background(), f.ws); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	create := f.fake.argvs()[1]
+	var bindings []string
+	for i, arg := range create {
+		if arg == "--credential" && i+1 < len(create) {
+			bindings = append(bindings, create[i+1])
+		}
+	}
+	want := []string{
+		"or=OPENROUTER_API_KEY@openrouter.ai",
+		"api=API_KEY@api.example.com,*.example.net:set-header=X-Api-Key",
+	}
+	if !slices.Equal(bindings, want) {
+		t.Errorf("--credential values = %q, want %q", bindings, want)
+	}
 }
 
 // Not parallel: it sets a process environment variable the fake reads.

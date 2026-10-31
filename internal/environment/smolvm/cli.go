@@ -158,11 +158,13 @@ type SocketMount struct {
 }
 
 // CredentialBinding binds the host variable Env to the guest variable of
-// the same name for Hosts, under the credential name Name.
+// the same name for Hosts, under the credential name Name. A non-empty
+// Header is also set to the real value on every HTTPS request to Hosts.
 type CredentialBinding struct {
-	Name  string
-	Env   string
-	Hosts []string
+	Name   string
+	Env    string
+	Hosts  []string
+	Header string
 }
 
 // Label is one machine label.
@@ -224,7 +226,11 @@ func createArgs(spec CreateSpec) ([]string, error) {
 		if len(cred.Hosts) == 0 {
 			return nil, fmt.Errorf("credential %q binds no host", cred.Name)
 		}
-		args = append(args, "--credential", cred.Name+"="+cred.Env+"@"+strings.Join(cred.Hosts, ","))
+		binding := cred.Name + "=" + cred.Env + "@" + strings.Join(cred.Hosts, ",")
+		if cred.Header != "" {
+			binding += ":set-header=" + cred.Header
+		}
+		args = append(args, "--credential", binding)
 	}
 	if spec.SSHAgent {
 		args = append(args, "--ssh-agent")

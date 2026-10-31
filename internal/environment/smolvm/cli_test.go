@@ -147,6 +147,26 @@ func TestExecArgs(t *testing.T) {
 	}
 }
 
+func TestCreateArgs_CredentialHeader(t *testing.T) {
+	t.Parallel()
+
+	args, err := createArgs(CreateSpec{Name: "n", Pack: "/p", Credentials: []CredentialBinding{
+		{Name: "a", Env: "A_KEY", Hosts: []string{"a.example"}},
+		{Name: "b", Env: "B_KEY", Hosts: []string{"b.example", "*.b.example"}, Header: "X-Api-Key"},
+	}})
+	if err != nil {
+		t.Fatalf("createArgs() error = %v", err)
+	}
+	want := []string{
+		"machine", "create", "--name", "n", "--from", "/p",
+		"--credential", "a=A_KEY@a.example",
+		"--credential", "b=B_KEY@b.example,*.b.example:set-header=X-Api-Key",
+	}
+	if !slices.Equal(args, want) {
+		t.Errorf("createArgs() = %q, want %q", args, want)
+	}
+}
+
 func TestCreateArgs_RefusesMountSeparatorInPath(t *testing.T) {
 	t.Parallel()
 

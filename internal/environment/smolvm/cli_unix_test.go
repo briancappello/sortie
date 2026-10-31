@@ -97,22 +97,16 @@ func TestCheckHost_RefusesUnparsableVersion(t *testing.T) {
 	}
 }
 
-func TestCheckHost_RefusesCredentialHeader(t *testing.T) {
+func TestCheckHost_AcceptsCredentialHeader(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeSmolvm(t, fakeState{})
 	cfg := smolvmConfig(fake.Binary)
 	cfg.Smolvm.Credentials = []config.SmolvmCredential{
-		{Name: "a", Env: "A_KEY", Hosts: []string{"a.example"}},
 		{Name: "b", Env: "B_KEY", Hosts: []string{"b.example"}, Header: "X-Api-Key"},
 	}
-	err := CheckHost(cfg)
-	var cfgErr *config.ConfigError
-	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.credentials[1].header" {
-		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.credentials[1].header", err)
-	}
-	if !strings.Contains(err.Error(), "does not support header") || !strings.Contains(err.Error(), "X-Api-Key") {
-		t.Errorf("CheckHost() = %q, want it to say header is not supported and name X-Api-Key", err)
+	if err := CheckHost(cfg); err != nil {
+		t.Errorf("CheckHost() = %v, want a credential header accepted", err)
 	}
 }
 
