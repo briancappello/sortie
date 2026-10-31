@@ -30,6 +30,11 @@ test-shell: ## Run shell integration tests
 	sh tests/scripts/nightly-issue.sh
 	sh tests/scripts/protocol-pin.sh
 
+.PHONY: check-latest
+check-latest: ## Fail when smolvm on PATH or a Go module is behind its latest release (needs the network; GH_TOKEN optional)
+	GH_TOKEN="$${GH_TOKEN:-$$(gh auth token 2>/dev/null)}" SORTIE_LATEST_TEST=1 \
+		$(GO) test -count=1 -run '^TestLatest_' -v ./internal/latestrelease ./internal/environment/smolvm
+
 .PHONY: test-coverage
 test-coverage: ## Run tests with coverage and print per-package percentages
 	$(GO) test -race -count=1 -covermode=atomic -coverprofile=$(COVERAGE_OUT) \
