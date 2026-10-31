@@ -27,6 +27,14 @@ const (
 	EnvironmentKindRemote = "remote"
 )
 
+// credentialHeadersRefused lists, lowercased, the headers smolvm refuses
+// to set from a credential because they route or frame the request.
+var credentialHeadersRefused = []string{
+	"connection", "content-length", "cookie", "host", "keep-alive",
+	"proxy-authenticate", "proxy-authorization", "proxy-connection",
+	"te", "trailer", "transfer-encoding", "upgrade",
+}
+
 // Defaults applied to the environment.smolvm block.
 const (
 	defaultSmolvmBinary     = "smolvm"
@@ -50,6 +58,7 @@ var (
 	envVarNamePattern        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	repositoryNamePattern    = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 	credentialNamePattern    = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	headerNamePattern        = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 	hostLabelPattern         = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 	environmentKindsAccepted = []string{EnvironmentKindLocal, EnvironmentKindSmolvm, EnvironmentKindRemote}
 )
@@ -142,7 +151,9 @@ type SmolvmCredential struct {
 	// "*.domain" pattern.
 	Hosts []string
 
-	// Header optionally names the request header the value is set in.
+	// Header optionally names a request header that is set to the real
+	// value on every HTTPS request to Hosts, replacing any value the
+	// guest sent in it.
 	Header string
 }
 
@@ -513,8 +524,10 @@ func parseSmolvmCredentials(m map[string]any) ([]SmolvmCredential, error) {
 		if err != nil {
 			return nil, err
 		}
-		if present && header == "" {
-			return nil, &ConfigError{Field: field + ".header", Message: "must not be an empty string; remove the key for the default"}
+		if present {
+			if err := checkCredentialHeader(header, field+".header"); err != nil {
+				return nil, err
+			}
 		}
 
 		creds = append(creds, SmolvmCredential{Name: name, Env: env, Hosts: hosts, Header: header})
@@ -523,6 +536,28 @@ func parseSmolvmCredentials(m map[string]any) ([]SmolvmCredential, error) {
 		return nil, nil
 	}
 	return creds, nil
+}
+
+// checkCredentialHeader refuses a header name that is not an HTTP field
+// name token, which also keeps the separators of smolvm's credential
+// syntax out of it, and a header smolvm refuses to set.
+func checkCredentialHeader(header, field string) error {
+	if header == "" {
+		return &ConfigError{Field: field, Message: "must not be an empty string; remove the key to set no header"}
+	}
+	if !headerNamePattern.MatchString(header) {
+		return &ConfigError{
+			Field:   field,
+			Message: fmt.Sprintf("invalid header name %q; use letters, digits, and !#$%%&'*+-.^_`|~", header),
+		}
+	}
+	if slices.Contains(credentialHeadersRefused, strings.ToLower(header)) {
+		return &ConfigError{
+			Field:   field,
+			Message: fmt.Sprintf("header %q routes or frames the request and cannot carry a credential", header),
+		}
+	}
+	return nil
 }
 
 // parsePassEnv reads environment.smolvm.pass_env, a list of host

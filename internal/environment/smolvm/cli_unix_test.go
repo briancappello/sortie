@@ -34,14 +34,14 @@ func TestCLIVersion(t *testing.T) {
 func TestCheckHost_RefusesUnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.30.0"})
+	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.26.1"})
 	err := CheckHost(smolvmConfig(fake.Binary))
 	var cfgErr *config.ConfigError
 	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.binary" {
 		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.binary", err)
 	}
-	if !strings.Contains(err.Error(), "1.30.0") || !strings.Contains(err.Error(), "1.26.x") {
-		t.Errorf("CheckHost() = %q, want it to name 1.30.0 and 1.26.x", err)
+	if !strings.Contains(err.Error(), "1.26.1") || !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %q, want it to name 1.26.1 and 1.32.4", err)
 	}
 	if calls := fake.argvs(); len(calls) != 1 || !slices.Equal(calls[0], []string{"--version"}) {
 		t.Errorf("calls = %q, want exactly one --version", calls)
@@ -57,8 +57,8 @@ func TestCheckHost_RefusesMissingBinary(t *testing.T) {
 	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.binary" {
 		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.binary", err)
 	}
-	if !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "1.26.x") {
-		t.Errorf("CheckHost() = %q, want it to name %s and 1.26.x", err, missing)
+	if !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %q, want it to name %s and 1.32.4", err, missing)
 	}
 }
 
@@ -67,45 +67,55 @@ func TestCheckHost_RefusesFailingVersionCommand(t *testing.T) {
 
 	fake := newFakeSmolvm(t, fakeState{Fail: map[string]fakeFailure{"--version": {Exit: 3, Stderr: "boom\n"}}})
 	err := CheckHost(smolvmConfig(fake.Binary))
-	if err == nil || !strings.Contains(err.Error(), "exit code 3") || !strings.Contains(err.Error(), "1.26.x") {
-		t.Errorf("CheckHost() = %v, want a refusal naming exit code 3 and 1.26.x", err)
+	if err == nil || !strings.Contains(err.Error(), "exit code 3") || !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %v, want a refusal naming exit code 3 and 1.32.4", err)
 	}
 }
 
 func TestCheckHost_AcceptsSupportedVersion(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.26.1"})
-	if err := CheckHost(smolvmConfig(fake.Binary)); err != nil {
-		t.Errorf("CheckHost() = %v, want nil", err)
+	for _, version := range []string{"smolvm 1.32.4", "smolvm 2.0.0"} {
+		fake := newFakeSmolvm(t, fakeState{Version: version})
+		if err := CheckHost(smolvmConfig(fake.Binary)); err != nil {
+			t.Errorf("CheckHost() with %q = %v, want nil", version, err)
+		}
 	}
 }
 
-func TestCheckHost_RefusesCredentialHeader(t *testing.T) {
+func TestCheckHost_RefusesUnparsableVersion(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.32"})
+	err := CheckHost(smolvmConfig(fake.Binary))
+	var cfgErr *config.ConfigError
+	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.binary" {
+		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.binary", err)
+	}
+	if !strings.Contains(err.Error(), "1.32.4") {
+		t.Errorf("CheckHost() = %q, want it to name the minimum 1.32.4", err)
+	}
+}
+
+func TestCheckHost_AcceptsCredentialHeader(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeSmolvm(t, fakeState{})
 	cfg := smolvmConfig(fake.Binary)
 	cfg.Smolvm.Credentials = []config.SmolvmCredential{
-		{Name: "a", Env: "A_KEY", Hosts: []string{"a.example"}},
 		{Name: "b", Env: "B_KEY", Hosts: []string{"b.example"}, Header: "X-Api-Key"},
 	}
-	err := CheckHost(cfg)
-	var cfgErr *config.ConfigError
-	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.credentials[1].header" {
-		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.credentials[1].header", err)
-	}
-	if !strings.Contains(err.Error(), "no header option") || !strings.Contains(err.Error(), "1.26") {
-		t.Errorf("CheckHost() = %q, want it to say smolvm 1.26 has no header option", err)
+	if err := CheckHost(cfg); err != nil {
+		t.Errorf("CheckHost() = %v, want a credential header accepted", err)
 	}
 }
 
 func TestCheckHost_RunsThroughTheRegistry(t *testing.T) {
 	t.Parallel()
 
-	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.30.0"})
+	fake := newFakeSmolvm(t, fakeState{Version: "smolvm 1.26.1"})
 	err := environment.CheckHost(smolvmConfig(fake.Binary))
-	if err == nil || !strings.Contains(err.Error(), "1.30.0") {
+	if err == nil || !strings.Contains(err.Error(), "1.26.1") {
 		t.Errorf("environment.CheckHost() = %v, want the smolvm kind's version refusal", err)
 	}
 }
@@ -125,7 +135,7 @@ func TestCLIList_ParsesRecordedListing(t *testing.T) {
 	if len(machines) != 2 || machines[0].Name != "ag1" || !machines[1].Running() {
 		t.Errorf("List() = %+v, want ag1 and a running ee-fixture", machines)
 	}
-	if calls := fake.argvs(); len(calls) != 1 || !slices.Equal(calls[0], []string{"machine", "ls", "--json"}) {
+	if calls := fake.argvs(); len(calls) != 1 || !slices.Equal(calls[0], []string{"machine", "ls", "--error-format", "json", "--json"}) {
 		t.Errorf("calls = %q, want machine ls --json", calls)
 	}
 }
@@ -158,12 +168,12 @@ func TestCLI_LifecycleArgv(t *testing.T) {
 		t.Fatalf("Delete() error = %v", err)
 	}
 	want := [][]string{
-		{"machine", "create", "--name", "sortie-VM-1", "--from", "/packs/base.smolmachine"},
-		{"machine", "start", "--name", "sortie-VM-1"},
-		{"machine", "exec", "--name", "sortie-VM-1", "-w", "/workspace", "--", "uname", "-n"},
-		{"machine", "stop", "--name", "sortie-VM-1"},
-		{"machine", "stop", "--name", "sortie-VM-1"},
-		{"machine", "delete", "-f", "--name", "sortie-VM-1"},
+		{"machine", "create", "--error-format", "json", "--name", "sortie-VM-1", "--from", "/packs/base.smolmachine"},
+		{"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"},
+		{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-w", "/workspace", "--", "uname", "-n"},
+		{"machine", "stop", "--error-format", "json", "--name", "sortie-VM-1"},
+		{"machine", "stop", "--error-format", "json", "--name", "sortie-VM-1"},
+		{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"},
 	}
 	if got := fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 		t.Errorf("calls = %q, want %q", got, want)
@@ -193,7 +203,7 @@ func TestCLI_WrapsFailures(t *testing.T) {
 		if strings.Join(cliErr.Args, " ") != name || cliErr.Machine != "gone" || cliErr.ExitCode != 1 {
 			t.Errorf("%s: CLIError = %+v, want Args %q, machine gone, exit code 1", name, cliErr, name)
 		}
-		if !IsNotFound(err) || !strings.Contains(err.Error(), "Error: vm not found: gone") {
+		if !IsNotFound(err) || cliErr.Code != "NOT_FOUND" || !strings.Contains(err.Error(), "NOT_FOUND: vm not found: gone") {
 			t.Errorf("%s: error = %q, want a not-found error quoting smolvm", name, err)
 		}
 	}

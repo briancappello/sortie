@@ -22,7 +22,7 @@ import (
 // extra top-level YAML.
 func repositoryWorkflow(t *testing.T, provider, extra string) (dir, path string) {
 	t.Helper()
-	dir, binary, pack := writeSmolvmFixture(t, "1.26.1")
+	dir, binary, pack := writeSmolvmFixture(t, "1.32.4")
 	issues := filepath.Join(dir, "issues.json")
 	if err := os.WriteFile(issues, []byte("[]"), 0o600); err != nil {
 		t.Fatal(err)

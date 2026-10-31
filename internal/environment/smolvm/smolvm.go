@@ -5,7 +5,7 @@
 // The package drives smolvm through its command line only, with [CLI];
 // it is the one place that knows smolvm's flags, JSON output, and exit
 // codes. The kind's host check, [CheckHost], refuses a smolvm release
-// outside [SupportedVersion].
+// older than [MinimumVersion].
 //
 // [Environment.Prepare] creates and starts the workspace's VM,
 // [Environment.AfterCreate] links the guest workspace's .sortie to the
@@ -113,6 +113,10 @@ type Environment struct {
 	workflowHash string
 	logger       *slog.Logger
 
+	// machineCache is smolvm's per-machine directory, where it leaves
+	// residue for a machine a command addresses that does not exist.
+	machineCache string
+
 	packMu   sync.Mutex
 	packSums map[string]packSum
 }
@@ -146,11 +150,12 @@ func New(params environment.Params) (environment.Environment, error) {
 		logger = slog.Default()
 	}
 	env := &Environment{
-		cfg:      params.Config.Smolvm,
-		cli:      NewCLI(params.Config.Smolvm.Binary),
-		stateDir: params.StateDir,
-		logger:   logger,
-		packSums: map[string]packSum{},
+		cfg:          params.Config.Smolvm,
+		cli:          NewCLI(params.Config.Smolvm.Binary),
+		stateDir:     params.StateDir,
+		machineCache: machineCacheDir(),
+		logger:       logger,
+		packSums:     map[string]packSum{},
 	}
 	if params.WorkflowPath != "" {
 		abs, err := filepath.Abs(params.WorkflowPath)
@@ -307,7 +312,7 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 		}
 		e.logger.InfoContext(ctx, "deleting a VM that predates its workspace directory",
 			slog.String("vm", name), slog.String("workspace", ws.HostPath))
-		if err := e.cli.Delete(ctx, name); err != nil && !IsNotFound(err) {
+		if err := e.deleteVM(ctx, name); err != nil {
 			return environment.PrepareResult{}, err
 		}
 	}
@@ -443,7 +448,7 @@ func (e *Environment) createSpec(name string, ws environment.Workspace, paths ho
 		for _, h := range cred.Hosts {
 			addHost(h)
 		}
-		spec.Credentials = append(spec.Credentials, CredentialBinding{Name: cred.Name, Env: cred.Env, Hosts: cred.Hosts})
+		spec.Credentials = append(spec.Credentials, CredentialBinding{Name: cred.Name, Env: cred.Env, Hosts: cred.Hosts, Header: cred.Header})
 	}
 	return spec, nil
 }

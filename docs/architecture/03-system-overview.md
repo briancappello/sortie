@@ -107,6 +107,6 @@ This section names what the system depends on outside its own process, by role. 
 - Metrics exposition, for the Prometheus scrape endpoint when the HTTP server is enabled. Pure Go; it does not require an external metrics server to be present. See ADR-0008.
 - CI platform API, reached through whichever CI status provider is configured. Required only when CI feedback is configured.
 - Source-control platform API, reached through whichever SCM adapter is configured. Required only when a reaction that observes or writes to a pull request is configured, or when the `smolvm` repository export opens pull requests.
-- The `smolvm` command line, version `1.26.x`, with KVM, on a Linux host. Required only when `environment.kind` is `smolvm`. Sortie drives it as a subprocess, never through a library.
+- The `smolvm` command line, version `1.32.4` or later, with KVM, on a Linux host. Required only when `environment.kind` is `smolvm`. Sortie drives it as a subprocess, never through a library.
 - The host's `git` client and git credentials, for the repository mirror. Required only when `environment.smolvm.repository` is set.
 

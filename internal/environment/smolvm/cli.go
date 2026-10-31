@@ -2,10 +2,12 @@ package smolvm
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
 	"slices"
@@ -19,15 +21,12 @@ import (
 // none.
 const DefaultBinary = "smolvm"
 
-// SupportedVersion is the smolvm release range this package drives.
-// Every flag, JSON field, and error text the client relies on was
-// measured against it.
-const SupportedVersion = "1.26.x"
+// MinimumVersion is the oldest smolvm release this package drives: the
+// release every flag, JSON field, and error text the client relies on
+// was last measured against. Every later release is accepted.
+const MinimumVersion = "1.32.4"
 
 const (
-	supportedMajor = 1
-	supportedMinor = 26
-
 	// stderrTailBytes is how much of a failed invocation's standard
 	// error a [CLIError] keeps: the same tail a workspace hook keeps.
 	stderrTailBytes = 8 * 1024
@@ -63,6 +62,14 @@ type CLIError struct {
 	// with every registered secret value masked.
 	Stderr string
 
+	// Code and Message are smolvm's own report of the failure, from
+	// the error line --error-format json makes it write last on
+	// standard error, such as "NOT_FOUND". Both are "" when the
+	// last line is not that report, as for a usage error or a failure
+	// of the command run in a machine.
+	Code    string
+	Message string
+
 	// Err is the underlying error from running the process.
 	Err error
 }
@@ -82,7 +89,9 @@ func (e *CLIError) Error() string {
 	} else if e.Err != nil {
 		fmt.Fprintf(&b, ": %v", e.Err)
 	}
-	if summary := stderrSummary(e.Stderr); summary != "" {
+	if e.Code != "" {
+		fmt.Fprintf(&b, ": %s: %s", e.Code, e.Message)
+	} else if summary := stderrSummary(e.Stderr); summary != "" {
 		b.WriteString(": ")
 		b.WriteString(summary)
 	}
@@ -105,10 +114,81 @@ func stderrSummary(stderr string) string {
 }
 
 // IsNotFound reports whether err is a [CLIError] from an invocation that
-// addressed a machine smolvm does not know.
+// addressed a machine smolvm does not know. It suits the machine
+// lifecycle commands; a command run in a machine writes to the same
+// standard error.
 func IsNotFound(err error) bool {
 	var cliErr *CLIError
-	return errors.As(err, &cliErr) && cliErr.ExitCode == 1 && strings.Contains(cliErr.Stderr, "vm not found:")
+	return errors.As(err, &cliErr) && cliErr.ExitCode == 1 && cliErr.Code == codeNotFound
+}
+
+// errorFormat selects smolvm's machine-readable failure report. Every
+// machine subcommand takes it after its own name.
+var errorFormat = []string{"--error-format", "json"}
+
+// machineArgs returns the arguments of the machine subcommand sub with
+// rest, selecting the JSON failure report.
+func machineArgs(sub string, rest ...string) []string {
+	args := make([]string, 0, 4+len(rest))
+	args = append(args, "machine", sub)
+	args = append(args, errorFormat...)
+	return append(args, rest...)
+}
+
+// smolvm's failure codes, which it documents as stable, except
+// COMMAND_FAILED, which Sortie does not read. Each failure smolvm
+// reports itself carries one; a failure of the command run in a
+// machine carries none.
+const (
+	codeNotFound              = "NOT_FOUND"
+	codeConflict              = "CONFLICT"
+	codeInterrupted           = "INTERRUPTED"
+	codeConfig                = "CONFIG_ERROR"
+	codeInvalidState          = "INVALID_STATE"
+	codeStorage               = "STORAGE_ERROR"
+	codeMount                 = "MOUNT_ERROR"
+	codeKVMUnavailable        = "KVM_UNAVAILABLE"
+	codeHypervisorUnavailable = "HYPERVISOR_UNAVAILABLE"
+	codeSmolvm                = "SMOLVM_ERROR"
+)
+
+// parseErrorReport returns the code and message of line when it is
+// exactly smolvm's JSON failure report: one object whose only key,
+// "error", holds exactly a non-empty string "code" and a string
+// "message".
+func parseErrorReport(line string) (code, message string, ok bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "{") {
+		return "", "", false
+	}
+	var report struct {
+		Error *struct {
+			Code    *string `json:"code"`
+			Message *string `json:"message"`
+		} `json:"error"`
+	}
+	dec := json.NewDecoder(strings.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&report); err != nil || dec.More() {
+		return "", "", false
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", "", false
+	}
+	if report.Error == nil || report.Error.Code == nil || report.Error.Message == nil || *report.Error.Code == "" {
+		return "", "", false
+	}
+	return *report.Error.Code, *report.Error.Message, true
+}
+
+// lastLine returns the last non-blank line of text, trimmed.
+func lastLine(lines []string) string {
+	for _, line := range slices.Backward(lines) {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // Machine states reported by the machine listing.
@@ -160,11 +240,13 @@ type SocketMount struct {
 }
 
 // CredentialBinding binds the host variable Env to the guest variable of
-// the same name for Hosts, under the credential name Name.
+// the same name for Hosts, under the credential name Name. A non-empty
+// Header is also set to the real value on every HTTPS request to Hosts.
 type CredentialBinding struct {
-	Name  string
-	Env   string
-	Hosts []string
+	Name   string
+	Env    string
+	Hosts  []string
+	Header string
 }
 
 // Label is one machine label.
@@ -203,7 +285,7 @@ func createArgs(spec CreateSpec) ([]string, error) {
 	if spec.Name == "" || spec.Pack == "" {
 		return nil, errors.New("smolvm machine create needs a name and a pack")
 	}
-	args := []string{"machine", "create", "--name", spec.Name, "--from", spec.Pack}
+	args := machineArgs("create", "--name", spec.Name, "--from", spec.Pack)
 	for _, sizing := range []struct {
 		flag  string
 		value int
@@ -226,7 +308,11 @@ func createArgs(spec CreateSpec) ([]string, error) {
 		if len(cred.Hosts) == 0 {
 			return nil, fmt.Errorf("credential %q binds no host", cred.Name)
 		}
-		args = append(args, "--credential", cred.Name+"="+cred.Env+"@"+strings.Join(cred.Hosts, ","))
+		binding := cred.Name + "=" + cred.Env + "@" + strings.Join(cred.Hosts, ",")
+		if cred.Header != "" {
+			binding += ":set-header=" + cred.Header
+		}
+		args = append(args, "--credential", binding)
 	}
 	if spec.SSHAgent {
 		args = append(args, "--ssh-agent")
@@ -289,7 +375,7 @@ type ExecOptions struct {
 // ExecArgs returns the arguments, without the program, of an invocation
 // that runs argv in the machine name.
 func ExecArgs(name string, opts ExecOptions, argv []string) []string {
-	args := []string{"machine", "exec", "--name", name}
+	args := machineArgs("exec", "--name", name)
 	switch {
 	case opts.Detach:
 		args = append(args, "-d")
@@ -355,6 +441,7 @@ func (c *CLI) run(ctx context.Context, subcommand []string, machine string, args
 		Stderr:   string(stderr.Bytes()),
 		Err:      err,
 	}
+	cliErr.Code, cliErr.Message, _ = parseErrorReport(lastLine(strings.Split(cliErr.Stderr, "\n")))
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.Exited() {
 		cliErr.ExitCode = exitErr.ExitCode()
@@ -383,23 +470,77 @@ func (c *CLI) Version(ctx context.Context) (string, error) {
 	return m[1] + "." + m[2] + "." + m[3] + m[4], nil
 }
 
-// CheckVersion returns an error naming version and [SupportedVersion]
-// when version is outside the supported range.
+// CheckVersion returns an error naming version and [MinimumVersion]
+// when version is older than the minimum or is not a version.
 func CheckVersion(version string) error {
-	m := versionPattern.FindStringSubmatch("smolvm " + version)
-	if m != nil {
-		major, _ := strconv.Atoi(m[1])
-		minor, _ := strconv.Atoi(m[2])
-		if major == supportedMajor && minor == supportedMinor {
-			return nil
-		}
+	got, ok := parseSemver(version)
+	if !ok {
+		return fmt.Errorf("smolvm version %q is not a version; minimum supported: %s", version, MinimumVersion)
 	}
-	return fmt.Errorf("smolvm version %s is not supported; supported: %s", version, SupportedVersion)
+	minimum, _ := parseSemver(MinimumVersion)
+	if got.compare(minimum) < 0 {
+		return fmt.Errorf("smolvm version %s is older than the minimum supported version %s", version, MinimumVersion)
+	}
+	return nil
+}
+
+var semverPattern = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+
+// semver is a parsed release version. Build metadata is dropped because
+// it does not order releases.
+type semver struct {
+	major, minor, patch int
+	prerelease          string
+}
+
+func parseSemver(s string) (semver, bool) {
+	m := semverPattern.FindStringSubmatch(s)
+	if m == nil {
+		return semver{}, false
+	}
+	var v semver
+	var err error
+	if v.major, err = strconv.Atoi(m[1]); err != nil {
+		return semver{}, false
+	}
+	if v.minor, err = strconv.Atoi(m[2]); err != nil {
+		return semver{}, false
+	}
+	if v.patch, err = strconv.Atoi(m[3]); err != nil {
+		return semver{}, false
+	}
+	v.prerelease = strings.TrimPrefix(m[4], "-")
+	return v, true
+}
+
+// compare orders v and w by major, minor, and patch. A prerelease of a
+// version orders before that version; two prereleases of the same
+// version compare by their identifiers as text, which is enough to keep
+// any prerelease of the minimum below the minimum.
+func (v semver) compare(w semver) int {
+	if c := cmp.Compare(v.major, w.major); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(v.minor, w.minor); c != 0 {
+		return c
+	}
+	if c := cmp.Compare(v.patch, w.patch); c != 0 {
+		return c
+	}
+	switch {
+	case v.prerelease == w.prerelease:
+		return 0
+	case v.prerelease == "":
+		return 1
+	case w.prerelease == "":
+		return -1
+	}
+	return strings.Compare(v.prerelease, w.prerelease)
 }
 
 // List returns every machine smolvm knows.
 func (c *CLI) List(ctx context.Context) ([]Machine, error) {
-	out, err := c.run(ctx, []string{"machine", "ls"}, "", []string{"machine", "ls", "--json"})
+	out, err := c.run(ctx, []string{"machine", "ls"}, "", machineArgs("ls", "--json"))
 	if err != nil {
 		return nil, err
 	}
@@ -418,20 +559,20 @@ func (c *CLI) Create(ctx context.Context, spec CreateSpec) error {
 
 // Start starts the machine name.
 func (c *CLI) Start(ctx context.Context, name string) error {
-	_, err := c.run(ctx, []string{"machine", "start"}, name, []string{"machine", "start", "--name", name})
+	_, err := c.run(ctx, []string{"machine", "start"}, name, machineArgs("start", "--name", name))
 	return err
 }
 
 // Stop stops the machine name. Stopping a machine that is not running
 // succeeds.
 func (c *CLI) Stop(ctx context.Context, name string) error {
-	_, err := c.run(ctx, []string{"machine", "stop"}, name, []string{"machine", "stop", "--name", name})
+	_, err := c.run(ctx, []string{"machine", "stop"}, name, machineArgs("stop", "--name", name))
 	return err
 }
 
 // Delete deletes the machine name without asking for confirmation.
 func (c *CLI) Delete(ctx context.Context, name string) error {
-	_, err := c.run(ctx, []string{"machine", "delete"}, name, []string{"machine", "delete", "-f", "--name", name})
+	_, err := c.run(ctx, []string{"machine", "delete"}, name, machineArgs("delete", "-f", "--name", name))
 	return err
 }
 

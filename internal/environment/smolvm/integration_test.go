@@ -3,6 +3,7 @@
 package smolvm
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,21 @@ import (
 	"github.com/sortie-ai/sortie/internal/workspace"
 	"github.com/sortie-ai/sortie/internal/workspacekit"
 )
+
+// smolvmLiveBound bounds the smolvm work of one gated test, and of one
+// test VM's deletion. Measured on smolvm 1.32.4: the slowest gated test,
+// TestIntegration_PrepareRealVM, took 31 s while the host ran other
+// builds.
+const smolvmLiveBound = 5 * time.Minute
+
+// liveContext returns a context derived from t.Context() that is done
+// after smolvmLiveBound.
+func liveContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), smolvmLiveBound)
+	t.Cleanup(cancel)
+	return ctx
+}
 
 // integrationPack returns the pack the gated tests create VMs from:
 // SORTIE_SMOLVM_TEST_PACK, or the spike's base pack.
@@ -89,16 +105,9 @@ func TestIntegration_PrepareRealVM(t *testing.T) {
 	cli := env.cli
 	name := VMName(key)
 	ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace, Identifier: key}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		if err := cli.Delete(ctx, name); err != nil && !IsNotFound(err) {
-			t.Errorf("delete VM %s: %v", name, err)
-		}
-	})
+	t.Cleanup(func() { deleteTestVM(t, env, name) })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	machine := func() Machine {
 		t.Helper()
 		machines, err := cli.List(ctx)
@@ -214,15 +223,38 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 	ie := &integrationEnv{env: built.(*Environment), root: root}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
 		for _, key := range ie.keys {
-			if err := ie.env.cli.Delete(ctx, VMName(key)); err != nil && !IsNotFound(err) {
-				t.Errorf("delete VM %s: %v", VMName(key), err)
-			}
+			deleteTestVM(t, ie.env, VMName(key))
 		}
 	})
 	return ie
+}
+
+// deleteTestVM deletes a gated test's VM, which may be gone already, and
+// fails the test when smolvm's residue for its name is left behind.
+func deleteTestVM(t *testing.T, env *Environment, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), smolvmLiveBound)
+	defer cancel()
+	if err := env.deleteVM(ctx, name); err != nil {
+		t.Errorf("delete VM %s: %v", name, err)
+	}
+	assertNoResidue(t, env, name)
+}
+
+// assertNoResidue fails the test when smolvm's per-machine directory or
+// lock file for name, a machine that no longer exists, is left behind.
+func assertNoResidue(t *testing.T, env *Environment, name string) {
+	t.Helper()
+	if env.machineCache == "" {
+		t.Fatal("smolvm's machine cache directory is unknown")
+	}
+	machineDir, lock := machineResidue(env.machineCache, name)
+	for _, path := range []string{machineDir, lock} {
+		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("smolvm residue %s of VM %s is left behind (Lstat error %v)", path, name, err)
+		}
+	}
 }
 
 // newKey returns a fresh workspace key whose VM is deleted when the test
@@ -246,8 +278,7 @@ func TestIntegration_HookRunsInTheGuest(t *testing.T) {
 	t.Setenv("SORTIE_SESSION_TOKEN", "integration-session-token")
 	t.Setenv("SORTIE_API_URL", "http://127.0.0.1:1/api")
 	key := ie.newKey("SMOLHOOK")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root:       ie.root,
@@ -293,48 +324,78 @@ func TestIntegration_ConnectionFailedOnRealExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	if _, err := ie.env.Prepare(ctx, ws); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
 
-	run := func(ws environment.Workspace, argv ...string) (int, []string) {
+	launch := func(ws environment.Workspace, l domain.CarrierLaunch) (*exec.Cmd, *strings.Builder) {
 		t.Helper()
-		hostArgv, err := ie.env.LaunchArgv(ws, domain.CarrierLaunch{Argv: argv})
+		hostArgv, err := ie.env.LaunchArgv(ws, l)
 		if err != nil {
 			t.Fatalf("LaunchArgv() error = %v", err)
 		}
 		cmd := exec.CommandContext(ctx, hostArgv[0], hostArgv[1:]...) //nolint:gosec // G204: the test's own smolvm launch
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
-		return procutil.ExtractExitCode(cmd.Run()), strings.Split(stderr.String(), "\n")
+		return cmd, &stderr
+	}
+	checkLaunch := func(name string, ws environment.Workspace, want bool, l domain.CarrierLaunch) {
+		t.Helper()
+		cmd, stderr := launch(ws, l)
+		exit := procutil.ExtractExitCode(cmd.Run())
+		if got := ie.env.ConnectionFailed(ws, exit, strings.Split(stderr.String(), "\n")); got != want {
+			t.Errorf("%s: ConnectionFailed(%d, %q) = %v, want %v", name, exit, stderr.String(), got, want)
+		}
 	}
 	check := func(name string, ws environment.Workspace, want bool, argv ...string) {
 		t.Helper()
-		exit, tail := run(ws, argv...)
-		if got := ie.env.ConnectionFailed(ws, exit, tail); got != want {
-			t.Errorf("%s: ConnectionFailed(%d, %q) = %v, want %v", name, exit, tail, got, want)
-		}
+		checkLaunch(name, ws, want, domain.CarrierLaunch{Argv: argv})
 	}
 
 	check("guest exit 1", ws, false, "sh", "-c", "echo guest-err >&2; exit 1")
-	check("guest prints smolvm's line", ws, false, "sh", "-c", "echo 'Error: vm not found: other' >&2; exit 1")
+	check("guest prints a report, then more", ws, false, "sh", "-c",
+		`echo '{"error":{"code":"NOT_FOUND","message":"vm not found: other"}}' >&2; echo more >&2; exit 1`)
+	check("guest prints JSON that is not a report", ws, false, "sh", "-c", `echo '{"error":"NOT_FOUND"}' >&2; exit 1`)
 	check("missing guest program", ws, false, "no-such-agent-program")
+	t.Setenv("SORTIE_SMOLVM_TEST_UNSET_SECRET", "")
+	if err := os.Unsetenv("SORTIE_SMOLVM_TEST_UNSET_SECRET"); err != nil {
+		t.Fatal(err)
+	}
+	checkLaunch("unset secret", ws, true, domain.CarrierLaunch{Argv: []string{"true"}, SecretEnv: []string{"SORTIE_SMOLVM_TEST_UNSET_SECRET"}})
 	missing := ws
 	missing.Key = key + "-missing"
+	ie.keys = append(ie.keys, missing.Key)
 	check("missing VM", missing, true, "true")
+
+	// The VM stops under a running command once the command has
+	// started.
+	cmd, stderr := launch(ws, domain.CarrierLaunch{Argv: []string{"sh", "-c", "echo started; exec sleep 300"}})
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the long command: %v", err)
+	}
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "started\n" {
+		t.Fatalf("long command output = %q, %v, want started", line, err)
+	}
 	if err := ie.env.cli.Stop(ctx, VMName(key)); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
+	exit := procutil.ExtractExitCode(cmd.Wait())
+	if !ie.env.ConnectionFailed(ws, exit, strings.Split(stderr.String(), "\n")) {
+		t.Errorf("VM stopped mid-command: ConnectionFailed(%d, %q) = false, want true", exit, stderr.String())
+	}
+
 	check("stopped VM", ws, true, "true")
 }
 
 func TestIntegration_ControlDirectoryIsShared(t *testing.T) {
 	ie := newIntegrationEnv(t)
 	key := ie.newKey("SMOLCTL")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 	prepare := func() workspace.PrepareResult {
 		t.Helper()
 		res, err := workspace.Prepare(ctx, workspace.PrepareParams{
@@ -414,8 +475,7 @@ func TestIntegration_ExistingSortieEntryFailsPreparation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			key := ie.newKey("SMOLDOT")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
+			ctx := liveContext(t)
 			_, err := workspace.Prepare(ctx, workspace.PrepareParams{
 				Root:          ie.root,
 				Identifier:    key,
@@ -470,8 +530,7 @@ func TestIntegration_ReleaseRemove(t *testing.T) {
 	ie := newIntegrationEnv(t)
 	key := ie.newKey("SMOLREL")
 	name := VMName(key)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root: ie.root, Identifier: key, IssueID: "10001", HookTimeoutMS: 120_000, Environment: ie.env,
@@ -522,8 +581,7 @@ func TestIntegration_Sweep(t *testing.T) {
 	key := ie.newKey("SMOLSWEEP")
 	name := VMName(key)
 	unlabeled := VMName(ie.newKey("SMOLUNL"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	host := filepath.Join(ie.root, key)
 	if err := os.Mkdir(host, 0o750); err != nil {
@@ -562,5 +620,90 @@ func TestIntegration_Sweep(t *testing.T) {
 	}
 	if m, ok := ie.listed(ctx, t, unlabeled); !ok || !m.Running() {
 		t.Errorf("unlabeled VM after the sweep = %+v (listed %v), want it left running", m, ok)
+	}
+}
+
+// The binding's header is set on HTTPS requests to its host, replacing
+// the guest's own value, while the guest variable holds a placeholder.
+// It needs egress to httpbin.org, which echoes the request headers.
+//
+// Not parallel: it sets the credential variable in the process
+// environment, where smolvm reads it when the VM starts.
+func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
+	requireSmolvm(t)
+	const variable, value = "SORTIE_SMOLVM_TEST_HEADER_KEY", "integration-header-value"
+	t.Setenv(variable, value)
+	pack := integrationPack(t)
+	if _, err := os.Stat(pack); err != nil {
+		t.Fatalf("pack %s: %v; set SORTIE_SMOLVM_TEST_PACK", pack, err)
+	}
+	root := t.TempDir()
+	built, err := New(environment.Params{
+		Config: config.EnvironmentConfig{Kind: config.EnvironmentKindSmolvm, Smolvm: config.SmolvmConfig{
+			Binary: DefaultBinary,
+			Pack:   pack,
+			Credentials: []config.SmolvmCredential{
+				{Name: "echo", Env: variable, Hosts: []string{"httpbin.org"}, Header: "X-Api-Key"},
+			},
+		}},
+		StateDir:     t.TempDir(),
+		WorkflowPath: filepath.Join(root, "WORKFLOW.md"),
+		Logger:       slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ie := &integrationEnv{env: built.(*Environment), root: root}
+	key := ie.newKey("SMOLHDR")
+	t.Cleanup(func() { deleteTestVM(t, ie.env, VMName(key)) })
+	host := filepath.Join(root, key)
+	if err := os.Mkdir(host, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ctx := liveContext(t)
+	if _, err := ie.env.Prepare(ctx, environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	seen, err := ie.guest(ctx, key, "printenv "+variable)
+	if err != nil || !strings.HasPrefix(seen, "SMOL_PLACEHOLDER_") || strings.Contains(seen, value) {
+		t.Errorf("guest %s = %q, %v, want a placeholder", variable, seen, err)
+	}
+	echo, err := ie.guest(ctx, key, `curl -sS -m 30 -H "X-Api-Key: guest-own" https://httpbin.org/headers | jq -r '.headers["X-Api-Key"]'`)
+	if err != nil || strings.TrimSpace(echo) != value {
+		t.Errorf("X-Api-Key received by httpbin.org = %q, %v, want the host's value", echo, err)
+	}
+}
+
+// Releasing and removing a workspace whose VM is missing, after a
+// command ran against it, leaves none of smolvm's residue for its name.
+func TestIntegration_MissingVMLeavesNoResidue(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	ctx := liveContext(t)
+	for _, step := range []string{"Release", "Remove"} {
+		key := ie.newKey("SMOLRES")
+		host := filepath.Join(ie.root, key)
+		if err := os.Mkdir(host, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}
+		name := VMName(key)
+		if _, err := ie.guest(ctx, key, "true"); !IsNotFound(err) {
+			t.Fatalf("exec in the missing VM %s: %v, want smolvm's not-found", name, err)
+		}
+		machineDir, _ := machineResidue(ie.env.machineCache, name)
+		if _, err := os.Stat(machineDir); err != nil {
+			t.Fatalf("smolvm left no directory for the missing VM %s: %v; its residue naming changed", name, err)
+		}
+		var err error
+		if step == "Release" {
+			err = ie.env.Release(ctx, ws)
+		} else {
+			err = ie.env.Remove(ctx, ws)
+		}
+		if err != nil {
+			t.Fatalf("%s() error = %v", step, err)
+		}
+		assertNoResidue(t, ie.env, name)
 	}
 }

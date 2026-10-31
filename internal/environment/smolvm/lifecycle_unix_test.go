@@ -4,13 +4,18 @@ package smolvm
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/sortie-ai/sortie/internal/agent/procutil"
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 )
 
@@ -75,7 +80,7 @@ func TestRelease_StopsTheRunningVM(t *testing.T) {
 	if err := f.env.Release(context.Background(), f.ws); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "stop", "--name", "sortie-VM-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "stop", "--error-format", "json", "--name", "sortie-VM-1"})
 	machines := f.fake.state().Machines
 	if len(machines) != 1 || machines[0].State != StateStopped {
 		t.Errorf("machines = %+v, want sortie-VM-1 stopped and still present", machines)
@@ -126,7 +131,7 @@ func TestResume(t *testing.T) {
 		wantArgvs [][]string
 	}{
 		{name: "stopped VM starts", state: StateStopped, wantReady: true,
-			wantArgvs: append([][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)},
+			wantArgvs: append([][]string{listArgv, {"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"}}, toolListenerCalls()...)},
 		{name: "running VM", state: StateRunning, wantReady: true, wantArgvs: [][]string{listArgv}},
 		{name: "no VM", wantArgvs: [][]string{listArgv}},
 	}
@@ -161,7 +166,7 @@ func TestRemove_DeletesTheVMThenItsStateDirectory(t *testing.T) {
 	if err := f.env.Remove(context.Background(), f.ws); err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "delete", "-f", "--name", "sortie-VM-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"})
 	if got := f.machineNames(t); !slices.Equal(got, []string{"sortie-VM-2"}) {
 		t.Errorf("machines = %q, want only sortie-VM-2 left", got)
 	}
@@ -186,9 +191,9 @@ func TestRemove_WithoutVM(t *testing.T) {
 		},
 		{
 			name:     "VM gone before the delete",
-			fail:     map[string]fakeFailure{"machine delete": {Exit: 1, Stderr: "Error: vm not found: sortie-VM-1\n"}},
+			fail:     map[string]fakeFailure{"machine delete": {Exit: 1, Stderr: `{"error":{"code":"NOT_FOUND","message":"vm not found: sortie-VM-1"}}` + "\n"}},
 			machines: func(f prepareFixture) []fakeMachine { return []fakeMachine{f.ownedVM("VM-1", StateStopped)} },
-			wantArgv: [][]string{listArgv, {"machine", "delete", "-f", "--name", "sortie-VM-1"}},
+			wantArgv: [][]string{listArgv, {"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"}},
 		},
 	}
 	for _, tt := range tests {
@@ -287,7 +292,7 @@ func TestSweep_SelectsLeftoverVMs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sweep() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "delete", "-f", "--name", "sortie-GONE-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-1"})
 	want := []string{
 		present.Name, running.Name, otherWorkflow.Name, unmanaged.Name, unlabeled.Name, traversal.Name, mismatched.Name,
 	}
@@ -313,8 +318,8 @@ func TestSweep_ContinuesPastAFailedDelete(t *testing.T) {
 		t.Fatal("Sweep() error = nil, want the delete failures")
 	}
 	assertArgvs(t, f, listArgv,
-		[]string{"machine", "delete", "-f", "--name", "sortie-GONE-1"},
-		[]string{"machine", "delete", "-f", "--name", "sortie-GONE-2"})
+		[]string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-1"},
+		[]string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-2"})
 	assertExists(t, keyDir, true)
 }
 
@@ -369,6 +374,141 @@ func TestSweepUnselected(t *testing.T) {
 	if err := SweepUnselected(context.Background(), params, p); err != nil {
 		t.Fatalf("SweepUnselected() error = %v", err)
 	}
-	assertArgvs(t, f, listArgv, []string{"machine", "delete", "-f", "--name", "sortie-GONE-1"})
+	assertArgvs(t, f, listArgv, []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-GONE-1"})
 	assertExists(t, keyDir, false)
+}
+
+// residueEntries lists what the fake left in its machine cache.
+func residueEntries(t *testing.T, f prepareFixture) []string {
+	t.Helper()
+	entries, err := os.ReadDir(f.env.machineCache)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// execInMissingVM runs a session launch in the fixture's VM, which does
+// not exist, so the fake leaves smolvm's residue for its name.
+func execInMissingVM(t *testing.T, f prepareFixture) {
+	t.Helper()
+	argv, err := f.env.LaunchArgv(f.ws, domain.CarrierLaunch{Argv: []string{"opencode", "acp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command(argv[0], argv[1:]...).Run(); procutil.ExtractExitCode(err) != 1 { //nolint:gosec // G204: the fake smolvm
+		t.Fatalf("exec in the missing VM: %v, want exit 1", err)
+	}
+	if len(residueEntries(t, f)) == 0 {
+		t.Fatal("the fake left no residue for the missing VM")
+	}
+}
+
+func TestReleaseAndRemove_ClearResidueOfAMissingVM(t *testing.T) {
+	t.Parallel()
+
+	for name, run := range map[string]func(prepareFixture) error{
+		"Release": func(f prepareFixture) error { return f.env.Release(context.Background(), f.ws) },
+		"Remove":  func(f prepareFixture) error { return f.env.Remove(context.Background(), f.ws) },
+	} {
+		f := newPrepareFixture(t, fakeState{}, nil)
+		execInMissingVM(t, f)
+		if err := run(f); err != nil {
+			t.Fatalf("%s() error = %v", name, err)
+		}
+		if left := residueEntries(t, f); len(left) != 0 {
+			t.Errorf("%s(): residue left = %q, want none", name, left)
+		}
+		// No smolvm command addressed the missing VM: only the listing.
+		for _, call := range f.fake.argvs()[1:] {
+			if call[1] != "ls" {
+				t.Errorf("%s(): call %q, want only listings", name, call)
+			}
+		}
+	}
+}
+
+func TestLifecycle_ClearsResidueOfAVMThatVanished(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		vanish string
+		state  string
+		run    func(prepareFixture) error
+	}{
+		"Release": {"machine stop", StateRunning, func(f prepareFixture) error { return f.env.Release(context.Background(), f.ws) }},
+		"Remove":  {"machine delete", StateStopped, func(f prepareFixture) error { return f.env.Remove(context.Background(), f.ws) }},
+		"Sweep": {"machine delete", StateStopped, func(f prepareFixture) error {
+			if err := os.RemoveAll(f.ws.HostPath); err != nil {
+				return err
+			}
+			return f.env.Sweep(context.Background(), environment.SweepParams{WorkspaceRoot: filepath.Dir(f.ws.HostPath)})
+		}},
+		"Prepare": {"machine delete", StateStopped, func(f prepareFixture) error {
+			_, err := f.env.Prepare(context.Background(), f.ws)
+			return err
+		}},
+	}
+	for name, tt := range tests {
+		f := newPrepareFixture(t, fakeState{}, nil)
+		f.fake.setState(fakeState{Machines: []fakeMachine{f.ownedVM("VM-1", tt.state)}, Vanish: []string{tt.vanish}})
+		if err := tt.run(f); err != nil {
+			t.Fatalf("%s() error = %v, want the vanished VM accepted", name, err)
+		}
+		if left := residueEntries(t, f); len(left) != 0 {
+			t.Errorf("%s(): residue left = %q, want none", name, left)
+		}
+	}
+}
+
+func TestRemoveMissingMachineResidue_KeepsWhatIsNotResidue(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, nil)
+	name := VMName(f.ws.Key)
+	machineDir, lock := machineResidue(f.env.machineCache, name)
+	if err := os.MkdirAll(machineDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(machineDir, "disk"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, []byte("held"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env.removeMissingMachineResidue(name)
+	assertExists(t, filepath.Join(machineDir, "disk"), true)
+	assertExists(t, lock, true)
+
+	other := VMName("VM-2")
+	otherDir, otherLock := machineResidue(f.env.machineCache, other)
+	if err := os.MkdirAll(otherDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherLock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env.removeMissingMachineResidue(name)
+	assertExists(t, otherDir, true)
+	assertExists(t, otherLock, true)
+}
+
+func TestMachineResidue_MatchesSmolvmsNames(t *testing.T) {
+	t.Parallel()
+
+	// smolvm 1.32.4, measured: the directory of a missing machine named
+	// probe-missing, and of one named nope-x.
+	for name, want := range map[string]string{"probe-missing": "2067d9cf4cf8431c", "nope-x": "6fb20f95ef1f5e9f"} {
+		dir, lock := machineResidue("/cache", name)
+		if dir != "/cache/"+want || lock != "/cache/."+name+".fork-operation.lock" {
+			t.Errorf("machineResidue(%q) = %q, %q", name, dir, lock)
+		}
+	}
 }

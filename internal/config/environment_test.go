@@ -447,6 +447,96 @@ func TestEnvironmentConfig_Errors(t *testing.T) {
 			wantMsg:   []string{"empty"},
 		},
 		{
+			name:      "credential header with a colon",
+			raw:       withCreds(cred(map[string]any{"header": "X-Api:Key"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a comma",
+			raw:       withCreds(cred(map[string]any{"header": "X-A,X-B"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with an equals sign",
+			raw:       withCreds(cred(map[string]any{"header": "X=Y"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a space",
+			raw:       withCreds(cred(map[string]any{"header": "X Api"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a tab",
+			raw:       withCreds(cred(map[string]any{"header": "X\tApi"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a slash",
+			raw:       withCreds(cred(map[string]any{"header": "X/Y"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with an at sign",
+			raw:       withCreds(cred(map[string]any{"header": "X@Y"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a quote",
+			raw:       withCreds(cred(map[string]any{"header": "X\"Y"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a non-ASCII letter",
+			raw:       withCreds(cred(map[string]any{"header": "X-Ápi"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header with a modifier",
+			raw:       withCreds(cred(map[string]any{"header": "X:set-header=Y"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"invalid header name"},
+		},
+		{
+			name:      "credential header Host",
+			raw:       withCreds(cred(map[string]any{"header": "Host"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"Host", "routes or frames"},
+		},
+		{
+			name:      "credential header content-length",
+			raw:       withCreds(cred(map[string]any{"header": "content-length"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"content-length", "routes or frames"},
+		},
+		{
+			name:      "credential header Cookie",
+			raw:       withCreds(cred(map[string]any{"header": "Cookie"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"Cookie", "routes or frames"},
+		},
+		{
+			name:      "credential header Proxy-Authorization",
+			raw:       withCreds(cred(map[string]any{"header": "Proxy-Authorization"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"Proxy-Authorization", "routes or frames"},
+		},
+		{
+			name:      "credential header Transfer-Encoding",
+			raw:       withCreds(cred(map[string]any{"header": "Transfer-Encoding"})),
+			wantField: "environment.smolvm.credentials[0].header",
+			wantMsg:   []string{"Transfer-Encoding", "routes or frames"},
+		},
+		{
 			name:      "credential header of the wrong type",
 			raw:       withCreds(cred(map[string]any{"header": []any{"a"}})),
 			wantField: "environment.smolvm.credentials[0].header",
@@ -588,5 +678,16 @@ func TestValidateFrontMatter_Environment(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ValidateFrontMatter() warnings = %v, want %v", got, want)
+	}
+}
+
+func TestSmolvmCredentialHeader_AcceptsFieldNameTokens(t *testing.T) {
+	t.Parallel()
+
+	for _, header := range []string{"X-Api-Key", "authorization", "x_api.key~1!#$%&'*+^`|", "Expect"} {
+		err := checkCredentialHeader(header, "environment.smolvm.credentials[0].header")
+		if err != nil {
+			t.Errorf("checkCredentialHeader(%q) = %v, want nil", header, err)
+		}
 	}
 }

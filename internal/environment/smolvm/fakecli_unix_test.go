@@ -46,7 +46,7 @@ type fakeFailure struct {
 }
 
 type fakeState struct {
-	// Version is what --version prints; "" prints "smolvm 1.26.1".
+	// Version is what --version prints; "" prints "smolvm 1.32.4".
 	Version string `json:"version"`
 
 	Machines []fakeMachine `json:"machines"`
@@ -60,7 +60,16 @@ type fakeState struct {
 
 	// RecordEnv names host variables whose values each call records.
 	RecordEnv []string `json:"record_env"`
+
+	// Vanish names subcommands, such as "machine delete", before which
+	// the addressed machine disappears, as when another process deletes
+	// it between Sortie's listing and its command.
+	Vanish []string `json:"vanish"`
 }
+
+// fakeMachineCache is where the fake in dir leaves the residue smolvm
+// 1.32.4 leaves for a machine that does not exist.
+func fakeMachineCache(dir string) string { return filepath.Join(dir, "smolvm-vms") }
 
 // fakeCall is one recorded invocation.
 type fakeCall struct {
@@ -156,7 +165,7 @@ func writeFakeState(dir string, state fakeState) error {
 	return os.WriteFile(filepath.Join(dir, "state.json"), data, 0o600)
 }
 
-// runFakeSmolvm behaves like the parts of smolvm 1.26 the client drives,
+// runFakeSmolvm behaves like the parts of smolvm 1.32.4 the client drives,
 // with the messages and exit codes measured from the real binary.
 func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 	state, err := readFakeState(dir)
@@ -197,7 +206,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 	if key == "--version" {
 		version := state.Version
 		if version == "" {
-			version = "smolvm 1.26.1"
+			version = "smolvm 1.32.4"
 		}
 		say(stdout, "%s\n", version)
 		return 0
@@ -205,10 +214,38 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 
 	flags, rest := parseFakeFlags(args[2:])
 	name := flags.last("--name")
+	if slices.Contains(state.Vanish, key) {
+		state.Machines = slices.DeleteFunc(state.Machines, func(m fakeMachine) bool { return m.Name == name })
+		if err := writeFakeState(dir, state); err != nil {
+			say(stderr, "fake smolvm: %v\n", err)
+			return 99
+		}
+	}
 	idx := slices.IndexFunc(state.Machines, func(m fakeMachine) bool { return m.Name == name })
-	notFound := func() int {
-		say(stderr, "Error: vm not found: %s\n", name)
+	// fail reports smolvm's own failure as smolvm 1.32.4 does: as its
+	// JSON report with --error-format json, else as an "Error:" line.
+	fail := func(code, message string) int {
+		if flags.last("--error-format") == "json" {
+			report, _ := json.Marshal(map[string]any{"error": map[string]string{"code": code, "message": message}})
+			say(stderr, "%s\n", report)
+		} else {
+			say(stderr, "Error: %s\n", message)
+		}
 		return 1
+	}
+	// notFound leaves what smolvm 1.32.4 leaves for a missing machine:
+	// exec and stop an empty machine directory, stop and delete an
+	// empty lock file; start leaves nothing.
+	notFound := func() int {
+		machineDir, lock := machineResidue(fakeMachineCache(dir), name)
+		if args[1] == "exec" || args[1] == "stop" {
+			_ = os.MkdirAll(machineDir, 0o750)
+		}
+		if args[1] == "stop" || args[1] == "delete" {
+			_ = os.MkdirAll(filepath.Dir(lock), 0o750)
+			_ = os.WriteFile(lock, nil, 0o600)
+		}
+		return fail(codeNotFound, "vm not found: "+name)
 	}
 
 	switch args[1] {
@@ -226,8 +263,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "create":
 		if idx >= 0 {
-			say(stderr, "Error: machine already exists: %s\n", name)
-			return 1
+			return fail(codeConfig, fmt.Sprintf("config operation failed: create machine: machine '%s' already exists or is being created", name))
 		}
 		m := fakeMachine{Name: name, State: StateCreated, Labels: map[string]string{}, Image: flags.last("--from")}
 		for _, l := range flags.all("--label") {
@@ -267,8 +303,7 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 			return notFound()
 		}
 		if state.Machines[idx].State != StateRunning {
-			say(stderr, "Error: agent operation failed: connect: machine '%s' is not running.\n", name)
-			return 1
+			return fail(codeSmolvm, fmt.Sprintf("agent operation failed: connect: machine '%s' is not running. Start it with 'smolvm machine start --name %s'; if a start is already in progress, retry once it finishes.", name, name))
 		}
 		say(stdout, "%s\n", strings.Join(rest, " "))
 		return 0
@@ -301,7 +336,7 @@ func parseFakeFlags(args []string) (fakeFlags, []string) {
 	valued := map[string]bool{
 		"--name": true, "-n": true, "--from": true, "--cpus": true, "--mem": true, "--storage": true,
 		"--label": true, "--allow-host-pattern": true, "--credential": true, "-v": true,
-		"--mount-socket": true, "-w": true, "-e": true, "--secret-env": true,
+		"--mount-socket": true, "-w": true, "-e": true, "--secret-env": true, "--error-format": true,
 	}
 	flags := fakeFlags{}
 	for i := 0; i < len(args); i++ {

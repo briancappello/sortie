@@ -60,9 +60,11 @@ func newPrepareFixture(t *testing.T, state fakeState, mutate func(*config.Smolvm
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	smolvmEnv := env.(*Environment)
+	smolvmEnv.machineCache = fakeMachineCache(fake.dir)
 	return prepareFixture{
 		fake:     fake,
-		env:      env.(*Environment),
+		env:      smolvmEnv,
 		ws:       environment.Workspace{Key: "VM-1", HostPath: host, GuestPath: GuestWorkspace, Identifier: "VM-1"},
 		stateDir: stateDir,
 		pack:     pack,
@@ -104,15 +106,15 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-var listArgv = []string{"machine", "ls", "--json"}
+var listArgv = []string{"machine", "ls", "--error-format", "json", "--json"}
 
 // toolListenerCalls are the calls that start the guest side of the tool
 // channel in the running VM sortie-VM-1: the socat check, then the
 // detached listener.
 func toolListenerCalls() [][]string {
 	return [][]string{
-		append([]string{"machine", "exec", "--name", "sortie-VM-1", "--"}, toolListenerCheck...),
-		append([]string{"machine", "exec", "--name", "sortie-VM-1", "-d", "--"}, toolListenerArgv...),
+		append([]string{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "--"}, toolListenerCheck...),
+		append([]string{"machine", "exec", "--error-format", "json", "--name", "sortie-VM-1", "-d", "--"}, toolListenerArgv...),
 	}
 }
 
@@ -142,7 +144,7 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 	control := filepath.Join(f.ws.HostPath, ".sortie")
 	socket := filepath.Join(f.stateDir, "env", "VM-1", "tools.sock")
 	wantCreate := []string{
-		"machine", "create", "--name", "sortie-VM-1", "--from", f.pack,
+		"machine", "create", "--error-format", "json", "--name", "sortie-VM-1", "--from", f.pack,
 		"--cpus", "2", "--mem", "4096", "--storage", "20",
 		"--label", "sortie.managed=1",
 		"--label", "sortie.workspace=VM-1",
@@ -159,7 +161,7 @@ func TestPrepare_CreatesAndStartsTheVM(t *testing.T) {
 		"-v", control + ":/run/sortie/control",
 		"--mount-socket", socket + ":/run/sortie/tools.sock",
 	}
-	want := append([][]string{listArgv, wantCreate, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
+	want := append([][]string{listArgv, wantCreate, {"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
 	got := f.fake.argvs()
 	if !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 		t.Fatalf("calls:\n got %q\nwant %q", got, want)
@@ -234,6 +236,37 @@ func TestPrepare_CredentialHostsJoinTheAllowlist(t *testing.T) {
 	if !strings.Contains(create, "--allow-host-pattern openrouter.ai --credential or=OPENROUTER_API_KEY@openrouter.ai") {
 		t.Errorf("create argv = %q, want the credential host on the allowlist", create)
 	}
+	if strings.Contains(create, "set-header") {
+		t.Errorf("create argv = %q, want no header for a binding without one", create)
+	}
+}
+
+func TestPrepare_CredentialHeaderReachesTheBinding(t *testing.T) {
+	t.Parallel()
+
+	f := newPrepareFixture(t, fakeState{}, func(cfg *config.SmolvmConfig) {
+		cfg.Credentials = []config.SmolvmCredential{
+			{Name: "or", Env: "OPENROUTER_API_KEY", Hosts: []string{"openrouter.ai"}},
+			{Name: "api", Env: "API_KEY", Hosts: []string{"api.example.com", "*.example.net"}, Header: "X-Api-Key"},
+		}
+	})
+	if _, err := f.env.Prepare(context.Background(), f.ws); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	create := f.fake.argvs()[1]
+	var bindings []string
+	for i, arg := range create {
+		if arg == "--credential" && i+1 < len(create) {
+			bindings = append(bindings, create[i+1])
+		}
+	}
+	want := []string{
+		"or=OPENROUTER_API_KEY@openrouter.ai",
+		"api=API_KEY@api.example.com,*.example.net:set-header=X-Api-Key",
+	}
+	if !slices.Equal(bindings, want) {
+		t.Errorf("--credential values = %q, want %q", bindings, want)
+	}
 }
 
 // Not parallel: it sets a process environment variable the fake reads.
@@ -282,7 +315,7 @@ func TestPrepare_StoppedVMIsStarted(t *testing.T) {
 		if err != nil || res.CreatedNow {
 			t.Fatalf("Prepare() with a %s VM = %+v, %v, want CreatedNow false", state, res, err)
 		}
-		want := append([][]string{listArgv, {"machine", "start", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
+		want := append([][]string{listArgv, {"machine", "start", "--error-format", "json", "--name", "sortie-VM-1"}}, toolListenerCalls()...)
 		if got := f.fake.argvs(); !slices.EqualFunc(got, want, slices.Equal[[]string]) {
 			t.Errorf("calls with a %s VM = %q, want %q", state, got, want)
 		}
@@ -315,7 +348,7 @@ func TestPrepare_VMPredatingTheWorkspaceIsRecreated(t *testing.T) {
 			t.Fatalf("%s: Prepare() = %+v, %v, want CreatedNow true", name, res, err)
 		}
 		got := f.fake.argvs()
-		if len(got) != 6 || !slices.Equal(got[1], []string{"machine", "delete", "-f", "--name", "sortie-VM-1"}) ||
+		if len(got) != 6 || !slices.Equal(got[1], []string{"machine", "delete", "--error-format", "json", "-f", "--name", "sortie-VM-1"}) ||
 			got[2][1] != "create" || got[3][1] != "start" ||
 			!slices.EqualFunc(got[4:], toolListenerCalls(), slices.Equal[[]string]) {
 			t.Errorf("%s: calls = %q, want listing, delete, create, start, and the tool listener", name, got)

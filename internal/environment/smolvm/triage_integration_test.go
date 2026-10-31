@@ -3,12 +3,10 @@
 package smolvm
 
 import (
-	"context"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/environment"
@@ -23,8 +21,7 @@ import (
 func TestIntegration_ReactionTriageFilesInTheGuest(t *testing.T) {
 	ie := newIntegrationEnv(t)
 	key := ie.newKey("SMOLTRIAGE")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := liveContext(t)
 
 	res, err := workspace.Prepare(ctx, workspace.PrepareParams{
 		Root: ie.root, Identifier: key, IssueID: "10001", HookTimeoutMS: 120_000, Environment: ie.env,

@@ -67,12 +67,26 @@ func (e *Environment) Release(ctx context.Context, ws environment.Workspace) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, lifecycleTimeout)
 	defer cancel()
-	vm, _, err := e.ownVM(ctx, ws)
-	if err != nil || vm == nil || !vm.Running() {
+	vm, foreign, err := e.ownVM(ctx, ws)
+	if err != nil {
 		return err
 	}
-	if err := e.cli.Stop(ctx, vm.Name); err != nil && !IsNotFound(err) {
-		return err
+	if vm == nil {
+		// A command run in the missing VM, such as the session's, left
+		// smolvm's residue for its name.
+		if !foreign {
+			e.removeMissingMachineResidue(VMName(ws.Key))
+		}
+		return nil
+	}
+	if !vm.Running() {
+		return nil
+	}
+	if err := e.cli.Stop(ctx, vm.Name); err != nil {
+		if !IsNotFound(err) {
+			return err
+		}
+		e.removeMissingMachineResidue(vm.Name)
 	}
 	e.logger.DebugContext(ctx, "stopped VM", slog.String("vm", vm.Name), slog.String("workspace", ws.HostPath))
 	return nil
@@ -141,13 +155,27 @@ func (e *Environment) Remove(ctx context.Context, ws environment.Workspace) erro
 	if foreign {
 		return nil
 	}
-	if vm != nil {
-		if err := e.cli.Delete(ctx, vm.Name); err != nil && !IsNotFound(err) {
-			return err
-		}
-		e.logger.InfoContext(ctx, "deleted VM", slog.String("vm", vm.Name), slog.String("workspace", ws.HostPath))
+	if vm == nil {
+		e.removeMissingMachineResidue(VMName(ws.Key))
+		return e.removeStateDir(ws.Key)
 	}
+	if err := e.deleteVM(ctx, vm.Name); err != nil {
+		return err
+	}
+	e.logger.InfoContext(ctx, "deleted VM", slog.String("vm", vm.Name), slog.String("workspace", ws.HostPath))
 	return e.removeStateDir(ws.Key)
+}
+
+// deleteVM deletes the VM name. A VM that is already gone, such as one
+// deleted between the listing and the deletion, is deleted
+// successfully, and the residue smolvm leaves for its name is removed.
+func (e *Environment) deleteVM(ctx context.Context, name string) error {
+	err := e.cli.Delete(ctx, name)
+	if IsNotFound(err) {
+		e.removeMissingMachineResidue(name)
+		return nil
+	}
+	return err
 }
 
 // removeStateDir removes the directory of key under the state
@@ -212,7 +240,7 @@ func (e *Environment) Sweep(ctx context.Context, p environment.SweepParams) erro
 		if _, statErr := os.Lstat(path); !errors.Is(statErr, fs.ErrNotExist) {
 			continue
 		}
-		if err := e.cli.Delete(ctx, m.Name); err != nil && !IsNotFound(err) {
+		if err := e.deleteVM(ctx, m.Name); err != nil {
 			errs = append(errs, err)
 			continue
 		}
