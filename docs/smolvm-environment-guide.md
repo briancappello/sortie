@@ -7,7 +7,7 @@ This guide is for operators. For every setting and error, see [the `environment`
 ## Requirements
 
 - A Linux host with KVM. The VM runs a copy of Sortie's own binary, so Sortie refuses `smolvm` on any other OS.
-- smolvm 1.26.x. Sortie runs `smolvm --version` at startup and on every reload that selects the kind, and refuses any other release. The range widens only after smolvm's behavior is measured again on a new release.
+- smolvm 1.32.4 or later. Sortie runs `smolvm --version` at startup and on every reload that selects the kind, and refuses an older release or a version it cannot parse. 1.32.4 is the release smolvm's behavior was last measured on; later releases are accepted without an upper bound.
 - `git` on the host, and git credentials that can fetch and push the repository, when you use `repository`.
 - podman or docker, and `smol-builder`, to build packs. They are not needed on the host that runs Sortie if you build packs elsewhere.
 - `environment.kind: smolvm` cannot be combined with `worker.ssh_hosts`.
@@ -19,8 +19,8 @@ Download the official install script, read it, then run it with the pinned versi
 ```sh
 curl -sSL https://smolmachines.com/install.sh -o install.sh
 less install.sh
-bash install.sh --version 1.26.1 --no-modify-path
-smolvm --version        # smolvm 1.26.1
+bash install.sh --version 1.32.4 --no-modify-path
+smolvm --version        # smolvm 1.32.4
 ```
 
 As a normal user, the script installs into `~/.smolvm` and links `~/.local/bin/smolvm`. As root on Linux it installs into `/opt/smolvm`. It checks the archive against the release's `checksums.sha256`, and only warns when that file is missing, so look for `Checksum verified` in its output. `--no-modify-path` leaves your shell profile alone; make sure `smolvm` is on the `PATH` of the user Sortie runs as, or set `environment.smolvm.binary` to its full path.
@@ -181,7 +181,7 @@ credentials:
 - The placeholder is replaced only on HTTPS requests to the listed hosts. A request that carries it in the query string is refused.
 - On those hosts, requests are HTTP/1.1 only, cannot upgrade to a WebSocket, and carry at most 8 MiB of body.
 - The binding's hosts are added to the allowlist.
-- `header` is not supported with smolvm 1.26: a binding that sets it is refused.
+- `header` is not supported yet: a binding that sets it is refused.
 
 claude-agent-acp through OpenRouter needs three variables. Bind the token, and set the other two in the agent's command:
 
@@ -347,7 +347,7 @@ Entries that a VM still uses are always kept.
 
 **Do not manage Sortie's VMs by hand.** Deleting a VM discards the workspace on its disk; the next dispatch creates a new VM and runs `after_create` again. To start an issue over, remove its workspace directory instead, and the sweep deletes the VM.
 
-**Upgrading smolvm.** Sortie accepts only 1.26.x and refuses to start with another release. Keep the pinned version until Sortie supports a newer one.
+**Upgrading smolvm.** Sortie accepts 1.32.4 and every later release, and refuses to start with an older one. Install the latest release with the install script's `--version`, then rebuild your packs with it.
 
 ## Rolling back
 
@@ -362,7 +362,7 @@ The reload applies the change. Each existing workspace was created by `smolvm`, 
 | Symptom | Cause and fix |
 | --- | --- |
 | `environment.smolvm.binary: cannot read the version of smolvm binary` | smolvm is not on Sortie's `PATH`. Set `environment.smolvm.binary` to its full path. |
-| `smolvm version 1.x.y is not supported; supported: 1.26.x` | Install 1.26.1 with the install script's `--version`. |
+| `smolvm version 1.x.y is older than the minimum supported version 1.32.4` | Install 1.32.4 or later with the install script's `--version`. |
 | `environment.agent_credential: agent kind ... reads the credential variable ...` | Bind that variable in `credentials`, list it in `pass_env`, or unset it in Sortie's environment. |
 | `guest workspace entry /workspace/.sortie already exists` | The repository commits a `.sortie` entry. Remove it from the repository; Sortie needs that path. |
 | The agent's model calls fail, and opencode uses `opencode/big-pickle` | `models.opencode.ai` is missing from `allow_hosts`. |

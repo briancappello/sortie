@@ -753,7 +753,7 @@ Fields:
 - `kind` (string)
   - Default: `local`. Accepted values: `local` and `smolvm`. An unknown value fails validation with an error that names `environment.kind` and the value.
   - `local` runs everything on Sortie's host, in the host workspace directory, exactly as without the block.
-  - `smolvm` runs each issue workspace in its own smolvm microVM. It requires Linux and smolvm `1.26.x`, and it excludes `worker.ssh_hosts`: validation fails with an error that names both settings.
+  - `smolvm` runs each issue workspace in its own smolvm microVM. It requires Linux and smolvm `1.32.4` or later, and it excludes `worker.ssh_hosts`: validation fails with an error that names both settings.
 - `host_prefix` (list of strings, optional)
   - An argv that stays on Sortie's host in front of the agent session launch and the credential verification launch (Section 10.10). An empty list, or an empty element, fails validation. It never wraps hooks, verification commands, triage, auxiliary commands, or git inspection.
 - `smolvm` (object)

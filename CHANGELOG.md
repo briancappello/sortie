@@ -40,7 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The Huly adapter, on its prototype branch, implements every write capability: it creates epics and stories as the task types `huly.epic_type` and `huly.story_type`, with Huly's issue numbering, rank, and rich-text descriptions, parents stories to epics, links dependencies through `blockedBy`, and stores plan keys in a custom issue attribute, `sortiePlanKey`, which it creates on its first plan write.
 
-- A new `environment` block selects where workspace code runs. The default kind, `local`, runs everything on Sortie's host as before. `environment.kind: smolvm` runs each issue workspace in its own smolvm microVM, created from a pack file (`environment.smolvm.pack`): the agent and its credential check, auxiliary agent commands, all four hooks, self-review verification commands, reaction triage, and every `git` command that inspects the workspace run in the VM, and none of them falls back to the host. The VM is created on first dispatch, stopped when the worker exits, deleted with its workspace, and swept when its workspace is gone. It reaches only the hosts in `allow_hosts`, sees API keys only as placeholders through `credentials` bindings, and shares only the `.sortie` directory and the issue's tool socket with the host. It requires Linux and smolvm 1.26.x, which Sortie checks at startup and on reload, and it cannot be combined with `worker.ssh_hosts`. `sortie validate` reports every setting error, and the dispatch preflight refuses an agent credential variable that is set on the host but neither bound nor listed in `pass_env`. See `docs/workflow-reference.md` and the new `docs/smolvm-environment-guide.md`.
+- A new `environment` block selects where workspace code runs. The default kind, `local`, runs everything on Sortie's host as before. `environment.kind: smolvm` runs each issue workspace in its own smolvm microVM, created from a pack file (`environment.smolvm.pack`): the agent and its credential check, auxiliary agent commands, all four hooks, self-review verification commands, reaction triage, and every `git` command that inspects the workspace run in the VM, and none of them falls back to the host. The VM is created on first dispatch, stopped when the worker exits, deleted with its workspace, and swept when its workspace is gone. It reaches only the hosts in `allow_hosts`, sees API keys only as placeholders through `credentials` bindings, and shares only the `.sortie` directory and the issue's tool socket with the host. It requires Linux and smolvm 1.32.4 or later, which Sortie checks at startup and on reload, and it cannot be combined with `worker.ssh_hosts`. `sortie validate` reports every setting error, and the dispatch preflight refuses an agent credential variable that is set on the host but neither bound nor listed in `pass_env`. See `docs/workflow-reference.md` and the new `docs/smolvm-environment-guide.md`.
 
 - `environment.smolvm.repository` lets Sortie, not the agent, talk to the git host. Sortie keeps a hardened mirror of the repository, seeds a new VM on the issue branch (`branch_prefix` plus the workspace key) before `after_create`, refreshes `origin` before each later run, and after each normal run exports the committed issue branch as a bundle, pushes it with a lease that never overwrites someone else's commits (the run fails with `branch moved upstream`), and, with `provider` and `project`, opens or finds the pull request, using the agent's `.sortie/pr.json` title and body when present. A failed export fails the run, skips the tracker handoff, and retries. The guest needs no git credential and no route to the git host, and Sortie records the push and pull request in a host-only SCM record that every reaction reads instead of `.sortie/scm.json`.
 
@@ -67,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - The remote kind's worker API now follows the protocol 1 spec. Every request carries `X-Sortie-Worker-Protocol: 1`, and any other value answers `400` naming version 1, replacing the body's `protocol` field. The default `worker.identity_header` is `X-Sortie-Worker-Identity`. A check-in declares `os`, `arch`, `kvm`, `nested`, `backends`, `run_slots`, `running` and `free {cpu, mem_gib, disk_gib}`, all required, and answers `{"heartbeat_ms", "lease_ms"}`. Matching reads capabilities from that declaration, uses `running` against `run_slots`, and counts a reported `stopped` machine's disk until the next check-in. An offer is `{job: {id, attempt, priority, issue, requires}, lease: {expires}, run, flows}`. The job ID is the issue identifier and the first attempt is `1`. `flows` holds `{url, token}` for `stdio`, `egress`, `mcp`, `bundles` and `usage`. The run descriptor names the backend, image, agent command and arguments, machine environment, stall timeout and seed path, with credentials only as placeholders. A heartbeat answers `{expires}`. A report takes `{outcome, reason, machine}`. A poll before check-in answers `409`. State leases are `{job, attempt, worker, expires}`. `environment.remote` now takes `image` (required), `backend`, `requires: {capabilities, cpu, mem_gib, disk_gib}`, `credentials` and `flows.<flow>.url` (all five required). It no longer takes `cpus`, `memory_mib`, `disk_mib` or a `flows` list.
 - With `server.control_token` set, `POST /api/v1/retries/{identifier}/run`, `POST /api/v1/attention/{id}/acknowledge`, and `POST /api/v1/reactions/{identifier}/{kind}/check` require the control token like every other state-changing endpoint. The dashboard sends no token, so its retry, acknowledge, and check actions answer `401` on such a deployment.
 - The dashboard no longer marks a held run; `/api/v1/state` and the per-issue detail still report holds.
@@ -127,6 +128,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - The dashboard shows an issue's status as one word with the same mark on every screen.
 
 - Overview's Agents running tile now says how many agents are idle, or that all of them are running, instead of showing the running count against the agent limit.
@@ -191,6 +193,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - `sortie_tokens_total`, `sortie_agent_runtime_seconds_total`, and `sortie_worker_exits_total` now carry a `model` label, so a dashboard can show token use, agent runtime, and run outcomes per model: the model the agent reported, else the configured `model`, else `<none>`. A query that sums one of these metrics returns what it did before, but a panel or alert on raw series now gets one series per model, and the example Grafana dashboard's Agent Runtime panel plots one line per model. After each restart these metrics report `0` for every configured model and every model an earlier run reported; a query filtered to any other model returns no data until a run reports that model, so an alert on it needs `or vector(0)`. On a default Prometheus, `rate()` and `increase()` miss the first sample of a model sortie has never run before; Prometheus's experimental `created-timestamp-zero-ingestion` feature flag counts it. ([#1343](https://github.com/sortie-ai/sortie/issues/1343))
 
 - A pull request reaction whose branch is missing from the workflow prompt now gets Sortie's built-in instructions on every turn of the run, a branch you write still takes precedence, and a continuation switch outside the branch now gets Sortie's continuation text. The example workflows now keep each reaction's instructions apart from the work prompt. ([#1357](https://github.com/sortie-ai/sortie/issues/1357))
@@ -274,6 +277,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - The built-in dashboard is now a live application at `/ui/`, and `/` redirects there. It shows what needs a person, every active issue, each issue's path through its pull request reactions, an issue page, a live view of each agent session, run history, analytics, Sortie's health, and the workflow in effect, and can retry an issue, check a pull request, or acknowledge an alert. ([#1296](https://github.com/sortie-ai/sortie/issues/1296), [#1297](https://github.com/sortie-ai/sortie/issues/1297), [#1298](https://github.com/sortie-ai/sortie/issues/1298), [#1299](https://github.com/sortie-ai/sortie/issues/1299), [#1300](https://github.com/sortie-ai/sortie/issues/1300), [#1309](https://github.com/sortie-ai/sortie/issues/1309), [#1375](https://github.com/sortie-ai/sortie/issues/1375))
 
 - Token figures on the dashboard and in the JSON API now leave out prompt cache reads, which are shown on their own; `agent.max_tokens` still counts them. ([#1361](https://github.com/sortie-ai/sortie/issues/1361))
@@ -360,6 +364,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - A template that calls a block nothing defines now stops the workflow from loading, instead of failing the run that reaches the call, so correct such a call before upgrading. ([#1219](https://github.com/sortie-ai/sortie/issues/1219))
 
 - An `opencode` turn on an SSH worker now applies `opencode.allowed_tools`, `opencode.denied_tools`, and `opencode.disable_autocompact` and keeps session sharing off, as a local turn does; these settings were silently ignored on SSH workers until now. A workflow that needs OpenCode's automatic compaction on SSH workers sets `opencode.disable_autocompact: false`. ([#1210](https://github.com/sortie-ai/sortie/issues/1210))
@@ -454,6 +459,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - The command that starts your agent (`agent.command`) now defaults to the agent's standard program, such as `claude` for `claude-code`, so it can be left out for every agent kind except `agent-client-protocol`. ([#1168](https://github.com/sortie-ai/sortie/issues/1168))
 
 - A set `claude-code.effort` now takes precedence over a `CLAUDE_CODE_EFFORT_LEVEL` variable in Sortie's environment or on an SSH worker host, that variable keeps its effect while `effort` is unset, and a level Claude Code does not recognize now logs a warning. ([#1182](https://github.com/sortie-ai/sortie/issues/1182))
@@ -503,6 +509,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - Workflows that use the `copilot-cli` agent kind now need GitHub Copilot CLI 1.0.51 or later.
   ([#1047](https://github.com/sortie-ai/sortie/issues/1047))
 
@@ -637,6 +644,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - On Linux and macOS, a process that a workspace hook, the reaction triage command, or a self-review verification command leaves running is now terminated when the command exits, matching what Windows hooks already did; a verification command's leftover processes on Windows are now terminated too. A service meant to outlive the command now has to start through a supervisor, which the workflow reference documents per platform, and hooks and the reaction triage command now receive `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` so they can reach the user's service manager. Two log messages are new: `leftover processes terminated after the command exited`, logged when that termination reached a process the command left behind, and `subprocess group termination failed after the launch returned`, logged whenever Sortie cannot confirm that a command's or an agent session's processes are gone. On Windows, the warnings `hook process tree did not settle`, `hook job object creation failed; child tree may survive timeout`, and `hook process resume failed` are renamed `subprocess tree did not settle`, `process group assignment failed`, and `process resume failed` and now cover launches other than hooks, while `hook job termination after wait failed; drain may not settle`, `hook job accounting query failed; drain skipped`, and `hook job processes still active after drain deadline` are no longer logged; an alert built on any of the old text stops matching.
   ([#1080](https://github.com/sortie-ai/sortie/issues/1080), [#1099](https://github.com/sortie-ai/sortie/issues/1099))
 
@@ -706,6 +714,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - A second interrupt (Ctrl-C) during shutdown now ends every remaining shutdown wait at once, instead of being silently discarded until shutdown finishes on its own. Each abandoned wait logs a warning naming what was given up.
   ([#1014](https://github.com/sortie-ai/sortie/issues/1014))
 
@@ -757,6 +766,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - `reactions.review_comments`, `reactions.bot_review`, `reactions.merge_conflicts`, and `reactions.auto_merge` now bound a pending entry's age with a per-reaction `watch_window_ms` key instead of a hardcoded thirty-minute constant. The default stays `1800000` (thirty minutes), so a deployment that sets nothing behaves exactly as before; setting `0` removes the bound entirely. A workflow with no `auto_merge`, where a person reviews and merges, will normally want a larger value than the default. The four expiry log records changed their message text and renamed their `ttl_ms` attribute to `window_ms`.
   ([#953](https://github.com/sortie-ai/sortie/issues/953))
 
@@ -813,6 +823,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - The consecutive-absence ceiling no longer follows `agent.max_sessions`. It now reads a new field, `agent.max_consecutive_absences`, which defaults to three and rejects `0` as a configuration error; a deployment that wants no absence checking at all sets `tracker.handoff_evidence: off` instead. `agent.max_sessions` itself is unchanged: it remains the total per-issue session budget. A deployment that set `agent.max_sessions` well above three, paired with a workflow whose runs legitimately leave the workspace untouched, now parks such an issue considerably sooner than before; the park is announced and reversible. An operator who chose a low `agent.max_sessions` to bound a loop should revisit that value, because a workflow advancing one issue through several phases needs a session budget sized to those phases rather than to the runaway guard it was previously also serving.
   ([#942](https://github.com/sortie-ai/sortie/issues/942))
 
@@ -840,6 +851,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - `reactions.ci_failure` now resolves the pull request's current head through the same SCM provider every other active SCM-backed reaction uses, so a deployment naming `reactions.ci_failure` with one provider and another active SCM-backed reaction with a different provider now fails at startup instead of running with a currency-blind CI watch. `sortie validate` now reports the same conflict offline, under the `reactions.scm_provider_conflict` check. The previously accepted shape, two providers across the active SCM-backed reactions including `ci_failure`, is no longer valid; name one forge across every active SCM-backed reaction, including `ci_failure`, to start again.
   ([#871](https://github.com/sortie-ai/sortie/issues/871),
   [#890](https://github.com/sortie-ai/sortie/issues/890))
@@ -947,6 +959,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - `opencode` transport failures - a stdout read error, a session id mismatch, or a timeout waiting for the first response - now report `exit_reason=turn_failed` instead of `turn_ended_with_error`, which no built-in coding agent reports any more. An alert or dashboard filter on the old value must match on the error kind instead, which already drew the same distinction.
 
 - Turn failure text is now the same across every coding agent: a turn that exits successfully having produced nothing reports `agent exited without producing output`, and a non-zero exit reports `exit code N`. An alert matching the previous `kiro` or `opencode` wording needs updating.
@@ -985,6 +998,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - A terminal issue whose pull request still carries a pending `sortie:review` or `sortie:fix` label-command entry is now cleaned up by the periodic workspace sweep like any other terminal issue, instead of being retained forever. This reaches every deployment on upgrade without an opt-in: previously, a pending label-command entry excluded its workspace from cleanup even after the linked issue reached a terminal tracker state; the label-command detection loop is unaffected by the change, since it reads nothing from the workspace directory.
   ([#706](https://github.com/sortie-ai/sortie/issues/706))
 
@@ -1053,6 +1067,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - Homebrew installs now use `brew install --cask sortie-ai/tap/sortie`. The tap distributes a Homebrew cask covering both macOS and Linux, replacing the previous formula.
   ([#613](https://github.com/sortie-ai/sortie/issues/613))
 
@@ -1081,6 +1096,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - Agent tools: the built-in tools now share one uniform result envelope - `{"success": true, "data": <payload>}` on success and `{"success": false, "error": {"kind": "...", "message": "..."}}` on a domain failure. For operators upgrading, this changes the result shape of the two pre-existing Tier 1 tools: `sortie_status` and `workspace_history` previously returned a bare success object and a flat `{"error": "message"}` failure, and now nest their payload under `data` and report failures with a closed `error.kind` (`state_unavailable` / `state_malformed` for `sortie_status`, `query_failed` for `workspace_history`). `tracker_api`'s output is unchanged, and the new `cost_budget` and `notify_operator` tools adopt the envelope natively. Agent prompts or downstream consumers that parsed the previous bare or flat shapes must now read the payload under `data` and read failures as `error.kind` and `error.message`.
   ([#567](https://github.com/sortie-ai/sortie/issues/567))
 
@@ -1162,6 +1178,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - CLI: `--version` now outputs a single diagnostic line including commit SHA, build date, Go version, and OS/architecture - e.g. `sortie 1.7.0 (commit: a1b2c3d, built: 2026-04-15, go1.26.1, linux/amd64)`. The previous GNU-style copyright/warranty block is removed. Build tooling (`Makefile`, `Dockerfile`, `.goreleaser.yaml`, and the release workflow) now injects `Commit` and `Date` via `-ldflags` at all build sites.
 
 ### Fixed
@@ -1185,6 +1202,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - Retry timer tracker validation: `HandleRetryTimer` now calls `FetchIssueByID` instead of scanning all candidate issues via `FetchCandidateIssues`, reducing each retry timer fire from O(pages) tracker API calls to exactly one.
   ([#206](https://github.com/sortie-ai/sortie/issues/206))
 
@@ -1220,6 +1238,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - CI pending backoff base now derives from the operator-configured `poll_interval` instead of a hardcoded 10 s default. A 30 s poll interval produces a `(60 s, 120 s, 240 s, 300 s…)` backoff schedule. Falls back to 10 s when `poll_interval` is zero or negative.
   ([#385](https://github.com/sortie-ai/sortie/issues/385))
 
@@ -1397,6 +1416,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the `smolvm` environment kind now requires smolvm 1.32.4 or later, with no upper bound, instead of exactly 1.26.x. Sortie refuses an older release, or a version it cannot parse, at startup and on reload, naming the version found and 1.32.4. Upgrade smolvm and rebuild your packs with it. A credential binding's `header` is still refused; the error now says Sortie does not support it, since smolvm 1.32.4 has the option.
 - `POST /api/v1/refresh` returns `409 Conflict` during graceful shutdown instead of accepting requests that cannot be fulfilled.
 
 ### Fixed
