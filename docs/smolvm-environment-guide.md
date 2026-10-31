@@ -181,7 +181,7 @@ credentials:
 - The placeholder is replaced only on HTTPS requests to the listed hosts. A request that carries it in the query string is refused.
 - On those hosts, requests are HTTP/1.1 only, cannot upgrade to a WebSocket, and carry at most 8 MiB of body.
 - The binding's hosts are added to the allowlist.
-- `header` is not supported yet: a binding that sets it is refused.
+- `header` names a request header that smolvm sets to the key, for an API that reads it from a header such as `X-Api-Key` instead of `Authorization: Bearer`. smolvm sets it on every HTTPS request to the binding's hosts, even when the agent does not send it, and replaces any value the agent sends in it. It is never set on other hosts or on plain HTTP. The placeholder is still replaced in the request's other headers.
 
 claude-agent-acp through OpenRouter needs three variables. Bind the token, and set the other two in the agent's command:
 
