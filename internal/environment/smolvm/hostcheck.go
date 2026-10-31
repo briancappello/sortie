@@ -15,7 +15,7 @@ const versionCheckTimeout = 10 * time.Second
 // CheckHost checks that this host can run the smolvm kind as cfg
 // configures it. It refuses a host other than Linux, the only host the
 // kind is proven on, and a credential binding that
-// sets a header, which smolvm's credential flag cannot express, and runs
+// sets a header, which Sortie does not pass to smolvm, and runs
 // the configured binary's version command once, refusing a binary that cannot be run
 // or whose version is older than [MinimumVersion]. Every refusal is a
 // [*config.ConfigError].
@@ -31,7 +31,7 @@ func CheckHost(cfg config.EnvironmentConfig) error {
 		if cred.Header != "" {
 			return &config.ConfigError{
 				Field: fmt.Sprintf("environment.smolvm.credentials[%d].header", i),
-				Message: fmt.Sprintf("smolvm has no header option for a credential binding; remove header %q from credential %q",
+				Message: fmt.Sprintf("Sortie does not support header for a credential binding; remove header %q from credential %q",
 					cred.Header, cred.Name),
 			}
 		}

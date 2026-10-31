@@ -111,8 +111,8 @@ func TestCheckHost_RefusesCredentialHeader(t *testing.T) {
 	if !errors.As(err, &cfgErr) || cfgErr.Field != "environment.smolvm.credentials[1].header" {
 		t.Fatalf("CheckHost() = %v, want a config error on environment.smolvm.credentials[1].header", err)
 	}
-	if !strings.Contains(err.Error(), "no header option") || !strings.Contains(err.Error(), "X-Api-Key") {
-		t.Errorf("CheckHost() = %q, want it to say smolvm has no header option and name X-Api-Key", err)
+	if !strings.Contains(err.Error(), "does not support header") || !strings.Contains(err.Error(), "X-Api-Key") {
+		t.Errorf("CheckHost() = %q, want it to say header is not supported and name X-Api-Key", err)
 	}
 }
 
