@@ -90,6 +90,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The `smolvm` environment no longer leaves an empty directory and lock file under `~/.cache/smolvm/vms` for each VM it finds already gone when it releases, removes, sweeps, or replaces a workspace's VM. smolvm creates them for any command addressed to a missing machine; Sortie now removes them, only when they are empty.
 - The Huly adapter now refuses to start when `tracker.no_change_state` names a status the project does not have, as it already did for `handoff_state` and `in_progress_state`. It checks the plan-control states the same way.
 - The fork's migrations for `held_ms`, `environment_image_sha256`, and `exported_commit` are renumbered 1001 to 1003. As 25 to 27 they reused numbers upstream gives other migrations, so an upstream merge would have skipped upstream's. A database created by an earlier build is refused at startup with a message to delete it.
 - `sortie validate` no longer warns that the settings block of an SCM or CI provider, such as `github:`, is an unknown top-level key when only a reaction names that provider and the tracker is another kind.

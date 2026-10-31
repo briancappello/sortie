@@ -60,7 +60,16 @@ type fakeState struct {
 
 	// RecordEnv names host variables whose values each call records.
 	RecordEnv []string `json:"record_env"`
+
+	// Vanish names subcommands, such as "machine delete", before which
+	// the addressed machine disappears, as when another process deletes
+	// it between Sortie's listing and its command.
+	Vanish []string `json:"vanish"`
 }
+
+// fakeMachineCache is where the fake in dir leaves the residue smolvm
+// 1.32.4 leaves for a machine that does not exist.
+func fakeMachineCache(dir string) string { return filepath.Join(dir, "smolvm-vms") }
 
 // fakeCall is one recorded invocation.
 type fakeCall struct {
@@ -205,6 +214,13 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 
 	flags, rest := parseFakeFlags(args[2:])
 	name := flags.last("--name")
+	if slices.Contains(state.Vanish, key) {
+		state.Machines = slices.DeleteFunc(state.Machines, func(m fakeMachine) bool { return m.Name == name })
+		if err := writeFakeState(dir, state); err != nil {
+			say(stderr, "fake smolvm: %v\n", err)
+			return 99
+		}
+	}
 	idx := slices.IndexFunc(state.Machines, func(m fakeMachine) bool { return m.Name == name })
 	// fail reports smolvm's own failure as smolvm 1.32.4 does: as its
 	// JSON report with --error-format json, else as an "Error:" line.
@@ -217,7 +233,20 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
-	notFound := func() int { return fail(codeNotFound, "vm not found: "+name) }
+	// notFound leaves what smolvm 1.32.4 leaves for a missing machine:
+	// exec and stop an empty machine directory, stop and delete an
+	// empty lock file; start leaves nothing.
+	notFound := func() int {
+		machineDir, lock := machineResidue(fakeMachineCache(dir), name)
+		if args[1] == "exec" || args[1] == "stop" {
+			_ = os.MkdirAll(machineDir, 0o750)
+		}
+		if args[1] == "stop" || args[1] == "delete" {
+			_ = os.MkdirAll(filepath.Dir(lock), 0o750)
+			_ = os.WriteFile(lock, nil, 0o600)
+		}
+		return fail(codeNotFound, "vm not found: "+name)
+	}
 
 	switch args[1] {
 	case "ls":

@@ -113,6 +113,10 @@ type Environment struct {
 	workflowHash string
 	logger       *slog.Logger
 
+	// machineCache is smolvm's per-machine directory, where it leaves
+	// residue for a machine a command addresses that does not exist.
+	machineCache string
+
 	packMu   sync.Mutex
 	packSums map[string]packSum
 }
@@ -146,11 +150,12 @@ func New(params environment.Params) (environment.Environment, error) {
 		logger = slog.Default()
 	}
 	env := &Environment{
-		cfg:      params.Config.Smolvm,
-		cli:      NewCLI(params.Config.Smolvm.Binary),
-		stateDir: params.StateDir,
-		logger:   logger,
-		packSums: map[string]packSum{},
+		cfg:          params.Config.Smolvm,
+		cli:          NewCLI(params.Config.Smolvm.Binary),
+		stateDir:     params.StateDir,
+		machineCache: machineCacheDir(),
+		logger:       logger,
+		packSums:     map[string]packSum{},
 	}
 	if params.WorkflowPath != "" {
 		abs, err := filepath.Abs(params.WorkflowPath)
@@ -307,7 +312,7 @@ func (e *Environment) Prepare(ctx context.Context, ws environment.Workspace) (en
 		}
 		e.logger.InfoContext(ctx, "deleting a VM that predates its workspace directory",
 			slog.String("vm", name), slog.String("workspace", ws.HostPath))
-		if err := e.cli.Delete(ctx, name); err != nil && !IsNotFound(err) {
+		if err := e.deleteVM(ctx, name); err != nil {
 			return environment.PrepareResult{}, err
 		}
 	}

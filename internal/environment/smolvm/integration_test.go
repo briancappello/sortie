@@ -90,13 +90,7 @@ func TestIntegration_PrepareRealVM(t *testing.T) {
 	cli := env.cli
 	name := VMName(key)
 	ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace, Identifier: key}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		if err := cli.Delete(ctx, name); err != nil && !IsNotFound(err) {
-			t.Errorf("delete VM %s: %v", name, err)
-		}
-	})
+	t.Cleanup(func() { deleteTestVM(t, env, name) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -215,15 +209,38 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 	ie := &integrationEnv{env: built.(*Environment), root: root}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
 		for _, key := range ie.keys {
-			if err := ie.env.cli.Delete(ctx, VMName(key)); err != nil && !IsNotFound(err) {
-				t.Errorf("delete VM %s: %v", VMName(key), err)
-			}
+			deleteTestVM(t, ie.env, VMName(key))
 		}
 	})
 	return ie
+}
+
+// deleteTestVM deletes a gated test's VM, which may be gone already, and
+// fails the test when smolvm's residue for its name is left behind.
+func deleteTestVM(t *testing.T, env *Environment, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := env.deleteVM(ctx, name); err != nil {
+		t.Errorf("delete VM %s: %v", name, err)
+	}
+	assertNoResidue(t, env, name)
+}
+
+// assertNoResidue fails the test when smolvm's per-machine directory or
+// lock file for name, a machine that no longer exists, is left behind.
+func assertNoResidue(t *testing.T, env *Environment, name string) {
+	t.Helper()
+	if env.machineCache == "" {
+		t.Fatal("smolvm's machine cache directory is unknown")
+	}
+	machineDir, lock := machineResidue(env.machineCache, name)
+	for _, path := range []string{machineDir, lock} {
+		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("smolvm residue %s of VM %s is left behind (Lstat error %v)", path, name, err)
+		}
+	}
 }
 
 // newKey returns a fresh workspace key whose VM is deleted when the test
@@ -336,6 +353,7 @@ func TestIntegration_ConnectionFailedOnRealExits(t *testing.T) {
 	checkLaunch("unset secret", ws, true, domain.CarrierLaunch{Argv: []string{"true"}, SecretEnv: []string{"SORTIE_SMOLVM_TEST_UNSET_SECRET"}})
 	missing := ws
 	missing.Key = key + "-missing"
+	ie.keys = append(ie.keys, missing.Key)
 	check("missing VM", missing, true, "true")
 
 	// The VM stops under a running command once the command has
@@ -629,13 +647,7 @@ func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
 	}
 	ie := &integrationEnv{env: built.(*Environment), root: root}
 	key := ie.newKey("SMOLHDR")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		if err := ie.env.cli.Delete(ctx, VMName(key)); err != nil && !IsNotFound(err) {
-			t.Errorf("delete VM %s: %v", VMName(key), err)
-		}
-	})
+	t.Cleanup(func() { deleteTestVM(t, ie.env, VMName(key)) })
 	host := filepath.Join(root, key)
 	if err := os.Mkdir(host, 0o750); err != nil {
 		t.Fatal(err)
@@ -653,5 +665,39 @@ func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
 	echo, err := ie.guest(ctx, key, `curl -sS -m 30 -H "X-Api-Key: guest-own" https://httpbin.org/headers | jq -r '.headers["X-Api-Key"]'`)
 	if err != nil || strings.TrimSpace(echo) != value {
 		t.Errorf("X-Api-Key received by httpbin.org = %q, %v, want the host's value", echo, err)
+	}
+}
+
+// Releasing and removing a workspace whose VM is missing, after a
+// command ran against it, leaves none of smolvm's residue for its name.
+func TestIntegration_MissingVMLeavesNoResidue(t *testing.T) {
+	ie := newIntegrationEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	for _, step := range []string{"Release", "Remove"} {
+		key := ie.newKey("SMOLRES")
+		host := filepath.Join(ie.root, key)
+		if err := os.Mkdir(host, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		ws := environment.Workspace{Key: key, HostPath: host, GuestPath: GuestWorkspace}
+		name := VMName(key)
+		if _, err := ie.guest(ctx, key, "true"); !IsNotFound(err) {
+			t.Fatalf("exec in the missing VM %s: %v, want smolvm's not-found", name, err)
+		}
+		machineDir, _ := machineResidue(ie.env.machineCache, name)
+		if _, err := os.Stat(machineDir); err != nil {
+			t.Fatalf("smolvm left no directory for the missing VM %s: %v; its residue naming changed", name, err)
+		}
+		var err error
+		if step == "Release" {
+			err = ie.env.Release(ctx, ws)
+		} else {
+			err = ie.env.Remove(ctx, ws)
+		}
+		if err != nil {
+			t.Fatalf("%s() error = %v", step, err)
+		}
+		assertNoResidue(t, ie.env, name)
 	}
 }

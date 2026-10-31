@@ -343,7 +343,7 @@ smolvm pack prune --keep 5    # keep at most 5 unused entries
 
 Entries that a VM still uses are always kept.
 
-**Host state.** Sortie keeps its smolvm state next to the database: `env/<key>/` holds each issue's tool socket while an agent session runs, and `repos/` the mirrors. An `env-bin/` directory left by an earlier version is unused and can be removed. Do not edit them while Sortie runs. Each workspace directory under `workspace.root` holds only `.sortie` and `.sortie-host`; the code is in the VM.
+**Host state.** Sortie keeps its smolvm state next to the database: `env/<key>/` holds each issue's tool socket while an agent session runs, and `repos/` the mirrors. An `env-bin/` directory left by an earlier version is unused and can be removed. Do not edit them while Sortie runs. A smolvm command addressed to a machine that does not exist leaves an empty directory and an empty lock file for its name under smolvm's cache, `~/.cache/smolvm/vms` (or `$XDG_CACHE_HOME/smolvm/vms`); when Sortie finds an issue's VM already gone on release or removal, it removes those two entries, and only when they are empty. Each workspace directory under `workspace.root` holds only `.sortie` and `.sortie-host`; the code is in the VM.
 
 **Do not manage Sortie's VMs by hand.** Deleting a VM discards the workspace on its disk; the next dispatch creates a new VM and runs `after_create` again. To start an issue over, remove its workspace directory instead, and the sweep deletes the VM.
 

@@ -60,9 +60,11 @@ func newPrepareFixture(t *testing.T, state fakeState, mutate func(*config.Smolvm
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	smolvmEnv := env.(*Environment)
+	smolvmEnv.machineCache = fakeMachineCache(fake.dir)
 	return prepareFixture{
 		fake:     fake,
-		env:      env.(*Environment),
+		env:      smolvmEnv,
 		ws:       environment.Workspace{Key: "VM-1", HostPath: host, GuestPath: GuestWorkspace, Identifier: "VM-1"},
 		stateDir: stateDir,
 		pack:     pack,
