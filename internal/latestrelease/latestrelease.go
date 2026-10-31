@@ -20,6 +20,8 @@ import (
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
+
+	"github.com/sortie-ai/sortie/internal/agent/procutil"
 )
 
 // EnableEnv is the variable that enables the version tests.
@@ -36,8 +38,14 @@ func Require(t testing.TB) {
 // GitHubAPI is the base URL of the GitHub REST API.
 const GitHubAPI = "https://api.github.com"
 
-// maxBodyBytes bounds a release list response.
-const maxBodyBytes = 16 << 20
+const (
+	// maxBodyBytes bounds a release list response.
+	maxBodyBytes = 16 << 20
+
+	// stderrTailBytes is how much of a failed go command's standard
+	// error an error keeps.
+	stderrTailBytes = 4096
+)
 
 // GitHub returns the highest stable release version of the GitHub
 // repository repo ("owner/name"), without a leading "v". It reads the
@@ -142,15 +150,20 @@ func GoModules(ctx context.Context, dir string) ([]Module, error) {
 	}
 
 	source := fmt.Sprintf("go list -m -u -json all (in %s)", dir)
-	cmd := exec.CommandContext(ctx, "go", "list", "-m", "-u", "-json", "all")
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w: %s", source, err, strings.TrimSpace(stderr.String()))
+	cmd := exec.CommandContext(ctx, "go", "-C", dir, "list", "-m", "-u", "-json", "all") //nolint:gosec // G204: the caller names its own module directory
+	var stdout bytes.Buffer
+	stderr := procutil.NewTailBuffer(stderrTailBytes)
+	result, err := procutil.RunCapture(ctx, cmd, procutil.DefaultStopGrace, procutil.CaptureParams{Stdout: &stdout, Stderr: stderr})
+	if err == nil {
+		err = result.WaitErr
 	}
-	return parseGoModules(out, source, required)
+	if err == nil && !result.OutputComplete {
+		err = errors.New("output incomplete")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: %s", source, err, strings.TrimSpace(string(stderr.Bytes())))
+	}
+	return parseGoModules(stdout.Bytes(), source, required)
 }
 
 func parseGoModules(out []byte, source string, required map[string]bool) ([]Module, error) {
