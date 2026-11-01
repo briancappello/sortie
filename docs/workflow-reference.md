@@ -2026,7 +2026,7 @@ A guest-planted link in a read-write mount is resolved in the guest, so it does 
 
 A credential binding keeps a secret out of the VM:
 
-- The guest variable named by `env` holds a placeholder that starts with `SMOL_PLACEHOLDER_`.
+- The guest variable named by `env` holds a placeholder value that smolvm generates. smolvm refuses every request that carries a placeholder, so never paste one into an issue, a comment, or a prompt: an agent that reads it sends it to its model, and its session fails with `credential_unverified`.
 - smolvm reads the real value from Sortie's environment each time it starts the VM. A variable that is not set then is logged as a warning, and requests that need it fail.
 - smolvm replaces the placeholder with the value only in HTTPS requests to the binding's `hosts`. A request with the placeholder in its query string is refused.
 - On the binding's hosts, requests are HTTP/1.1 only, a WebSocket upgrade is not possible, and a request body is at most 8 MiB.
