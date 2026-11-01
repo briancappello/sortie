@@ -57,7 +57,7 @@ func TestHeld(t *testing.T) {
 				t.Errorf("entries() = %d records, first Reason %q, want 1 record with Reason %q", len(got), got[issue.ID].Reason, SkipSSHHostsFull)
 			}
 		}},
-		{"blockers that hold are the empty-state and open ones, in order", func(t *testing.T) {
+		{"blockers that hold are the ones the judge does not accept, in order, with its reason", func(t *testing.T) {
 			blockers := []domain.BlockerRef{
 				{ID: "a", State: "Done"},
 				{ID: "b"},
@@ -66,14 +66,18 @@ func TestHeld(t *testing.T) {
 				{ID: "e", State: "To Do"},
 			}
 
-			got := nonTerminalBlockers(blockers, map[string]struct{}{"done": {}})
+			got := unsatisfiedBlockers(terminalJudge{}, blockers, map[string]struct{}{"done": {}})
 
-			var ids []string
+			var ids, reasons []string
 			for _, blocker := range got {
 				ids = append(ids, blocker.ID)
+				reasons = append(reasons, blocker.Reason)
 			}
 			if want := []string{"b", "c", "e"}; !slices.Equal(ids, want) {
-				t.Errorf("nonTerminalBlockers() IDs = %v, want %v", ids, want)
+				t.Errorf("unsatisfiedBlockers() IDs = %v, want %v", ids, want)
+			}
+			if want := []string{BlockerUnknown, BlockerNotTerminal, BlockerNotTerminal}; !slices.Equal(reasons, want) {
+				t.Errorf("unsatisfiedBlockers() reasons = %v, want %v", reasons, want)
 			}
 		}},
 		{"an issue on a list active merges is not listed held", func(t *testing.T) {
@@ -148,7 +152,7 @@ func TestHeld(t *testing.T) {
 			pass := newHeldPass(nil, t0, nil, nil)
 			pass.hold(domain.Issue{ID: "id-b", Identifier: "MT-1", Title: "leaks " + secret}, HeldEntry{
 				Reason:   SkipBlockedBy,
-				Blockers: []domain.BlockerRef{{ID: "x", State: secret}},
+				Blockers: []HeldBlocker{{BlockerRef: domain.BlockerRef{ID: "x", State: secret}, Reason: BlockerNotTerminal}},
 			})
 			pass.hold(domain.Issue{ID: "id-s", Identifier: "MT-2"}, HeldEntry{
 				Reason: SkipAgentSlotsFull,

@@ -270,6 +270,7 @@ type holdBlockerResponse struct {
 	IssueIdentifier   string `json:"issue_identifier"`
 	DisplayIdentifier string `json:"display_identifier,omitempty"`
 	State             string `json:"state,omitempty"`
+	Reason            string `json:"reason"`
 }
 
 // holdSlotResponse is the JSON wire format for the agent slot limit that held
@@ -918,6 +919,7 @@ func toHoldResponse(h *orchestrator.SnapshotHold, words sentence.Context) *holdR
 				IssueIdentifier:   blocker.Identifier,
 				DisplayIdentifier: blocker.DisplayID,
 				State:             blocker.State,
+				Reason:            blocker.Reason,
 			})
 		}
 	}

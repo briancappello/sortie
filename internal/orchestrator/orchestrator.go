@@ -1271,7 +1271,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	activeSet := stateSet(cfg.Tracker.ActiveStates)
 	terminalSet := stateSet(cfg.Tracker.TerminalStates)
-	o.state.BlockerJudge = PlanJudgeFor(ctx, cfg.Tracker, o.store, sorted, o.logger)
+	o.state.BlockerJudge = PlanJudgeFor(ctx, cfg.Tracker, o.store, sorted, BlockerRunsElsewhere(cfg.Environment, cfg.Workspace.Root), o.logger)
 
 	// Break only on exhausted global capacity; skip individual issues whose
 	// per-state limit is full so other states can still dispatch.
@@ -1326,7 +1326,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			if decision.Err != nil {
 				readFailures++
 			}
-			held.holdDecision(decision, terminalSet)
+			held.holdDecision(decision, judgeOf(o.state), terminalSet)
 			o.recordCandidateHold(decision, pass, terminalSet)
 			switch decision.Reason {
 			case SkipBlockedBy:

@@ -1081,12 +1081,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			BrokerReadFn:           server.BrokerReadFunc(o.BrokerReadFunc()),
 			PlanStatesFn:           func() domain.TrackerStates { return br.mgr.Config().Tracker.States() },
 			PlanSatisfaction:       store,
-			PlanProjects:           planProjects,
-			TerminalStatesFn:       func() []string { return br.mgr.Config().Tracker.TerminalStates },
-			RunHistory:             runHistoryReader{store: store},
-			RunEventsFn:            o.RunEvents,
-			RunEventsAfterFn:       o.RunEventsAfter,
-			Stats:                  stats.report,
+			PlanRunsElsewhereFn: func() func(domain.BlockerRef) bool {
+				cfg := br.mgr.Config()
+				return orchestrator.BlockerRunsElsewhere(cfg.Environment, cfg.Workspace.Root)
+			},
+			PlanProjects:     planProjects,
+			TerminalStatesFn: func() []string { return br.mgr.Config().Tracker.TerminalStates },
+			RunHistory:       runHistoryReader{store: store},
+			RunEventsFn:      o.RunEvents,
+			RunEventsAfterFn: o.RunEventsAfter,
+			Stats:            stats.report,
 
 			ModelUse:           modelUseSource(store),
 			ConfiguredModelsFn: o.ConfiguredModels,

@@ -285,7 +285,7 @@ func (a *HulyAdapter) normalize(ctx context.Context, issues []hulyIssue) ([]doma
 		return nil, err
 	}
 
-	labels, err := a.labelsByIssue(ctx, issueIDs)
+	labels, err := a.labelsByIssue(ctx, dedupe(append(slices.Clone(issueIDs), blockerIDs...)))
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +327,7 @@ func (a *HulyAdapter) normalize(ctx context.Context, issues []hulyIssue) ([]doma
 				Identifier: b.Identifier,
 				State:      statuses[b.Status].Name,
 				PlanKey:    b.PlanKey,
+				Labels:     issuekit.NormalizeLabels(labels[b.ID]),
 			})
 		}
 		out = append(out, issue)

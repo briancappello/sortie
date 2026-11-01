@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"cmp"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -38,12 +37,19 @@ type HeldEntry struct {
 	Identity   IssueIdentity // unmasked
 	Since      time.Time     // UTC; the first pass that held the issue without a break
 	Reason     SkipReason
-	Blockers   []domain.BlockerRef
+	Blockers   []HeldBlocker
 	Slot       *SlotHold
 	ResetsAt   time.Time
 	AgentKind  string
 	ModelOnly  bool
 	Model      string
+}
+
+// HeldBlocker is a blocker that holds a candidate, with the reason the
+// blocker judge gave: one of the Blocker* reasons.
+type HeldBlocker struct {
+	domain.BlockerRef
+	Reason string
 }
 
 // heldPass collects the holds of one dispatch pass. Like [TickResolution] it
@@ -105,14 +111,15 @@ func (p *heldPass) holdEligible(rest []domain.Issue, state *State, activeSet, te
 }
 
 // holdDecision records the hold a declined candidate decision implies. An
-// ineligible candidate is held for nothing and records none.
-func (p *heldPass) holdDecision(decision CandidateDecision, terminalSet map[string]struct{}) {
+// ineligible candidate is held for nothing and records none. A blocker
+// hold names every blocker judge does not accept.
+func (p *heldPass) holdDecision(decision CandidateDecision, judge BlockerJudge, terminalSet map[string]struct{}) {
 	entry := HeldEntry{Reason: decision.Reason}
 	switch {
 	case decision.Reason == SkipIneligible || decision.Reason == SkipNone:
 		return
 	case decision.Reason == SkipBlockedBy:
-		entry.Blockers = nonTerminalBlockers(decision.Issue.BlockedBy, terminalSet)
+		entry.Blockers = unsatisfiedBlockers(judge, decision.Issue.BlockedBy, terminalSet)
 	case isSpendCeilingReason(decision.Reason) && p.spend != nil:
 		entry = *p.spend
 	}
@@ -137,23 +144,6 @@ func spendHoldEntry(reason SkipReason, ceilings []SpendCeilingStatus) *HeldEntry
 		}
 	}
 	return &HeldEntry{Reason: reason}
-}
-
-// nonTerminalBlockers returns, in order, the blockers whose state is empty or
-// not in terminalSet: the criterion [isBlockedByNonTerminalSet] holds an
-// issue by.
-func nonTerminalBlockers(blockers []domain.BlockerRef, terminalSet map[string]struct{}) []domain.BlockerRef {
-	var open []domain.BlockerRef
-	for _, blocker := range blockers {
-		if blocker.State == "" {
-			open = append(open, blocker)
-			continue
-		}
-		if _, terminal := terminalSet[strings.ToLower(blocker.State)]; !terminal {
-			open = append(open, blocker)
-		}
-	}
-	return open
 }
 
 // listedHeld reports whether the held list shows the issue: it is on no list
@@ -233,6 +223,7 @@ func snapshotHold(e *HeldEntry) SnapshotHold {
 				Identifier: blocker.Identifier,
 				DisplayID:  blocker.DisplayID,
 				State:      redact.Mask(blocker.State),
+				Reason:     blocker.Reason,
 			})
 		}
 	}

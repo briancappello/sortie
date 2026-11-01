@@ -367,3 +367,44 @@ func TestFetchCandidateIssues_BlockerPlanKeys(t *testing.T) {
 	}
 	t.Fatal("HULY-8 not among the candidates")
 }
+
+// A blocker's labels come back with it, so the repository its label
+// names is known; a blocker without labels has none.
+func TestFetchCandidateIssues_BlockerLabels(t *testing.T) {
+	t.Parallel()
+	f := seedWorkspace()
+	f.add(classIssue, map[string]any{
+		"_id": "issue-keyed", "space": "proj1", "identifier": "HULY-7", "title": "Planned", "status": "st-done",
+		"attachedTo": noParent, "modifiedOn": 1700000000000, attrPlanKey: "billing/a3",
+	})
+	f.add(classTagReference, map[string]any{
+		"_id": "ref-repo", "space": "proj1", "attachedTo": "issue-keyed", "collection": collectionLabels, "tag": "tag-repo", "title": "Sortie-Repository:sortie",
+	})
+	f.add(classIssue, map[string]any{
+		"_id": "issue-both", "space": "proj1", "identifier": "HULY-8", "title": "Blocked twice", "status": "st-todo",
+		"attachedTo": noParent, "modifiedOn": 1700000000000,
+		"blockedBy": []map[string]any{{"_id": "issue-keyed", "_class": classIssue}, {"_id": "issue2", "_class": classIssue}},
+	})
+	a := newTestAdapter(t, f)
+	issues, err := a.FetchCandidateIssues(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, is := range issues {
+		if is.Identifier != "HULY-8" {
+			continue
+		}
+		got := map[string][]string{}
+		for _, b := range is.BlockedBy {
+			got[b.Identifier] = b.Labels
+		}
+		if !slices.Equal(got["HULY-7"], []string{"sortie-repository:sortie"}) || len(got["HULY-2"]) != 0 {
+			t.Errorf("blocker labels = %v, want HULY-7 labeled sortie-repository:sortie and HULY-2 without labels", got)
+		}
+		if is.Labels == nil || slices.Contains(is.Labels, "sortie-repository:sortie") {
+			t.Errorf("HULY-8 labels = %v, want its own labels only", is.Labels)
+		}
+		return
+	}
+	t.Fatal("HULY-8 not among the candidates")
+}

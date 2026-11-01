@@ -111,6 +111,10 @@ type BlockerRef struct {
 	// keys. Empty for a blocker no plan created, and for every blocker
 	// of an adapter that stores none.
 	PlanKey string
+
+	// Labels are the blocker's labels, lowercase, set by adapters that
+	// read them with the blocker. Nil when the adapter reads none.
+	Labels []string
 }
 
 // ParentRef identifies the parent issue for a sub-task.

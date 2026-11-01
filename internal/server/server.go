@@ -473,6 +473,12 @@ type Params struct {
 	PlanStatesFn     func() domain.TrackerStates
 	PlanSatisfaction orchestrator.PlanSatisfactionLoader
 
+	// PlanRunsElsewhereFn returns the report of which blockers another
+	// Sortie runs, which the plan graph judges by their state; see
+	// [orchestrator.PlanJudge.RunsElsewhere]. Nil treats every blocker as
+	// this Sortie's own.
+	PlanRunsElsewhereFn func() func(domain.BlockerRef) bool
+
 	// TerminalStatesFn returns the workflow's current terminal states,
 	// which mark plan graph nodes terminal. When nil, no node is.
 	TerminalStatesFn func() []string
@@ -526,6 +532,7 @@ type Server struct {
 	brokerReportFn   BrokerReportFunc
 	planStatesFn     func() domain.TrackerStates
 	planSatisfaction orchestrator.PlanSatisfactionLoader
+	planElsewhereFn  func() func(domain.BlockerRef) bool
 	brokerReadFn     BrokerReadFunc
 	planCancelFn     PlanControlFunc
 	planProjects     *plan.Projects
@@ -576,6 +583,7 @@ func New(params Params) *Server {
 		brokerReportFn:   params.BrokerReportFn,
 		planStatesFn:     params.PlanStatesFn,
 		planSatisfaction: params.PlanSatisfaction,
+		planElsewhereFn:  params.PlanRunsElsewhereFn,
 		brokerReadFn:     params.BrokerReadFn,
 		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
