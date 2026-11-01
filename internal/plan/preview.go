@@ -25,6 +25,11 @@ type Tracker struct {
 	// preview refuses no repository.
 	Repositories func() []string
 
+	// RequiresRepository reports whether every story must name its
+	// repository: the workflow lists repositories and names no default.
+	// Nil requires none.
+	RequiresRepository func() bool
+
 	// States returns the workflow's states. Nil means plan control is
 	// off. Plan control is on when it reports a release state.
 	States func() domain.TrackerStates
@@ -197,6 +202,7 @@ type Preview struct {
 	MissingCapabilities  []registry.WriteCapability `json:"missing_capabilities"`
 	Unsupported          []string                   `json:"unsupported"`
 	UnlistedRepositories []UnlistedRepository       `json:"unlisted_repositories"`
+	MissingRepositories  []string                   `json:"missing_repositories"`
 
 	graph    Graph
 	existing map[string]domain.PlanIssue
@@ -238,6 +244,7 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 		Approvals:            []ApprovalOp{},
 		Unsupported:          []string{},
 		UnlistedRepositories: []UnlistedRepository{},
+		MissingRepositories:  []string{},
 		SkippedDrafts:        []string{},
 		UnplannedChanges:     append([]string{}, g.UnplannedChanges...),
 		MissingCapabilities:  []registry.WriteCapability{},
@@ -291,6 +298,7 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 	release, backlog, planControl := t.planStates()
 	planControl = planControl && g.SchemaVersion >= 2
 	approvals := t.Has(registry.CapApprovalFields)
+	requiresRepository := t.RequiresRepository != nil && t.RequiresRepository()
 	approvalsSkipped := false
 
 	// Epics first, then stories, each in graph order: the order an apply
@@ -320,7 +328,9 @@ func diff(g Graph, t Tracker, issues []domain.PlanIssue) Preview {
 			}
 			p.planOps(n, issue, ok, release, backlog, approvals)
 		}
-		if n.Kind == KindStory && g.SchemaVersion >= 2 {
+		if n.Kind == KindStory && n.Repository == "" && requiresRepository {
+			p.MissingRepositories = append(p.MissingRepositories, n.PlanKey)
+		} else if n.Kind == KindStory && g.SchemaVersion >= 2 {
 			p.repositoryOp(t, n, issue, ok)
 		}
 		if !ok {
