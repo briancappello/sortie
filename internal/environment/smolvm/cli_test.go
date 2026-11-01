@@ -228,3 +228,25 @@ func TestParseErrorReport(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateArgs_HostInputs(t *testing.T) {
+	t.Parallel()
+
+	args, err := createArgs(CreateSpec{
+		Name: "n", Pack: "/p", Labels: []Label{{"k", "v"}},
+		Nested: true, NetBackend: "virtio-net", AllowHosts: []string{"ghcr.io"},
+		Volumes: []Volume{{Host: "/c", Guest: "/run/sortie/control"}, {Host: "/s", Guest: "/src", ReadOnly: true}, {Host: "/r/K", Guest: "/var/recorder"}},
+	})
+	if err != nil {
+		t.Fatalf("createArgs() error = %v", err)
+	}
+	want := []string{
+		"machine", "create", "--error-format", "json", "--name", "n", "--from", "/p",
+		"--label", "k=v", "--nested", "--net-backend", "virtio-net",
+		"--allow-host-pattern", "ghcr.io",
+		"-v", "/c:/run/sortie/control", "-v", "/s:/src:ro", "-v", "/r/K:/var/recorder",
+	}
+	if !slices.Equal(args, want) {
+		t.Errorf("createArgs() = %q, want %q", args, want)
+	}
+}

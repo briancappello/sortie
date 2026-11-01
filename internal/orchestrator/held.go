@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
@@ -190,6 +191,10 @@ func snapshotHeld(state *State) []SnapshotHeldEntry {
 			continue
 		}
 		identity := maskedIdentity(entry.Identity)
+		var instance environment.Instance
+		if state.DescribeEnvironment != nil {
+			instance = state.DescribeEnvironment(entry.Identifier)
+		}
 		rows = append(rows, SnapshotHeldEntry{
 			IssueID:     id,
 			Identifier:  entry.Identifier,
@@ -200,6 +205,7 @@ func snapshotHeld(state *State) []SnapshotHeldEntry {
 			IssueLabels: identity.Labels,
 			State:       identity.State,
 			Hold:        snapshotHold(entry),
+			Environment: snapshotEnvironment(state, instance, entry.Identifier),
 		})
 	}
 	slices.SortFunc(rows, func(a, b SnapshotHeldEntry) int {

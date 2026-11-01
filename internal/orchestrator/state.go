@@ -1371,6 +1371,12 @@ type State struct {
 	// on the event-loop goroutine.
 	DescribeEnvironment func(identifier string) environment.Instance
 
+	// DescribeKeptDirs returns the host paths of the kept directories of
+	// the workspace of the issue with the given identifier under the
+	// current configuration, refreshed on every poll tick. Nil keeps
+	// none. Written only on the event-loop goroutine.
+	DescribeKeptDirs func(identifier string) []string
+
 	// Rates are the rates in force; a nil value prices nothing. Only the
 	// event loop writes them, and always by replacing the pointer, so a
 	// snapshot can share it without a lock.
@@ -1780,6 +1786,11 @@ type SnapshotHeldEntry struct {
 	IssueLabels []string     `json:"issue_labels,omitzero"`
 	State       string       `json:"state,omitempty"`
 	Hold        SnapshotHold `json:"hold"`
+
+	// Environment names the instance the issue's workspace runs in
+	// under the current configuration, with its kept directories. Nil
+	// when the environment names no instance.
+	Environment *SnapshotEnvironment `json:"environment,omitempty"`
 }
 
 // SnapshotStageHop is a read-only view of one issue between stages: a hop was
@@ -1959,15 +1970,24 @@ type SnapshotParkedEntry struct {
 type SnapshotEnvironment struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
+
+	// KeptDirs lists the host paths of the workspace's kept
+	// directories, which outlive the instance and the workspace.
+	KeptDirs []string `json:"kept_dirs,omitempty"`
 }
 
-// snapshotEnvironment returns the view of instance, or nil when it names
+// snapshotEnvironment returns the view of instance with the kept
+// directories of the workspace of identifier, or nil when instance names
 // no instance.
-func snapshotEnvironment(instance environment.Instance) *SnapshotEnvironment {
+func snapshotEnvironment(state *State, instance environment.Instance, identifier string) *SnapshotEnvironment {
 	if instance.Name == "" {
 		return nil
 	}
-	return &SnapshotEnvironment{Kind: instance.Kind, Name: instance.Name}
+	view := &SnapshotEnvironment{Kind: instance.Kind, Name: instance.Name}
+	if state.DescribeKeptDirs != nil {
+		view.KeptDirs = slices.Clone(state.DescribeKeptDirs(identifier))
+	}
+	return view
 }
 
 // SnapshotBudgetEntry is a read-only, value-copied view of one issue held
@@ -2318,7 +2338,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			APIRequestsMeasured: requestsMeasured,
 			WorkspacePath:       entry.WorkspacePath,
 			Repository:          entry.Repository,
-			Environment:         snapshotEnvironment(entry.Environment),
+			Environment:         snapshotEnvironment(state, entry.Environment, entry.Identifier),
 			SSHHost:             entry.SSHHost,
 			ToolTimeMs:          entry.ToolTimeMs,
 			APITimeMs:           entry.APITimeMs,
@@ -2392,7 +2412,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			StageLineage:      entry.StageLineage,
 			StagePosition:     stagePosition(state, entry.IssueID, entry.RuleName, entry.StageLineage.PreviousRule),
 			Paused:            entry.pausedSinceMS != 0,
-			Environment:       snapshotEnvironment(instance),
+			Environment:       snapshotEnvironment(state, instance, entry.Identifier),
 		})
 	}
 

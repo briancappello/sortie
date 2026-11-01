@@ -331,17 +331,18 @@ type usageWindowAmountResponse struct {
 // heldIssueResponse is the JSON wire format for an eligible candidate the
 // latest dispatch pass held back. Used by GET /api/v1/state.
 type heldIssueResponse struct {
-	IssueID           string       `json:"issue_id"`
-	IssueIdentifier   string       `json:"issue_identifier"`
-	DisplayIdentifier string       `json:"display_identifier,omitempty"`
-	IssueTitle        string       `json:"issue_title,omitempty"`
-	IssueURL          string       `json:"issue_url,omitempty"`
-	IssueType         string       `json:"issue_type,omitempty"`
-	IssueLabels       []string     `json:"issue_labels,omitzero"`
-	State             string       `json:"state,omitempty"`
-	Hold              holdResponse `json:"hold"`
-	StatusText        string       `json:"status_text"`
-	StatusTextFull    string       `json:"status_text_full"`
+	IssueID           string           `json:"issue_id"`
+	IssueIdentifier   string           `json:"issue_identifier"`
+	DisplayIdentifier string           `json:"display_identifier,omitempty"`
+	IssueTitle        string           `json:"issue_title,omitempty"`
+	IssueURL          string           `json:"issue_url,omitempty"`
+	IssueType         string           `json:"issue_type,omitempty"`
+	IssueLabels       []string         `json:"issue_labels,omitzero"`
+	State             string           `json:"state,omitempty"`
+	Hold              holdResponse     `json:"hold"`
+	StatusText        string           `json:"status_text"`
+	StatusTextFull    string           `json:"status_text_full"`
+	Environment       *environmentInfo `json:"environment,omitempty"`
 }
 
 // parkedEntryResponse is the JSON wire format for one issue held out of
@@ -537,6 +538,10 @@ func (c reactionCheckResponse) MarshalJSON() ([]byte, error) {
 type environmentInfo struct {
 	Kind string `json:"kind"`
 	Name string `json:"name"`
+
+	// KeptDirs lists the host paths of the workspace's kept directories,
+	// which outlive the instance and the workspace.
+	KeptDirs []string `json:"kept_dirs,omitempty"`
 }
 
 // toEnvironmentInfo returns the wire form of e, nil when e is nil.
@@ -544,7 +549,7 @@ func toEnvironmentInfo(e *orchestrator.SnapshotEnvironment) *environmentInfo {
 	if e == nil {
 		return nil
 	}
-	return &environmentInfo{Kind: e.Kind, Name: e.Name}
+	return &environmentInfo{Kind: e.Kind, Name: e.Name, KeptDirs: e.KeptDirs}
 }
 
 // budgetExhaustedResponse is the JSON wire format for one issue held out
@@ -940,6 +945,7 @@ func toHeldIssueResponse(e orchestrator.SnapshotHeldEntry, words sentence.Contex
 		IssueLabels:       e.IssueLabels,
 		State:             e.State,
 		Hold:              *toHoldResponse(&e.Hold, words),
+		Environment:       toEnvironmentInfo(e.Environment),
 	}
 	row.StatusText, row.StatusTextFull = sentencesOf(sentence.Entry{Held: &e}, words)
 	return row

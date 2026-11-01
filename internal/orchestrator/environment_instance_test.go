@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestRuntimeSnapshot_Environment(t *testing.T) {
 	}
 	for id, w := range want {
 		g, ok := got[id]
-		if !ok || (w == nil) != (g == nil) || (w != nil && *w != *g) {
+		if !ok || (w == nil) != (g == nil) || (w != nil && !reflect.DeepEqual(*w, *g)) {
 			t.Errorf("snapshot environment of %s = %+v, want %+v", id, g, w)
 		}
 	}

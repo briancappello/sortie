@@ -103,20 +103,49 @@ func (r *environmentResolver) sweepUnselected(cfg config.EnvironmentConfig) func
 // identifier. An environment that cannot be built, or that names no
 // instance, describes none.
 func (o *Orchestrator) describeEnvironment(cfg config.ServiceConfig) func(identifier string) environment.Instance {
-	envCfg, root := cfg.Environment, cfg.Workspace.Root
+	resolve := o.issueEnvironment(cfg)
 	return func(identifier string) environment.Instance {
+		env, ws, ok := resolve(identifier)
+		if !ok {
+			return environment.Instance{}
+		}
+		return environment.DescribeInstance(env, ws)
+	}
+}
+
+// describeKeptDirs returns the host paths of the kept directories of an
+// issue's workspace under cfg, as [environment.KeptDirs] names them for
+// the workspace of the given identifier. An environment that cannot be
+// built keeps none.
+func (o *Orchestrator) describeKeptDirs(cfg config.ServiceConfig) func(identifier string) []string {
+	resolve := o.issueEnvironment(cfg)
+	return func(identifier string) []string {
+		env, ws, ok := resolve(identifier)
+		if !ok {
+			return nil
+		}
+		return environment.KeptDirs(env, ws)
+	}
+}
+
+// issueEnvironment returns a resolver of the environment cfg selects and
+// of the workspace of an issue identifier in it. It reports false when
+// the environment cannot be built or the identifier names no workspace.
+func (o *Orchestrator) issueEnvironment(cfg config.ServiceConfig) func(identifier string) (environment.Environment, environment.Workspace, bool) {
+	envCfg, root := cfg.Environment, cfg.Workspace.Root
+	return func(identifier string) (environment.Environment, environment.Workspace, bool) {
 		env, err := o.environments.resolve(envCfg)
 		if err != nil {
-			return environment.Instance{}
+			return nil, environment.Workspace{}, false
 		}
 		key, err := workspace.SanitizeKey(identifier)
 		if err != nil {
-			return environment.Instance{}
+			return nil, environment.Workspace{}, false
 		}
 		hostPath := filepath.Join(root, key)
-		return environment.DescribeInstance(env, environment.Workspace{
+		return env, environment.Workspace{
 			Key: key, HostPath: hostPath, GuestPath: env.GuestPath(hostPath), Identifier: identifier,
-		})
+		}, true
 	}
 }
 
