@@ -155,37 +155,64 @@ func RepositoryProvider(cfg config.EnvironmentConfig) string {
 	return cfg.Smolvm.Repository.Provider
 }
 
-// dispatchesIssue reports whether cfg dispatches an issue with labels:
-// always when cfg configures no repository, and otherwise when the
-// issue runs in a listed repository open to dispatch. Sortie leaves any
-// other issue alone, to the Sortie whose workflow dispatches it.
-func dispatchesIssue(cfg config.EnvironmentConfig, labels []string) bool {
+// leftAloneReason returns why cfg leaves the issue to another workflow,
+// wrapping [config.ErrNotDispatched], or nil when cfg dispatches it:
+// always when cfg configures no repository. An issue whose workspace
+// under workspaceRoot was already seeded keeps that repository, so it is
+// dispatched unless the repository is now closed to dispatch; any other
+// issue is decided by its labels.
+func leftAloneReason(cfg config.EnvironmentConfig, workspaceRoot string, issue domain.Issue) error {
 	if !configuresRepository(cfg) {
-		return true
+		return nil
 	}
-	_, err := cfg.Smolvm.DispatchRepository(labels)
-	return err == nil
+	if path, err := workspace.ComputePath(workspaceRoot, issue.Identifier); err == nil {
+		if rec, ok, err := workspace.ReadRepositoryRecord(path.Path); err == nil && ok {
+			if repo, found := cfg.Smolvm.RepositoryNamed(rec.Name); found && repo.ClosedToDispatch {
+				return fmt.Errorf("the issue's workspace was seeded from repository %q, which is closed to dispatch: %w", rec.Name, config.ErrNotDispatched)
+			}
+			return nil
+		}
+	}
+	_, err := cfg.Smolvm.DispatchRepository(issue.Labels)
+	return err
+}
+
+// dispatchesIssue reports whether cfg dispatches the issue; see
+// [leftAloneReason].
+func dispatchesIssue(cfg config.EnvironmentConfig, workspaceRoot string, issue domain.Issue) bool {
+	return leftAloneReason(cfg, workspaceRoot, issue) == nil
 }
 
 // dispatchableIssues returns the issues cfg dispatches, in their order,
-// leaving out every issue [dispatchesIssue] refuses, so that no later
-// step of a poll claims, moves, comments on, holds or counts one.
-func dispatchableIssues(cfg config.EnvironmentConfig, issues []domain.Issue, logger *slog.Logger) []domain.Issue {
+// leaving out every issue [leftAloneReason] refuses, so that no later
+// step of a poll claims, moves, comments on, holds or counts one. It
+// also returns the reason for each issue it left out, by issue ID. It
+// logs a left-out issue at debug level only when logged, the reasons of
+// the previous poll, holds no reason or another reason for it: once per
+// issue, again when the reason changes or after a poll that did not
+// leave the issue out.
+func dispatchableIssues(cfg config.EnvironmentConfig, workspaceRoot string, issues []domain.Issue, logged map[string]string, logger *slog.Logger) ([]domain.Issue, map[string]string) {
 	if !configuresRepository(cfg) {
-		return issues
+		return issues, nil
 	}
 	kept := make([]domain.Issue, 0, len(issues))
+	reasons := map[string]string{}
 	for _, issue := range issues {
-		if _, err := cfg.Smolvm.DispatchRepository(issue.Labels); err != nil {
+		err := leftAloneReason(cfg, workspaceRoot, issue)
+		if err == nil {
+			kept = append(kept, issue)
+			continue
+		}
+		reason := err.Error()
+		if prev, ok := logged[issue.ID]; !ok || prev != reason {
 			logger.Debug("issue left to another workflow",
 				slog.String("issue_id", issue.ID),
 				slog.String("issue_identifier", issue.Identifier),
-				slog.Any("reason", err))
-			continue
+				slog.String("reason", reason))
 		}
-		kept = append(kept, issue)
+		reasons[issue.ID] = reason
 	}
-	return kept
+	return kept, reasons
 }
 
 // issueRepository returns cfg with its repository set to the one the

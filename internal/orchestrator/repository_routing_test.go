@@ -1,15 +1,19 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/config"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/workspace"
 )
 
 // routedRepository returns a repositories entry called name.
@@ -194,7 +198,7 @@ func TestHandleRetryTimer_IssueLeftToAnotherWorkflowReleasesTheClaim(t *testing.
 	state := retryState(t, "ISS-1", "ISS-1", 1)
 	params := defaultRetryParams(t, store, &mockRetryTracker{fetchedIssue: issue})
 	env := routedEnvironment("sortie", routedRepository("sortie", false), routedRepository("homelab", true))
-	params.Dispatches = func(i domain.Issue) bool { return dispatchesIssue(env, i.Labels) }
+	params.Dispatches = func(i domain.Issue) bool { return dispatchesIssue(env, t.TempDir(), i) }
 	params.MakeWorkerFn = func(_, _, _, _, _ string, _ domain.AgentAdapter, _ AttemptSettings) WorkerFunc {
 		t.Error("the retry dispatched an issue its workflow leaves to another")
 		return func(context.Context, domain.Issue, *int) {}
@@ -238,8 +242,9 @@ func TestDispatchesIssue(t *testing.T) {
 		{"single block for an unlabeled issue", single, nil, true},
 		{"single block for another repository", single, []string{repoLabel("homelab")}, false},
 	}
+	root := t.TempDir()
 	for _, tt := range tests {
-		if got := dispatchesIssue(tt.env, tt.labels); got != tt.want {
+		if got := dispatchesIssue(tt.env, root, candidate("id", "ONS-1", tt.labels...)); got != tt.want {
 			t.Errorf("%s: dispatchesIssue(%v) = %v, want %v", tt.name, tt.labels, got, tt.want)
 		}
 	}
@@ -288,5 +293,106 @@ func TestWorkflowShape_ShowsTheRepositoriesEachSortieRuns(t *testing.T) {
 				t.Errorf("wire repositories = %s, want %d entries", raw, len(tt.want))
 			}
 		})
+	}
+}
+
+// leftAloneLines returns the debug lines buf holds for issue id, each
+// left out of a poll.
+func leftAloneLines(buf *bytes.Buffer, id string) []string {
+	var lines []string
+	for line := range strings.Lines(buf.String()) {
+		if strings.Contains(line, "issue left to another workflow") && strings.Contains(line, "issue_id="+id+" ") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// A left-out issue is logged at debug level once, naming the issue and
+// the reason, and again only when the reason changes or after a poll
+// that did not leave it out.
+func TestHandleTick_LogsALeftOutIssueOnce(t *testing.T) {
+	t.Parallel()
+
+	env := routedEnvironment("sortie", routedRepository("sortie", false), routedRepository("homelab", true))
+	h := newRoutedHarness(t, env, nil)
+	h.tracker.candidates = []domain.Issue{
+		candidate("id-open", "ONS-1", repoLabel("sortie")),
+		candidate("id-closed", "ONS-2", repoLabel("homelab")),
+	}
+	h.build()
+	var buf bytes.Buffer
+	h.o.logger = debugLogger(t, &buf)
+
+	tickOnce(h)
+	lines := leftAloneLines(&buf, "id-closed")
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=DEBUG") || !strings.Contains(lines[0], "issue_identifier=ONS-2") || !strings.Contains(lines[0], "closed to dispatch") {
+		t.Fatalf("first poll logged %q, want one debug line naming ONS-2 and the reason", lines)
+	}
+	if lines := leftAloneLines(&buf, "id-open"); len(lines) != 0 {
+		t.Errorf("first poll logged the dispatched issue: %q", lines)
+	}
+	buf.Reset()
+	tickOnce(h)
+	if lines := leftAloneLines(&buf, "id-closed"); len(lines) != 0 {
+		t.Errorf("second poll logged %q, want nothing", lines)
+	}
+	buf.Reset()
+
+	h.tracker.candidates = []domain.Issue{candidate("id-closed", "ONS-2", repoLabel("elsewhere"))}
+	tickOnce(h)
+	if lines := leftAloneLines(&buf, "id-closed"); len(lines) != 1 || !strings.Contains(lines[0], "elsewhere") {
+		t.Errorf("poll with a new reason logged %q, want one line naming it", lines)
+	}
+	buf.Reset()
+
+	h.tracker.candidates = nil
+	tickOnce(h)
+	h.tracker.candidates = []domain.Issue{candidate("id-closed", "ONS-2", repoLabel("elsewhere"))}
+	tickOnce(h)
+	if lines := leftAloneLines(&buf, "id-closed"); len(lines) != 1 {
+		t.Errorf("poll after the issue was absent logged %q, want one line", lines)
+	}
+}
+
+// A workspace keeps the repository it was seeded from: an issue whose
+// workspace was seeded from an open repository is dispatched even when
+// its label now names a repository the workflow leaves alone, and one
+// seeded from a closed repository is left alone whatever its label.
+func TestDispatchesIssue_SeededWorkspaceKeepsItsRepository(t *testing.T) {
+	t.Parallel()
+
+	env := routedEnvironment("", routedRepository("sortie", false), routedRepository("homelab", true))
+	root := t.TempDir()
+	seed := func(identifier, repo string) {
+		t.Helper()
+		path, err := workspace.ComputePath(root, identifier)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(path.Path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := workspace.WriteRepositoryRecord(path.Path, workspace.RepositoryRecord{Name: repo}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("ONS-1", "sortie")
+	seed("ONS-2", "homelab")
+
+	tests := []struct {
+		name  string
+		issue domain.Issue
+		want  bool
+	}{
+		{"seeded open, label closed", candidate("id-1", "ONS-1", repoLabel("homelab")), true},
+		{"seeded open, no label and no default", candidate("id-1", "ONS-1"), true},
+		{"seeded closed, label open", candidate("id-2", "ONS-2", repoLabel("sortie")), false},
+		{"not seeded, label closed", candidate("id-3", "ONS-3", repoLabel("homelab")), false},
+	}
+	for _, tt := range tests {
+		if got := dispatchesIssue(env, root, tt.issue); got != tt.want {
+			t.Errorf("%s: dispatchesIssue = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
