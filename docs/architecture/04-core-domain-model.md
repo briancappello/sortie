@@ -39,6 +39,9 @@ Fields:
     - `state` (string)
     - `display_id` (string)
       - Qualified form of `identifier`, by the same rule the issue's own `display_id` follows. Empty means `identifier` is already display-ready. A blocker ref's identifier fields follow the same rule the issue's own do on every adapter: an adapter that qualifies its issues qualifies its blockers the same way.
+  - An adapter that stores plan keys also sets, on each blocker ref it reads:
+    - `plan_key` (string), empty for a blocker no plan created.
+    - `labels` (list of strings), the blocker's labels normalized to lowercase. Under plan control they tell which repository the blocker runs in, and so whether this Sortie or another one judges it by its merge record.
   - If `blocker.state` is null or unknown, treat it as non-terminal (conservative).
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
