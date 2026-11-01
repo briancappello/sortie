@@ -2,6 +2,7 @@ package jira
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -176,7 +177,7 @@ func TestNormalizeSearchIssue_VersionIndependentFields(t *testing.T) {
 		t.Fatalf("BlockedBy len: v2 = %d, v3 = %d", len(v2.BlockedBy), len(v3.BlockedBy))
 	}
 	for i := range v3.BlockedBy {
-		if v2.BlockedBy[i] != v3.BlockedBy[i] {
+		if !reflect.DeepEqual(v2.BlockedBy[i], v3.BlockedBy[i]) {
 			t.Errorf("BlockedBy[%d]: v2 = %+v, v3 = %+v", i, v2.BlockedBy[i], v3.BlockedBy[i])
 		}
 	}

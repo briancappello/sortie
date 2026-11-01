@@ -206,6 +206,43 @@ func leftAloneReason(cfg config.EnvironmentConfig, workspaceRoot string, issue d
 	return err
 }
 
+// BlockerRunsElsewhere returns a report of whether a blocker runs in a
+// repository cfg does not dispatch, one closed to dispatch or not listed,
+// so that another Sortie runs it. A blocker whose workspace under
+// workspaceRoot was seeded runs in the recorded repository; any other is
+// decided by its labels, as [config.SmolvmConfig.DispatchRepository]
+// decides an issue. It returns nil when cfg configures no repository,
+// where every blocker is this Sortie's own. The report reads each blocker
+// once.
+func BlockerRunsElsewhere(cfg config.EnvironmentConfig, workspaceRoot string) func(domain.BlockerRef) bool {
+	if !configuresRepository(cfg) {
+		return nil
+	}
+	seen := map[string]bool{}
+	return func(b domain.BlockerRef) bool {
+		key := b.ID + "\x00" + b.Identifier
+		if elsewhere, ok := seen[key]; ok {
+			return elsewhere
+		}
+		elsewhere := blockerRunsElsewhere(cfg, workspaceRoot, b)
+		seen[key] = elsewhere
+		return elsewhere
+	}
+}
+
+func blockerRunsElsewhere(cfg config.EnvironmentConfig, workspaceRoot string, b domain.BlockerRef) bool {
+	if b.Identifier != "" {
+		if path, err := workspace.ComputePath(workspaceRoot, b.Identifier); err == nil {
+			if rec, ok, err := workspace.ReadRepositoryRecord(path.Path); err == nil && ok {
+				repo, found := cfg.Smolvm.RepositoryNamed(rec.Name)
+				return !found || repo.ClosedToDispatch
+			}
+		}
+	}
+	_, err := cfg.Smolvm.DispatchRepository(b.Labels)
+	return err != nil
+}
+
 // dispatchesIssue reports whether cfg dispatches the issue; see
 // [leftAloneReason].
 func dispatchesIssue(cfg config.EnvironmentConfig, workspaceRoot string, issue domain.Issue) bool {

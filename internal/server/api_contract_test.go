@@ -61,6 +61,7 @@ type jsonField struct {
 
 var contractEnums = map[reflect.Type]map[string][]string{
 	reflect.TypeFor[holdResponse]():        {"reason": holdReasonValues()},
+	reflect.TypeFor[holdBlockerResponse](): {"reason": orchestrator.BlockerReasons()},
 	reflect.TypeFor[usageWindowResponse](): {"status": usageWindowStatusValues()},
 }
 

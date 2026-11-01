@@ -21,6 +21,7 @@ const (
 	unparkTriggerStateChanged     = "state_changed"
 	unparkTriggerLabelRemoved     = "label_removed"
 	unparkTriggerEvidenceObserved = "evidence_observed"
+	unparkTriggerAnswered         = "answered"
 )
 
 // ParkStore is the persistence contract [parkIssue] and [unparkIssue] need.
@@ -212,7 +213,7 @@ func parkIssue(state *State, params parkIssueParams) {
 // isReleaseGesture reports whether trigger is a person's release, as opposed
 // to a worker exit that observed work.
 func isReleaseGesture(trigger string) bool {
-	return trigger == unparkTriggerLabelRemoved || trigger == unparkTriggerStateChanged
+	return trigger == unparkTriggerLabelRemoved || trigger == unparkTriggerStateChanged || trigger == unparkTriggerAnswered
 }
 
 // unparkIssue lifts the park, resets the absence sequence and the issue's

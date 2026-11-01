@@ -44,8 +44,8 @@ type ParkedIssue struct {
 	Statement  string
 
 	// ReleasedAt (RFC 3339 UTC, whole seconds) and ReleaseGesture
-	// ("label_removed" or "state_changed") record a person's release; both
-	// are empty while the park holds.
+	// ("label_removed", "state_changed", or "answered") record a person's
+	// release; both are empty while the park holds.
 	ReleasedAt     string
 	ReleaseGesture string
 }

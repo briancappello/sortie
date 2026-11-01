@@ -454,6 +454,11 @@ type Params struct {
 	// 503.
 	EscalateFn EscalateFunc
 
+	// AnswerFn posts a person's answer on a parked issue and releases
+	// the park. Called on POST /api/v1/{identifier}/answer. When nil,
+	// that route answers 503.
+	AnswerFn AnswerFunc
+
 	// PullBackFn and PlanCancelFn pull back and cancel a plan story by
 	// plan key. Called on POST /api/v1/plan/pull-back and
 	// /api/v1/plan/cancel. When nil, those routes answer 503.
@@ -479,6 +484,12 @@ type Params struct {
 	// control fields.
 	PlanStatesFn     func() domain.TrackerStates
 	PlanSatisfaction orchestrator.PlanSatisfactionLoader
+
+	// PlanRunsElsewhereFn returns the report of which blockers another
+	// Sortie runs, which the plan graph judges by their state; see
+	// [orchestrator.PlanJudge.RunsElsewhere]. Nil treats every blocker as
+	// this Sortie's own.
+	PlanRunsElsewhereFn func() func(domain.BlockerRef) bool
 
 	// TerminalStatesFn returns the workflow's current terminal states,
 	// which mark plan graph nodes terminal. When nil, no node is.
@@ -530,10 +541,12 @@ type Server struct {
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
+	answerFn         AnswerFunc
 	pullBackFn       PlanControlFunc
 	brokerReportFn   BrokerReportFunc
 	planStatesFn     func() domain.TrackerStates
 	planSatisfaction orchestrator.PlanSatisfactionLoader
+	planElsewhereFn  func() func(domain.BlockerRef) bool
 	brokerReadFn     BrokerReadFunc
 	planCancelFn     PlanControlFunc
 	planProjects     *plan.Projects
@@ -584,10 +597,12 @@ func New(params Params) *Server {
 		brokerReportFn:   params.BrokerReportFn,
 		planStatesFn:     params.PlanStatesFn,
 		planSatisfaction: params.PlanSatisfaction,
+		planElsewhereFn:  params.PlanRunsElsewhereFn,
 		brokerReadFn:     params.BrokerReadFn,
 		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
+		answerFn:         params.AnswerFn,
 		planProjects:     params.PlanProjects,
 		terminalStatesFn: params.TerminalStatesFn,
 		runHistory:       params.RunHistory,
@@ -655,6 +670,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
 	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
 	mux.HandleFunc("/api/v1/{identifier}/escalate", s.controlRoute(scopeSession, s.handleEscalate))
+	mux.HandleFunc("/api/v1/{identifier}/answer", s.controlRoute(scopeOperator, s.handleAnswer))
 	mux.HandleFunc("/api/v1/{identifier}/broker", s.routeBroker)
 
 	if params.MetricsRegistry != nil {

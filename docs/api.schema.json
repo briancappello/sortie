@@ -1402,13 +1402,26 @@
         "issue_identifier": {
           "type": "string"
         },
+        "reason": {
+          "enum": [
+            "not_merged",
+            "awaiting_merge_record",
+            "canceled",
+            "not_done",
+            "unverified_no_change",
+            "unknown",
+            "not_terminal"
+          ],
+          "type": "string"
+        },
         "state": {
           "type": "string"
         }
       },
       "required": [
         "issue_id",
-        "issue_identifier"
+        "issue_identifier",
+        "reason"
       ],
       "type": "object"
     },
@@ -2337,6 +2350,9 @@
         "state": {
           "type": "string"
         },
+        "statement": {
+          "type": "string"
+        },
         "status_text": {
           "type": "string"
         },
@@ -2352,6 +2368,7 @@
         "label",
         "label_applied",
         "parked_at",
+        "statement",
         "stage_position",
         "status_text",
         "status_text_full"

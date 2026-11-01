@@ -49,7 +49,7 @@ func runDryRun(ctx context.Context, cfg config.ServiceConfig, logger *slog.Logge
 	activeSet := dryRunStateSet(cfg.Tracker.ActiveStates)
 	terminalSet := dryRunStateSet(cfg.Tracker.TerminalStates)
 
-	state.BlockerJudge = orchestrator.PlanJudgeFor(ctx, cfg.Tracker, satisfaction, sorted, logger)
+	state.BlockerJudge = orchestrator.PlanJudgeFor(ctx, cfg.Tracker, satisfaction, sorted, orchestrator.BlockerRunsElsewhere(cfg.Environment, cfg.Workspace.Root), logger)
 
 	pass := &orchestrator.TickResolution{}
 

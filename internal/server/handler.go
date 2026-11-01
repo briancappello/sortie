@@ -270,6 +270,7 @@ type holdBlockerResponse struct {
 	IssueIdentifier   string `json:"issue_identifier"`
 	DisplayIdentifier string `json:"display_identifier,omitempty"`
 	State             string `json:"state,omitempty"`
+	Reason            string `json:"reason"`
 }
 
 // holdSlotResponse is the JSON wire format for the agent slot limit that held
@@ -363,6 +364,7 @@ type parkedEntryResponse struct {
 	Label             string     `json:"label"`
 	LabelApplied      bool       `json:"label_applied"`
 	ParkedAt          time.Time  `json:"parked_at"`
+	Statement         string     `json:"statement"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
 	StagePosition   *stagePositionResponse `json:"stage_position"`
@@ -918,6 +920,7 @@ func toHoldResponse(h *orchestrator.SnapshotHold, words sentence.Context) *holdR
 				IssueIdentifier:   blocker.Identifier,
 				DisplayIdentifier: blocker.DisplayID,
 				State:             blocker.State,
+				Reason:            blocker.Reason,
 			})
 		}
 	}
@@ -995,6 +998,7 @@ func toParkedEntryResponse(e orchestrator.SnapshotParkedEntry) parkedEntryRespon
 		Label:             e.Label,
 		LabelApplied:      e.LabelApplied,
 		ParkedAt:          e.ParkedAt.UTC(),
+		Statement:         e.Statement,
 
 		RuleName:        e.RuleName,
 		StagePosition:   toStagePositionResponse(e.StagePosition),

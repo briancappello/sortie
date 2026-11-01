@@ -1129,7 +1129,7 @@ type ParkedEntry struct {
 	// ReleasedAt and ReleaseGesture record a person's release; both are
 	// zero while the park holds.
 	ReleasedAt     time.Time
-	ReleaseGesture string // "label_removed" or "state_changed"
+	ReleaseGesture string // "label_removed", "state_changed", or "answered"
 }
 
 // IssueIdentity names an issue to a person beside its key: the tracker's
@@ -1740,12 +1740,14 @@ type SnapshotContinuation struct {
 }
 
 // SnapshotBlocker is a blocker that holds a candidate. State is masked and
-// empty when the tracker returned none.
+// empty when the tracker returned none. Reason is why the blocker holds
+// the candidate, one of the Blocker* reasons.
 type SnapshotBlocker struct {
 	IssueID    string `json:"issue_id"`
 	Identifier string `json:"issue_identifier"`
 	DisplayID  string `json:"display_identifier,omitempty"`
 	State      string `json:"state,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 // SnapshotSlotHold is the agent slot limit that held a candidate. State is
@@ -1957,6 +1959,7 @@ type SnapshotParkedEntry struct {
 	Label        string    `json:"label"`
 	LabelApplied bool      `json:"label_applied"`
 	ParkedAt     time.Time `json:"parked_at"`
+	Statement    string    `json:"statement"`
 	ChainID      string    `json:"-"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
@@ -2490,6 +2493,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			Label:        entry.Label,
 			LabelApplied: entry.LabelApplied,
 			ParkedAt:     entry.ParkedAt,
+			Statement:    entry.Statement,
 			ChainID:      entry.StageLineage.ChainID,
 
 			RuleName:        entry.RuleName,

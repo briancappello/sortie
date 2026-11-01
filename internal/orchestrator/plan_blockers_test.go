@@ -115,7 +115,7 @@ func TestPlanJudge_ReadFailureHolds(t *testing.T) {
 // Without plan control the old rule holds: any terminal blocker satisfies.
 func TestPlanJudgeFor_OffKeepsTheTerminalRule(t *testing.T) {
 	t.Parallel()
-	if j := PlanJudgeFor(context.Background(), config.TrackerConfig{}, &fakeSatisfaction{}, nil, discardLogger()); j != nil {
+	if j := PlanJudgeFor(context.Background(), config.TrackerConfig{}, &fakeSatisfaction{}, nil, nil, discardLogger()); j != nil {
 		t.Fatalf("PlanJudgeFor() = %T, want nil with plan control off", j)
 	}
 	st := &State{}
@@ -136,7 +136,7 @@ func TestPlanJudgeFor_OneLoadPerTick(t *testing.T) {
 	for i := range candidates {
 		candidates[i] = domain.Issue{BlockedBy: []domain.BlockerRef{{ID: "b1", PlanKey: "k", State: "Done"}, {ID: "b2", PlanKey: "k2", State: "Done"}}}
 	}
-	j := PlanJudgeFor(context.Background(), planTracker(), store, candidates, discardLogger())
+	j := PlanJudgeFor(context.Background(), planTracker(), store, candidates, nil, discardLogger())
 	for _, c := range candidates {
 		_ = isBlockedFor(j, c, planTerminal)
 	}

@@ -1278,7 +1278,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	activeSet := stateSet(cfg.Tracker.ActiveStates)
 	terminalSet := stateSet(cfg.Tracker.TerminalStates)
-	o.state.BlockerJudge = PlanJudgeFor(ctx, cfg.Tracker, o.store, sorted, o.logger)
+	o.state.BlockerJudge = PlanJudgeFor(ctx, cfg.Tracker, o.store, sorted, BlockerRunsElsewhere(cfg.Environment, cfg.Workspace.Root), o.logger)
 
 	// Break only on exhausted global capacity; skip individual issues whose
 	// per-state limit is full so other states can still dispatch.
@@ -1333,7 +1333,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 			if decision.Err != nil {
 				readFailures++
 			}
-			held.holdDecision(decision, terminalSet)
+			held.holdDecision(decision, judgeOf(o.state), terminalSet)
 			o.recordCandidateHold(decision, pass, terminalSet)
 			switch decision.Reason {
 			case SkipBlockedBy:
@@ -2852,6 +2852,12 @@ func (o *Orchestrator) handleControl(ctx context.Context, req controlRequest) Co
 		reply = applyBrokerReport(o.state, req.Identifier, req.Broker, o.logger)
 	case controlBrokerRead:
 		reply = readBroker(o.state, req.Identifier)
+	case controlAnswer:
+		reply = applyAnswer(ctx, o.state, req.Identifier, req.Answer, parkAnswerParams{
+			Tracker: o.trackerAdapter,
+			Store:   o.store,
+			Log:     o.logger,
+		})
 	case controlPullBack, controlCancel:
 		cfg := o.workflowManager.Config()
 		p := planControlParams{

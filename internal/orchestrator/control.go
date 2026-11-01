@@ -13,6 +13,7 @@ import (
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/logging"
 	"github.com/sortie-ai/sortie/internal/notify/route"
+	"github.com/sortie-ai/sortie/internal/parkanswer"
 	"github.com/sortie-ai/sortie/internal/redact"
 )
 
@@ -42,6 +43,9 @@ const (
 	// ControlUnavailable means the event loop did not answer, because it is
 	// shutting down or busy past the reply bound.
 	ControlUnavailable
+
+	// ControlNotParked means the issue holds no park to answer.
+	ControlNotParked
 )
 
 // HoldState is a run's hold as the control routes report it.
@@ -61,6 +65,7 @@ type ControlReply struct {
 	Hold    HoldState
 	Message string
 	Broker  BrokerAddress
+	Answer  ParkAnswer
 }
 
 type controlKind int
@@ -73,6 +78,7 @@ const (
 	controlCancel
 	controlBrokerReport
 	controlBrokerRead
+	controlAnswer
 )
 
 // controlRequest asks the event loop to change one issue's run.
@@ -84,6 +90,7 @@ type controlRequest struct {
 	Escalation EscalationRequest
 	Plan       planTarget
 	Broker     BrokerAddress
+	Answer     parkanswer.Answer
 	ReplyCh    chan ControlReply
 }
 
