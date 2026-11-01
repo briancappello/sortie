@@ -666,8 +666,10 @@ var holdTemplates = map[orchestrator.SkipReason]string{
 
 func selectHold(h *orchestrator.SnapshotHold, c Context) (string, map[string]any) {
 	blockers := make([]string, len(h.Blockers))
+	planRule := false
 	for i, blocker := range h.Blockers {
 		blockers[i] = blockerWords(blocker)
+		planRule = planRule || planBlockerReasons[blocker.Reason]
 	}
 	var slot orchestrator.SnapshotSlotHold
 	if h.Slot != nil {
@@ -676,6 +678,7 @@ func selectHold(h *orchestrator.SnapshotHold, c Context) (string, map[string]any
 	data := map[string]any{
 		"Blockers":  blockers,
 		"Several":   len(blockers) > 1,
+		"Plan":      planRule,
 		"State":     strings.TrimSpace(slot.State),
 		"Used":      slot.Used,
 		"Limit":     slot.Limit,
@@ -697,11 +700,34 @@ func selectHold(h *orchestrator.SnapshotHold, c Context) (string, map[string]any
 	return holdTemplates[h.Reason], data
 }
 
-// blockerWords names a blocker by its key and state.
+// planBlockerReasons are the blocker reasons only the plan-control rule
+// gives.
+var planBlockerReasons = map[string]bool{
+	orchestrator.BlockerNotMerged:          true,
+	orchestrator.BlockerAwaitingMerge:      true,
+	orchestrator.BlockerCanceled:           true,
+	orchestrator.BlockerNotDone:            true,
+	orchestrator.BlockerUnverifiedNoChange: true,
+}
+
+// blockerReasonWords says why a blocker holds its dependent, for the
+// reasons its state does not already say.
+var blockerReasonWords = map[string]string{
+	orchestrator.BlockerNotMerged:          "not merged",
+	orchestrator.BlockerAwaitingMerge:      "no merge recorded",
+	orchestrator.BlockerCanceled:           "never satisfies the issue",
+	orchestrator.BlockerNotDone:            "not done",
+	orchestrator.BlockerUnverifiedNoChange: "no-change claim not verified",
+}
+
+// blockerWords names a blocker by its key, its state, and why it holds.
 func blockerWords(b orchestrator.SnapshotBlocker) string {
 	state := strings.TrimSpace(b.State)
 	if state == "" {
 		state = "state unknown"
+	}
+	if why := blockerReasonWords[b.Reason]; why != "" {
+		state += ", " + why
 	}
 	return cmp.Or(b.DisplayID, b.Identifier, b.IssueID) + " (" + state + ")"
 }

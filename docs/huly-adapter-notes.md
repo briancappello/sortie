@@ -113,7 +113,7 @@ A new issue gets the project's default issue status when its task type allows it
 - Huly omits a field that a query matches by equality from the documents it returns. The adapter therefore matches by `$in` whenever it reads a queried field back.
 - The collaborator service stores descriptions as ProseMirror documents. The adapter reads them with the `getContent` RPC. The `markup` package converts them to Markdown and also converts Huly's own nodes: mentions, emoji, todo lists, and mermaid diagrams. The renderer comes from Probo's MIT-licensed `pkg/prosemirror`; see `internal/tracker/huly/markup/LICENSE.probo`.
 - A comment is a `chunter:class:ChatMessage` in the issue's `comments` collection. A label is a `tags:class:TagReference` in the `labels` collection. When no issue label of that name exists, the adapter creates one in the `Other` category.
-- Blockers come from the issue's `blockedBy` list, so candidates carry them.
+- Blockers come from the issue's `blockedBy` list, so candidates carry them. Each blocker carries its state, plan key, and labels; the labels are read in the same `TagReference` query as the candidates' own, so a blocker's `sortie-repository:<name>` label tells which Sortie runs it.
 
 ## Test
 

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/sortie-ai/sortie/internal/domain"
@@ -128,5 +129,50 @@ func TestPlanGraph_PlanControlFieldsNullWhenOff(t *testing.T) {
 		if !present || v != nil {
 			t.Errorf("%s = %v (present %v), want present and null", f, v, present)
 		}
+	}
+}
+
+// A blocker another Sortie runs waits on its state alone: the graph holds
+// none of its merge records, and it is satisfied once Done.
+func TestPlanGraph_BlockerAnotherSortieRunsIsJudgedByItsState(t *testing.T) {
+	t.Parallel()
+	tr := &planTracker{issues: []domain.PlanIssue{
+		{ID: "shape", Identifier: "T-16", PlanKey: "smolvm-machine-shape", Kind: domain.IssueKindStory, State: "Done",
+			BlockedBy: []string{}, Labels: []string{"sortie-repository:sortie"}},
+		{ID: "own", Identifier: "T-17", PlanKey: "homelab-own", Kind: domain.IssueKindStory, State: "Done",
+			BlockedBy: []string{}, Labels: []string{"sortie-repository:homelab"}},
+		{ID: "pilot", Identifier: "T-19", PlanKey: "homelab-pilot", Kind: domain.IssueKindStory, State: "Todo",
+			BlockedBy: []string{"shape", "own"}, Labels: []string{"sortie-repository:homelab"}},
+	}}
+	states := domain.TrackerStates{Release: "Todo", Backlog: "Backlog", Cancel: "Canceled", Done: "Done"}
+	srv := New(Params{
+		SnapshotFn:   fixedSnapshot(orchestrator.RuntimeSnapshotResult{}),
+		RefreshFn:    acceptingRefresh(),
+		Logger:       slog.New(slog.DiscardHandler),
+		ControlToken: planTestToken,
+		PlanProjects: plan.NewProjects("T", plan.NewSyncer(plan.Tracker{Adapter: tr, Meta: registry.TrackerMeta{
+			WriteCapabilities: registry.AllWriteCapabilities(), PlanKeyStorage: registry.PlanKeyCustomField,
+		}}), nil),
+		TerminalStatesFn: func() []string { return []string{"Done", "Canceled"} },
+		PlanStatesFn:     func() domain.TrackerStates { return states },
+		PlanSatisfaction: rowsLoader{},
+		PlanRunsElsewhereFn: func() func(domain.BlockerRef) bool {
+			return func(b domain.BlockerRef) bool { return slices.Contains(b.Labels, "sortie-repository:sortie") }
+		},
+	})
+	ts := httptest.NewServer(srv.Mux())
+	t.Cleanup(ts.Close)
+
+	code, body := planRequest(t, ts, http.MethodGet, "/api/v1/plan/graph", "", planTestToken)
+	if code != http.StatusOK {
+		t.Fatalf("status %d %v", code, body)
+	}
+	reasons := map[string]string{}
+	for _, w := range nodeByKey(t, body, "homelab-pilot")["waiting_on"].([]any) {
+		m := w.(map[string]any)
+		reasons[m["blocker_id"].(string)] = m["reason"].(string)
+	}
+	if len(reasons) != 1 || reasons["own"] != orchestrator.BlockerAwaitingMerge {
+		t.Errorf("homelab-pilot waits on %v, want only its own blocker awaiting its merge record", reasons)
 	}
 }

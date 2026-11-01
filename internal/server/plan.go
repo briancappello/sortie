@@ -330,6 +330,9 @@ func (s *Server) handlePlanGraph(w http.ResponseWriter, r *http.Request) {
 	var judge *orchestrator.PlanJudge
 	if planControl {
 		judge = orchestrator.NewPlanJudge(r.Context(), s.planSatisfaction, states.Cancel, states.Done, s.logger)
+		if s.planElsewhereFn != nil {
+			judge.RunsElsewhere = s.planElsewhereFn()
+		}
 		ids := make([]string, 0, len(issues))
 		for _, i := range issues {
 			ids = append(ids, i.ID)
@@ -391,7 +394,7 @@ func planNodeFields(n *planGraphNode, i domain.PlanIssue, byID map[string]domain
 	for _, b := range i.BlockedBy {
 		ref := domain.BlockerRef{ID: b}
 		if blocker, ok := byID[b]; ok {
-			ref.State, ref.PlanKey, ref.Identifier = blocker.State, blocker.PlanKey, blocker.Identifier
+			ref.State, ref.PlanKey, ref.Identifier, ref.Labels = blocker.State, blocker.PlanKey, blocker.Identifier, blocker.Labels
 		}
 		if why := judge.Unsatisfied(ref, terminalSet); why != "" {
 			n.WaitingOn = append(n.WaitingOn, planWaitReason{BlockerID: b, Reason: why})

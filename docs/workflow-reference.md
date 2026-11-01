@@ -267,9 +267,10 @@ tracker:
 
 - A blocker with a plan key counts only when Sortie's own records show that its pull request merged (merge completion latched the merge commit), or that a no-change claim of its run was confirmed. Its tracker state alone never counts, so a card moved to `Done` by hand keeps its dependents waiting, logged as `awaiting_merge_record`. A merged pull request counts as reviewed even when the forge required no review.
 - A blocker without a plan key counts only in `done_state`.
+- A blocker another Sortie runs counts only in `done_state`, plan key or not. That is a blocker whose repository this Sortie does not dispatch: its workspace was seeded from a repository that is closed to dispatch or no longer listed, or, with no seeded workspace, its `sortie-repository:<name>` label names such a repository, or it names none and `environment.smolvm` sets no `default_repository` (see [Two Sorties over one tracker project](#two-sorties-over-one-tracker-project)). The Sortie that runs it records its merge before moving it to done, and this Sortie holds no record of that merge. A blocker in a repository this Sortie dispatches keeps the merge rule above.
 - A blocker in `cancel_state`, or whose state Sortie cannot read, never counts.
 - Merge records live in the database (`plan_satisfaction`), so they survive restarts and workspace removal. Every merge is recorded, plan control on or off, and upgrading fills the table from the merges merge completion already latched.
-- Dispatch, retries, and `--dry-run` apply the same rule. The dry run reads the database read-only. The debug record `candidate held by blocker` carries `blocker_reason`: `not_merged`, `awaiting_merge_record`, `canceled`, `not_done`, `unverified_no_change`, or `unknown`.
+- Dispatch, retries, and `--dry-run` apply the same rule. The dry run reads the database read-only. The debug record `candidate held by blocker` carries `blocker_reason`: `not_merged`, `awaiting_merge_record`, `canceled`, `not_done`, `unverified_no_change`, or `unknown`. The hold the issue shows in `/api/v1/state` names every blocker that holds it, each with that reason.
 - Requires **write permissions** on the tracker API token (same as `handoff_state`).
 
 **`api_key` environment resolution:**
@@ -1925,7 +1926,7 @@ environment:
 
 ##### Two Sorties over one tracker project
 
-Two Sorties can poll the same tracker project, each dispatching the issues of its own repositories. Each lists the repositories it runs. A Sortie that runs plan sync for a plan naming another Sortie's repository lists that repository too, closed to dispatch. At most one of them names a `default_repository`, so an issue without a repository label runs in exactly one.
+Two Sorties can poll the same tracker project, each dispatching the issues of its own repositories. Each lists the repositories it runs. A Sortie that runs plan sync for a plan naming another Sortie's repository lists that repository too, closed to dispatch. At most one of them names a `default_repository`, so an issue without a repository label runs in exactly one. Under plan control, a Sortie judges a blocker the other Sortie runs by its tracker state alone, because only the Sortie that ran it holds its merge record: a story in one Sortie's repository starts once its blocker in the other's reaches `done_state`.
 
 ```yaml
 # The first Sortie runs sortie, and the issues that name no repository.
@@ -2842,7 +2843,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
         "reason": "blocked_by",
         "held_since": "2026-02-24T20:09:44Z",
         "blockers": [
-          {"issue_id": "abc124", "issue_identifier": "MT-648", "state": "In Review"}
+          {"issue_id": "abc124", "issue_identifier": "MT-648", "state": "In Review", "reason": "not_terminal"}
         ],
         "slot": null,
         "resets_at": null,
@@ -3399,7 +3400,7 @@ The `hold` object of a held row and of a between-stages row has these members.
 | -------------- | ----------------- | ----------- |
 | `reason`       | string            | Why the pass held the issue, one of the values below, and the API schema enumerates them. A client MUST tolerate a `reason` its copy of the schema does not list, one a newer version serves, and show `reason_text` and `release_text`. |
 | `held_since`   | string            | When a dispatch pass first held the issue, as an RFC 3339 timestamp in UTC. Never `null`. It does not change while later passes keep the issue held, whatever their reasons, nor across a candidate fetch that fails. It is new when a pass that runs the loop does not hold the issue and a later pass does, and after a restart. |
-| `blockers`     | array or `null`   | Non-null exactly for `blocked_by`: every blocker whose state is empty or not terminal, in the order the tracker returned them. Each has `issue_id`, `issue_identifier`, `display_identifier` (omitted when the tracker needs no qualified form), and `state` (omitted when the tracker returned none, masked). |
+| `blockers`     | array or `null`   | Non-null exactly for `blocked_by`: every blocker that holds the issue, in the order the tracker returned them: one whose state is empty or not terminal, or under plan control one the plan-control rule does not count. Each has `issue_id`, `issue_identifier`, `display_identifier` (omitted when the tracker needs no qualified form), `state` (omitted when the tracker returned none, masked), and `reason`, why it holds the issue: `not_terminal` or `unknown` without plan control, and under it the `blocker_reason` values of **Blockers under plan control** in [Section 2.2](#22-tracker--issue-tracker-configuration). |
 | `slot`         | object or `null` | Non-null exactly for `agent_slots_full`. `scope` is `global` or `state`; `state` is the issue's tracker state as the pass read it, present exactly for `state` and masked; `used` is the sessions running against the limit; `limit` is the limit. |
 | `resets_at`    | string or `null`  | Non-null exactly for the spend reasons and `usage_limit`: when the holding window or usage limit resets, as an RFC 3339 timestamp in UTC. |
 | `agent_kind`   | string or absent  | Present exactly for `usage_limit`: the agent kind whose new sessions the hold stops. |

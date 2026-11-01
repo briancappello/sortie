@@ -208,7 +208,7 @@ func TestPlanControlLoop(t *testing.T) {
 	active, terminal := stateSet(tcfg.ActiveStates), stateSet(tcfg.TerminalStates)
 	dispatchable := func() []string {
 		cands := tracker.candidates("Todo", "In Progress")
-		st.BlockerJudge = PlanJudgeFor(ctx, tcfg, store, cands, discardLogger())
+		st.BlockerJudge = PlanJudgeFor(ctx, tcfg, store, cands, nil, discardLogger())
 		var keys []string
 		for _, c := range cands {
 			if EvaluateCandidate(ctx, c, st, active, terminal, nil, &TickResolution{}).Dispatch {

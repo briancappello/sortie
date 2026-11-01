@@ -22,6 +22,15 @@ const (
 	BlockerNotTerminal        = "not_terminal"
 )
 
+// BlockerReasons returns every reason a blocker judge gives. The slice is
+// new on each call.
+func BlockerReasons() []string {
+	return []string{
+		BlockerNotMerged, BlockerAwaitingMerge, BlockerCanceled, BlockerNotDone,
+		BlockerUnverifiedNoChange, BlockerUnknown, BlockerNotTerminal,
+	}
+}
+
 // BlockerJudge decides whether one blocker of a candidate lets it start.
 // It runs on the event loop.
 type BlockerJudge interface {
@@ -46,11 +55,17 @@ func (terminalJudge) Unsatisfied(b domain.BlockerRef, terminalSet map[string]str
 
 // PlanJudge applies the plan-control rule. A blocker with a plan key is
 // satisfied only by Sortie's own durable record of a merge or of a
-// confirmed no-change claim. A blocker without one is satisfied only by
-// the done state. A cancelled blocker never is.
+// confirmed no-change claim. A blocker without one, or one another Sortie
+// runs, is satisfied only by the done state. A cancelled blocker never is.
 type PlanJudge struct {
 	CancelState string
 	DoneState   string
+
+	// RunsElsewhere reports a blocker whose repository this Sortie does
+	// not dispatch. The Sortie that runs it holds its merge record, so it
+	// is judged by its tracker state. Nil treats every blocker as this
+	// Sortie's own.
+	RunsElsewhere func(domain.BlockerRef) bool
 
 	loader PlanSatisfactionLoader
 	ctx    context.Context
@@ -173,7 +188,7 @@ func (j *PlanJudge) Unsatisfied(b domain.BlockerRef, terminalSet map[string]stru
 	if strings.EqualFold(b.State, j.CancelState) {
 		return BlockerCanceled
 	}
-	if b.PlanKey == "" {
+	if b.PlanKey == "" || (j.RunsElsewhere != nil && j.RunsElsewhere(b)) {
 		if strings.EqualFold(b.State, j.DoneState) {
 			return ""
 		}
@@ -193,13 +208,16 @@ func (j *PlanJudge) Unsatisfied(b domain.BlockerRef, terminalSet map[string]stru
 
 // PlanJudgeFor returns a judge primed with the blockers of candidates when
 // plan control is on, and nil otherwise. A store that cannot load
-// satisfaction yields a judge that satisfies no plan-keyed blocker.
-func PlanJudgeFor(ctx context.Context, tracker config.TrackerConfig, store any, candidates []domain.Issue, log *slog.Logger) BlockerJudge {
+// satisfaction yields a judge that satisfies no plan-keyed blocker of
+// this Sortie's own; runsElsewhere names the others, as
+// [PlanJudge.RunsElsewhere] does.
+func PlanJudgeFor(ctx context.Context, tracker config.TrackerConfig, store any, candidates []domain.Issue, runsElsewhere func(domain.BlockerRef) bool, log *slog.Logger) BlockerJudge {
 	if !tracker.PlanControl() {
 		return nil
 	}
 	loader, _ := store.(PlanSatisfactionLoader)
 	j := NewPlanJudge(ctx, loader, tracker.CancelState, tracker.DoneState, log)
+	j.RunsElsewhere = runsElsewhere
 	j.Prime(BlockerIDs(candidates))
 	return j
 }
@@ -221,6 +239,18 @@ func firstUnsatisfiedBlocker(judge BlockerJudge, blockers []domain.BlockerRef, t
 		}
 	}
 	return domain.BlockerRef{}, ""
+}
+
+// unsatisfiedBlockers returns, in order, every blocker the judge does not
+// accept, each with its reason.
+func unsatisfiedBlockers(judge BlockerJudge, blockers []domain.BlockerRef, terminalSet map[string]struct{}) []HeldBlocker {
+	var out []HeldBlocker
+	for _, b := range blockers {
+		if reason := judge.Unsatisfied(b, terminalSet); reason != "" {
+			out = append(out, HeldBlocker{BlockerRef: b, Reason: reason})
+		}
+	}
+	return out
 }
 
 // isBlockedFor is the one blocker-hold decision. An issue whose

@@ -1120,12 +1120,12 @@ func TestEntryResponses_KeysJSON(t *testing.T) {
 			name: "hold by a blocker serves its blockers and no slot or reset",
 			body: toHoldResponse(&orchestrator.SnapshotHold{
 				Reason: orchestrator.SkipBlockedBy, Since: startedAt,
-				Blockers: []orchestrator.SnapshotBlocker{{IssueID: "b-1", Identifier: "PROJ-9", DisplayID: "acme/web#9"}},
+				Blockers: []orchestrator.SnapshotBlocker{{IssueID: "b-1", Identifier: "PROJ-9", DisplayID: "acme/web#9", Reason: orchestrator.BlockerUnknown}},
 			}, sentence.Context{}),
 			want: map[string]any{
 				"reason":     "blocked_by",
 				"held_since": "2026-03-24T12:00:00Z",
-				"blockers":   []any{map[string]any{"issue_id": "b-1", "issue_identifier": "PROJ-9", "display_identifier": "acme/web#9"}},
+				"blockers":   []any{map[string]any{"issue_id": "b-1", "issue_identifier": "PROJ-9", "display_identifier": "acme/web#9", "reason": "unknown"}},
 				"slot":       nil,
 				"resets_at":  nil,
 			},

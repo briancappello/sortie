@@ -200,6 +200,34 @@ func TestFor(t *testing.T) {
 			}),
 			short: "Blocked by acme/web#8 (To Do), MT-9 (state unknown)",
 		},
+		{
+			name: "held by a blocker another Sortie runs, not done",
+			entry: holding(orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipBlockedBy,
+				Blockers: []orchestrator.SnapshotBlocker{
+					{Identifier: "ONS-16", State: "In Review", Reason: orchestrator.BlockerNotDone},
+				},
+			}),
+			short: "Blocked by ONS-16 (In Review, not done)",
+			long:  "Blocked by ONS-16 (In Review, not done). Sortie dispatches the issue once the blocker reaches the done state, with its merge recorded when this Sortie runs it.",
+		},
+		{
+			name: "held by plan blockers, each with its reason",
+			entry: holding(orchestrator.SnapshotHold{
+				Reason: orchestrator.SkipBlockedBy,
+				Blockers: []orchestrator.SnapshotBlocker{
+					{Identifier: "ONS-15", State: "Done", Reason: orchestrator.BlockerAwaitingMerge},
+					{Identifier: "ONS-16", State: "In Progress", Reason: orchestrator.BlockerNotMerged},
+				},
+			}),
+			short: "Blocked by ONS-15 (Done, no merge recorded), ONS-16 (In Progress, not merged)",
+		},
+		{
+			name:  "held by blockers it lists none of",
+			entry: holding(orchestrator.SnapshotHold{Reason: orchestrator.SkipBlockedBy, Blockers: []orchestrator.SnapshotBlocker{}}),
+			short: "Held for its blockers",
+			long:  "Held for its blockers. Sortie dispatches the issue once the blocker reaches a terminal state.",
+		},
 		{name: "held, blockers not read after a failure", entry: holding(orchestrator.SnapshotHold{Reason: orchestrator.SkipBlockersUnresolved}), short: "Blockers not read: a tracker request failed"},
 		{name: "held, blockers not reached on this poll", entry: holding(orchestrator.SnapshotHold{Reason: orchestrator.SkipBlockersNotRead}), short: "Blockers not read on this poll"},
 		{name: "held, blocker list incomplete", entry: holding(orchestrator.SnapshotHold{Reason: orchestrator.SkipBlockersIncomplete}), short: "Blocker list incomplete"},

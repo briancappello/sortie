@@ -1740,12 +1740,14 @@ type SnapshotContinuation struct {
 }
 
 // SnapshotBlocker is a blocker that holds a candidate. State is masked and
-// empty when the tracker returned none.
+// empty when the tracker returned none. Reason is why the blocker holds
+// the candidate, one of the Blocker* reasons.
 type SnapshotBlocker struct {
 	IssueID    string `json:"issue_id"`
 	Identifier string `json:"issue_identifier"`
 	DisplayID  string `json:"display_identifier,omitempty"`
 	State      string `json:"state,omitempty"`
+	Reason     string `json:"reason"`
 }
 
 // SnapshotSlotHold is the agent slot limit that held a candidate. State is

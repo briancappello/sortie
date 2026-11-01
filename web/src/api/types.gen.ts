@@ -321,6 +321,7 @@ export interface HoldBlockerResponse {
   issue_identifier: string;
   display_identifier?: string;
   state?: string;
+  reason: "not_merged" | "awaiting_merge_record" | "canceled" | "not_done" | "unverified_no_change" | "unknown" | "not_terminal";
 }
 
 export interface HoldResponse {

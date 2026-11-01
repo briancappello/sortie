@@ -1402,13 +1402,26 @@
         "issue_identifier": {
           "type": "string"
         },
+        "reason": {
+          "enum": [
+            "not_merged",
+            "awaiting_merge_record",
+            "canceled",
+            "not_done",
+            "unverified_no_change",
+            "unknown",
+            "not_terminal"
+          ],
+          "type": "string"
+        },
         "state": {
           "type": "string"
         }
       },
       "required": [
         "issue_id",
-        "issue_identifier"
+        "issue_identifier",
+        "reason"
       ],
       "type": "object"
     },

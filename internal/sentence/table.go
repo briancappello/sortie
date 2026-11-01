@@ -53,8 +53,9 @@ const (
 
 // Fragments shared by the hold templates.
 const (
-	blockersTerminal = "{{if .Several}}every blocker reaches{{else}}the blocker reaches{{end}} a terminal state"
-	resetsIn         = "{{if .HasReset}}, resets in {{duration .ResetsIn}}{{end}}"
+	blockersTerminal = "{{if .Several}}every blocker reaches{{else}}the blocker reaches{{end}} " +
+		"{{if .Plan}}the done state, with its merge recorded when this Sortie runs it{{else}}a terminal state{{end}}"
+	resetsIn = "{{if .HasReset}}, resets in {{duration .ResetsIn}}{{end}}"
 )
 
 // errorDetail ends a run-error sentence with the text the stored error
@@ -372,8 +373,8 @@ var table = map[string]parts{
 	},
 
 	"hold_blocked_by": {
-		short:  "Blocked by {{list .Blockers}}",
-		long:   "Blocked by {{series .Blockers}}. Sortie dispatches the issue once " + blockersTerminal + ".",
+		short:  "{{if .Blockers}}Blocked by {{list .Blockers}}{{else}}Held for its blockers{{end}}",
+		long:   "{{if .Blockers}}Blocked by {{series .Blockers}}{{else}}Held for its blockers{{end}}. Sortie dispatches the issue once " + blockersTerminal + ".",
 		clears: "Released when " + blockersTerminal + ".",
 	},
 	"hold_blockers_unresolved": {
