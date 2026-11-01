@@ -51,6 +51,8 @@ type lineSession struct {
 	lines  chan []byte
 	stderr *bytes.Buffer
 	exited chan struct{}
+	// readErr is why reading the agent's output stopped, set before lines closes.
+	readErr error
 }
 
 var _ domain.AgentAdapter = (*lineAdapter)(nil)
@@ -89,6 +91,7 @@ func (a *lineAdapter) StartSession(_ context.Context, params domain.StartSession
 		for sc.Scan() {
 			s.lines <- slices.Clone(sc.Bytes())
 		}
+		s.readErr = sc.Err()
 		close(s.lines)
 	}()
 	go func() {
@@ -116,6 +119,9 @@ func (a *lineAdapter) RunTurn(ctx context.Context, session domain.Session, param
 			return domain.TurnResult{SessionID: session.ID}, context.Cause(ctx)
 		case raw, open := <-s.lines:
 			if !open {
+				if s.readErr != nil {
+					return domain.TurnResult{SessionID: session.ID}, fmt.Errorf("reading the agent's output: %w", s.readErr)
+				}
 				return domain.TurnResult{SessionID: session.ID}, fmt.Errorf("agent exited mid-turn: %s", s.stderr)
 			}
 			var line fakeAgentLine
