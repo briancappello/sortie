@@ -1873,6 +1873,9 @@ Requirements and limits:
 | `default_repository` | string     | With two or more `repositories` | the one entry | The `name` of the `repositories` entry an issue that names no repository runs in. Must name a listed entry. Refused with `repository` or without `repositories`. |
 | `pass_env`    | list of strings  | No       | `[]`     | Names of Sortie's own environment variables to copy into every guest command, in plain text. A name that is not set on the host is left out. `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never cross, even when listed. Each entry must be a valid environment variable name. |
 | `ssh_agent`   | boolean          | No       | `false`  | Forwards Sortie's SSH agent into each new VM. Off by default. With `repository` set, the guest needs no SSH agent. |
+| `nested`      | boolean          | No       | `false`  | Creates each new VM with smolvm's nested virtualization (`--nested`), so the guest can run KVM guests of its own. The host's KVM module must allow nested guests (`kvm_intel` or `kvm_amd` `nested=1`). Off by default. See [Host inputs](#host-inputs). |
+| `net_backend` | string           | No       | _(smolvm's own)_ | The network backend of each new VM (`--net-backend`). The only accepted value is `virtio-net`. `tsi` is refused, because smolvm does not enforce an allowlist with it. Requires `allow_hosts` or `credentials`. See [Host inputs](#host-inputs). |
+| `mounts`      | list of maps     | No       | `[]`     | Host directories mounted into each new VM. See [Host inputs](#host-inputs). |
 
 `environment.smolvm.credentials[]` fields:
 
@@ -1935,7 +1938,7 @@ The single `repository` block works as before. It is the only repository, and a 
 
 **The control directory is the only shared directory.** Sortie creates the host workspace's `.sortie` directory before it creates the VM, and mounts it read-write at `/run/sortie/control`. After `after_create` succeeds, Sortie links `/workspace/.sortie` to `/run/sortie/control`. So the agent writes `.sortie/status`, `.sortie/review_verdict.json`, and `.sortie/pr.json` in the guest, and Sortie reads them on the host with the same link refusal and size limits as for a local workspace. A repository that commits its own `.sortie` entry fails preparation with an error that names `/workspace/.sortie`, and Sortie does not change that entry.
 
-**Exactly two host resources** are given to the VM: the issue's `.sortie` directory (read-write, at `/run/sortie/control`) and the issue's tool channel socket (at `/run/sortie/tools.sock`). Sortie never enables nested virtualization, system mounts, a Docker socket, or published ports, and mounts no other host path. `ssh_agent: true` adds the SSH agent forwarding.
+**Sortie's two host resources** are given to every VM: the issue's `.sortie` directory (read-write, at `/run/sortie/control`) and the issue's tool channel socket (at `/run/sortie/tools.sock`). Without `nested` and `mounts`, they are the only ones. Sortie never enables system mounts, a Docker socket, or published ports. `ssh_agent: true` adds the SSH agent forwarding, `nested: true` adds nested virtualization, and each `mounts` entry adds one host directory. See [Host inputs](#host-inputs).
 
 **Environment variables in the guest.** A command in the VM receives:
 
@@ -1950,6 +1953,54 @@ The single `repository` block works as before. It is the only repository, and a 
 **Agent credentials.** An agent kind declares the variables its runtime reads as its credential, for example `ANTHROPIC_API_KEY` for `claude-code`. When such a variable is set in Sortie's environment and neither `credentials` nor `pass_env` lists it, the dispatch preflight fails under the check `environment.agent_credential`, naming the kind and the variable. Sortie never copies the variable into the VM, and never drops it without a word. Bind it as a credential, list it in `pass_env`, or unset it. `sortie validate` reports the same error.
 
 **No graceful stop.** smolvm delivers no termination signal to a guest command. When Sortie stops a session, the agent in the VM ends at once, and `agent.stop_grace_ms` gives it no time. The agent's own session state is on the VM's disk, so a later session can resume it.
+
+#### Host inputs
+
+`nested`, `net_backend`, and `mounts` give a VM more of the host. Each is off unless the workflow sets it. A workflow that sets none of them creates its VMs with the same smolvm arguments as before these fields existed.
+
+```yaml
+environment:
+  kind: smolvm
+  smolvm:
+    pack: ~/.local/share/smol/homelab.smolmachine
+    nested: true
+    net_backend: virtio-net
+    allow_hosts: [ghcr.io]
+    mounts:
+      - {host: ~/.cache/homelab-sources, guest: /home/agent/.cache/homelab-sources, read_only: true}
+      - {host: ~/.cache/go-build, guest: /home/agent/.cache/go-build}
+      - {host: ~/.local/state/sortie-recorder/{workspace}, guest: /var/recorder}
+```
+
+**Nested virtualization.** With `nested: true`, Sortie passes `--nested` to `smolvm machine create`. The guest then has `/dev/kvm` and can start KVM guests of its own. Without it, the guest has no `/dev/kvm`.
+
+**The network backend.** With `net_backend: virtio-net`, Sortie passes `--net-backend virtio-net`. `allow_hosts` and the credential hosts still decide egress: smolvm 1.32.4 filters a virtio-net VM's egress by them (see the measurement in [docs/fork.md](fork.md#smolvm-egress-with-virtio-net)). Validation refuses, with an error on `environment.smolvm.net_backend`:
+
+- `tsi`. smolvm refuses an egress policy on TSI, so a TSI VM could not keep the allowlist.
+- any other value, and an empty string.
+- `virtio-net` without `allow_hosts` and without `credentials`. smolvm gives such a VM no network, and Sortie never opens unfiltered egress to make room for the backend.
+
+Without `net_backend`, smolvm already uses its virtio-net stack for every VM with an allowlist, so leaving it out changes nothing for such a VM.
+
+**Mounts.** Each `mounts` entry mounts one host directory into every new VM, as `-v <host>:<guest>[:ro]`, after Sortie's own control directory.
+
+| Field       | Type    | Required | Default | Description |
+| ----------- | ------- | -------- | ------- | ----------- |
+| `host`      | string  | **Yes**  | _(none)_ | The host directory. `~` and `$VAR` are expanded, and the result must be absolute. Unless it holds `{workspace}`, it must be an existing directory at startup and on every reload. |
+| `guest`     | string  | **Yes**  | _(none)_ | The absolute directory in the VM. smolvm creates it when the pack lacks it. |
+| `read_only` | boolean | No       | `false` | Mounts the directory read-only: the guest reads it, and every write to it fails. |
+
+Validation fails, with an error naming the entry's field, such as `environment.smolvm.mounts[1].guest`, when:
+
+- `host` or `guest` is not absolute after expansion, or contains `:`;
+- `host` holds no `{workspace}` and does not exist or is not a directory;
+- `host` is or lies under `workspace.root`, whose directories Sortie removes with their workspaces;
+- two entries have the same `guest`;
+- `guest` is, lies under, or contains a path Sortie mounts itself: `/run/sortie/control` or `/run/sortie/tools.sock`.
+
+A guest-planted link in a read-write mount is resolved in the guest, so it does not reach the host's files through the mount. Files the guest writes there are owned by Sortie's user on the host. A mount is data the agent can read, so mount no credential: bind secrets with `credentials`.
+
+**A per-workspace directory.** A `host` that holds `{workspace}` names one directory per issue: Sortie replaces `{workspace}` with the workspace key, for example `~/.local/state/sortie-recorder/ENG-42`. Sortie creates the directory, mode `0700`, before it creates the VM, and never deletes it: not when it stops, deletes, or recreates the VM, not when the VM crashes, and not when it removes the workspace. So what the guest wrote there is still on the host after the VM crashed or the workspace was removed. `GET /api/v1/state` lists each such directory under `environment.kept_dirs` for every running, retrying, or held issue. Sortie never cleans these directories up; the operator does.
 
 #### Credential bindings
 
@@ -2122,7 +2173,7 @@ To switch back, set `kind: local` and restore the clone in `after_create` and an
 
 `environment` reloads. A reload that fails validation, the smolvm version check, or the repository provider check keeps the previous configuration and reports the error through the workflow's last load error, as any invalid reload does.
 
-- `kind`, `smolvm.pack`, the sizing, `allow_hosts`, `credentials`, and `ssh_agent` apply to VMs created after the reload. A VM keeps the settings it was created with. To move an issue to a new pack or new settings, remove its workspace.
+- `kind`, `smolvm.pack`, the sizing, `allow_hosts`, `credentials`, `ssh_agent`, `nested`, `net_backend`, and `mounts` apply to VMs created after the reload. A VM keeps the settings it was created with. To move an issue to a new pack or new settings, remove its workspace.
 - `host_prefix` applies to the next session launch.
 - `pass_env` and `repository` apply to the next run.
 
@@ -3097,7 +3148,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
 | `holder`             | string            | Who holds the run, as the hold request named it (for example `acp-broker`); empty when not held. |
 | `held_since`         | string or `null`  | When the current hold began (RFC 3339, UTC); `null` when not held. |
 | `held_total_ms`      | integer           | Time the run has spent held so far, in milliseconds, the current hold included. Recorded in run history as `held_ms` when the run ends. |
-| `environment`        | object or absent  | The execution environment instance the issue's workspace runs in: `{"kind": "smolvm", "name": "sortie-MT-649"}`. `name` is the VM name, as `smolvm machine ls` and `smolvm machine egress-events --name` take it. Omitted for a workspace that runs on the host. |
+| `environment`        | object or absent  | The execution environment instance the issue's workspace runs in: `{"kind": "smolvm", "name": "sortie-MT-649"}`. `name` is the VM name, as `smolvm machine ls` and `smolvm machine egress-events --name` take it. `kept_dirs`, an array of host paths, lists the issue's per-workspace mount directories, which outlive the VM and the workspace (see [Host inputs](#host-inputs)); it is omitted when the workflow mounts none. Omitted for a workspace that runs on the host. |
 
 A limit key (`budget_tokens`, `budget_sessions`, `budget_usd`) is always present: `null` means no limit is configured. A usage key (`used_tokens`, `issue_tokens_completed`, `used_sessions`, `unmeasured_sessions`) set to `null` means unknown. `used_tokens` is `null` only when `issue_cost_status` is `unmeasured`, and `issue_cost_status` is `estimated` only when `used_tokens_complete` is `true`. While a rate source is available, the top-level `active_estimated_cost_usd` equals the sum of `estimated_cost_usd` over the running rows whose `cost_status` is `estimated` or `partial`, and `cost_unpriced_running` counts the rows whose `cost_status` is `unpriced`.
 
@@ -3113,7 +3164,7 @@ Each row of `retrying` and each record of `budget_exhausted` carries these flat 
 | `issue_labels` | array of strings or absent | The issue's labels, lowercase and in the tracker's order. `[]` when the issue was read and carries none; omitted while the row holds no read of its labels, so an unread issue never reads as one without labels. |
 | `state`       | string or absent | The tracker state of the issue. Omitted when empty or unread. |
 
-A `retrying` entry carries the same `environment` object, described from the current configuration, and omits it in the same case.
+A `retrying` entry, and a `held` entry, carry the same `environment` object, described from the current configuration, and omit it in the same case.
 
 A retry row carries the read of the issue the retry was scheduled with. Sortie stores the read with the retry and restores it at startup, so a restart serves the title, link, display identifier, type, labels, and state it served before. A retry restored from a row stored by an earlier release holds no read; it takes one from the next poll tick whose candidates list its issue, or from its next fire. A retry restored from a row stored before the type, labels, and state were recorded holds a title and link and no labels; it takes the type, labels, and state of the same next read and keeps its title and link. A title or link already held is never replaced. A `budget_exhausted` record carries the read of the poll tick that last rebuilt the set, or of the retry the hold was found on until the next tick. A retry that a pending reaction schedules carries the reaction's issue facts, so its `state` is the handoff target after that reaction's handoff, and so does a `budget_exhausted` record made from that retry.
 
@@ -3298,6 +3349,7 @@ Each element of `held` describes one eligible issue in an active state that the 
 | `issue_labels`       | array of strings | The issue's labels as the pass read them, `[]` when it carries none. Always present. Masked. |
 | `hold`               | object           | Why the issue is held, as the table below describes. Always present. |
 | `status_text`, `status_text_full` | string | The status sentence pair. `status_text` equals `hold.reason_text`. Always present. |
+| `environment`        | object or absent | The execution environment instance the issue's workspace runs in, with its `kept_dirs`, as on a running row, described from the current configuration. Omitted for a workspace that runs on the host. |
 
 **Hold fields:**
 
@@ -3799,7 +3851,7 @@ Returns issue-specific runtime and debug details for a single issue, and the iss
 }
 ```
 
-The `running` object uses the same per-session field schema as `GET /api/v1/state` (see the per-session fields table above). A top-level `environment` object, `{"kind": ..., "name": ...}`, names the VM the issue's workspace runs in, taken from the running entry or else the retry entry; it is omitted for a workspace that runs on the host. `status` is `"running"` when the issue has a running session, `"retrying"` when it does not but has a pending retry, `"budget_exhausted"` when it has neither but is held out of dispatch by a per-issue budget ceiling, `"parked"` when it is none of those but is parked, `"pending_reactions"` when it is none of those but a pending pull request reaction holds it, `"between_stages"` when it is none of those but a stage hop advanced it and its next stage has no run yet, and `"history"` when it is none of those but run history holds runs of it. The fields for whichever cases do not apply are `null`. `budget_exhausted` carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state`, `parked` the record shape of the `parked` array, and `between_stages` the row shape of the `between_stages` array, `null` when the issue is not between stages, with its `hold` like the array's row. The route does not read the `held` list, so an issue that only the list holds is answered from the other row lists and run history alone. `pending_reactions` is always present: the issue's rows in the record shape and order of the `pending_reactions` array on `GET /api/v1/state`, `[]` when the issue has none, whatever the status. A parked-only, pending-reaction-only, between-stages-only, or history-only response carries a `null` `workspace`, zero `attempts`, and a `null` `last_error`, as a budget-exhausted one does. `last_error` is the retry's `error`, so after a reschedule it is the reschedule reason.
+The `running` object uses the same per-session field schema as `GET /api/v1/state` (see the per-session fields table above). A top-level `environment` object, `{"kind": ..., "name": ...}` with the `kept_dirs` of a running row, names the VM the issue's workspace runs in, taken from the running entry or else the retry entry; it is omitted for a workspace that runs on the host. `status` is `"running"` when the issue has a running session, `"retrying"` when it does not but has a pending retry, `"budget_exhausted"` when it has neither but is held out of dispatch by a per-issue budget ceiling, `"parked"` when it is none of those but is parked, `"pending_reactions"` when it is none of those but a pending pull request reaction holds it, `"between_stages"` when it is none of those but a stage hop advanced it and its next stage has no run yet, and `"history"` when it is none of those but run history holds runs of it. The fields for whichever cases do not apply are `null`. `budget_exhausted` carries the same record shape as the `budget_exhausted` array on `GET /api/v1/state`, `parked` the record shape of the `parked` array, and `between_stages` the row shape of the `between_stages` array, `null` when the issue is not between stages, with its `hold` like the array's row. The route does not read the `held` list, so an issue that only the list holds is answered from the other row lists and run history alone. `pending_reactions` is always present: the issue's rows in the record shape and order of the `pending_reactions` array on `GET /api/v1/state`, `[]` when the issue has none, whatever the status. A parked-only, pending-reaction-only, between-stages-only, or history-only response carries a `null` `workspace`, zero `attempts`, and a `null` `last_error`, as a budget-exhausted one does. `last_error` is the retry's `error`, so after a reschedule it is the reschedule reason.
 
 `status_text` and `status_text_full` at the top level are the status sentence pair of the row that decides `status`. For `pending_reactions` they are the pair of the first served row whose `escalated_at` is non-null, and of the first served row when none is. For `history` they word how the issue ended from its outcome and the newest run's hop decision, so a handoff that followed a stage hop that was not made names the stage it did not reach, and an issue with no outcome says that Sortie recorded no ending. The pair is present on every `200` response.
 
@@ -6491,6 +6543,19 @@ These errors are raised during typed config construction from the parsed front m
 | `config: environment.smolvm.pass_env[<i>]: expected string, got <type>` | An entry is not a string. | Quote the entry. |
 | `config: environment.smolvm.pass_env[<i>]: invalid environment variable name "<v>"` | The entry is not `[A-Za-z_][A-Za-z0-9_]*`. | Write the variable name, not `$VAR`. |
 | `config: environment.smolvm.ssh_agent: expected boolean, got <type>` | `ssh_agent` is not `true` or `false`. | Write `true` or `false`. |
+| `config: environment.smolvm.nested: expected boolean, got <type>` | `nested` is not `true` or `false`. | Write `true` or `false`. |
+| `config: environment.smolvm.net_backend: smolvm does not enforce allow_hosts or the credential hosts with "tsi", so its egress would be unfiltered; use virtio-net` | `net_backend: tsi`. | Write `virtio-net`, or remove the key. |
+| `config: environment.smolvm.net_backend: unknown network backend "<v>"; valid: virtio-net` | Another value. `""` fails with `must not be an empty string`. | Write `virtio-net`, or remove the key. |
+| `config: environment.smolvm.net_backend: needs allow_hosts or credentials: ...` | `net_backend` without `allow_hosts` and `credentials`. | List the hosts the VM needs, or remove the key. |
+| `config: environment.smolvm.mounts: expected list, got <type>` | `mounts` is not a list (or an entry is not a map, at `mounts[<i>]`). | Write a list of `{host, guest}` maps. |
+| `config: environment.smolvm.mounts[<i>].host: is required and must be a non-empty string` | `host` is absent or empty (same message for `guest`). | Set the key. |
+| `config: environment.smolvm.mounts[<i>].host: "<p>" is not an absolute path after ~ and $VAR expansion` | A relative path, in `host` or `guest`. | Write an absolute path. |
+| `config: environment.smolvm.mounts[<i>].host: "<p>" contains ':', which separates smolvm's mount fields` | `:` in `host` or `guest`. | Use a path without `:`. |
+| `config: environment.smolvm.mounts[<i>].host: "<p>" does not exist or is not readable: <err>` | A shared `host` is missing (or `is not a directory`). Startup and reload. | Create the directory, or put `{workspace}` in the path. |
+| `config: environment.smolvm.mounts[<i>].host: "<p>" lies under workspace.root "<root>", ...` | The directory would go with a workspace, or reach into all of them. | Keep mounts outside `workspace.root`. |
+| `config: environment.smolvm.mounts[<j>].guest: "<g>" is already the guest path of environment.smolvm.mounts[<i>]` | Two entries share a `guest`. | Give each its own `guest`. |
+| `config: environment.smolvm.mounts[<i>].guest: "<g>" overlaps /run/sortie/control, which Sortie mounts itself` | `guest` is, lies under, or contains `/run/sortie/control` or `/run/sortie/tools.sock`. | Pick another `guest`. |
+| `config: environment.smolvm.mounts[<i>].read_only: expected boolean, got <type>` | `read_only` is not `true` or `false`. | Write `true` or `false`. |
 | `config: environment.smolvm.binary: cannot read the version of smolvm binary "<b>" (minimum supported: 1.32.4): <err>` | The binary is missing, fails, or its `--version` output is not a version (`<err>` is then `smolvm --version printed "<line>", not a smolvm version`). Startup and reload. | Install smolvm 1.32.4 or later, or set `binary`. |
 | `config: environment.smolvm.binary: smolvm binary "<b>": smolvm version <v> is older than the minimum supported version 1.32.4` | An older smolvm release. Startup and reload. | Install smolvm 1.32.4 or later. |
 | `config: environment.smolvm.binary: smolvm binary "<b>": smolvm version "<v>" is not a version; minimum supported: 1.32.4` | `--version` names a version that is not `MAJOR.MINOR.PATCH`. Startup and reload. | Install a smolvm release. |

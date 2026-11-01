@@ -314,6 +314,32 @@ Every hook runs in the VM, in `/workspace`, with `SORTIE_ENVIRONMENT=smolvm`. A 
 
 Without `repository`, Sortie neither seeds nor exports. `after_create` must then get the code itself, from inside the VM, which needs the git host in `allow_hosts` and a credential in the VM.
 
+## Nested VMs, the network backend, and host mounts
+
+A workflow whose agent starts VMs of its own, or needs data from the host, opts in per field. None of them is on by default, and a workflow that sets none of them keeps its VMs as they were. See [Host inputs](workflow-reference.md#host-inputs) for every rule.
+
+```yaml
+environment:
+  kind: smolvm
+  smolvm:
+    pack: ~/.local/share/smol/homelab.smolmachine
+    nested: true                     # the guest gets /dev/kvm
+    net_backend: virtio-net          # needs allow_hosts or credentials
+    allow_hosts: [ghcr.io]
+    mounts:
+      - {host: ~/.cache/homelab-sources, guest: /home/agent/.cache/homelab-sources, read_only: true}
+      - {host: ~/.local/state/sortie-recorder/{workspace}, guest: /var/recorder}
+```
+
+- **`nested`** needs nested KVM on the host: `cat /sys/module/kvm_intel/parameters/nested` (or `kvm_amd`) prints `Y` or `1`.
+- **`net_backend`** accepts only `virtio-net`. smolvm filters egress on it by `allow_hosts` and the credential hosts, as it does for any VM with an allowlist. `tsi` is refused, because smolvm cannot keep an allowlist on it.
+- **`mounts`** mount host directories over virtiofs. A shared `host` must exist when the workflow loads. Mount data, never a credential: everything in the VM can read a mount. smolvm runs every command as the pack's user, and files the guest writes in a mount belong to Sortie's user on the host.
+- **A `{workspace}` mount** gives each issue its own directory, for example `~/.local/state/sortie-recorder/ENG-42`. Sortie creates it, mode `0700`, before the VM, and never removes it, so it keeps what the guest wrote after the VM crashed or the workspace was removed. `/api/v1/state` lists it under `environment.kept_dirs`. Remove old directories yourself.
+
+```sh
+curl -s http://127.0.0.1:7678/api/v1/state | jq '.running[] | {issue_identifier, kept: .environment.kept_dirs}'
+```
+
 ## Operating it
 
 **Find an issue's VM.** Each issue's VM is named `sortie-<workspace key>`, for example `sortie-ENG-42`. `/api/v1/state` and `/api/v1/<identifier>` show it in an `environment` object:
@@ -364,6 +390,11 @@ The reload applies the change. Each existing workspace was created by `smolvm`, 
 | `environment.smolvm.binary: cannot read the version of smolvm binary` | smolvm is not on Sortie's `PATH`. Set `environment.smolvm.binary` to its full path. |
 | `smolvm version 1.x.y is older than the minimum supported version 1.32.4` | Install 1.32.4 or later with the install script's `--version`. |
 | `environment.agent_credential: agent kind ... reads the credential variable ...` | Bind that variable in `credentials`, list it in `pass_env`, or unset it in Sortie's environment. |
+| `environment.smolvm.net_backend: ... use virtio-net` | `tsi`, or another backend smolvm cannot keep an allowlist on, is set. Set `virtio-net`, or remove the key. |
+| `environment.smolvm.net_backend: needs allow_hosts or credentials` | A backend without an allowlist would have no network. List the hosts the VM needs in `allow_hosts`. |
+| `environment.smolvm.mounts[N].guest: ... overlaps /run/sortie/control` | The mount would cover a path Sortie mounts itself. Pick another `guest`. |
+| `environment.smolvm.mounts[N].host: ... does not exist` | Create the directory before Sortie loads the workflow, or put `{workspace}` in the path to have Sortie create one per issue. |
+| A nested guest fails to start, and the VM has no `/dev/kvm` | `nested` is not set, or the host's KVM module does not allow nested guests. |
 | `guest workspace entry /workspace/.sortie already exists` | The repository commits a `.sortie` entry. Remove it from the repository; Sortie needs that path. |
 | The agent's model calls fail, and opencode uses `opencode/big-pickle` | `models.opencode.ai` is missing from `allow_hosts`. |
 | A hook cannot download dependencies | Its registry is missing from `allow_hosts`. Check `smolvm machine egress-events`. |
