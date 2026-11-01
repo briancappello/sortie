@@ -894,6 +894,9 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				HostPool:               o.hostPool,
 				WorkflowFile:           o.workflowFile(),
 				ReleaseHeld:            o.once != nil,
+				Dispatches: func(issue domain.Issue) bool {
+					return dispatchesIssue(cfg.Environment, issue.Labels)
+				},
 				ConfiguredModelOf: func(selection DispatchResolution) string {
 					return o.configuredModelOf(cfg, selection)
 				},
@@ -1248,7 +1251,7 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	o.pollHealth.record(time.Now(), pollOutcomeSucceeded, nil)
 
-	sorted := SortForDispatch(issues)
+	sorted := SortForDispatch(dispatchableIssues(cfg.Environment, issues, o.logger))
 	clearDispatchBlocks(o.state, sorted, time.Now(), o.logger)
 	o.once.setCandidates(sorted)
 	input := o.once.dispatchInput(sorted)

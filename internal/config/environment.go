@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -115,7 +116,8 @@ type SmolvmConfig struct {
 	// Repository configures the host-owned repository the guest
 	// workspace is seeded from and exported to by default: the single
 	// repository block, or the default_repository entry of the
-	// repositories list. Nil when neither is set.
+	// repositories list. Nil when neither is set, and for a
+	// repositories list that names no default.
 	Repository *SmolvmRepository
 
 	// Repositories lists every repository Sortie may open, in written
@@ -124,7 +126,9 @@ type SmolvmConfig struct {
 	Repositories []SmolvmRepository
 
 	// DefaultRepository names the entry of Repositories an issue that
-	// names no repository uses. Empty for the single repository block.
+	// names no repository uses. Empty for the single repository block,
+	// and for a repositories list that names no default, under which an
+	// issue that names no repository is not dispatched.
 	DefaultRepository string
 
 	// PassEnv lists host variable names copied into the guest in plain
@@ -187,6 +191,12 @@ type SmolvmRepository struct {
 	// MaxBundleMiB caps the size of a bundle exported from the guest.
 	// Positive; 512 by default.
 	MaxBundleMiB int
+
+	// ClosedToDispatch keeps every issue that runs in the repository
+	// from being dispatched: Sortie still lists it, for plan sync, and
+	// leaves its issues to another Sortie. Set by dispatch: false on a
+	// repositories entry; never set for the single repository block.
+	ClosedToDispatch bool
 }
 
 // buildEnvironmentConfig parses the top-level environment block. The
@@ -601,6 +611,9 @@ func parseSmolvmRepository(m map[string]any) (*SmolvmRepository, error) {
 	if !ok {
 		return nil, typeError(smolvmRepositoryField, "mapping", raw)
 	}
+	if _, set := entry["dispatch"]; set {
+		return nil, &ConfigError{Field: smolvmRepositoryField + ".dispatch", Message: "applies to repositories entries, not to the single repository block"}
+	}
 	return parseRepositoryEntry(entry, smolvmRepositoryField)
 }
 
@@ -623,6 +636,41 @@ func (c SmolvmConfig) AllRepositories() []SmolvmRepository {
 		return []SmolvmRepository{*c.Repository}
 	}
 	return c.Repositories
+}
+
+// ListsRepositories reports whether the repositories list, rather than
+// the single repository block, configures the repositories.
+func (c SmolvmConfig) ListsRepositories() bool {
+	return len(c.Repositories) > 0 && (c.DefaultRepository != "" || c.Repository == nil)
+}
+
+// ErrNotDispatched reports an issue that runs in no repository the
+// workflow dispatches, which Sortie leaves to another Sortie.
+var ErrNotDispatched = errors.New("not dispatched by this workflow")
+
+// DispatchRepository returns the repository an issue with labels runs
+// in when no seeded workspace names one: the repository its
+// [RepositoryLabelPrefix] label names, or the default for an issue
+// without one. An error wrapping [ErrNotDispatched] reports an issue
+// that names an unlisted repository or one closed to dispatch, or that
+// names none under a repositories list without a default.
+func (c SmolvmConfig) DispatchRepository(labels []string) (*SmolvmRepository, error) {
+	name := IssueRepositoryName(labels)
+	if name == "" {
+		if c.Repository == nil {
+			return nil, fmt.Errorf("the issue names no repository and environment.smolvm sets no default_repository: %w", ErrNotDispatched)
+		}
+		repo := *c.Repository
+		return &repo, nil
+	}
+	repo, found := c.RepositoryNamed(name)
+	if !found {
+		return nil, fmt.Errorf("the issue names repository %q, which environment.smolvm.repositories does not list: %w", name, ErrNotDispatched)
+	}
+	if repo.ClosedToDispatch {
+		return nil, fmt.Errorf("the issue names repository %q, which is closed to dispatch: %w", name, ErrNotDispatched)
+	}
+	return repo, nil
 }
 
 // RepositoryNames lists the names of the configured repositories in
@@ -686,6 +734,13 @@ func parseSmolvmRepositories(m map[string]any, cfg *SmolvmConfig) error {
 		if err != nil {
 			return err
 		}
+		if rawDispatch, set := entry["dispatch"]; set && rawDispatch != nil {
+			open, isBool := rawDispatch.(bool)
+			if !isBool {
+				return typeError(field+".dispatch", "boolean", rawDispatch)
+			}
+			repo.ClosedToDispatch = !open
+		}
 		if repo.Name == "" {
 			return &ConfigError{Field: field + ".name", Message: "is required and must be a non-empty string"}
 		}
@@ -695,18 +750,18 @@ func parseSmolvmRepositories(m map[string]any, cfg *SmolvmConfig) error {
 		seen[repo.Name] = true
 		repos = append(repos, *repo)
 	}
+	cfg.Repositories = repos
 	if def == "" {
-		if len(repos) > 1 {
-			return &ConfigError{Field: smolvmDefaultRepoField, Message: "is required when repositories lists more than one repository"}
-		}
-		def = repos[0].Name
+		return nil
 	}
 	if !seen[def] {
 		return &ConfigError{Field: smolvmDefaultRepoField, Message: fmt.Sprintf("names %q, which repositories does not list", def)}
 	}
-	cfg.Repositories = repos
 	cfg.DefaultRepository = def
 	cfg.Repository, _ = cfg.RepositoryNamed(def)
+	if cfg.Repository.ClosedToDispatch {
+		return &ConfigError{Field: smolvmDefaultRepoField, Message: fmt.Sprintf("names %q, which is closed to dispatch; leave default_repository out to dispatch no issue that names no repository", def)}
+	}
 	return nil
 }
 

@@ -725,9 +725,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 				slog.String("provider", repositoryProvider))
 			return 1
 		}
+		project := ""
+		if def := br.cfg.Environment.Smolvm.Repository; def != nil {
+			project = def.Project
+		}
 		br.logger.Info("pull requests for pushed issue branches enabled",
 			slog.String("provider", repositoryProvider),
-			slog.String("project", br.cfg.Environment.Smolvm.Repository.Project),
+			slog.String("project", project),
 			slog.Any("repositories", br.cfg.Environment.Smolvm.RepositoryNames()),
 		)
 	}

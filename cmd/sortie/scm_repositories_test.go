@@ -37,3 +37,16 @@ func TestCheckRepositoryProvider_Repositories(t *testing.T) {
 		t.Errorf("unknown provider: error = %v", err)
 	}
 }
+
+// A repositories list without a default still names each entry's
+// provider by its index.
+func TestCheckRepositoryProvider_RepositoriesWithoutDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := repositoriesConfig("github", "gitea")
+	cfg.Environment.Smolvm.DefaultRepository, cfg.Environment.Smolvm.Repository = "", nil
+	err := checkRepositoryProvider(cfg)
+	if ce, ok := errors.AsType[*config.ConfigError](err); !ok || ce.Field != "environment.smolvm.repositories[1].provider" {
+		t.Errorf("mixed providers: error = %v, want the second entry named", err)
+	}
+}

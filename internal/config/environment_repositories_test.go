@@ -47,17 +47,65 @@ func TestEnvironmentConfig_Repositories(t *testing.T) {
 	}
 }
 
-func TestEnvironmentConfig_RepositoriesOneEntryIsTheDefault(t *testing.T) {
+// The default repository is optional: a repositories list without one,
+// of any length, names no default, and an issue that names no
+// repository is not dispatched.
+func TestEnvironmentConfig_DefaultRepositoryIsOptional(t *testing.T) {
 	t.Parallel()
 
+	for _, list := range [][]any{
+		{repoEntry("only", "https://example.com/o/only.git")},
+		{repoEntry("a", "https://example.com/a.git"), repoEntry("b", "https://example.com/b.git")},
+	} {
+		cfg, err := NewServiceConfig(smolvmRaw(writePack(t), map[string]any{"repositories": list}))
+		if err != nil {
+			t.Fatalf("NewServiceConfig(%d entries) error = %v", len(list), err)
+		}
+		s := cfg.Environment.Smolvm
+		if s.DefaultRepository != "" || s.Repository != nil || len(s.Repositories) != len(list) || !s.ListsRepositories() {
+			t.Errorf("%d entries: default %q, Repository %+v, Repositories %d; want no default", len(list), s.DefaultRepository, s.Repository, len(s.Repositories))
+		}
+		if _, err := s.DispatchRepository(nil); !errors.Is(err, ErrNotDispatched) {
+			t.Errorf("%d entries: DispatchRepository(no label) error = %v, want ErrNotDispatched", len(list), err)
+		}
+		if r, err := s.DispatchRepository([]string{RepositoryLabelPrefix + s.Repositories[0].Name}); err != nil || r.Name != s.Repositories[0].Name {
+			t.Errorf("%d entries: DispatchRepository(labelled) = %+v, %v", len(list), r, err)
+		}
+	}
+}
+
+// A listed repository may be closed to dispatch: it stays listed, so
+// plan sync accepts its name, and its issues are not dispatched.
+func TestEnvironmentConfig_RepositoryClosedToDispatch(t *testing.T) {
+	t.Parallel()
+
+	homelab := repoEntry("homelab", "https://example.com/o/homelab.git")
+	homelab["dispatch"] = false
+	open := repoEntry("sortie", "https://example.com/o/sortie.git")
+	open["dispatch"] = true
 	cfg, err := NewServiceConfig(smolvmRaw(writePack(t), map[string]any{
-		"repositories": []any{repoEntry("only", "https://example.com/o/only.git")},
+		"repositories":       []any{open, homelab},
+		"default_repository": "sortie",
 	}))
 	if err != nil {
 		t.Fatalf("NewServiceConfig() error = %v", err)
 	}
-	if cfg.Environment.Smolvm.DefaultRepository != "only" || cfg.Environment.Smolvm.Repository.Name != "only" {
-		t.Errorf("default = %q, want only", cfg.Environment.Smolvm.DefaultRepository)
+	s := cfg.Environment.Smolvm
+	if got := s.RepositoryNames(); !reflect.DeepEqual(got, []string{"sortie", "homelab"}) {
+		t.Errorf("RepositoryNames() = %v, want both listed", got)
+	}
+	r, _ := s.RepositoryNamed("homelab")
+	if !r.ClosedToDispatch || s.Repository.ClosedToDispatch {
+		t.Errorf("homelab closed %v, sortie closed %v; want only homelab closed", r.ClosedToDispatch, s.Repository.ClosedToDispatch)
+	}
+	if _, err := s.DispatchRepository([]string{RepositoryLabelPrefix + "homelab"}); !errors.Is(err, ErrNotDispatched) || !strings.Contains(err.Error(), "closed to dispatch") {
+		t.Errorf("DispatchRepository(homelab) error = %v, want closed to dispatch", err)
+	}
+	if r, err := s.DispatchRepository(nil); err != nil || r.Name != "sortie" {
+		t.Errorf("DispatchRepository(no label) = %+v, %v; want the default", r, err)
+	}
+	if _, err := s.DispatchRepository([]string{RepositoryLabelPrefix + "elsewhere"}); !errors.Is(err, ErrNotDispatched) {
+		t.Errorf("DispatchRepository(elsewhere) error = %v, want ErrNotDispatched", err)
 	}
 }
 
@@ -74,7 +122,7 @@ func TestEnvironmentConfig_SingleRepositoryUnchanged(t *testing.T) {
 	if s.Repository == nil || s.Repository.URL != "https://example.com/o/app.git" || s.DefaultRepository != "" {
 		t.Fatalf("Repository = %+v, default %q", s.Repository, s.DefaultRepository)
 	}
-	if len(s.Repositories) != 1 || len(s.RepositoryNames()) != 0 {
+	if len(s.Repositories) != 1 || len(s.RepositoryNames()) != 0 || s.ListsRepositories() {
 		t.Errorf("Repositories = %+v, names %v; want the one unnamed block", s.Repositories, s.RepositoryNames())
 	}
 	if r, ok := s.RepositoryNamed(""); !ok || r.URL != s.Repository.URL {
@@ -87,6 +135,8 @@ func TestEnvironmentConfig_RepositoriesErrors(t *testing.T) {
 
 	a := repoEntry("a", "https://example.com/a.git")
 	b := repoEntry("b", "https://example.com/b.git")
+	closed := repoEntry("c", "https://example.com/c.git")
+	closed["dispatch"] = false
 	tests := []struct {
 		name  string
 		extra map[string]any
@@ -103,8 +153,10 @@ func TestEnvironmentConfig_RepositoriesErrors(t *testing.T) {
 		{"bad name", map[string]any{"repositories": []any{repoEntry("Bad_Name", "u")}}, smolvmRepositoriesField + "[0].name", "must match"},
 		{"duplicate name", map[string]any{"repositories": []any{a, repoEntry("a", "v")}}, smolvmRepositoriesField + "[1].name", "more than once"},
 		{"missing url", map[string]any{"repositories": []any{map[string]any{"name": "a", "base": "main"}}}, smolvmRepositoriesField + "[0].url", "required"},
-		{"two without default", map[string]any{"repositories": []any{a, b}}, smolvmDefaultRepoField, "required"},
 		{"unlisted default", map[string]any{"repositories": []any{a, b}, "default_repository": "c"}, smolvmDefaultRepoField, "does not list"},
+		{"closed default", map[string]any{"repositories": []any{a, closed}, "default_repository": "c"}, smolvmDefaultRepoField, "closed to dispatch"},
+		{"dispatch not a boolean", map[string]any{"repositories": []any{map[string]any{"name": "a", "url": "u", "base": "main", "dispatch": "no"}}}, smolvmRepositoriesField + "[0].dispatch", "boolean"},
+		{"dispatch on the single block", map[string]any{"repository": map[string]any{"url": "u", "base": "main", "dispatch": false}}, smolvmRepositoryField + ".dispatch", "single"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -124,8 +176,10 @@ func TestEnvironmentConfig_RepositoriesErrors(t *testing.T) {
 func TestValidateFrontMatter_RepositoriesKnown(t *testing.T) {
 	t.Parallel()
 
+	closed := repoEntry("b", "v")
+	closed["dispatch"] = false
 	raw := smolvmRaw("/p", map[string]any{
-		"repositories":       []any{repoEntry("a", "u")},
+		"repositories":       []any{repoEntry("a", "u"), closed},
 		"default_repository": "a",
 	})
 	for _, w := range ValidateFrontMatter(raw, ServiceConfig{}) {

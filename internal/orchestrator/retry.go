@@ -156,6 +156,11 @@ type HandleRetryTimerParams struct {
 	// WorkflowFile is the base filename of the active WORKFLOW.md file.
 	WorkflowFile string
 
+	// Dispatches reports whether the configuration in force dispatches
+	// the re-fetched issue. Nil dispatches every issue. A refused issue,
+	// one now left to another workflow, has its claim released.
+	Dispatches func(domain.Issue) bool
+
 	// ResolveAttemptSettings resolves the retry attempt's settings from the
 	// configuration in force now; sshHost is empty for a local launch.
 	// Required. An attempt whose settings carry refusals is rescheduled.
@@ -592,6 +597,18 @@ func HandleRetryTimer(state *State, issueID string, params HandleRetryTimerParam
 		}
 
 		log.Info("issue without a state label, releasing claim")
+		delete(state.Claimed, issueID)
+
+		if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
+			log.Error("failed to delete retry entry from store",
+				slog.Any("error", err),
+			)
+		}
+		return
+	}
+
+	if params.Dispatches != nil && !params.Dispatches(issue) {
+		log.Info("issue left to another workflow, releasing claim")
 		delete(state.Claimed, issueID)
 
 		if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {

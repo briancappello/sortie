@@ -138,27 +138,63 @@ type Repository interface {
 type RepositoryFunc func(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error)
 
 // configuresRepository reports whether cfg places a repository in each
-// workspace's environment: the smolvm kind with a repository block.
+// workspace's environment: the smolvm kind with a repository block or a
+// repositories list.
 func configuresRepository(cfg config.EnvironmentConfig) bool {
-	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && cfg.Smolvm.Repository != nil
+	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && len(cfg.Smolvm.AllRepositories()) > 0
 }
 
 // RepositoryProvider returns the SCM provider that opens the pull
 // request for each issue branch Sortie pushes under cfg, or "" when cfg
-// configures no repository or the repository names no provider.
+// configures no repository, names no default and was not set to an
+// issue's repository, or the repository names no provider.
 func RepositoryProvider(cfg config.EnvironmentConfig) string {
-	if !configuresRepository(cfg) {
+	if !configuresRepository(cfg) || cfg.Smolvm.Repository == nil {
 		return ""
 	}
 	return cfg.Smolvm.Repository.Provider
+}
+
+// dispatchesIssue reports whether cfg dispatches an issue with labels:
+// always when cfg configures no repository, and otherwise when the
+// issue runs in a listed repository open to dispatch. Sortie leaves any
+// other issue alone, to the Sortie whose workflow dispatches it.
+func dispatchesIssue(cfg config.EnvironmentConfig, labels []string) bool {
+	if !configuresRepository(cfg) {
+		return true
+	}
+	_, err := cfg.Smolvm.DispatchRepository(labels)
+	return err == nil
+}
+
+// dispatchableIssues returns the issues cfg dispatches, in their order,
+// leaving out every issue [dispatchesIssue] refuses, so that no later
+// step of a poll claims, moves, comments on, holds or counts one.
+func dispatchableIssues(cfg config.EnvironmentConfig, issues []domain.Issue, logger *slog.Logger) []domain.Issue {
+	if !configuresRepository(cfg) {
+		return issues
+	}
+	kept := make([]domain.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if _, err := cfg.Smolvm.DispatchRepository(issue.Labels); err != nil {
+			logger.Debug("issue left to another workflow",
+				slog.String("issue_id", issue.ID),
+				slog.String("issue_identifier", issue.Identifier),
+				slog.Any("reason", err))
+			continue
+		}
+		kept = append(kept, issue)
+	}
+	return kept
 }
 
 // issueRepository returns cfg with its repository set to the one the
 // issue runs in, and that repository's name. A workspace already seeded
 // keeps the repository its record names; otherwise the issue's
 // repository label names it, and an issue without one runs in the
-// default. A name the workflow does not list is an error. cfg is
-// returned unchanged when it configures no repository.
+// default. The poll dispatches no issue its workflow leaves to another,
+// so the error for one reports a reload between the dispatch and the
+// attempt. cfg is returned unchanged when it configures no repository.
 func issueRepository(cfg config.EnvironmentConfig, workspacePath string, labels []string) (config.EnvironmentConfig, string, error) {
 	if !configuresRepository(cfg) {
 		return cfg, "", nil
@@ -177,16 +213,12 @@ func issueRepository(cfg config.EnvironmentConfig, workspacePath string, labels 
 			return cfg, rec.Name, nil
 		}
 	}
-	name := config.IssueRepositoryName(labels)
-	if name == "" {
-		return cfg, cfg.Smolvm.Repository.Name, nil
-	}
-	repo, found := cfg.Smolvm.RepositoryNamed(name)
-	if !found {
-		return cfg, "", fmt.Errorf("the issue names repository %q, which environment.smolvm.repositories does not list", name)
+	repo, err := cfg.Smolvm.DispatchRepository(labels)
+	if err != nil {
+		return cfg, "", err
 	}
 	cfg.Smolvm.Repository = repo
-	return cfg, name, nil
+	return cfg, repo.Name, nil
 }
 
 // PullRequestOpenerFunc returns the pull request opener of the SCM
@@ -198,7 +230,7 @@ type PullRequestOpenerFunc func(cfg config.ServiceConfig) (domain.PullRequestOpe
 // repositorySync returns the [Repository] cfg configures, with its
 // mirror under stateDir, or nil when cfg configures none.
 func repositorySync(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error) {
-	if !configuresRepository(cfg) {
+	if !configuresRepository(cfg) || cfg.Smolvm.Repository == nil {
 		return nil, nil
 	}
 	syncer, err := gitsync.New(gitsync.Params{Repository: *cfg.Smolvm.Repository, StateDir: stateDir, Logger: logger})
