@@ -159,6 +159,9 @@ func TestRunWorkerAttempt_WorkspaceKeepsItsRepository(t *testing.T) {
 	}
 }
 
+// The poll dispatches no issue that names an unlisted repository; an
+// attempt that meets one, after a reload dropped the repository, fails
+// its preparation and seeds nothing.
 func TestRunWorkerAttempt_UnlistedIssueRepositoryFails(t *testing.T) {
 	cfg := twoRepositoryConfig(t)
 	r := runRepositoryWorker(t, cfg, repoIssue("i-1", "ONE-1", config.RepositoryLabelPrefix+"elsewhere"), nil)

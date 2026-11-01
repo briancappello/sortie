@@ -1870,7 +1870,7 @@ Requirements and limits:
 | `credentials` | list of maps     | No       | `[]`     | Credential bindings. See [Credential bindings](#credential-bindings). |
 | `repository`  | map              | No       | _(none)_ | The repository Sortie seeds the guest workspace from and exports the issue branch to. See [Repository sync](#repository-sync). |
 | `repositories` | list of maps    | No       | _(none)_ | Several repositories, each a `repository` block with a `name`. Each issue runs in one of them. Cannot be set with `repository`. See [Several repositories](#several-repositories). |
-| `default_repository` | string     | With two or more `repositories` | the one entry | The `name` of the `repositories` entry an issue that names no repository runs in. Must name a listed entry. Refused with `repository` or without `repositories`. |
+| `default_repository` | string     | No       | _(none)_ | The `name` of the `repositories` entry an issue that names no repository runs in. Must name a listed entry that is open to dispatch. Absent: Sortie dispatches no issue that names no repository, and plan sync refuses a story that names none. Refused with `repository` or without `repositories`. |
 | `pass_env`    | list of strings  | No       | `[]`     | Names of Sortie's own environment variables to copy into every guest command, in plain text. A name that is not set on the host is left out. `SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never cross, even when listed. Each entry must be a valid environment variable name. |
 | `ssh_agent`   | boolean          | No       | `false`  | Forwards Sortie's SSH agent into each new VM. Off by default. With `repository` set, the guest needs no SSH agent. |
 | `nested`      | boolean          | No       | `false`  | Creates each new VM with smolvm's nested virtualization (`--nested`), so the guest can run KVM guests of its own. The host's KVM module must allow nested guests (`kvm_intel` or `kvm_amd` `nested=1`). Off by default. See [Host inputs](#host-inputs). |
@@ -1897,10 +1897,11 @@ Requirements and limits:
 | `provider`       | string  | No       | _(none)_  | The SCM adapter that opens the pull request after a push: `github`, `gitlab`, or `gitea`. Absent: Sortie pushes and opens no pull request. |
 | `project`        | string  | With `provider` | _(none)_ | The repository for `provider`, as `owner/repo`. On GitLab, everything before the last `/` is the namespace. |
 | `max_bundle_mib` | integer | No       | `512`     | The largest bundle Sortie reads out of the VM at export, in MiB. Must be positive. |
+| `dispatch`       | boolean | No       | `true`    | Only in a `repositories` entry. `false` closes the repository to dispatch: it stays listed, so plan sync accepts its name, and Sortie dispatches none of its issues. Refused in the single `repository` block. |
 
 #### Several repositories
 
-`repositories` lists every repository Sortie may open, each entry a `repository` block with a `name`. `default_repository` names the one an issue runs in when it names none. With one entry it may be left out.
+`repositories` lists every repository Sortie may open, each entry a `repository` block with a `name`. `default_repository` optionally names the one an issue runs in when it names none.
 
 ```yaml
 environment:
@@ -1913,14 +1914,33 @@ environment:
     default_repository: sortie
 ```
 
-- **Which repository an issue runs in.** An issue carrying the label `sortie-repository:<name>` runs in that repository. Plan sync keeps that label on each story whose plan node names a `repository` (see [Plan sync](#46-plan-sync-sortie-plan-sync)). An issue without the label runs in `default_repository`. A label that names an unlisted repository fails the workspace preparation, and the failure is retried like any other.
+- **Which repository an issue runs in.** An issue carrying the label `sortie-repository:<name>` runs in that repository. Plan sync keeps that label on each story whose plan node names a `repository` (see [Plan sync](#46-plan-sync-sortie-plan-sync)). An issue without the label runs in `default_repository`.
+- **Which issues Sortie dispatches.** Sortie dispatches an issue only when the repository it runs in is listed and open to dispatch. For an issue whose workspace was already seeded, that is the repository the workspace was seeded from, whatever its label says now. It leaves every other issue alone: an issue whose label names an unlisted repository, or one closed with `dispatch: false`, and an issue without the label when `default_repository` is absent. Such an issue is left out of the poll as if the tracker had not returned it. Sortie does not claim it, move its state, comment on it, start a session for it, count it against `max_sessions`, or show it in `/api/v1/state`. It logs the issue once at debug level, naming it and the reason, and again only when the reason changes or after a poll that did not leave it alone. A retry whose issue has since been left alone releases its claim without a dispatch.
 - **Each run uses its issue's repository.** The workspace is seeded from that repository's `url` and `base`, the issue branch is pushed there, and the pull request is opened in its `project` and followed there by the SCM reactions. Issues in different repositories run at once.
-- **A workspace keeps the repository it was seeded from.** Sortie records the repository's name in the workspace's `.sortie-host/repository.json`. Later runs of the issue use it, even when the issue's label or `default_repository` changed since. A workflow that no longer lists it fails the preparation until the workspace is removed.
+- **A workspace keeps the repository it was seeded from.** Sortie records the repository's name in the workspace's `.sortie-host/repository.json`. Sortie keeps dispatching the issue and later runs use the recorded repository, even when the issue's label or `default_repository` changed since, unless that repository is now closed to dispatch. A workflow that no longer lists it fails the preparation until the workspace is removed.
 - **One mirror per URL.** Sortie keeps one host mirror per `url`, so entries that share a `url` share a mirror.
 - **One SCM adapter.** Every `provider` set in `repositories` must be the same, and must match every active SCM reaction.
-- **State.** `/api/v1/state` shows each running issue's `repository` once its workspace is prepared. It is omitted for an unnamed single `repository` block.
+- **State.** `/api/v1/state` shows each running issue's `repository` once its workspace is prepared. It is omitted for an unnamed single `repository` block. Its `config.repositories` lists every repository the workflow opens, whether Sortie dispatches its issues, and which one is the default.
 
-The single `repository` block works as before. It is the only repository, and a plan story that names any repository is refused by plan sync.
+##### Two Sorties over one tracker project
+
+Two Sorties can poll the same tracker project, each dispatching the issues of its own repositories. Each lists the repositories it runs. A Sortie that runs plan sync for a plan naming another Sortie's repository lists that repository too, closed to dispatch. At most one of them names a `default_repository`, so an issue without a repository label runs in exactly one.
+
+```yaml
+# The first Sortie runs sortie, and the issues that name no repository.
+repositories:
+  - {name: sortie, url: git@github.com:org/sortie.git, base: main}
+  - {name: homelab, url: git@github.com:org/homelab.git, base: main, dispatch: false}
+default_repository: sortie
+```
+
+```yaml
+# The second Sortie runs only the issues labeled sortie-repository:homelab.
+repositories:
+  - {name: homelab, url: git@github.com:org/homelab.git, base: main}
+```
+
+The single `repository` block works as before. It is the only repository and the default, and Sortie dispatches no issue whose label names another repository. A plan story that names any repository is refused by plan sync.
 
 #### The VM and its workspace
 
@@ -3069,6 +3089,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "bot_review": {"max_continuation_turns": 5, "poll_interval_ms": 60000, "bot_usernames": ["review-bot"], "triage": false, "escalation": "none"},
       "auto_merge": {"strategy": "squash", "require_ci": true, "delete_branch": true, "poll_interval_ms": 60000, "max_retries": null, "escalation": "label", "escalation_label": "needs-human"}
     },
+    "repositories": [],
     "token_rates": {
       "claude-code": {"input_per_mtok": 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok": null, "complete": true, "per_kind": true},
       "codex": {"input_per_mtok": 2.5, "output_per_mtok": null, "cache_read_per_mtok": null, "cache_write_per_mtok": null, "complete": false, "per_kind": true}
@@ -3545,7 +3566,7 @@ A session whose `usage_arrival` is `none` contributes nothing to the token total
 
 **Workflow shape (`config`):**
 
-`config` describes the workflow in effect, so a client draws the rules, stages, and reactions the workflow has and assumes none it lacks. It reports the configuration promoted at the last successful load, kept when a reload fails. A setting whose change needs a restart reports what the process applies: every reaction except `ci_failure` is the one built at startup, and `tracker.kind` and `tracker.project` are the ones the tracker adapter was built with. So `config` names no reaction a reload added, keeps naming one a reload removed, and keeps the tracker kind and project of startup, until the restart that applies the edit. A member reports the WORKFLOW.md key of its name; the derived members are `selected_by`, `agent_kind`, `usage_arrival`, `chains`, `hop_ceiling`, and `complete`. A member whose setting imposes no ceiling is `null`, present and never `0`. An optional string is omitted when unset, and a list member is `[]` when empty.
+`config` describes the workflow in effect, so a client draws the rules, stages, and reactions the workflow has and assumes none it lacks. It reports the configuration promoted at the last successful load, kept when a reload fails. A setting whose change needs a restart reports what the process applies: every reaction except `ci_failure` is the one built at startup, and `tracker.kind` and `tracker.project` are the ones the tracker adapter was built with. So `config` names no reaction a reload added, keeps naming one a reload removed, and keeps the tracker kind and project of startup, until the restart that applies the edit. A member reports the WORKFLOW.md key of its name; the derived members are `selected_by`, `agent_kind`, `usage_arrival`, `chains`, `hop_ceiling`, `default`, and `complete`. A member whose setting imposes no ceiling is `null`, present and never `0`. An optional string is omitted when unset, and a list member is `[]` when empty.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -3581,6 +3602,10 @@ A session whose `usage_arrival` is `none` contributes nothing to the token total
 | `dispatch.chains` | array of arrays of strings | Each stage chain the `next` links form, as rule names in `next` order, in the order of the rules that start them. A chain starts at a rule that carries `next` and that no `next` names, and ends at a rule without `next`. Chains that share a tail list it in each chain. A rule that carries no `next` and that no `next` names belongs to no chain. `[]` when no rule carries `next`. |
 | `dispatch.max_consecutive_hops` | integer or `null` | The value `dispatch.max_consecutive_hops` writes. `null` when the key is absent. |
 | `dispatch.hop_ceiling` | integer | The limit a worker exit compares with an issue's hop count: the written `dispatch.max_consecutive_hops`, or the larger of `10` and the hops of the longest chain. With no chain no hop occurs, and the value is the ceiling a reload that adds `next` would apply. |
+| `repositories` | array of objects | The repositories `environment.smolvm` opens under `environment.kind: smolvm`, in the order written: the `repositories` list, or the single `repository` block as its one entry. `[]` when the workflow opens none. Two Sorties over one tracker project each show the repositories they run here. |
+| `repositories[].name` | string | The entry's `name`. `""` for an unnamed single `repository` block. |
+| `repositories[].dispatch` | boolean | Whether Sortie dispatches the issues that run in the repository: `false` for an entry with `dispatch: false`, whose issues another Sortie runs. |
+| `repositories[].default` | boolean | Whether an issue that names no repository runs in it: `true` for `default_repository` and for the single `repository` block. With no entry `true`, Sortie dispatches no issue that names no repository. |
 | `reactions` | object | A member per reaction kind the process applies, keyed as in `reactions` of WORKFLOW.md. `{}` when it applies none. Key order carries no meaning. |
 | `reactions.ci_failure` | object or absent | Present exactly while the CI check runs, which needs both a CI provider and a source-control adapter. Holds `max_retries`, `triage`, and the escalation members. |
 | `reactions.review_comments` | object or absent | Present when the reaction was configured at startup. Holds `max_continuation_turns`, `debounce_ms`, `poll_interval_ms`, `triage`, and the escalation members. |
@@ -5516,7 +5541,7 @@ The orchestrator forwards the entire sub-object to the matching adapter without 
 
 A version 1 graph, or plan control off, releases nothing, writes no labels or approvers, and creates issues where the tracker puts new ones.
 
-With any version 2 graph, plan control on or off, a story whose node names a `repository` keeps exactly one label `sortie-repository:<name>`, and a story that names none keeps no such label. The name must be listed in the workflow's `environment.smolvm.repositories`: the preview lists any other under `unlisted_repositories`, and the apply refuses with `tracker_payload_error` before the first write. See [Several repositories](#several-repositories).
+With any version 2 graph, plan control on or off, a story whose node names a `repository` keeps exactly one label `sortie-repository:<name>`, and a story that names none keeps no such label. The name must be listed in the workflow's `environment.smolvm.repositories`: the preview lists any other under `unlisted_repositories`, and the apply refuses with `tracker_payload_error` before the first write. When the workflow lists `repositories` and names no `default_repository`, every story must name one, in a graph of either version: the preview lists the plan key of each story that names none under `missing_repositories`, and the apply refuses in the same way, naming those plan keys. See [Several repositories](#several-repositories).
 
 The same sync is served over HTTP by `POST /api/v1/plan/sync`. Over HTTP, the plan routes also serve other projects of the tracker's workspace through `?project=<key>`, when the tracker supports it; Sortie plans and syncs those projects but dispatches agents only for `tracker.project` (see [architecture §13.7.2](architecture/18-logging-status-and-observability.md#1372-json-rest-api-apiv1)). Which trackers support it is listed in [architecture §11.7](architecture/11-issue-tracker-integration-contract.md#117-optional-write-capabilities).
 
@@ -6534,8 +6559,10 @@ These errors are raised during typed config construction from the parsed front m
 | `config: environment.smolvm.repositories[<i>].name: is required and must be a non-empty string` | An entry has no `name`. | Name it. Other keys of an entry fail as under `repository`, with the entry's path. |
 | `config: environment.smolvm.repositories[<i>].name: "<v>" must match [a-z0-9]+(-[a-z0-9]+)*` | The name has another character. | Rename it. |
 | `config: environment.smolvm.repositories[<j>].name: "<v>" is listed more than once` | Two entries share a name. | Give each its own name. |
-| `config: environment.smolvm.default_repository: is required when repositories lists more than one repository` | Two or more entries, no default. | Name one entry. |
 | `config: environment.smolvm.default_repository: names "<v>", which repositories does not list` | An unlisted default. | Name a listed entry. |
+| `config: environment.smolvm.default_repository: names "<v>", which is closed to dispatch; ...` | The default is an entry with `dispatch: false`. | Name an open entry, or remove `default_repository` to dispatch no issue that names no repository. |
+| `config: environment.smolvm.repositories[<i>].dispatch: expected boolean, got <type>` | `dispatch` is not a boolean. | Write `true` or `false`. |
+| `config: environment.smolvm.repository.dispatch: applies to repositories entries, not to the single repository block` | `dispatch` in the single `repository` block. | Remove it, or use `repositories`. |
 | `config: environment.smolvm.default_repository: applies to repositories, not to the single repository block` | `default_repository` with `repository` (or `is set but repositories lists none` without either). | Remove it, or use `repositories`. |
 | `config: environment.smolvm.repositories[<j>].provider: is "<p>" but environment.smolvm.repositories[<i>].provider is "<q>": ...` | Two entries name different providers. Startup and reload. | Use one provider. |
 | `config: environment.smolvm.repository.provider: names "<p>", whose SCM adapter cannot open pull requests` | The adapter has no pull request support. Startup and reload. | Use `github`, `gitlab`, or `gitea`, or remove `provider`. |
@@ -6709,7 +6736,8 @@ A flat reference of every configuration field, for quick lookup. The "Env Overri
 | `environment.smolvm.repository.project` | string           | _(required with `provider`)_ | —                                        | `owner/repo`                                                                           |
 | `environment.smolvm.repository.max_bundle_mib` | integer   | `512`                        | —                                        | Export bundle cap; positive                                                            |
 | `environment.smolvm.repositories`       | `[map]`          | _(absent)_                   | —                                        | Entries as `repository`, each with a unique `name`; not with `repository`             |
-| `environment.smolvm.default_repository` | string           | the one entry                | —                                        | Required with two or more `repositories`; must name a listed entry                     |
+| `environment.smolvm.repositories[].dispatch` | boolean     | `true`                       | —                                        | `false` lists the repository but dispatches none of its issues; not in `repository`    |
+| `environment.smolvm.default_repository` | string           | _(absent)_                   | —                                        | Optional; must name a listed entry open to dispatch; absent dispatches no unlabeled issue |
 | `environment.smolvm.pass_env`           | `[string]`       | `[]`                         | —                                        | Host variables copied into the VM in plain text                                        |
 | `environment.smolvm.ssh_agent`          | boolean          | `false`                      | —                                        | Forwards the host SSH agent into new VMs                                               |
 | **Extensions**                          |                  |                              |                                          |                                                                                        |

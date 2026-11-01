@@ -205,6 +205,9 @@ func (s *Syncer) run(ctx context.Context, p Preview) (Result, error) {
 	if len(p.UnlistedRepositories) > 0 {
 		return r, UnlistedRepositoriesError(p.UnlistedRepositories)
 	}
+	if len(p.MissingRepositories) > 0 {
+		return r, MissingRepositoriesError(p.MissingRepositories)
+	}
 
 	nodes := map[string]Node{}
 	for _, n := range p.graph.Nodes {
@@ -354,5 +357,15 @@ func UnlistedRepositoriesError(unlisted []UnlistedRepository) error {
 	return &domain.TrackerError{
 		Kind:    domain.ErrTrackerPayload,
 		Message: "stories name repositories the workflow does not list in environment.smolvm.repositories: " + strings.Join(names, ", "),
+	}
+}
+
+// MissingRepositoriesError is the payload error an apply returns when
+// stories, named by plan key, name no repository and the workflow names
+// no default_repository. It writes nothing.
+func MissingRepositoriesError(planKeys []string) error {
+	return &domain.TrackerError{
+		Kind:    domain.ErrTrackerPayload,
+		Message: "stories name no repository and environment.smolvm sets no default_repository: " + strings.Join(planKeys, ", "),
 	}
 }

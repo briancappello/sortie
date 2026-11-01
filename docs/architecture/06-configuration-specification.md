@@ -270,6 +270,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `environment.smolvm.repository.max_bundle_mib`: positive integer, default `512`
 - `environment.smolvm.repository.name`: optional string, `[a-z0-9]+(-[a-z0-9]+)*`
 - `environment.smolvm.repositories`: list of `repository` blocks, each with a required unique `name`; mutually exclusive with `repository`; every `provider` set must be the same
-- `environment.smolvm.default_repository`: string naming a listed entry; required when `repositories` has two or more entries, defaults to the one entry otherwise
+- `environment.smolvm.repositories[].dispatch`: boolean, default `true`; `false` keeps the entry listed and dispatches none of its issues; refused in the single `repository` block
+- `environment.smolvm.default_repository`: optional string naming a listed entry open to dispatch; absent, no issue that names no repository is dispatched
 - `environment.smolvm.pass_env`: list of variable names, default empty
 - `environment.smolvm.ssh_agent`: boolean, default `false`

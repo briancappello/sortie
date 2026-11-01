@@ -117,3 +117,83 @@ func TestPlanSync_RefusesUnlistedRepository(t *testing.T) {
 		t.Errorf("writes = %v, want none", f.log)
 	}
 }
+
+func requiringRepository(t Tracker, names ...string) Tracker {
+	t = withRepositories(t, names...)
+	t.RequiresRepository = func() bool { return true }
+	return t
+}
+
+// Without a default repository, the preview refuses a story that names
+// no repository, by its plan key, and an apply of it writes nothing.
+func TestPlanSync_RefusesStoryWithoutRepositoryWhenNoDefault(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTracker()
+	tr := requiringRepository(f.tracker(), "homelab")
+	g := v2(newGraph().epic("billing", ApprovalApproved, "a", "b").build())
+	story(&g, "billing/b").Repository = "homelab"
+
+	p := preview(t, g, tr)
+	if !slices.Equal(p.MissingRepositories, []string{"billing/a"}) {
+		t.Errorf("missing = %v, want billing/a", p.MissingRepositories)
+	}
+	s := NewSyncer(tr)
+	_, id, err := s.Preview(context.Background(), g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Apply(context.Background(), g, id)
+	te, ok := errors.AsType[*domain.TrackerError](err)
+	if !ok || te.Kind != domain.ErrTrackerPayload || !strings.Contains(te.Message, "billing/a") || strings.Contains(te.Message, "billing/b") {
+		t.Fatalf("Apply() error = %v, want a payload error naming billing/a only", err)
+	}
+	if len(f.log) != 0 {
+		t.Errorf("writes = %v, want none", f.log)
+	}
+
+	// A version 1 graph names no repository on any story.
+	g1 := newGraph().epic("billing", ApprovalApproved, "a").build()
+	if p := preview(t, g1, tr); !slices.Equal(p.MissingRepositories, []string{"billing/a"}) {
+		t.Errorf("v1 missing = %v, want billing/a", p.MissingRepositories)
+	}
+}
+
+// With a default repository, a story that names no repository syncs.
+func TestPlanSync_AcceptsStoryWithoutRepositoryUnderADefault(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTracker()
+	tr := withRepositories(f.tracker(), "sortie", "homelab")
+	tr.RequiresRepository = func() bool { return false }
+	g := v2(newGraph().epic("billing", ApprovalApproved, "a").build())
+
+	if p := preview(t, g, tr); len(p.MissingRepositories) != 0 {
+		t.Errorf("missing = %v, want none", p.MissingRepositories)
+	}
+	apply(t, tr, g)
+}
+
+// Without a default, a story that names a listed repository syncs,
+// including a repository the workflow lists closed to dispatch.
+func TestPlanSync_AcceptsListedRepositoryWithoutDefault(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTracker()
+	// homelab stands for an entry with dispatch: false: plan sync sees
+	// every listed name, open or closed.
+	tr := requiringRepository(f.tracker(), "sortie", "homelab")
+	g := v2(newGraph().epic("billing", ApprovalApproved, "a", "b").build())
+	story(&g, "billing/a").Repository = "sortie"
+	story(&g, "billing/b").Repository = "homelab"
+
+	if p := preview(t, g, tr); len(p.MissingRepositories) != 0 || len(p.UnlistedRepositories) != 0 {
+		t.Errorf("missing = %v, unlisted = %v, want none", p.MissingRepositories, p.UnlistedRepositories)
+	}
+	apply(t, tr, g)
+	for _, i := range f.issues {
+		if i.PlanKey == "billing/b" && !slices.Contains(i.Labels, RepositoryLabelPrefix+"homelab") {
+			t.Errorf("billing/b labels = %v, want the homelab repository label", i.Labels)
+		}
+	}
+}

@@ -16,6 +16,19 @@ type WorkflowShape struct {
 	Worker    ShapeWorker    `json:"worker"`
 	Dispatch  ShapeDispatch  `json:"dispatch"`
 	Reactions ShapeReactions `json:"reactions"`
+
+	// Repositories lists the repositories the workflow's environment
+	// opens, in written order; empty when it opens none.
+	Repositories []ShapeRepository `json:"repositories"`
+}
+
+// ShapeRepository reports one repository the workflow opens: its name,
+// whether the process dispatches the issues that run in it, and whether
+// an issue that names no repository runs in it.
+type ShapeRepository struct {
+	Name     string `json:"name"`
+	Dispatch bool   `json:"dispatch"`
+	Default  bool   `json:"default"`
 }
 
 // ShapeTracker reports the tracker kind and project the poll loop's adapter was
@@ -206,10 +219,28 @@ func (o *Orchestrator) WorkflowShape() WorkflowShape {
 			MaxConcurrentAgents:        cfg.Agent.MaxConcurrentAgents,
 			MaxConcurrentAgentsByState: copyCaps(cfg.Agent.MaxConcurrentByState),
 		},
-		Worker:    worker,
-		Dispatch:  o.shapeDispatch(cfg, remote),
-		Reactions: o.shapeReactions(cfg),
+		Worker:       worker,
+		Dispatch:     o.shapeDispatch(cfg, remote),
+		Reactions:    o.shapeReactions(cfg),
+		Repositories: shapeRepositories(cfg.Environment),
 	}
+}
+
+// shapeRepositories reports the repositories cfg opens. The single
+// repository block is its one entry, open to dispatch and the default.
+func shapeRepositories(cfg config.EnvironmentConfig) []ShapeRepository {
+	repos := []ShapeRepository{}
+	if !configuresRepository(cfg) {
+		return repos
+	}
+	for _, repo := range cfg.Smolvm.AllRepositories() {
+		repos = append(repos, ShapeRepository{
+			Name:     repo.Name,
+			Dispatch: !repo.ClosedToDispatch,
+			Default:  cfg.Smolvm.Repository != nil && cfg.Smolvm.Repository.Name == repo.Name,
+		})
+	}
+	return repos
 }
 
 // shapeWorker reports the worker members and whether launches are remote.

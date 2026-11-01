@@ -188,6 +188,7 @@ export interface ConfigResponse {
   worker: ShapeWorker;
   dispatch: ShapeDispatch;
   reactions: ShapeReactions;
+  repositories: ShapeRepository[] | null;
   token_rates: Record<string, TokenRateResponse> | null;
 }
 
@@ -955,6 +956,12 @@ export interface ShapeReactions {
   auto_merge?: ShapeAutoMerge;
   merge_completion?: ShapeMergeCompletion;
   label_commands?: ShapeLabelCommands;
+}
+
+export interface ShapeRepository {
+  name: string;
+  dispatch: boolean;
+  default: boolean;
 }
 
 export interface ShapeReviewComments {

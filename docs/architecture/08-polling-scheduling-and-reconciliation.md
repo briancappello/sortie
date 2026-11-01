@@ -13,7 +13,7 @@ Tick sequence:
 3. Reconcile running issues.
 4. Run the periodic workspace sweep when its tick counter is due (Section 8.7).
 5. Evaluate the instance spend ceiling (Section 8.4): read the spend of each configured UTC calendar window and record whether the window holds dispatch. The step runs on every tick, whether or not preflight passed, and reads nothing while no instance spend window's setting is above `0`.
-6. Fetch candidate issues from tracker using active states.
+6. Fetch candidate issues from tracker using active states, and leave out every issue the workflow leaves to another Sortie (Section 8.2). No later step of the tick sees one.
 7. Sort issues by dispatch priority.
 8. Rebuild the exhausted-issue set from the session, token, and money ceilings (§14.2).
 9. Evaluate the release rule for every parked issue (§14.2): observe the tick's candidates directly for a state change or a confirmed parking label's removal, then read the state and labels of the parked issues the candidate fetch did not return, through one batched, filter-free, comment-free call, and observe each of them as it would observe a candidate. A release by a gesture keeps the park's record as a pending release, with the hand-over it recorded, instead of deleting it. A park that holds no read of its issue, because it was recorded or restored without one, takes the read of this step: the candidate's when the candidates list the issue, otherwise one single-issue read when the batched state-and-label read finds it. That read is made once per park unless it fails, in which case the next tick tries again. A park that holds a title or link and no labels, as one persisted before the type and labels were recorded does, takes the type and labels of the candidate only and keeps the title and link it holds; no tracker call is added. The labels a park stores in either case leave out the park's own parking label, because a new park's labels are read before the label is written and a later read carries the label once it is applied. Beyond the candidate fetch in step 6, the batched state-and-label read and this single-issue read are the only tracker calls this step makes; the batched read is skipped when every parked issue is already a candidate.
@@ -71,6 +71,7 @@ A signal before the run settles starts the usual drain, a second signal abandons
 An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
+- Under a smolvm environment with repositories, the repository it runs in is listed and open to dispatch: the repository its existing workspace was seeded from, when that workspace records one, and otherwise its `sortie-repository:<name>` label names a listed entry without `dispatch: false`, or it carries no such label and `default_repository` (or the single `repository` block) gives it one. A workspace seeded from a repository the workflow no longer lists keeps the issue a candidate, and its preparation fails. An issue that fails this rule belongs to another Sortie on the same tracker project and is dropped from the candidates before any other rule, so it is neither claimed, moved, commented on, held, recorded, run, nor counted against `max_sessions`. It is logged at debug level, naming the issue and the reason, on the first poll that drops it, and again only when the reason changes or after a poll that did not drop it. A retry whose issue now fails it releases its claim without a dispatch.
 - Its state is in `active_states` and not in `terminal_states`.
 - It is not already in `running`.
 - It is not already in `claimed`.
@@ -132,7 +133,7 @@ Retry handling behavior:
 
 1. Fetch active candidate issues (not all issues).
 2. Find the specific issue by `issue_id`.
-3. If not found, release claim.
+3. If not found, release claim. If found but its workflow now leaves it to another Sortie (Section 8.2), release the claim and delete the retry entry.
 4. If found and still candidate-eligible:
    - Dispatch if slots are available, on the selection the configuration in force gives the retry (Retry selection, below).
    - Otherwise requeue with error `no available orchestrator slots`.

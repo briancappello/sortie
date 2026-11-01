@@ -804,6 +804,19 @@
         "reactions": {
           "$ref": "#/$defs/ShapeReactions"
         },
+        "repositories": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ShapeRepository"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "token_rates": {
           "anyOf": [
             {
@@ -831,6 +844,7 @@
         "worker",
         "dispatch",
         "reactions",
+        "repositories",
         "token_rates"
       ],
       "type": "object"
@@ -4701,6 +4715,25 @@
         }
       },
       "required": [],
+      "type": "object"
+    },
+    "ShapeRepository": {
+      "properties": {
+        "default": {
+          "type": "boolean"
+        },
+        "dispatch": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "dispatch",
+        "default"
+      ],
       "type": "object"
     },
     "ShapeReviewComments": {
