@@ -61,3 +61,20 @@ func (s *Server) handleIntrospect(w http.ResponseWriter, r *http.Request) {
 	}
 	issuer.IntrospectHandler().ServeHTTP(w, r)
 }
+
+// routeDataPlane serves the data-plane flows Sortie answers itself while
+// the remote environment kind is selected, and 404 otherwise. Each
+// request authenticates with its flow's job token, not the control
+// token.
+func (s *Server) routeDataPlane(w http.ResponseWriter, r *http.Request) {
+	var h http.Handler
+	if s.dataPlaneFn != nil {
+		h = s.dataPlaneFn()
+	}
+	if h == nil {
+		writeErrorJSON(w, s.logger, http.StatusNotFound, "not_found",
+			"the data plane is served only under environment.kind remote")
+		return
+	}
+	h.ServeHTTP(w, r)
+}

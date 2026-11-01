@@ -945,7 +945,7 @@ func adapterProviders(cfg ServiceConfig) []string {
 	}
 	add(cfg.CIFeedback.Kind)
 	add(cfg.LabelCommands.Provider)
-	for _, repo := range cfg.Environment.Smolvm.AllRepositories() {
+	for _, repo := range cfg.Environment.RepositorySet().AllRepositories() {
 		add(repo.Provider)
 	}
 	return providers

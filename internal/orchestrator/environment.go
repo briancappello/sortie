@@ -168,9 +168,9 @@ type RepositoryFunc func(cfg config.EnvironmentConfig, stateDir string, logger *
 
 // configuresRepository reports whether cfg places a repository in each
 // workspace's environment: the smolvm kind with a repository block or a
-// repositories list.
+// repositories list, or the remote kind with a repository block.
 func configuresRepository(cfg config.EnvironmentConfig) bool {
-	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && len(cfg.Smolvm.AllRepositories()) > 0
+	return len(cfg.RepositorySet().AllRepositories()) > 0
 }
 
 // RepositoryProvider returns the SCM provider that opens the pull
@@ -178,10 +178,10 @@ func configuresRepository(cfg config.EnvironmentConfig) bool {
 // configures no repository, names no default and was not set to an
 // issue's repository, or the repository names no provider.
 func RepositoryProvider(cfg config.EnvironmentConfig) string {
-	if !configuresRepository(cfg) || cfg.Smolvm.Repository == nil {
+	if !configuresRepository(cfg) || cfg.RepositorySet().Repository == nil {
 		return ""
 	}
-	return cfg.Smolvm.Repository.Provider
+	return cfg.RepositorySet().Repository.Provider
 }
 
 // leftAloneReason returns why cfg leaves the issue to another workflow,
@@ -196,13 +196,13 @@ func leftAloneReason(cfg config.EnvironmentConfig, workspaceRoot string, issue d
 	}
 	if path, err := workspace.ComputePath(workspaceRoot, issue.Identifier); err == nil {
 		if rec, ok, err := workspace.ReadRepositoryRecord(path.Path); err == nil && ok {
-			if repo, found := cfg.Smolvm.RepositoryNamed(rec.Name); found && repo.ClosedToDispatch {
+			if repo, found := cfg.RepositorySet().RepositoryNamed(rec.Name); found && repo.ClosedToDispatch {
 				return fmt.Errorf("the issue's workspace was seeded from repository %q, which is closed to dispatch: %w", rec.Name, config.ErrNotDispatched)
 			}
 			return nil
 		}
 	}
-	_, err := cfg.Smolvm.DispatchRepository(issue.Labels)
+	_, err := cfg.RepositorySet().DispatchRepository(issue.Labels)
 	return err
 }
 
@@ -261,19 +261,19 @@ func issueRepository(cfg config.EnvironmentConfig, workspacePath string, labels 
 			return cfg, "", fmt.Errorf("read the workspace's repository record: %w", err)
 		}
 		if ok {
-			repo, found := cfg.Smolvm.RepositoryNamed(rec.Name)
+			repo, found := cfg.RepositorySet().RepositoryNamed(rec.Name)
 			if !found {
 				return cfg, "", fmt.Errorf("the workspace was seeded from repository %q, which environment.smolvm.repositories no longer lists", rec.Name)
 			}
-			cfg.Smolvm.Repository = repo
+			cfg.SetRepository(repo)
 			return cfg, rec.Name, nil
 		}
 	}
-	repo, err := cfg.Smolvm.DispatchRepository(labels)
+	repo, err := cfg.RepositorySet().DispatchRepository(labels)
 	if err != nil {
 		return cfg, "", err
 	}
-	cfg.Smolvm.Repository = repo
+	cfg.SetRepository(repo)
 	return cfg, repo.Name, nil
 }
 
@@ -286,10 +286,10 @@ type PullRequestOpenerFunc func(cfg config.ServiceConfig) (domain.PullRequestOpe
 // repositorySync returns the [Repository] cfg configures, with its
 // mirror under stateDir, or nil when cfg configures none.
 func repositorySync(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error) {
-	if !configuresRepository(cfg) || cfg.Smolvm.Repository == nil {
+	if !configuresRepository(cfg) || cfg.RepositorySet().Repository == nil {
 		return nil, nil
 	}
-	syncer, err := gitsync.New(gitsync.Params{Repository: *cfg.Smolvm.Repository, StateDir: stateDir, Logger: logger})
+	syncer, err := gitsync.New(gitsync.Params{Repository: *cfg.RepositorySet().Repository, StateDir: stateDir, Logger: logger})
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +379,7 @@ func RepositoriesProvider(cfg config.EnvironmentConfig) string {
 	if !configuresRepository(cfg) {
 		return ""
 	}
-	for _, repo := range cfg.Smolvm.AllRepositories() {
+	for _, repo := range cfg.RepositorySet().AllRepositories() {
 		if repo.Provider != "" {
 			return repo.Provider
 		}

@@ -180,7 +180,7 @@ func pullRequestTargetFor(cfg config.ServiceConfig, openers PullRequestOpenerFun
 	if RepositoryProvider(cfg.Environment) == "" {
 		return nil
 	}
-	repo := cfg.Environment.Smolvm.Repository
+	repo := cfg.Environment.RepositorySet().Repository
 	target := &pullRequestTarget{Project: repo.Project, Base: repo.Base}
 	if openers != nil {
 		target.Opener = func() (domain.PullRequestOpener, error) { return openers(cfg) }

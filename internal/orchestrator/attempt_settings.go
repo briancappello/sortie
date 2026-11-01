@@ -31,6 +31,11 @@ func (o *Orchestrator) resolveAttemptSettings(cfg config.ServiceConfig, selectio
 	meta, registered := o.preflightParams.AgentRegistry.Meta(selection.AgentKind)
 
 	arrival, attribution := usageDisposition(meta, registered, settings.Passthrough, sshHost != "")
+	if isRemoteKind(cfg.Environment) {
+		// A remote job reports its usage on the usage flow as the
+		// attempt's running totals, whatever its agent kind reports.
+		arrival, attribution = registry.UsageArrivalIncremental, registry.UsageAttributionSessionTotal
+	}
 	refusals, _ := settingsDiagnostics(cfg, meta, registered, settings, sshHost != "")
 
 	return AttemptSettings{

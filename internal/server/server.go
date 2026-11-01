@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sortie-ai/sortie/internal/dataplane"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/jobtoken"
 	"github.com/sortie-ai/sortie/internal/orchestrator"
@@ -427,6 +428,12 @@ type Params struct {
 	// returns nil. Nil issues no job tokens.
 	JobTokensFn func() *jobtoken.Issuer
 
+	// DataPlaneFn returns the handler of the data-plane flows Sortie
+	// serves itself, under /api/v1/flows/, while the remote environment
+	// kind is selected, and nil otherwise. Its routes answer 404 while it
+	// returns nil. Nil serves no data plane.
+	DataPlaneFn func() http.Handler
+
 	// ControlToken is the bearer token every state-changing endpoint
 	// requires. When empty, those endpoints accept a request that
 	// presents no token; startup permits that only on a loopback bind.
@@ -513,6 +520,7 @@ type Server struct {
 	workersFn          func() *worker.Matcher
 	workerHeaderFn     func() string
 	jobTokensFn        func() *jobtoken.Issuer
+	dataPlaneFn        func() http.Handler
 
 	changes *changeFeed
 	timing  streamTiming
@@ -596,6 +604,7 @@ func New(params Params) *Server {
 		workersFn:          params.WorkersFn,
 		workerHeaderFn:     params.WorkerIdentityHeaderFn,
 		jobTokensFn:        params.JobTokensFn,
+		dataPlaneFn:        params.DataPlaneFn,
 		changes:            newChangeFeed(),
 		timing: streamTiming{
 			heartbeat:      15 * time.Second,
@@ -636,6 +645,9 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/reactions/{identifier}/{kind}/check", s.controlRoute(scopeOperator, s.handleCheckNow))
 	for _, route := range workerRoutes {
 		mux.HandleFunc(route, s.routeWorker)
+	}
+	for _, route := range dataplane.Routes {
+		mux.HandleFunc(route, s.routeDataPlane)
 	}
 	mux.HandleFunc("/api/v1/tokens/introspect", s.controlRoute(scopeOperator, s.handleIntrospect))
 	mux.HandleFunc("/api/v1/events", s.routeEvents)

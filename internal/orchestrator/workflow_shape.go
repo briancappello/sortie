@@ -233,11 +233,12 @@ func shapeRepositories(cfg config.EnvironmentConfig) []ShapeRepository {
 	if !configuresRepository(cfg) {
 		return repos
 	}
-	for _, repo := range cfg.Smolvm.AllRepositories() {
+	set := cfg.RepositorySet()
+	for _, repo := range set.AllRepositories() {
 		repos = append(repos, ShapeRepository{
 			Name:     repo.Name,
 			Dispatch: !repo.ClosedToDispatch,
-			Default:  cfg.Smolvm.Repository != nil && cfg.Smolvm.Repository.Name == repo.Name,
+			Default:  set.Repository != nil && set.Repository.Name == repo.Name,
 		})
 	}
 	return repos

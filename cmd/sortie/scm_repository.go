@@ -9,10 +9,6 @@ import (
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
-// repositoryProviderField is the setting naming the SCM provider that
-// opens the pull request for each issue branch Sortie pushes.
-const repositoryProviderField = "environment.smolvm.repository.provider"
-
 // scmReactionProviderSetting returns the setting that names the provider
 // of the active SCM reaction kind name. Every kind, label_commands
 // included, is a block under reactions.
@@ -33,14 +29,11 @@ func checkRepositoryProvider(cfg config.ServiceConfig) error {
 		return nil
 	}
 	first, firstField := "", ""
-	for i, repo := range cfg.Environment.Smolvm.AllRepositories() {
+	for i, repo := range cfg.Environment.RepositorySet().AllRepositories() {
 		if repo.Provider == "" {
 			continue
 		}
-		field := repositoryProviderField
-		if cfg.Environment.Smolvm.ListsRepositories() {
-			field = fmt.Sprintf("environment.smolvm.repositories[%d].provider", i)
-		}
+		field := cfg.Environment.RepositoryField(i) + ".provider"
 		if first == "" {
 			first, firstField = repo.Provider, field
 		} else if repo.Provider != first {

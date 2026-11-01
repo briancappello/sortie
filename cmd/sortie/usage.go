@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
+
+	"github.com/sortie-ai/sortie/internal/dataplane"
 )
 
 func printHelp(w io.Writer) {
@@ -18,6 +20,7 @@ Commands:
   stats                     Summarize past runs: outcomes, duration, and cost
   plan sync                 Sync a validated plan graph into the tracker
   mcp-server                Start the MCP stdio server for agent-to-orchestrator communication
+  stdio-bridge SOCKET       Join an agent session to a remote job's stdio flow (started by Sortie)
 
 Flags:
   -h, --help                Print this help message and quit
@@ -167,7 +170,7 @@ Global flags:
 // tokens and the POSIX "--" terminator stop the scan immediately.
 func interceptShortFlags(args []string) string {
 	for _, arg := range args {
-		if arg == "validate" || arg == "stats" || arg == "plan" || arg == "mcp-server" {
+		if arg == "validate" || arg == "stats" || arg == "plan" || arg == "mcp-server" || arg == dataplane.BridgeCommand {
 			return ""
 		}
 		if arg == "--" {

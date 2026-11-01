@@ -11,6 +11,10 @@ import (
 	"github.com/sortie-ai/sortie/internal/registry"
 )
 
+// repositoryProviderField is the setting naming the SCM provider of the
+// single smolvm repository block.
+const repositoryProviderField = "environment.smolvm.repository.provider"
+
 // scmWithoutPullRequestsKind is an SCM adapter kind registered for the
 // tests that declares no pull request capability.
 const scmWithoutPullRequestsKind = "scm-without-pull-requests"
