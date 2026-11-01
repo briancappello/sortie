@@ -33,7 +33,13 @@ func TestPrepare_UserIsTheMachinesUser(t *testing.T) {
 			if i := slices.Index(on, "--user"); i+1 >= len(on) || on[i+1] != user {
 				t.Errorf("create argv = %q, want --user %s", on, user)
 			}
-			assertOnlyGrantedResources(t, on)
+			// The one root command a VM with a user gets: the chown of its
+			// workspace. Everything else is held to the usual grant.
+			if n := countArg(on, "--init"); n != 1 {
+				t.Fatalf("create argv = %q, want --init once", on)
+			}
+			j := slices.Index(on, "--init")
+			assertOnlyGrantedResources(t, slices.Delete(slices.Clone(on), j, j+2))
 
 			// The same workspace without user: the argv it would be
 			// created with.
@@ -53,9 +59,15 @@ func TestPrepare_UserIsTheMachinesUser(t *testing.T) {
 			if slices.Contains(off, "--user") {
 				t.Errorf("create argv without user = %q, want no --user", off)
 			}
+			if i := slices.Index(on, "--init"); i < 0 || i+1 >= len(on) || on[i+1] != "chown "+user+" "+GuestWorkspace {
+				t.Errorf("create argv = %q, want --init %q", on, "chown "+user+" "+GuestWorkspace)
+			}
+			if slices.Contains(off, "--init") {
+				t.Errorf("create argv without user = %q, want no --init", off)
+			}
 			i := slices.Index(on, "--user")
-			if without := slices.Delete(slices.Clone(on), i, i+2); !slices.Equal(without, off) {
-				t.Errorf("create argv with user less --user %s = %q, want the argv without it %q", user, without, off)
+			if without := slices.Delete(slices.Clone(on), i, i+4); !slices.Equal(without, off) {
+				t.Errorf("create argv with user less --user %s and its --init = %q, want the argv without it %q", user, without, off)
 			}
 		})
 	}

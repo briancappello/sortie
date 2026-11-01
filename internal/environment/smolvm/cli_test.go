@@ -260,7 +260,7 @@ func TestCreateArgs_User(t *testing.T) {
 	}
 	want := []string{
 		"machine", "create", "--error-format", "json", "--name", "n", "--from", "/p",
-		"--label", "k=v", "--user", "builder", "--nested",
+		"--label", "k=v", "--user", "builder", "--init", "chown builder /workspace", "--nested",
 	}
 	if !slices.Equal(args, want) {
 		t.Errorf("createArgs() = %q, want %q", args, want)
