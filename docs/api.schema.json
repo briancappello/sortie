@@ -2350,6 +2350,9 @@
         "state": {
           "type": "string"
         },
+        "statement": {
+          "type": "string"
+        },
         "status_text": {
           "type": "string"
         },
@@ -2365,6 +2368,7 @@
         "label",
         "label_applied",
         "parked_at",
+        "statement",
         "stage_position",
         "status_text",
         "status_text_full"

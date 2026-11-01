@@ -68,7 +68,7 @@ const eventMessage = "{{if .Message}}: {{.Message}}{{end}}"
 // Fragments shared by the attention templates.
 const (
 	parkedClears = "Clears when a poll tick finds `{{.Label}}` removed from the issue{{if .Unseen}} after Sortie has seen it there{{end}}" +
-		"{{if .State}}, or the issue moved out of {{.State}}{{end}}."
+		"{{if .State}}, or the issue moved out of {{.State}}{{end}}, or when a person answers it through the API."
 	parkedSeen      = "{{if .Unseen}} (not yet seen on the issue){{end}}"
 	budgetLeaves    = "or after the issue leaves the active tracker states."
 	triesOfMax      = "{{count .Tries}}{{if .HasMax}} of {{count .Max}}{{end}}"

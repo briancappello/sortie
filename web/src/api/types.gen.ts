@@ -500,6 +500,7 @@ export interface ParkedEntryResponse {
   label: string;
   label_applied: boolean;
   parked_at: string;
+  statement: string;
   rule_name?: string;
   stage_position: StagePositionResponse | null;
   agent_kind?: string;

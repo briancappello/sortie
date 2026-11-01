@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/orchestrator"
+	"github.com/sortie-ai/sortie/internal/parkanswer"
 )
 
 // HoldFunc holds the running issue named by identifier. It must be safe
@@ -76,6 +77,8 @@ func (s *Server) writeControlReply(w http.ResponseWriter, r *http.Request, start
 		status, code = http.StatusNotFound, "issue_not_found"
 	case orchestrator.ControlNotRunning:
 		status, code = http.StatusConflict, "issue_not_running"
+	case orchestrator.ControlNotParked:
+		status, code = http.StatusConflict, "issue_not_parked"
 	case orchestrator.ControlInvalid:
 		status, code = http.StatusBadRequest, "invalid_request"
 	case orchestrator.ControlRateLimited:
@@ -169,4 +172,49 @@ func (s *Server) handleEscalate(w http.ResponseWriter, r *http.Request) {
 	identifier := r.PathValue("identifier")
 	reply := s.escalateFn(identifier, orchestrator.EscalationRequest{Message: req.Message, Kind: req.Kind, URL: req.URL})
 	s.writeControlReply(w, r, start, reply, escalateResponse{IssueIdentifier: identifier, EventType: "session.escalated", Accepted: true})
+}
+
+// AnswerFunc answers the parked issue named by identifier. It must be safe
+// to call from any goroutine.
+type AnswerFunc func(identifier string, answer parkanswer.Answer) orchestrator.ControlReply
+
+type answerRequest struct {
+	Text   string `json:"text"`
+	Author string `json:"author"`
+}
+
+type answerResponse struct {
+	IssueIdentifier string    `json:"issue_identifier"`
+	IssueID         string    `json:"issue_id"`
+	Author          string    `json:"author"`
+	Reason          string    `json:"reason"`
+	Statement       string    `json:"statement"`
+	ParkedAt        time.Time `json:"parked_at"`
+	ReleasedAt      time.Time `json:"released_at"`
+	Gesture         string    `json:"gesture"`
+}
+
+func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	if s.answerFn == nil {
+		writeErrorJSON(w, s.logger, http.StatusServiceUnavailable, "orchestrator_unavailable", "answers are not available")
+		return
+	}
+	var req answerRequest
+	if err := decodeControlBody(r, &req); err != nil {
+		writeErrorJSON(w, s.logger, http.StatusBadRequest, "invalid_request", "request body must be a JSON object with text and author")
+		return
+	}
+	reply := s.answerFn(r.PathValue("identifier"), parkanswer.Answer{Text: req.Text, Author: req.Author})
+	a := reply.Answer
+	s.writeControlReply(w, r, start, reply, answerResponse{
+		IssueIdentifier: a.Identifier,
+		IssueID:         a.IssueID,
+		Author:          a.Author,
+		Reason:          a.Reason,
+		Statement:       a.Statement,
+		ParkedAt:        a.ParkedAt.UTC(),
+		ReleasedAt:      a.ReleasedAt.UTC(),
+		Gesture:         "answered",
+	})
 }
