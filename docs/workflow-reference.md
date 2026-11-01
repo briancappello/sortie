@@ -2077,11 +2077,18 @@ environment:
       bundles: { url: https://edge.example/bundles }
       usage:   { url: https://edge.example/usage }
     lease_ttl_ms: 60000                      # optional
+    repository:                              # optional, seeded and pushed by Sortie
+      url: git@github.com:org/app.git
+      base: main
+      branch_prefix: sortie/
+      provider: github
+      project: org/app
+      max_bundle_mib: 512
 worker:
   identity_header: X-Sortie-Worker-Identity  # optional
 ```
 
-The `remote` kind runs nothing of an issue on Sortie's host. Each dispatched attempt becomes a job in the worker matcher. The job's ID is the issue identifier, and its attempt is the run history's attempt, so a first dispatch is attempt `1`. The job also carries the issue, the requirements above and the issue's plan priority. Workers dial Sortie over the worker API, and Sortie never dials a worker. A worker runs the job and reports its outcome. The outcome ends the attempt as a local run with the same exit ends it: success takes the continuation path, failure and an expired lease take the failure retry path with backoff, and a cancellation withdraws the job. The next attempt is a new job attempt with new tokens. Sortie never resumes an old attempt on another worker.
+The `remote` kind runs no workspace code on Sortie's host. Each dispatched attempt becomes a job in the worker matcher. The job's ID is the issue identifier, and its attempt is the run history's attempt, so a first dispatch is attempt `1`. The job also carries the issue, the requirements above and the issue's plan priority. Workers dial Sortie over the worker API, and Sortie never dials a worker. The agent runs in the job's machine on the worker, while Sortie drives its session over the `stdio` flow as it drives a local agent; see [The remote run](#the-remote-run). A failure report and an expired lease end the attempt through the failure retry path with backoff, with the worker's reason as the error, and a cancellation withdraws the job. The next attempt is a new job attempt with new tokens and a new seed. Sortie never resumes an old attempt on another worker.
 
 The matcher offers queued jobs in priority order, lower first and a job without a priority last, then oldest first. A job goes only to a worker that has all of these:
 
@@ -2104,6 +2111,7 @@ A running machine uses a run slot. A stopped machine uses only disk, which the w
 | `credentials`  | list of maps     | No       | `[]`     | Credentials the agent needs, each `{name, env, hosts, header}` with the rules of `environment.smolvm.credentials`. The machine sets `env` to the placeholder `sortie-credential-<name>`, which the egress proxy replaces on requests to `hosts`. Sortie never reads the value. |
 | `flows.<flow>.url` | string       | Yes      | _(none)_ | The URL a worker reaches each data-plane flow at: `stdio`, `egress`, `mcp`, `bundles` and `usage`. All five are required, and no other flow is accepted. Each URL is absolute, uses `http`, `https`, `ws` or `wss`, and holds no user information. |
 | `lease_ttl_ms` | integer          | No       | `60000`  | How long a lease lasts after its grant or last heartbeat. Must be positive. |
+| `repository`   | map              | No       | _(none)_ | The repository each job's workspace is seeded from and whose issue branch Sortie pushes, with the fields and defaults of [`environment.smolvm.repository`](#kind-smolvm) except `dispatch`. `max_bundle_mib` caps the bundle a worker returns. Without it, Sortie serves no seed and pushes nothing. |
 
 `worker.identity_header` names the request header that carries the worker's identity, `X-Sortie-Worker-Identity` by default. Sortie takes the identity from that header only, never from the path or the body. Put Sortie behind a proxy that authenticates each worker by its client certificate and sets the header. `remote` cannot be combined with `worker.ssh_hosts`. Validation fails with an error that names both settings.
 
@@ -2138,6 +2146,35 @@ The run descriptor holds no model key, forge or tracker token, deploy key, or se
 Sortie checks leases every second. An expired lease ends its attempt as failed. A later heartbeat or report for it answers `409`.
 
 Each flow token is a job token. Sortie mints one per flow when it grants the lease. Each token is bound to that job, that attempt and that flow, holds 256 random bits, and Sortie keeps only its SHA-256 digest. The tokens become void as soon as the attempt ends, by report, lease expiry, cancel or shutdown, and a new attempt gets new ones. No token appears in the log or in `GET /api/v1/state`. That state lists each worker with its `declaration`, `last_check_in` and the `available` capacity Sortie counts. It lists each live lease as `{"job", "attempt", "worker", "expires"}`, and each queued job with `queued_at` and why it waits. A proxy asks what a token grants with `POST /api/v1/tokens/introspect` and body `{"token": "..."}`, using Sortie's control token. The answer is `200 {"job", "attempt", "flow"}` for a live token and `404` for any other. Without the control token, the answer is `401`, so a worker cannot ask.
+
+##### The remote run
+
+A remote attempt is a normal run whose agent runs on the worker. Sortie renders the prompt, starts the session, runs its turns, and applies `agent.turn_timeout_ms`, `agent.stall_timeout_ms`, `max_turns`, the per-turn tracker refresh, the token ceilings and the handoff exactly as for a co-located run. So a remote run and the same run co-located send the same prompts, record the same turn events and usage, and push the same commits to the same pull request.
+
+1. **Seed.** With `repository` set, Sortie fetches the upstream into its host mirror and builds the job's seed before it queues the job: a git bundle of `HEAD` and `refs/heads/<issue branch>`, the upstream issue branch when it exists and otherwise a new branch at `base`. `git clone` of the seed gives the repository with the issue branch checked out, and `origin/<issue branch>` marks the seed's commit. The worker fetches it at `seed_path` on the `bundles` flow. Sortie serves it only to a request with that job's live `bundles` token for that attempt; any other token, another flow's, an ended one, or none answers `401` and serves nothing.
+2. **Session.** The worker starts the run descriptor's agent command in the machine and opens the `stdio` flow; Sortie waits for that stream before it starts the session. On Sortie's host the session's process is `sortie stdio-bridge`, behind `environment.host_prefix` when set, so [`acp-broker`](https://github.com/ortusnova/agentic-orchestration/blob/main/acp-broker/docs/guide.md) wraps a remote session as it wraps a local one and the workbench's watch view shows it. The bridge's standard input and output are the agent's. A stream that breaks before the worker reports the agent's exit leaves the session silent, and Sortie ends the turn as stall detection ends a stalled agent's: the run is cancelled with `stall timeout exceeded` and retried with backoff.
+3. **Usage.** The worker reports the attempt's token counts on the `usage` flow. Sortie records each report as the run's usage, as a local run's adapter reports it: it shows in `GET /api/v1/state` while the run lasts and in the run history after. A report with `"measured": false` records spend whose amount is unknown, as an unmeasured turn of a local run does.
+4. **Return.** When Sortie stops the session, the bridge closes the agent's input. The worker then returns the issue branch on the `bundles` flow: a bundle of `refs/heads/<issue branch>` that leaves out the seed's commits, with the agent's `.sortie/pr.json` beside it when there is one. Sortie refuses a bundle that names any other ref, or whose branch is not the seed's commit or on top of it, and fails the attempt with an export error that names the ref; nothing is imported or pushed.
+5. **Push and pull request.** Sortie imports the branch into its mirror, pushes it with its own git credentials and the lease of [Repository sync](#repository-sync), and opens or finds the pull request with the returned `.sortie/pr.json` as for a co-located run. Then the issue moves to its handoff state. The host workspace directory holds only Sortie's control files and the trusted SCM record.
+
+**No forge credential reaches a worker.** The offer, the run descriptor and the seed hold no git, forge or tracker credential, no repository URL, and no session token. The seed's clone knows only the bundle as its origin. Every fetch and push of the repository, and every call to the forge, runs on Sortie's host with Sortie's own credentials. A flow's job token is the only secret a worker holds, and it is void once the attempt ends.
+
+**What runs only on a co-located host.** Under `remote` nothing but the agent runs in the job's workspace. The `after_create`, `before_run`, `after_run` and `before_remove` hooks, `self_review.verification_commands`, the reaction `triage` command and the git inspection of the handoff evidence are refused, so a workflow under `remote` sets none of them; a `before_run` or `after_create` hook fails the preparation. The credential verification session does not run, because a job's `stdio` flow carries one session. The worker runs the agent command of the run descriptor, so an agent kind that starts a process per turn, or adds flags of its own to the command, does not work under `remote`; `agent-client-protocol` does. Sortie's own tools reach no remote session.
+
+##### Data-plane flows Sortie serves
+
+Sortie serves the `stdio`, `bundles` and `usage` flows itself, under `/api/v1/flows/<flow>`, while `environment.kind` is `remote`; under any other kind they answer `404`. Point `environment.remote.flows.<flow>.url` at that path, directly or through a proxy that forwards it. Each request carries its flow's job token as `Authorization: Bearer <token>`; a token of another job, attempt or flow answers `401`. The paths below follow the flow's URL.
+
+| Flow | Request | Answer |
+| ---- | ------- | ------ |
+| `bundles` | `GET /jobs/{job}/attempts/{attempt}/seed` | `200` with the seed, `Content-Type: application/x-git-bundle`. `404` without `repository`. |
+| `bundles` | `POST /jobs/{job}/attempts/{attempt}/result`, `multipart/form-data` with the part `bundle` (the returned bundle, at most `max_bundle_mib`) and the optional part `pr` (`.sortie/pr.json`, at most 64 KiB). Leave `bundle` out when the machine has no issue branch. | `204`. `413` for a part over its limit, `409` for a second result. |
+| `stdio` | `GET /jobs/{job}/attempts/{attempt}` with `Connection: Upgrade` and `Upgrade: sortie-stdio/1` | `101`, then frames both ways. `409` while the attempt's stream is open. |
+| `usage` | `POST /jobs/{job}/attempts/{attempt}` with `{"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "model", "measured"}`; every field is optional, the counts are the attempt's totals so far, and `measured` defaults to `true` | `204`. `400` for a negative count. |
+
+A `stdio` frame is one type byte, a four-byte big-endian payload length of at most 1 MiB, and the payload. Sortie sends `I` (bytes for the agent's standard input) and `C` (the input closed, no payload). The worker sends `O` (the agent's standard output), `E` (its standard error), and last `X` (the agent exited; the payload is the exit status as a four-byte big-endian signed integer). A stream that ends before `X` is broken.
+
+The worker returns the result before it reports the attempt; a report or an expired lease that comes first fails the export with the worker's reason. A report that arrives before the `stdio` stream opened ends an attempt whose session never started, as failed.
 
 #### Host prefix
 
@@ -7063,12 +7100,4 @@ _This document is derived strictly from the Sortie Architecture Specification (S
 
 ## Remote environment and the worker API (fork)
 
-`environment.kind: remote` hands each run to the matcher in `internal/worker` instead of starting it on this host. Workers dial out to Sortie and are never dialed. A job goes only to a worker whose capabilities include every capability the job requires and whose free run slots and disk cover it. A running machine uses a run slot and disk; a stopped one uses only disk. A job is leased to one worker, which renews the lease; an expired lease ends the attempt.
-
-Worker API:
-
-- `POST /api/v1/workers/checkin` with `{id, capabilities, free:{run_slots, disk_mb}}`.
-- `POST /api/v1/workers/{id}/poll` returns `{job, lease}` or 204.
-- `POST /api/v1/workers/{id}/jobs/{job}/renew` extends the lease; 409 when it is lost.
-- `POST /api/v1/workers/{id}/jobs/{job}/stop` drops the lease and frees the run slot.
-- `GET /api/v1/workers` returns workers, pending jobs and leases.
+`environment.kind: remote` hands each run to the matcher in `internal/worker`, and the agent of the run to the worker that takes the job, while Sortie drives its session over the `stdio` flow and seeds and pushes the repository itself. [Kind `remote`](#kind-remote) documents the settings, [Worker API protocol 1](#worker-api-protocol-1) the routes a worker calls, [The remote run](#the-remote-run) the run from seed to pull request, and [Data-plane flows Sortie serves](#data-plane-flows-sortie-serves) the `stdio`, `bundles` and `usage` routes. No forge credential reaches a worker.

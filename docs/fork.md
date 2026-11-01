@@ -15,6 +15,10 @@ Last merged upstream commit: `c48b724b` (2026-10-28).
 
 Jobs for `environment.kind: remote` are matched to workers in `internal/worker`, wired into the orchestrator in `internal/orchestrator/remote.go`, configured in `internal/config/environment_remote.go` and served by `internal/server/worker.go`, following the `agent-platform/worker-api` (protocol 1) and `agent-platform/worker-dispatch` specs. The lease rule sits behind the `worker.Leaser` interface. Until upstream #1499 settles, the fork follows a fixed-duration rule (`TTLLeaser`): one worker holds a job at a time, a lease lasts its TTL from the grant or last renewal, and an expired lease ends the attempt as failed; the worker's run slot, CPUs and memory return, and its disk stays counted as a stopped machine's until the worker's next check-in. Replacing the rule means implementing `Leaser`.
 
+## Remote runs
+
+A remote attempt is a normal worker run (`RunRemoteAttempt` in `internal/orchestrator/remote.go`, following `agent-platform/remote-runs`): the attempt's execution environment is the job's machine, Sortie drives the agent session over the `stdio` flow through `sortie stdio-bridge`, and seeds and pushes the repository through `internal/gitsync` (`BuildSeed`, `ImportReturned`). `internal/dataplane` serves the `stdio`, `bundles` and `usage` flows under `/api/v1/flows/`, each request admitted by its flow's job token. No forge credential reaches a worker.
+
 ## Plan sync from the workbench
 
 The agentic-orchestration workbench syncs the plan on its own, with no Sync step for the user. It calls `POST /api/v1/plan/sync` with `"apply": false` to preview, then applies that preview with `"apply": true` and the preview's `preview_id`. After a sync that released a story, it calls `POST /api/v1/refresh` so the released story is dispatched on the next tick instead of the next poll. Both routes take the control token. Nothing else in Sortie changes for this.
