@@ -398,13 +398,13 @@ The re-dispatch and re-block cycle is an expected operational pattern:
 
 1. Agent writes `blocked` to `.sortie/status`.
 2. Orchestrator reads the signal, exits normally, releases claim, records a park, and applies the parking label.
-3. A human acts on the issue: either moves it to a different tracker state, or removes the parking label the orchestrator has confirmed reached the tracker.
-4. The next poll tick observes the state change or the confirmed label's removal and lifts the park.
+3. A human acts on the issue: moves it to a different tracker state, removes the parking label the orchestrator has confirmed reached the tracker, or answers it through `POST /api/v1/{identifier}/answer`, which posts the answer as a comment on the issue.
+4. The next poll tick observes the state change or the confirmed label's removal and lifts the park. An answer through the API lifts it at once, after its comment is posted, and queues a poll.
 5. If the issue is now active and eligible, the orchestrator reads its comments and dispatches a new worker run for it. When the read fails, the issue waits for a later poll tick and no run starts.
 6. Pre-dispatch cleanup (Section 3.4) removes the stale `.sortie/status` file.
 7. The run continues the agent session that stopped, where the parked run recorded one and the agent kind can resume it, and its first prompt renders the `park` template variable: the statement the agent gave when it wrote `blocked` as `park.statement`, and the comments created since the park as `park.comments`. If still blocked, the agent writes `blocked` again.
 
-An update to the issue that is neither a state change nor a removal of the confirmed parking label, for example adding a comment while leaving both the state and the label untouched, does not lift the park.
+An update to the issue in the tracker that is neither a state change nor a removal of the confirmed parking label, for example adding a comment while leaving both the state and the label untouched, does not lift the park. A comment posted through the answer route does, because the route releases the park itself.
 
 Where `tracker.query_filter` excludes the parking label, the orchestrator still confirms the label and observes its removal. A separate, filter-free tracker call reads the state and labels of every parked issue the candidate query omits, so both gestures in step 3 release such an issue.
 

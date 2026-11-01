@@ -17,7 +17,7 @@ Inputs to prompt rendering:
   - `reason`: `agent_blocked` or `handoff_absence`
   - `statement`: the stop statement stored with the run the park follows; empty when that run declared none or the park recorded no run
   - `parked_at` and `released_at`: RFC 3339 times in UTC, whole seconds; empty when the stored time cannot be read
-  - `gesture`: `label_removed` or `state_changed`
+  - `gesture`: `label_removed`, `state_changed`, or `answered` for an answer posted through the HTTP API
   - `comments`: the comments created since the park, oldest first, never nil, each with `id`, `author`, `body`, and `created_at`. A comment whose time cannot be read is included, and a park time that cannot be read includes every comment
 - `ci_failure` (map or nil): CI failure context injected into CI-fix continuation prompts via `CIResult.ToTemplateMap()`. Nil on initial dispatch and non-CI retries. When non-nil, contains:
   - `status`: aggregate CI pipeline status string (`failing`)
