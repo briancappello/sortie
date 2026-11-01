@@ -176,7 +176,8 @@ credentials:
     hosts: [openrouter.ai]
 ```
 
-- In the VM, `OPENROUTER_API_KEY` holds a placeholder that starts with `SMOL_PLACEHOLDER_`. The key itself never enters the VM.
+- In the VM, `OPENROUTER_API_KEY` holds a placeholder value that smolvm generates. The key itself never enters the VM.
+- Never put a placeholder value into anything an agent reads: issue text, comments, or prompt files. An agent sends what it reads to its model, smolvm then rejects every request that carries the placeholder, and the agent's session fails with `credential_unverified`.
 - smolvm reads the value from Sortie's environment each time it starts the VM. Set the variable before Sortie starts; Sortie logs a warning for a binding whose variable is not set.
 - The placeholder is replaced only on HTTPS requests to the listed hosts. A request that carries it in the query string is refused.
 - On those hosts, requests are HTTP/1.1 only, cannot upgrade to a WebSocket, and carry at most 8 MiB of body.

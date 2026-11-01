@@ -96,6 +96,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- No tracked file spells out smolvm's credential-placeholder prefix any more. smolvm refuses every guest request that carries it, so an agent that read it in the smolvm guide, the workflow reference, or a test sent it to its model and its session failed with `credential_unverified`. The docs now describe the placeholder instead, the smolvm guide warns never to put a placeholder value into anything an agent reads, and a test fails when a tracked file contains the prefix.
 - The `smolvm` environment no longer leaves an empty directory and lock file under `~/.cache/smolvm/vms` for each VM it finds already gone when it releases, removes, sweeps, or replaces a workspace's VM. smolvm creates them for any command addressed to a missing machine; Sortie now removes them, only when they are empty.
 - The Huly adapter now refuses to start when `tracker.no_change_state` names a status the project does not have, as it already did for `handoff_state` and `in_progress_state`. It checks the plan-control states the same way.
 - The fork's migrations for `held_ms`, `environment_image_sha256`, and `exported_commit` are renumbered 1001 to 1003. As 25 to 27 they reused numbers upstream gives other migrations, so an upstream merge would have skipped upstream's. A database created by an earlier build is refused at startup with a message to delete it.

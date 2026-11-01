@@ -34,6 +34,16 @@ import (
 // builds.
 const smolvmLiveBound = 5 * time.Minute
 
+// smolvm refuses every guest request that carries its credential-placeholder
+// prefix, and an agent sends what it reads to its model, so the prefix never
+// appears spelled out in a file: it is joined from two halves at run time.
+const (
+	placeholderPrefixHead = "SMOL_"
+	placeholderPrefixTail = "PLACEHOLDER_"
+)
+
+func placeholderPrefix() string { return placeholderPrefixHead + placeholderPrefixTail }
+
 // liveContext returns a context derived from t.Context() that is done
 // after smolvmLiveBound.
 func liveContext(t *testing.T) context.Context {
@@ -666,7 +676,7 @@ func TestIntegration_CredentialHeaderIsSetOnTheHost(t *testing.T) {
 	}
 
 	seen, err := ie.guest(ctx, key, "printenv "+variable)
-	if err != nil || !strings.HasPrefix(seen, "SMOL_PLACEHOLDER_") || strings.Contains(seen, value) {
+	if err != nil || !strings.HasPrefix(seen, placeholderPrefix()) || strings.Contains(seen, value) {
 		t.Errorf("guest %s = %q, %v, want a placeholder", variable, seen, err)
 	}
 	echo, err := ie.guest(ctx, key, `curl -sS -m 30 -H "X-Api-Key: guest-own" https://httpbin.org/headers | jq -r '.headers["X-Api-Key"]'`)
