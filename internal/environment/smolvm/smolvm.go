@@ -57,11 +57,11 @@ const (
 
 	// GuestControlDir is where the host workspace's .sortie directory
 	// is mounted, read-write.
-	GuestControlDir = "/run/sortie/control"
+	GuestControlDir = config.SmolvmGuestControlDir
 
 	// GuestToolSocket is where the issue's tool channel socket is
 	// mounted.
-	GuestToolSocket = "/run/sortie/tools.sock"
+	GuestToolSocket = config.SmolvmGuestToolSocket
 
 	// GuestToolPort is the guest loopback port at which the VM's socat
 	// listener joins every connection to [GuestToolSocket].
@@ -138,6 +138,7 @@ var (
 	_ environment.Resumer             = (*Environment)(nil)
 	_ environment.EnvForwarder        = (*Environment)(nil)
 	_ environment.ToolChanneler       = (*Environment)(nil)
+	_ environment.KeptDirLister       = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a
@@ -255,10 +256,11 @@ func shortHash(s string) string {
 
 // Prepare makes the workspace's VM ready to run commands.
 //
-// It creates the host workspace's .sortie directory and the state
-// directories the VM's mounts name, refreshes the binary directory's
-// copy of the Sortie binary, then looks the VM up. Without a VM,
-// it creates one from the pack and starts it, and reports CreatedNow. A
+// It creates the host workspace's .sortie directory, the state
+// directories the VM's mounts name, and each per-workspace directory of
+// the workflow's mounts, at mode 0700, which nothing in this package
+// removes, then looks the VM up. Without a VM, it creates one from the
+// pack and starts it, and reports CreatedNow. A
 // stopped VM is started; a running one is left as it is. A VM is reused
 // only when the workspace's environment record names it: a VM that
 // predates a fresh host workspace directory is deleted and created
@@ -345,10 +347,43 @@ func labelValue(labels []Label, key string) string {
 	return ""
 }
 
-// hostPaths holds the host side of a VM's mounts.
+// hostPaths holds the host side of a VM's mounts: Sortie's own, and the
+// workflow's mounts with each per-workspace directory resolved.
 type hostPaths struct {
 	control string
 	socket  string
+	mounts  []Volume
+}
+
+// workflowMounts returns the workflow's mounts for the workspace key,
+// each per-workspace host directory named for key.
+func (e *Environment) workflowMounts(key string) []Volume {
+	if len(e.cfg.Mounts) == 0 {
+		return nil
+	}
+	mounts := make([]Volume, 0, len(e.cfg.Mounts))
+	for _, m := range e.cfg.Mounts {
+		mounts = append(mounts, Volume{Host: m.HostFor(key), Guest: m.Guest, ReadOnly: m.ReadOnly})
+	}
+	return mounts
+}
+
+// KeptDirs returns the host directories of ws's own that its VM
+// mounts: the per-workspace directories of the workflow's mounts. Sortie
+// creates them before it creates the VM and never removes them, so what
+// the guest wrote there outlives the VM and the workspace. A key that
+// cannot name a directory has none.
+func (e *Environment) KeptDirs(ws environment.Workspace) []string {
+	if !validKey(ws.Key) {
+		return nil
+	}
+	var dirs []string
+	for _, m := range e.cfg.Mounts {
+		if m.PerWorkspace() {
+			dirs = append(dirs, m.HostFor(ws.Key))
+		}
+	}
+	return dirs
 }
 
 // preparePaths checks the configuration and the workspace, and creates
@@ -388,6 +423,12 @@ func (e *Environment) preparePaths(ws environment.Workspace) (hostPaths, error) 
 	if err := os.MkdirAll(filepath.Dir(paths.socket), 0o700); err != nil {
 		return hostPaths{}, fmt.Errorf("create %s: %w", filepath.Dir(paths.socket), err)
 	}
+	for _, dir := range e.KeptDirs(ws) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return hostPaths{}, fmt.Errorf("create the workspace's mount directory %s: %w", dir, err)
+		}
+	}
+	paths.mounts = e.workflowMounts(ws.Key)
 	return paths, nil
 }
 
@@ -407,8 +448,10 @@ func recordNames(hostPath, name string) bool {
 }
 
 // createSpec describes the VM for ws: the configured pack and sizing,
-// the labels, the egress allowlist and credential bindings, and exactly
-// two host resources: the control directory and the tool channel socket.
+// the labels, nested virtualization and the network backend when the
+// workflow asks for them, the egress allowlist and credential bindings,
+// Sortie's two host resources, the control directory and the tool
+// channel socket, and the workflow's mounts after them.
 func (e *Environment) createSpec(name string, ws environment.Workspace, paths hostPaths) (CreateSpec, error) {
 	packSHA, err := e.packSHA256(e.cfg.Pack)
 	if err != nil {
@@ -426,10 +469,12 @@ func (e *Environment) createSpec(name string, ws environment.Workspace, paths ho
 			{LabelPack, packSHA},
 			{LabelWorkflow, e.workflowHash},
 		},
-		SSHAgent: e.cfg.SSHAgent,
-		Volumes: []Volume{
+		Nested:     e.cfg.Nested,
+		NetBackend: e.cfg.NetBackend,
+		SSHAgent:   e.cfg.SSHAgent,
+		Volumes: append([]Volume{
 			{Host: paths.control, Guest: GuestControlDir},
-		},
+		}, paths.mounts...),
 		Sockets: []SocketMount{{Host: paths.socket, Guest: GuestToolSocket}},
 	}
 	// A credential binding alone gives the VM unrestricted egress, so
@@ -449,6 +494,13 @@ func (e *Environment) createSpec(name string, ws environment.Workspace, paths ho
 			addHost(h)
 		}
 		spec.Credentials = append(spec.Credentials, CredentialBinding{Name: cred.Name, Env: cred.Env, Hosts: cred.Hosts, Header: cred.Header})
+	}
+	// A backend is given only to a VM whose egress smolvm filters.
+	if spec.NetBackend != "" && (!slices.Contains(config.SmolvmNetBackendsAccepted, spec.NetBackend) || len(spec.AllowHosts) == 0) {
+		return CreateSpec{}, &config.ConfigError{
+			Field:   "environment.smolvm.net_backend",
+			Message: fmt.Sprintf("backend %q needs %s and allow_hosts or credentials, so that smolvm filters the VM's egress", spec.NetBackend, strings.Join(config.SmolvmNetBackendsAccepted, ", ")),
+		}
 	}
 	return spec, nil
 }

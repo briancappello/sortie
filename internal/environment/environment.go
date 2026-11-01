@@ -199,6 +199,25 @@ type ToolChanneler interface {
 	ToolChannel(ws Workspace) (domain.ToolChannel, error)
 }
 
+// KeptDirLister is implemented by an environment that gives each
+// workspace host directories of its own, which it creates before the
+// workspace's instance and never removes, so what the instance wrote in
+// them outlives the instance and the workspace.
+type KeptDirLister interface {
+	// KeptDirs returns the host paths of ws's kept directories.
+	KeptDirs(ws Workspace) []string
+}
+
+// KeptDirs returns the host paths of ws's kept directories when env is
+// a [KeptDirLister], and nil otherwise.
+func KeptDirs(env Environment, ws Workspace) []string {
+	lister, ok := env.(KeptDirLister)
+	if !ok {
+		return nil
+	}
+	return lister.KeptDirs(ws)
+}
+
 // EnvForwarder is implemented by an environment that runs elsewhere and
 // makes chosen host variables available to the commands it runs. Any
 // other host variable never reaches them.

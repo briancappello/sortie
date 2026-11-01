@@ -268,6 +268,14 @@ type CreateSpec struct {
 
 	Labels []Label
 
+	// Nested exposes the host's virtualization extensions in the
+	// machine.
+	Nested bool
+
+	// NetBackend names the machine's network backend; "" keeps
+	// smolvm's own choice.
+	NetBackend string
+
 	// AllowHosts lists the egress host patterns. Nothing else opens the
 	// network: without it and without Credentials the machine has none.
 	AllowHosts []string
@@ -300,6 +308,12 @@ func createArgs(spec CreateSpec) ([]string, error) {
 	}
 	for _, label := range spec.Labels {
 		args = append(args, "--label", label.Key+"="+label.Value)
+	}
+	if spec.Nested {
+		args = append(args, "--nested")
+	}
+	if spec.NetBackend != "" {
+		args = append(args, "--net-backend", spec.NetBackend)
 	}
 	for _, host := range spec.AllowHosts {
 		args = append(args, "--allow-host-pattern", host)

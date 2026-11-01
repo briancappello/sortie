@@ -272,6 +272,14 @@ func runFakeSmolvm(dir string, args []string, stdout, stderr io.Writer) int {
 		}
 		m.Mounts = len(flags.all("-v"))
 		m.Network = len(flags.all("--allow-host-pattern")) > 0 || len(flags.all("--credential")) > 0
+		// smolvm 1.32.4 refuses a backend without a network, and an egress
+		// policy on tsi, which does not enforce it.
+		switch backend := flags.last("--net-backend"); {
+		case backend != "" && !m.Network:
+			return fail(codeConfig, "config operation failed: --net-backend: --net-backend "+backend+" requires --net")
+		case backend == "tsi" && len(flags.all("--allow-host-pattern")) > 0:
+			return fail(codeConfig, "config operation failed: egress: egress policy requires the virtio-net backend; TSI does not enforce it")
+		}
 		state.Machines = append(state.Machines, m)
 		say(stdout, "Created machine: %s\n", name)
 	case "start":
@@ -336,7 +344,7 @@ func parseFakeFlags(args []string) (fakeFlags, []string) {
 	valued := map[string]bool{
 		"--name": true, "-n": true, "--from": true, "--cpus": true, "--mem": true, "--storage": true,
 		"--label": true, "--allow-host-pattern": true, "--credential": true, "-v": true,
-		"--mount-socket": true, "-w": true, "-e": true, "--secret-env": true, "--error-format": true,
+		"--mount-socket": true, "--net-backend": true, "-w": true, "-e": true, "--secret-env": true, "--error-format": true,
 	}
 	flags := fakeFlags{}
 	for i := 0; i < len(args); i++ {

@@ -111,3 +111,43 @@ func TestHandleIssueDetail_Environment(t *testing.T) {
 		wantEnvironment(t, tt.identifier+" detail "+tt.section, section, tt.kind, tt.name)
 	}
 }
+
+// GET /api/v1/state names the host path of each kept directory of a
+// running, retrying, or held issue's workspace.
+func TestHandleState_KeptDirs(t *testing.T) {
+	t.Parallel()
+
+	kept := func(key string) *orchestrator.SnapshotEnvironment {
+		return &orchestrator.SnapshotEnvironment{Kind: "smolvm", Name: "sortie-" + key, KeptDirs: []string{"/srv/recorder/" + key}}
+	}
+	snap := environmentSnapshot()
+	snap.Running[0].Environment = kept("ENG-42")
+	snap.Retrying[0].Environment = kept("ENG-43")
+	snap.Held = []orchestrator.SnapshotHeldEntry{
+		{IssueID: "id-held", Identifier: "ENG-44", Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull}, Environment: kept("ENG-44")},
+		{IssueID: "id-held-host", Identifier: "ENG-3", Hold: orchestrator.SnapshotHold{Reason: orchestrator.SkipSSHHostsFull}},
+	}
+	ts := testServer(t, fixedSnapshot(snap), acceptingRefresh())
+	body := getJSONMap(t, ts.URL+"/api/v1/state")
+
+	byIdentifier := map[string]map[string]any{}
+	for _, list := range []string{"running", "retrying", "held"} {
+		entries, _ := body[list].([]any)
+		for _, e := range entries {
+			entry := e.(map[string]any)
+			byIdentifier[entry["issue_identifier"].(string)] = entry
+		}
+	}
+	for _, key := range []string{"ENG-42", "ENG-43", "ENG-44"} {
+		env, _ := byIdentifier[key]["environment"].(map[string]any)
+		dirs, _ := env["kept_dirs"].([]any)
+		if len(dirs) != 1 || dirs[0] != "/srv/recorder/"+key {
+			t.Errorf("%s environment = %v, want kept_dirs [/srv/recorder/%s]", key, env, key)
+		}
+	}
+	for _, key := range []string{"ENG-1", "ENG-2", "ENG-3"} {
+		if env, present := byIdentifier[key]["environment"]; present {
+			t.Errorf("%s environment = %v, want the key omitted", key, env)
+		}
+	}
+}

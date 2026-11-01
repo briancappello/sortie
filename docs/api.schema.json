@@ -944,6 +944,12 @@
     },
     "EnvironmentInfo": {
       "properties": {
+        "kept_dirs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "kind": {
           "type": "string"
         },
@@ -1289,6 +1295,9 @@
       "properties": {
         "display_identifier": {
           "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentInfo"
         },
         "hold": {
           "$ref": "#/$defs/HoldResponse"

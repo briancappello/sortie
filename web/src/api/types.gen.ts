@@ -213,6 +213,7 @@ export interface Duration {
 export interface EnvironmentInfo {
   kind: string;
   name: string;
+  kept_dirs?: string[];
 }
 
 export interface ErrorDetail {
@@ -302,6 +303,7 @@ export interface HeldIssueResponse {
   hold: HoldResponse;
   status_text: string;
   status_text_full: string;
+  environment?: EnvironmentInfo;
 }
 
 export interface HistoryTotalsResponse {

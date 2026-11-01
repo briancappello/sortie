@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -137,7 +139,66 @@ type SmolvmConfig struct {
 
 	// SSHAgent forwards the host SSH agent into the guest.
 	SSHAgent bool
+
+	// Nested exposes the host's virtualization extensions in each VM,
+	// so the guest can run KVM guests of its own.
+	Nested bool
+
+	// NetBackend names the smolvm network backend of each VM, one of
+	// [SmolvmNetBackendsAccepted]. Empty keeps smolvm's own choice.
+	NetBackend string
+
+	// Mounts lists the host directories mounted into each VM, in
+	// written order.
+	Mounts []SmolvmMount
 }
+
+// SmolvmMount is a host directory mounted into each VM.
+type SmolvmMount struct {
+	// Host is the absolute host directory, with ~ and $VAR expanded. It
+	// may hold [SmolvmWorkspacePlaceholder], which stands for the
+	// workspace key.
+	Host string
+
+	// Guest is the absolute directory in the VM it is mounted at.
+	Guest string
+
+	// ReadOnly mounts the directory read-only.
+	ReadOnly bool
+}
+
+// PerWorkspace reports whether the mount's host directory is one per
+// workspace: whether Host holds [SmolvmWorkspacePlaceholder].
+func (m SmolvmMount) PerWorkspace() bool {
+	return strings.Contains(m.Host, SmolvmWorkspacePlaceholder)
+}
+
+// HostFor returns the mount's host directory for the workspace key.
+func (m SmolvmMount) HostFor(key string) string {
+	return strings.ReplaceAll(m.Host, SmolvmWorkspacePlaceholder, key)
+}
+
+// SmolvmWorkspacePlaceholder in a mount's host path stands for the
+// workspace key.
+const SmolvmWorkspacePlaceholder = "{workspace}"
+
+// Guest paths the smolvm kind mounts itself. No workflow mount may
+// cover them.
+const (
+	SmolvmGuestControlDir = "/run/sortie/control"
+	SmolvmGuestToolSocket = "/run/sortie/tools.sock"
+)
+
+// The network backends of environment.smolvm.net_backend. smolvm
+// enforces an egress policy only with virtio-net; with tsi it refuses
+// one, so tsi could never carry the allowlist and is refused.
+const (
+	SmolvmNetBackendVirtioNet = "virtio-net"
+	SmolvmNetBackendTSI       = "tsi"
+)
+
+// SmolvmNetBackendsAccepted lists the values net_backend accepts.
+var SmolvmNetBackendsAccepted = []string{SmolvmNetBackendVirtioNet}
 
 // SmolvmCredential binds a host environment variable to the guest
 // variable of the same name for a set of hosts. The guest sees only a
@@ -377,7 +438,187 @@ func buildSmolvmConfig(value any) (SmolvmConfig, error) {
 		cfg.SSHAgent = b
 	}
 
+	if rawNested, exists := m["nested"]; exists && rawNested != nil {
+		b, isBool := rawNested.(bool)
+		if !isBool {
+			return SmolvmConfig{}, typeError(smolvmField+".nested", "boolean", rawNested)
+		}
+		cfg.Nested = b
+	}
+
+	cfg.NetBackend, err = parseNetBackend(m, cfg)
+	if err != nil {
+		return SmolvmConfig{}, err
+	}
+
+	cfg.Mounts, err = parseSmolvmMounts(m)
+	if err != nil {
+		return SmolvmConfig{}, err
+	}
+
 	return cfg, nil
+}
+
+// parseNetBackend reads environment.smolvm.net_backend. A backend
+// smolvm cannot enforce the allowlist with is refused, and so is a
+// backend without allow_hosts or credentials: smolvm gives such a VM no
+// network to put the backend on, and opening one would leave its egress
+// unfiltered.
+func parseNetBackend(m map[string]any, cfg SmolvmConfig) (string, error) {
+	field := smolvmField + ".net_backend"
+	backend, present, err := requireStringField(m, "net_backend", field)
+	if err != nil || !present {
+		return "", err
+	}
+	switch {
+	case backend == "":
+		return "", &ConfigError{Field: field, Message: "must not be an empty string; remove the key to keep smolvm's own backend"}
+	case backend == SmolvmNetBackendTSI:
+		return "", &ConfigError{
+			Field:   field,
+			Message: fmt.Sprintf("smolvm does not enforce allow_hosts or the credential hosts with %q, so its egress would be unfiltered; use %s", backend, SmolvmNetBackendVirtioNet),
+		}
+	case !slices.Contains(SmolvmNetBackendsAccepted, backend):
+		return "", &ConfigError{
+			Field:   field,
+			Message: fmt.Sprintf("unknown network backend %q; valid: %s", backend, strings.Join(SmolvmNetBackendsAccepted, ", ")),
+		}
+	case len(cfg.AllowHosts) == 0 && len(cfg.Credentials) == 0:
+		return "", &ConfigError{
+			Field:   field,
+			Message: "needs allow_hosts or credentials: without them the VM has no network for the backend, and Sortie never opens unfiltered egress",
+		}
+	}
+	return backend, nil
+}
+
+// smolvmMountsField is the field path of environment.smolvm.mounts.
+const smolvmMountsField = smolvmField + ".mounts"
+
+// parseSmolvmMounts reads environment.smolvm.mounts.
+func parseSmolvmMounts(m map[string]any) ([]SmolvmMount, error) {
+	raw, exists := m["mounts"]
+	if !exists || raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, typeError(smolvmMountsField, "list", raw)
+	}
+	mounts := make([]SmolvmMount, 0, len(list))
+	guests := make(map[string]int, len(list))
+	for i, elem := range list {
+		field := fmt.Sprintf("%s[%d]", smolvmMountsField, i)
+		entry, isMap := elem.(map[string]any)
+		if !isMap {
+			return nil, typeError(field, "mapping", elem)
+		}
+		mount, err := parseSmolvmMount(entry, field)
+		if err != nil {
+			return nil, err
+		}
+		if first, dup := guests[mount.Guest]; dup {
+			return nil, &ConfigError{
+				Field:   field + ".guest",
+				Message: fmt.Sprintf("%q is already the guest path of %s[%d]", mount.Guest, smolvmMountsField, first),
+			}
+		}
+		guests[mount.Guest] = i
+		mounts = append(mounts, mount)
+	}
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	return mounts, nil
+}
+
+// parseSmolvmMount reads one mounts entry at field.
+func parseSmolvmMount(entry map[string]any, field string) (SmolvmMount, error) {
+	var mount SmolvmMount
+	for _, p := range []struct {
+		key string
+		dst *string
+	}{
+		{"host", &mount.Host},
+		{"guest", &mount.Guest},
+	} {
+		pathField := field + "." + p.key
+		s, err := requiredString(entry, p.key, pathField)
+		if err != nil {
+			return SmolvmMount{}, err
+		}
+		expanded, err := ExpandPath(s, true)
+		if err != nil {
+			return SmolvmMount{}, &ConfigError{Field: pathField, Message: err.Error()}
+		}
+		if strings.Contains(expanded, ":") {
+			return SmolvmMount{}, &ConfigError{Field: pathField, Message: fmt.Sprintf("%q contains ':', which separates smolvm's mount fields", expanded)}
+		}
+		if !strings.HasPrefix(expanded, "/") {
+			return SmolvmMount{}, &ConfigError{Field: pathField, Message: fmt.Sprintf("%q is not an absolute path after ~ and $VAR expansion", expanded)}
+		}
+		*p.dst = path.Clean(expanded)
+	}
+
+	if rawRO, exists := entry["read_only"]; exists && rawRO != nil {
+		b, isBool := rawRO.(bool)
+		if !isBool {
+			return SmolvmMount{}, typeError(field+".read_only", "boolean", rawRO)
+		}
+		mount.ReadOnly = b
+	}
+
+	for _, own := range []string{SmolvmGuestControlDir, SmolvmGuestToolSocket} {
+		if pathsOverlap(mount.Guest, own) {
+			return SmolvmMount{}, &ConfigError{
+				Field:   field + ".guest",
+				Message: fmt.Sprintf("%q overlaps %s, which Sortie mounts itself", mount.Guest, own),
+			}
+		}
+	}
+
+	if !mount.PerWorkspace() {
+		info, err := os.Stat(mount.Host)
+		if err != nil {
+			return SmolvmMount{}, &ConfigError{Field: field + ".host", Message: fmt.Sprintf("%q does not exist or is not readable: %v", mount.Host, err)}
+		}
+		if !info.IsDir() {
+			return SmolvmMount{}, &ConfigError{Field: field + ".host", Message: fmt.Sprintf("%q is not a directory", mount.Host)}
+		}
+	}
+	return mount, nil
+}
+
+// pathsOverlap reports whether the clean absolute slash paths a and b
+// are the same path or one lies under the other.
+func pathsOverlap(a, b string) bool {
+	under := func(p, dir string) bool {
+		return dir == "/" || strings.HasPrefix(p, dir+"/")
+	}
+	return a == b || under(a, b) || under(b, a)
+}
+
+// checkSmolvmMountsOutsideRoot refuses a mount whose host directory is
+// or lies under the workspace root, where a per-workspace directory
+// would go with its workspace and a shared one would reach into every
+// workspace's control files.
+func checkSmolvmMountsOutsideRoot(env EnvironmentConfig, root string) error {
+	if env.Kind != EnvironmentKindSmolvm || root == "" {
+		return nil
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	for i, mount := range env.Smolvm.Mounts {
+		host := filepath.Clean(mount.HostFor("x"))
+		if host == root || strings.HasPrefix(host, root+string(filepath.Separator)) {
+			return &ConfigError{
+				Field:   fmt.Sprintf("%s[%d].host", smolvmMountsField, i),
+				Message: fmt.Sprintf("%q lies under workspace.root %q, whose directories Sortie removes with their workspaces", mount.Host, root),
+			}
+		}
+	}
+	return nil
 }
 
 // smolvmPathField reads a string path key of environment.smolvm and
