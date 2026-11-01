@@ -18,7 +18,8 @@ import (
 )
 
 // GuestGitDir is the directory inside the environment that bundles pass
-// through. It is on the guest's tmpfs, outside the workspace and outside
+// through unless the environment names its own ([environment.TransferDirNamer]).
+// It is on the guest's tmpfs, outside the workspace and outside
 // the control directory the host shares.
 const GuestGitDir = "/run/sortie/git"
 
@@ -57,7 +58,8 @@ type Syncer struct {
 	mirror *Mirror
 	logger *slog.Logger
 
-	// guestDir is the directory bundles pass through in the environment.
+	// guestDir is the directory bundles pass through in an environment
+	// that names none of its own.
 	guestDir string
 
 	// maxBundleMiB caps an exported bundle, in MiB.
@@ -141,7 +143,7 @@ func (s *Syncer) Seed(ctx context.Context, env environment.Environment, ws envir
 	}
 	defer s.removeGuestBundle(ctx, env, ws)
 
-	if err := s.guest(ctx, env, ws, nil, "git", "clone", "--quiet", "--no-checkout", "--origin", "origin", "--", s.guestBundle(), ws.GuestPath); err != nil {
+	if err := s.guest(ctx, env, ws, nil, "git", "clone", "--quiet", "--no-checkout", "--origin", "origin", "--", s.guestBundle(env), ws.GuestPath); err != nil {
 		return fmt.Errorf("clone the repository in the environment: %w", err)
 	}
 	if err := s.guest(ctx, env, ws, nil, "sh", "-c", excludeControlDirScript); err != nil {
@@ -176,7 +178,7 @@ func (s *Syncer) Refresh(ctx context.Context, env environment.Environment, ws en
 	}
 	defer s.removeGuestBundle(ctx, env, ws)
 
-	if err := s.guest(ctx, env, ws, nil, "git", "fetch", "--quiet", "--prune", "--no-tags", "--", s.guestBundle(), "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if err := s.guest(ctx, env, ws, nil, "git", "fetch", "--quiet", "--prune", "--no-tags", "--", s.guestBundle(env), "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return fmt.Errorf("refresh origin in the environment: %w", err)
 	}
 	return nil
@@ -200,7 +202,7 @@ func (s *Syncer) sendBundle(ctx context.Context, env environment.Environment, ws
 	}
 	defer f.Close() //nolint:errcheck // read only
 	script := `umask 077 && mkdir -p "$1" && cat > "$1/in.bundle"`
-	if err := s.guest(ctx, env, ws, f, "sh", "-c", script, "sh", s.guestDir); err != nil {
+	if err := s.guest(ctx, env, ws, f, "sh", "-c", script, "sh", s.transferDir(env)); err != nil {
 		return false, fmt.Errorf("send the repository bundle to the environment: %w", err)
 	}
 	return hasBranch, nil
@@ -255,13 +257,21 @@ func (s *Syncer) buildBundle(ctx context.Context, branch string, strict bool) (s
 }
 
 // guestBundle returns the bundle's path inside the environment.
-func (s *Syncer) guestBundle() string { return path.Join(s.guestDir, "in.bundle") }
+func (s *Syncer) guestBundle(env environment.Environment) string {
+	return path.Join(s.transferDir(env), "in.bundle")
+}
+
+// transferDir returns the directory bundles pass through in env: the one
+// env names, or the syncer's own.
+func (s *Syncer) transferDir(env environment.Environment) string {
+	return environment.GuestTransferDir(env, s.guestDir)
+}
 
 // removeGuestBundle deletes the bundle from the environment, even when
 // ctx has ended. A failure is logged: the bundle is on the guest's tmpfs
 // and the next transfer replaces it.
 func (s *Syncer) removeGuestBundle(ctx context.Context, env environment.Environment, ws environment.Workspace) {
-	s.removeGuestFile(ctx, env, ws, s.guestBundle())
+	s.removeGuestFile(ctx, env, ws, s.guestBundle(env))
 }
 
 // removeGuestFile deletes the file at guestPath from the environment,

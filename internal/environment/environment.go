@@ -218,6 +218,29 @@ func KeptDirs(env Environment, ws Workspace) []string {
 	return lister.KeptDirs(ws)
 }
 
+// TransferDirNamer is implemented by an environment that names the
+// directory inside it where files Sortie passes into and out of a
+// workspace's instance are staged, because its commands cannot write the
+// directory a caller would use by default.
+type TransferDirNamer interface {
+	// GuestTransferDir returns the absolute guest directory, outside the
+	// workspace and every directory the host shares, that the
+	// environment's commands can create and write. "" keeps the caller's
+	// default.
+	GuestTransferDir() string
+}
+
+// GuestTransferDir returns the transfer directory env names when it is a
+// [TransferDirNamer] that names one, and fallback otherwise.
+func GuestTransferDir(env Environment, fallback string) string {
+	if namer, ok := env.(TransferDirNamer); ok {
+		if dir := namer.GuestTransferDir(); dir != "" {
+			return dir
+		}
+	}
+	return fallback
+}
+
 // EnvForwarder is implemented by an environment that runs elsewhere and
 // makes chosen host variables available to the commands it runs. Any
 // other host variable never reaches them.

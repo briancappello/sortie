@@ -55,6 +55,13 @@ jq -r .pack_sha256 report.json
 
 The output is replaced atomically, and a failed build leaves the old pack in place. No layer holds a credential: credentials are bound to each VM when it is created, never baked into the pack.
 
+A pack does not carry its image's `USER`. A project layer that ends in `USER builder` still gets VMs that run every command as root. To run as that user, set `environment.smolvm.user: builder` (see [The machine's user](workflow-reference.md#the-machines-user)). The user needs write access to `/workspace` and to its home, and should have the uid Sortie runs as on the host, since the shared `.sortie` directory shows the guest that owner:
+
+```dockerfile
+RUN useradd --create-home --uid 1000 builder
+USER builder
+```
+
 Point `environment.smolvm.pack` at the file. Sortie records the pack's SHA-256 in each new VM's `sortie.pack` label and in the `environment_image_sha256` column of every run. Rebuilding the pack affects only VMs created afterwards. An existing issue keeps the VM, and the pack, it was created with. To move an issue onto the new pack, remove its workspace; Sortie creates a new VM at its next dispatch.
 
 ## An example workflow
@@ -334,7 +341,7 @@ environment:
 
 - **`nested`** needs nested KVM on the host: `cat /sys/module/kvm_intel/parameters/nested` (or `kvm_amd`) prints `Y` or `1`.
 - **`net_backend`** accepts only `virtio-net`. smolvm filters egress on it by `allow_hosts` and the credential hosts, as it does for any VM with an allowlist. `tsi` is refused, because smolvm cannot keep an allowlist on it.
-- **`mounts`** mount host directories over virtiofs. A shared `host` must exist when the workflow loads. Mount data, never a credential: everything in the VM can read a mount. smolvm runs every command as the pack's user, and files the guest writes in a mount belong to Sortie's user on the host.
+- **`mounts`** mount host directories over virtiofs. A shared `host` must exist when the workflow loads. Mount data, never a credential: everything in the VM can read a mount. Files the guest writes in a mount belong to Sortie's user on the host.
 - **A `{workspace}` mount** gives each issue its own directory, for example `~/.local/state/sortie-recorder/ENG-42`. Sortie creates it, mode `0700`, before the VM, and never removes it, so it keeps what the guest wrote after the VM crashed or the workspace was removed. `/api/v1/state` lists it under `environment.kept_dirs`. Remove old directories yourself.
 
 ```sh
@@ -395,6 +402,8 @@ The reload applies the change. Each existing workspace was created by `smolvm`, 
 | `environment.smolvm.net_backend: needs allow_hosts or credentials` | A backend without an allowlist would have no network. List the hosts the VM needs in `allow_hosts`. |
 | `environment.smolvm.mounts[N].guest: ... overlaps /run/sortie/control` | The mount would cover a path Sortie mounts itself. Pick another `guest`. |
 | `environment.smolvm.mounts[N].host: ... does not exist` | Create the directory before Sortie loads the workflow, or put `{workspace}` in the path to have Sortie create one per issue. |
+| Hooks and the agent run as root although the image sets `USER` | A pack does not carry its image's `USER`. Set `environment.smolvm.user`. |
+| With `user` set, the agent cannot write `.sortie/status` | The user's uid is not the uid Sortie runs as on the host, which owns the shared `.sortie` directory. Give the pack's user Sortie's uid. |
 | A nested guest fails to start, and the VM has no `/dev/kvm` | `nested` is not set, or the host's KVM module does not allow nested guests. |
 | `guest workspace entry /workspace/.sortie already exists` | The repository commits a `.sortie` entry. Remove it from the repository; Sortie needs that path. |
 | The agent's model calls fail, and opencode uses `opencode/big-pickle` | `models.opencode.ai` is missing from `allow_hosts`. |

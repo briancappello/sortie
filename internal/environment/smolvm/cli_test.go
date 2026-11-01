@@ -250,3 +250,19 @@ func TestCreateArgs_HostInputs(t *testing.T) {
 		t.Errorf("createArgs() = %q, want %q", args, want)
 	}
 }
+
+func TestCreateArgs_User(t *testing.T) {
+	t.Parallel()
+
+	args, err := createArgs(CreateSpec{Name: "n", Pack: "/p", Labels: []Label{{"k", "v"}}, User: "builder", Nested: true})
+	if err != nil {
+		t.Fatalf("createArgs() error = %v", err)
+	}
+	want := []string{
+		"machine", "create", "--error-format", "json", "--name", "n", "--from", "/p",
+		"--label", "k=v", "--user", "builder", "--init", "chown builder /workspace", "--nested",
+	}
+	if !slices.Equal(args, want) {
+		t.Errorf("createArgs() = %q, want %q", args, want)
+	}
+}

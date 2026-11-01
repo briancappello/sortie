@@ -66,6 +66,10 @@ const (
 	// GuestToolPort is the guest loopback port at which the VM's socat
 	// listener joins every connection to [GuestToolSocket].
 	GuestToolPort = 47800
+
+	// GuestUserTransferDir is where files Sortie passes into and out of
+	// a VM whose workflow sets the machine's user are staged.
+	GuestUserTransferDir = config.SmolvmGuestUserTransferDir
 )
 
 // Labels Sortie puts on every VM it creates.
@@ -139,6 +143,7 @@ var (
 	_ environment.EnvForwarder        = (*Environment)(nil)
 	_ environment.ToolChanneler       = (*Environment)(nil)
 	_ environment.KeptDirLister       = (*Environment)(nil)
+	_ environment.TransferDirNamer    = (*Environment)(nil)
 )
 
 // New returns the smolvm environment for params. It succeeds without a
@@ -176,6 +181,17 @@ func (*Environment) Kind() string { return config.EnvironmentKindSmolvm }
 // [GuestWorkspace]. A path inside a workspace maps through
 // [environment.Workspace.GuestPathOf].
 func (*Environment) GuestPath(string) string { return GuestWorkspace }
+
+// GuestTransferDir returns [GuestUserTransferDir] for a workflow that
+// sets the machine's user, and "" otherwise. smolvm creates /run/sortie,
+// the parent of Sortie's own mounts, for root alone, so a command run as
+// another user cannot create a directory there.
+func (e *Environment) GuestTransferDir() string {
+	if e.cfg.User == "" {
+		return ""
+	}
+	return GuestUserTransferDir
+}
 
 // ForwardsEnv reports whether the host variable name reaches the VM: as
 // the placeholder of a credential binding, or in plain text through
@@ -448,8 +464,8 @@ func recordNames(hostPath, name string) bool {
 }
 
 // createSpec describes the VM for ws: the configured pack and sizing,
-// the labels, nested virtualization and the network backend when the
-// workflow asks for them, the egress allowlist and credential bindings,
+// the labels, the user, nested virtualization and the network backend
+// when the workflow asks for them, the egress allowlist and credential bindings,
 // Sortie's two host resources, the control directory and the tool
 // channel socket, and the workflow's mounts after them.
 func (e *Environment) createSpec(name string, ws environment.Workspace, paths hostPaths) (CreateSpec, error) {
@@ -469,6 +485,7 @@ func (e *Environment) createSpec(name string, ws environment.Workspace, paths ho
 			{LabelPack, packSHA},
 			{LabelWorkflow, e.workflowHash},
 		},
+		User:       e.cfg.User,
 		Nested:     e.cfg.Nested,
 		NetBackend: e.cfg.NetBackend,
 		SSHAgent:   e.cfg.SSHAgent,

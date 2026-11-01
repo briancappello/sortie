@@ -151,6 +151,11 @@ type SmolvmConfig struct {
 	// Mounts lists the host directories mounted into each VM, in
 	// written order.
 	Mounts []SmolvmMount
+
+	// User is the user every command in each VM runs as: a user name
+	// the pack's image defines, or a numeric uid[:gid]. Empty keeps
+	// smolvm's own choice.
+	User string
 }
 
 // SmolvmMount is a host directory mounted into each VM.
@@ -188,6 +193,12 @@ const (
 	SmolvmGuestControlDir = "/run/sortie/control"
 	SmolvmGuestToolSocket = "/run/sortie/tools.sock"
 )
+
+// SmolvmGuestUserTransferDir is where the smolvm kind stages the files it
+// passes into and out of a VM whose user is set, since such a user
+// cannot create a directory under /run/sortie. No workflow mount of such
+// a VM may cover it.
+const SmolvmGuestUserTransferDir = "/tmp/sortie-transfer"
 
 // The network backends of environment.smolvm.net_backend. smolvm
 // enforces an egress policy only with virtio-net; with tsi it refuses
@@ -451,9 +462,24 @@ func buildSmolvmConfig(value any) (SmolvmConfig, error) {
 		return SmolvmConfig{}, err
 	}
 
+	cfg.User, err = parseSmolvmUser(m)
+	if err != nil {
+		return SmolvmConfig{}, err
+	}
+
 	cfg.Mounts, err = parseSmolvmMounts(m)
 	if err != nil {
 		return SmolvmConfig{}, err
+	}
+	if cfg.User != "" {
+		for i, mount := range cfg.Mounts {
+			if pathsOverlap(mount.Guest, SmolvmGuestUserTransferDir) {
+				return SmolvmConfig{}, &ConfigError{
+					Field:   fmt.Sprintf("%s[%d].guest", smolvmMountsField, i),
+					Message: fmt.Sprintf("%q overlaps %s, where Sortie stages repository bundles in a VM whose user is set", mount.Guest, SmolvmGuestUserTransferDir),
+				}
+			}
+		}
 	}
 
 	return cfg, nil
@@ -490,6 +516,30 @@ func parseNetBackend(m map[string]any, cfg SmolvmConfig) (string, error) {
 		}
 	}
 	return backend, nil
+}
+
+// smolvmUserPattern matches the values environment.smolvm.user accepts:
+// a user name or uid of letters, digits, '.', '_' and '-', or a numeric
+// uid:gid.
+var smolvmUserPattern = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+|[0-9]+:[0-9]+)$`)
+
+// parseSmolvmUser reads environment.smolvm.user.
+func parseSmolvmUser(m map[string]any) (string, error) {
+	field := smolvmField + ".user"
+	user, present, err := requireStringField(m, "user", field)
+	if err != nil || !present {
+		return "", err
+	}
+	switch {
+	case user == "":
+		return "", &ConfigError{Field: field, Message: "must not be an empty string; remove the key to run as root"}
+	case !smolvmUserPattern.MatchString(user):
+		return "", &ConfigError{
+			Field:   field,
+			Message: fmt.Sprintf("%q is not a user name or a numeric uid[:gid]: use letters, digits, '.', '_' and '-', or one ':' between two numbers", user),
+		}
+	}
+	return user, nil
 }
 
 // smolvmMountsField is the field path of environment.smolvm.mounts.

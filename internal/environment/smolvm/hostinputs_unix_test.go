@@ -47,9 +47,9 @@ func createArgv(t *testing.T, f prepareFixture) []string {
 	return nil
 }
 
-// A workflow that sets none of nested, net_backend and mounts creates
-// its VMs with the argv Sortie used before they existed, written out
-// here as it was.
+// A workflow that sets none of nested, net_backend, mounts and user
+// creates its VMs with the argv Sortie used before they existed, written
+// out here as it was.
 func TestPrepare_NoHostInputsKeepsArgv(t *testing.T) {
 	t.Parallel()
 

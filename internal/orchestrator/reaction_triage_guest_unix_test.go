@@ -157,6 +157,50 @@ func TestRunReactionTriage_GuestFilesLiveInTheEnvironment(t *testing.T) {
 	}
 }
 
+// transferTriageEnvironment is a guest triage environment that names its
+// own transfer directory, as a smolvm VM whose machine user is set does.
+type transferTriageEnvironment struct {
+	guestTriageEnvironment
+	dir string
+}
+
+func (e transferTriageEnvironment) GuestTransferDir() string { return e.dir }
+
+var _ environment.TransferDirNamer = transferTriageEnvironment{}
+
+// An environment that names its transfer directory gets each run's
+// files under it, and never under /run/sortie.
+func TestRunReactionTriage_GuestFilesUseTheTransferDir(t *testing.T) {
+	t.Parallel()
+
+	env := transferTriageEnvironment{guestTriageEnvironment: newGuestTriageEnvironment(t), dir: filepath.Join(t.TempDir(), "transfer")}
+	root := mustTriageWorkspace(t, "TRIAGE-USER")
+	req := gateRequest(root, "TRIAGE-USER", "fp-user")
+	req.Environment = env
+	outcome := RunReactionTriage(context.Background(), config.ReactionTriageConfig{Script: triageVerdictScript("handled"), TimeoutMS: 5000}, req, discardLogger())
+
+	if outcome.Disposition != TriageHandled || outcome.Fallback != "" {
+		t.Fatalf("outcome = %+v, want handled without a fallback", outcome)
+	}
+	cmds := env.Commands()
+	if len(cmds) != 4 {
+		t.Fatalf("commands = %d, want write, triage, read, remove", len(cmds))
+	}
+	dir := cmds[0].Spec.Argv[4]
+	if want := regexp.MustCompile(`^` + regexp.QuoteMeta(env.dir) + `/triage/ci-[0-9a-f]{16}$`); !want.MatchString(dir) {
+		t.Errorf("run directory = %q, want %s/triage/<run id>", dir, env.dir)
+	}
+	if got := specEnv(cmds[1].Spec, "SORTIE_REACTION_RESULT"); got != dir+"/result.json" {
+		t.Errorf("SORTIE_REACTION_RESULT = %q, want %q", got, dir+"/result.json")
+	}
+	if _, err := os.Stat(filepath.Join(env.guestRoot, "run")); !os.IsNotExist(err) {
+		t.Errorf("guest /run: Stat error = %v, want nothing written under /run/sortie", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(env.dir, "triage")); err != nil || len(entries) != 0 {
+		t.Errorf("transfer triage directory entries = %v, %v, want the run directory removed", entries, err)
+	}
+}
+
 func TestRunReactionTriage_GuestResultFallbacks(t *testing.T) {
 	t.Parallel()
 

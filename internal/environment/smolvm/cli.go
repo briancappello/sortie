@@ -268,6 +268,10 @@ type CreateSpec struct {
 
 	Labels []Label
 
+	// User is the user every command in the machine runs as; "" keeps
+	// smolvm's own choice.
+	User string
+
 	// Nested exposes the host's virtualization extensions in the
 	// machine.
 	Nested bool
@@ -308,6 +312,12 @@ func createArgs(spec CreateSpec) ([]string, error) {
 	}
 	for _, label := range spec.Labels {
 		args = append(args, "--label", label.Key+"="+label.Value)
+	}
+	if spec.User != "" {
+		// The machine's user owns its workspace: the disk's mount point
+		// belongs to root, and git refuses a repository whose directory
+		// another user owns. smolvm runs --init commands as root, once.
+		args = append(args, "--user", spec.User, "--init", "chown "+spec.User+" "+GuestWorkspace)
 	}
 	if spec.Nested {
 		args = append(args, "--nested")
