@@ -351,9 +351,13 @@ type Orchestrator struct {
 	turnStartedCh      chan turnStartedMsg
 	issueReadCh        chan issueReadMsg
 	unaccountedTurnsCh chan unaccountedTurnsMsg
-	snapshotCh         chan snapshotRequest
-	refreshCh          chan struct{}
-	controlCh          chan controlRequest
+
+	// streamBrokenCh carries the issue ID of a remote run whose stdio
+	// stream broke, so the event loop ends it as a stalled run.
+	streamBrokenCh chan string
+	snapshotCh     chan snapshotRequest
+	refreshCh      chan struct{}
+	controlCh      chan controlRequest
 
 	// actionCh carries work for the event loop; only Run reads it. stopping
 	// closes once, when shutdown begins and before workers drain.
@@ -539,6 +543,7 @@ func NewOrchestrator(params OrchestratorParams) *Orchestrator {
 		turnStartedCh:                     make(chan turnStartedMsg, eventBuf),
 		issueReadCh:                       make(chan issueReadMsg, eventBuf),
 		unaccountedTurnsCh:                make(chan unaccountedTurnsMsg, eventBuf),
+		streamBrokenCh:                    make(chan string, eventBuf),
 		snapshotCh:                        make(chan snapshotRequest, 4),
 		refreshCh:                         make(chan struct{}, 1),
 		controlCh:                         make(chan controlRequest, 4),
@@ -837,6 +842,8 @@ func (o *Orchestrator) Run(ctx context.Context) {
 		select {
 		case <-leaseSweep.C:
 			o.expireLeases()
+		case issueID := <-o.streamBrokenCh:
+			o.stallBrokenStream(ctx, issueID)
 		case <-ctx.Done():
 			if o.once != nil {
 				o.once.interrupted = true
@@ -1725,7 +1732,10 @@ func (o *Orchestrator) makeWorkerFn(resumeSessionID, sshHost, agentKind, templat
 
 		if cfg := deps.ConfigFunc(); isRemoteKind(cfg.Environment) && o.remote != nil {
 			meta, _ := o.preflightParams.AgentRegistry.Meta(agentKind)
-			RunRemoteAttempt(ctx, o.remote.matcher, cfg, issue, attempt, agentKind, meta.DefaultCommand, deps.OnExit)
+			RunRemoteAttempt(ctx, o.remote, issue, attempt, deps, RemoteAttemptParams{
+				DefaultCommand: meta.DefaultCommand,
+				OnStreamBroken: o.reportStreamBroken,
+			})
 			return
 		}
 

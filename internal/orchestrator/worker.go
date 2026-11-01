@@ -1333,7 +1333,13 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 	cacheKey, cacheKeyed = verificationKeyFor(agentKind, params)
 	var provenAt time.Time
 	var verificationSkipped bool
-	if cacheKeyed {
+	// A remote job's stdio flow carries the one session of its attempt,
+	// so no credential check runs ahead of it.
+	oneSession := isRemoteKind(cfg.Environment)
+	if oneSession {
+		cacheKeyed = false
+		verificationSkipped = true
+	} else if cacheKeyed {
 		provenAt, verificationSkipped = deps.VerificationCache.fresh(cacheKey, time.Now())
 	}
 
@@ -1376,7 +1382,9 @@ func RunWorkerAttempt(ctx context.Context, issue domain.Issue, attempt *int, dep
 
 	var verificationSpend domain.TokenUsage
 	var verificationUsageByModel map[string]domain.TokenUsage
-	if verificationSkipped {
+	if oneSession {
+		logger.Info("agent credential verification skipped: the remote job carries one session")
+	} else if verificationSkipped {
 		logger.Info("agent credential verification skipped", slog.Time("proven_at", provenAt.UTC()))
 	} else {
 		verificationStarted := time.Now()

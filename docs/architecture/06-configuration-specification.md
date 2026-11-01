@@ -256,6 +256,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `environment.remote.credentials`: list of `{name, env, hosts, header}`, as `environment.smolvm.credentials`; the machine gets `env` set to the placeholder `sortie-credential-<name>`
 - `environment.remote.flows`: map of `stdio`, `egress`, `mcp`, `bundles`, `usage`, each `{url}`, all required; absolute `http`, `https`, `ws` or `wss` URLs without user information
 - `environment.remote.lease_ttl_ms`: integer, default 60000, positive; the lease duration
+- `environment.remote.repository`: map, optional; the fields of `environment.smolvm.repository` except `dispatch`; Sortie serves each job's seed from its host mirror on the `bundles` flow, takes the returned issue branch back on it, and pushes it and opens the pull request with its own credentials, so no forge credential reaches a worker
 - `worker.identity_header`: string, default `X-Sortie-Worker-Identity`; under `remote`, the header that names the worker of a worker API request
 - `environment.host_prefix`: list of strings, optional; non-empty, no empty element; prefixes the agent session and credential verification launch only
 - `environment.smolvm.binary`: path, default `smolvm`; `~` and `$VAR` expanded; its version must be `1.32.4` or later, with no upper bound, checked at startup and on each reload that selects the kind

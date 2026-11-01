@@ -44,6 +44,7 @@ var remoteSchemaFields = []FieldDef{
 		return out
 	}()},
 	{Name: "lease_ttl_ms", Type: FieldInt},
+	{Name: "repository", Type: FieldMap},
 }
 
 // RemoteConfig holds the environment.remote settings and the worker
@@ -74,6 +75,12 @@ type RemoteConfig struct {
 
 	// LeaseTTLMS is how long a lease lasts without a heartbeat.
 	LeaseTTLMS int
+
+	// Repository is the host-owned repository each job's workspace is
+	// seeded from and whose issue branch comes back from the worker as
+	// a bundle. Nil when the block is absent: Sortie then serves no
+	// seed and pushes nothing.
+	Repository *SmolvmRepository
 }
 
 // RemoteRequirements is what each remote job needs of a worker: every
@@ -149,7 +156,67 @@ func buildRemoteConfig(value any, worker map[string]any) (RemoteConfig, error) {
 		}
 		cfg.LeaseTTLMS = n
 	}
+	if cfg.Repository, err = parseRemoteRepository(m["repository"]); err != nil {
+		return RemoteConfig{}, err
+	}
 	return cfg, nil
+}
+
+// parseRemoteRepository reads environment.remote.repository with the
+// fields and defaults of environment.smolvm.repository.
+func parseRemoteRepository(raw any) (*SmolvmRepository, error) {
+	const field = remoteField + ".repository"
+	if raw == nil {
+		return nil, nil
+	}
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return nil, typeError(field, "mapping", raw)
+	}
+	if _, set := entry["dispatch"]; set {
+		return nil, &ConfigError{Field: field + ".dispatch", Message: "applies to environment.smolvm.repositories entries, not to the remote repository block"}
+	}
+	return parseRepositoryEntry(entry, field)
+}
+
+// RepositorySet returns the repository settings of the kind c selects,
+// as a [SmolvmConfig] holding only its Repository, Repositories and
+// DefaultRepository: the smolvm block's own, or the remote kind's single
+// repository block as the only entry and the default. Every other kind
+// configures none.
+func (c EnvironmentConfig) RepositorySet() SmolvmConfig {
+	switch c.Kind {
+	case EnvironmentKindSmolvm:
+		return SmolvmConfig{Repository: c.Smolvm.Repository, Repositories: c.Smolvm.Repositories, DefaultRepository: c.Smolvm.DefaultRepository}
+	case EnvironmentKindRemote:
+		if r := c.Remote.Repository; r != nil {
+			return SmolvmConfig{Repository: r, Repositories: []SmolvmRepository{*r}}
+		}
+	}
+	return SmolvmConfig{}
+}
+
+// SetRepository makes repo the repository of the kind c selects, the one
+// an issue's run uses.
+func (c *EnvironmentConfig) SetRepository(repo *SmolvmRepository) {
+	switch c.Kind {
+	case EnvironmentKindSmolvm:
+		c.Smolvm.Repository = repo
+	case EnvironmentKindRemote:
+		c.Remote.Repository = repo
+	}
+}
+
+// RepositoryField returns the setting path of the repository at index i
+// of [EnvironmentConfig.RepositorySet], for an error about it.
+func (c EnvironmentConfig) RepositoryField(i int) string {
+	switch {
+	case c.Kind == EnvironmentKindRemote:
+		return remoteField + ".repository"
+	case c.Smolvm.ListsRepositories():
+		return fmt.Sprintf("%s[%d]", smolvmRepositoriesField, i)
+	}
+	return smolvmRepositoryField
 }
 
 // parseRemoteRequirements reads environment.remote.requires.

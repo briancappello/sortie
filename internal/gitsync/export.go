@@ -103,18 +103,26 @@ func (s *Syncer) Export(ctx context.Context, env environment.Environment, ws env
 		return res, nil
 	}
 
+	return s.importAndPush(ctx, ws.Key, bundle, "", res)
+}
+
+// importAndPush imports the bundle at bundlePath into the mirror and
+// pushes it, as [Syncer.Export] describes, with the branch's commit
+// required to descend from onTopOf when that is not empty.
+func (s *Syncer) importAndPush(ctx context.Context, key, bundlePath, onTopOf string, res ExportResult) (ExportResult, error) {
+	branch := res.Branch
 	l, err := s.mirror.Lock(ctx)
 	if err != nil {
 		return res, fmt.Errorf("lock the repository mirror: %w", err)
 	}
 	defer l.Unlock()
-	commit, needPush, upToDate, err := s.importBundle(ctx, l, ws.Key, branch, bundle)
+	commit, needPush, upToDate, err := s.importBundle(ctx, l, key, branch, bundlePath, onTopOf)
 	res.Commit = commit
 	res.UpToDate = upToDate
 	if err != nil || !needPush {
 		return res, err
 	}
-	if err := s.push(ctx, l, ws.Key, branch, commit); err != nil {
+	if err := s.push(ctx, l, key, branch, commit); err != nil {
 		return res, err
 	}
 	res.Pushed = true
@@ -284,7 +292,9 @@ func (c *cappedFile) Write(p []byte) (int, error) {
 // and imports the bundle's branch into the incoming ref of key unless
 // there is nothing to push. It returns the branch's commit, whether it
 // must be pushed, and whether it is the upstream's issue branch tip.
-func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundlePath string) (commit string, needPush, upToDate bool, err error) {
+// With onTopOf set, an imported commit that does not descend from it is
+// refused and the incoming ref restored.
+func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundlePath, onTopOf string) (commit string, needPush, upToDate bool, err error) {
 	heads, err := l.ListHeads(ctx, bundlePath)
 	if err != nil {
 		return "", false, false, err
@@ -335,6 +345,12 @@ func (s *Syncer) importBundle(ctx context.Context, l *Locked, key, branch, bundl
 		var typ string
 		if typ, err = l.ObjectType(ctx, commit); err == nil && typ != "commit" {
 			err = fmt.Errorf("the exported %s is a %s, not a commit", want, typ)
+		}
+	}
+	if err == nil && onTopOf != "" {
+		var onTop bool
+		if onTop, err = l.isAncestorOf(ctx, onTopOf, commit); err == nil && !onTop {
+			err = fmt.Errorf("the returned bundle's %s at %s is not on top of the seed %s", want, commit, onTopOf)
 		}
 	}
 	if err != nil {

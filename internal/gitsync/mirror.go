@@ -372,7 +372,13 @@ func (l *Locked) CreateBundle(ctx context.Context, path string, branches ...stri
 // IsAncestor reports whether commit is reachable from the mirror's branch.
 // A commit the mirror does not hold is not.
 func (l *Locked) IsAncestor(ctx context.Context, commit, branch string) (bool, error) {
-	_, err := l.m.git.run(ctx, "merge-base", "--is-ancestor", "--", commit, "refs/heads/"+branch)
+	return l.isAncestorOf(ctx, commit, "refs/heads/"+branch)
+}
+
+// isAncestorOf reports whether commit is reachable from rev, a commit or
+// a full ref name. A commit the mirror does not hold is not.
+func (l *Locked) isAncestorOf(ctx context.Context, commit, rev string) (bool, error) {
+	_, err := l.m.git.run(ctx, "merge-base", "--is-ancestor", "--", commit, rev)
 	if err == nil {
 		return true, nil
 	}

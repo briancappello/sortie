@@ -12,6 +12,7 @@ import (
 
 	"github.com/sortie-ai/sortie/internal/blockers"
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/dataplane"
 	"github.com/sortie-ai/sortie/internal/domain"
 	"github.com/sortie-ai/sortie/internal/environment"
 	"github.com/sortie-ai/sortie/internal/logging"
@@ -114,6 +115,9 @@ func boot(ctx context.Context, p bootParams) (bootResult, int) {
 	}
 	if len(p.args) > 0 && p.args[0] == "mcp-server" {
 		return bootResult{}, runMCPServer(ctx, p.args[1:], p.stdout, p.stderr)
+	}
+	if len(p.args) > 0 && p.args[0] == dataplane.BridgeCommand {
+		return bootResult{}, runStdioBridge(p.args[1:], p.stderr)
 	}
 
 	fs := flag.NewFlagSet("sortie", flag.ContinueOnError)

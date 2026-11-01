@@ -726,13 +726,13 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			return 1
 		}
 		project := ""
-		if def := br.cfg.Environment.Smolvm.Repository; def != nil {
+		if def := br.cfg.Environment.RepositorySet().Repository; def != nil {
 			project = def.Project
 		}
 		br.logger.Info("pull requests for pushed issue branches enabled",
 			slog.String("provider", repositoryProvider),
 			slog.String("project", project),
-			slog.Any("repositories", br.cfg.Environment.Smolvm.RepositoryNames()),
+			slog.Any("repositories", br.cfg.Environment.RepositorySet().RepositoryNames()),
 		)
 	}
 
@@ -1056,6 +1056,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 			WorkersFn:              o.Workers,
 			WorkerIdentityHeaderFn: o.WorkerIdentityHeader,
 			JobTokensFn:            o.JobTokens,
+			DataPlaneFn:            o.DataPlane,
 			RefreshFn:              o.RefreshFunc(),
 			RetryNowFn:             o.RetryNowFunc(),
 			AcknowledgeFn:          o.AcknowledgeFunc(),

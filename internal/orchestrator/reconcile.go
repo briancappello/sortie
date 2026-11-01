@@ -419,62 +419,72 @@ func reconcileStalled(state *State, params ReconcileParams, log *slog.Logger, ct
 			continue
 		}
 
-		entry.cancelRun(errCancelStall)
-
 		entryLog.Warn("stall detected, cancelling worker",
 			slog.Int64("elapsed_ms", elapsedMS),
 			slog.Int("stall_timeout_ms", params.StallTimeoutMS),
 		)
+		stallRunningEntry(ctx, state, issueID, entry, params, log, metrics, "")
+	}
+}
 
-		if incumbent := retrySlotIncumbent(state, issueID); incumbent != nil {
-			logRetrySlotDeferral(entryLog, "stall", incumbent)
-			continue
-		}
+// stallRunningEntry cancels the run of a stalled entry and schedules its
+// exponential-backoff retry, as stall detection does. A non-empty why is
+// logged as the reason the run counts as stalled.
+func stallRunningEntry(ctx context.Context, state *State, issueID string, entry *RunningEntry, params ReconcileParams, log *slog.Logger, metrics domain.Metrics, why string) {
+	entryLog := logging.WithIssue(log, issueID, entry.Identifier)
+	if why != "" {
+		entryLog.Warn("run stalled, cancelling worker", slog.String("reason", why))
+	}
+	entry.cancelRun(errCancelStall)
 
-		nextAttempt := NextAttempt(entry.RetryAttempt)
-		delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
+	if incumbent := retrySlotIncumbent(state, issueID); incumbent != nil {
+		logRetrySlotDeferral(entryLog, "stall", incumbent)
+		return
+	}
 
-		ScheduleRetry(state, ScheduleRetryParams{
-			IssueID:             issueID,
-			Identifier:          entry.Identifier,
-			DisplayID:           entry.Issue.DisplayID,
-			IssueIdentity:       issueIdentityOf(entry.Issue),
-			Attempt:             nextAttempt,
-			DelayMS:             delayMS,
-			Error:               StallCancelError,
-			LastSSHHost:         entry.SSHHost,
-			SessionID:           entry.SessionID,
-			ContinuationContext: entry.ContinuationContext,
-			ReactionKind:        entry.ReactionKind,
-			Continuation:        entry.Continuation,
-			AgentKind:           entry.AgentKind,
-			ConfiguredModel:     entry.ConfiguredModel,
-			RuleName:            entry.RuleName,
-			StageLineage:        entry.StageLineage,
-			RuleSettingsApplied: entry.RuleSettingsApplied,
-			TemplateID:          entry.TemplateID,
-			Logger:              entryLog,
-			Trigger:             triggerStall,
-		}, params.OnRetryFire)
-		metrics.IncRetries(triggerStall)
+	nextAttempt := NextAttempt(entry.RetryAttempt)
+	delayMS := computeBackoffDelay(nextAttempt, params.MaxRetryBackoffMS)
 
-		if retryEntry, ok := state.RetryAttempts[issueID]; ok {
-			if isKnownReactionKind(retryEntry.ReactionKind) {
-				if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
-					entryLog.Error("failed to delete persisted reaction retry entry",
-						slog.Any("error", err),
-					)
-				}
-				continue
-			}
+	ScheduleRetry(state, ScheduleRetryParams{
+		IssueID:             issueID,
+		Identifier:          entry.Identifier,
+		DisplayID:           entry.Issue.DisplayID,
+		IssueIdentity:       issueIdentityOf(entry.Issue),
+		Attempt:             nextAttempt,
+		DelayMS:             delayMS,
+		Error:               StallCancelError,
+		LastSSHHost:         entry.SSHHost,
+		SessionID:           entry.SessionID,
+		ContinuationContext: entry.ContinuationContext,
+		ReactionKind:        entry.ReactionKind,
+		Continuation:        entry.Continuation,
+		AgentKind:           entry.AgentKind,
+		ConfiguredModel:     entry.ConfiguredModel,
+		RuleName:            entry.RuleName,
+		StageLineage:        entry.StageLineage,
+		RuleSettingsApplied: entry.RuleSettingsApplied,
+		TemplateID:          entry.TemplateID,
+		Logger:              entryLog,
+		Trigger:             triggerStall,
+	}, params.OnRetryFire)
+	metrics.IncRetries(triggerStall)
 
-			pEntry := retryEntryRow(retryEntry)
-			pEntry.SessionID = nil
-			if err := params.Store.SaveRetryEntry(ctx, pEntry); err != nil {
-				entryLog.Error("failed to persist stall retry entry",
+	if retryEntry, ok := state.RetryAttempts[issueID]; ok {
+		if isKnownReactionKind(retryEntry.ReactionKind) {
+			if err := params.Store.DeleteRetryEntry(ctx, issueID); err != nil {
+				entryLog.Error("failed to delete persisted reaction retry entry",
 					slog.Any("error", err),
 				)
 			}
+			return
+		}
+
+		pEntry := retryEntryRow(retryEntry)
+		pEntry.SessionID = nil
+		if err := params.Store.SaveRetryEntry(ctx, pEntry); err != nil {
+			entryLog.Error("failed to persist stall retry entry",
+				slog.Any("error", err),
+			)
 		}
 	}
 }

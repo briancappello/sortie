@@ -10,7 +10,10 @@ import (
 	"time"
 
 	"github.com/sortie-ai/sortie/internal/config"
+	"github.com/sortie-ai/sortie/internal/dataplane"
 	"github.com/sortie-ai/sortie/internal/domain"
+	"github.com/sortie-ai/sortie/internal/jobtoken"
+	"github.com/sortie-ai/sortie/internal/prompt"
 	"github.com/sortie-ai/sortie/internal/waittest"
 	"github.com/sortie-ai/sortie/internal/worker"
 )
@@ -54,14 +57,44 @@ func remoteHost() worker.Declaration {
 		RunSlots: 4, Free: worker.Free{CPU: 16, MemGiB: 52, DiskGiB: 210}}
 }
 
-// runRemote starts RunRemoteAttempt with cfg and returns the channel
+// remoteWorkersOf binds m to a data plane of its own tokens, as
+// newRemoteWorkers does for the orchestrator's matcher.
+func remoteWorkersOf(m *worker.Matcher) *remoteWorkers {
+	tokens := jobtoken.NewIssuer()
+	plane := dataplane.New(tokens)
+	return &remoteWorkers{matcher: m, tokens: tokens, plane: plane, handler: plane.Handler()}
+}
+
+// remoteDeps returns the worker dependencies of a remote attempt under
+// cfg whose result goes to done.
+func remoteDeps(t *testing.T, cfg config.ServiceConfig, agent domain.AgentAdapter, done chan<- WorkerResult) WorkerDeps {
+	t.Helper()
+	if cfg.Workspace.Root == "" {
+		cfg.Workspace.Root = t.TempDir()
+	}
+	if agent == nil {
+		agent = &mockAgentAdapter{}
+	}
+	return WorkerDeps{
+		TrackerAdapter:         &mockTrackerAdapter{},
+		AgentAdapter:           agent,
+		AgentKind:              cfg.Agent.Kind,
+		ConfigFunc:             func() config.ServiceConfig { return cfg },
+		PromptTemplateByIDFunc: func(_ string) *prompt.Template { return mustParseTemplate(t, "{{ .issue.title }}") },
+		OnEvent:                func(_ string, _ domain.AgentEvent) {},
+		OnExit:                 func(_ string, r WorkerResult) { done <- r },
+		Logger:                 discardLogger(),
+	}
+}
+
+// runRemoteCfg starts RunRemoteAttempt with cfg and returns the channel
 // its result arrives on, once the job is queued.
-func runRemoteCfg(t *testing.T, ctx context.Context, m *worker.Matcher, cfg config.ServiceConfig, issue domain.Issue, attempt *int) <-chan WorkerResult {
+func runRemoteCfg(t *testing.T, ctx context.Context, rw *remoteWorkers, cfg config.ServiceConfig, issue domain.Issue, attempt *int) <-chan WorkerResult {
 	t.Helper()
 	done := make(chan WorkerResult, 1)
-	go RunRemoteAttempt(withDispatchID(ctx, "D1"), m, cfg, issue, attempt, "claude-code", "claude", func(_ string, r WorkerResult) { done <- r })
+	go RunRemoteAttempt(withDispatchID(ctx, "D1"), rw, issue, attempt, remoteDeps(t, cfg, nil, done), RemoteAttemptParams{DefaultCommand: "claude"})
 	waittest.Until(t, func() error {
-		if len(m.Snapshot().Queue) == 0 {
+		if len(rw.matcher.Snapshot().Queue) == 0 {
 			return errors.New("job not queued")
 		}
 		return nil
@@ -71,7 +104,7 @@ func runRemoteCfg(t *testing.T, ctx context.Context, m *worker.Matcher, cfg conf
 
 func runRemote(t *testing.T, ctx context.Context, m *worker.Matcher, issue domain.Issue, attempt *int) <-chan WorkerResult {
 	t.Helper()
-	return runRemoteCfg(t, ctx, m, remoteCfg(), issue, attempt)
+	return runRemoteCfg(t, ctx, remoteWorkersOf(m), remoteCfg(), issue, attempt)
 }
 
 // worker-dispatch: A run under the remote kind. The job carries the
@@ -112,8 +145,11 @@ func TestARunUnderTheRemoteKind(t *testing.T) {
 	if err := m.Report("w", "ONS-7", 4, worker.Outcome{Succeeded: true, Machine: worker.MachineStopped}); err != nil {
 		t.Fatal(err)
 	}
+	// Sortie drives the session, so a report that arrives before the
+	// stdio stream opened ends an attempt that never ran.
 	r := waittest.Receive(t, done, "remote attempt result")
-	if r.ExitKind != WorkerExitNormal || r.Identifier != "ONS-7" || *r.Attempt != 3 || r.WorkspacePath != "" {
+	if r.ExitKind != WorkerExitError || r.Identifier != "ONS-7" || *r.Attempt != 3 || r.Error == nil ||
+		!strings.Contains(r.Error.Error(), "before its agent session started") {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -154,7 +190,7 @@ func TestNoSecretInTheOffer(t *testing.T) {
 	c := &remoteClock{time.Unix(0, 0)}
 	r := newRemoteWorkers(c.now)
 	ctx := withSessionIdentity(context.Background(), sessionIdentity{Token: "session-token-5e1d", RuleName: "build"})
-	runRemoteCfg(t, ctx, r.matcher, cfg, domain.Issue{ID: "1", Identifier: "ONS-7"}, nil)
+	runRemoteCfg(t, ctx, r, cfg, domain.Issue{ID: "1", Identifier: "ONS-7"}, nil)
 	r.matcher.CheckIn("w", remoteHost())
 	offer, ok, err := r.matcher.Poll("w")
 	if !ok || err != nil {
@@ -309,7 +345,7 @@ func TestRemoteJobTokensVoidOnStop(t *testing.T) {
 	c := &remoteClock{time.Unix(0, 0)}
 	r := newRemoteWorkers(c.now)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := runRemote(t, ctx, r.matcher, domain.Issue{ID: "1", Identifier: "ONS-7"}, nil)
+	done := runRemoteCfg(t, ctx, r, remoteCfg(), domain.Issue{ID: "1", Identifier: "ONS-7"}, nil)
 	r.matcher.CheckIn("w", remoteHost())
 	offer, ok, _ := r.matcher.Poll("w")
 	if !ok || len(offer.Flows) != 5 || offer.Flows["stdio"].Token == "" {
