@@ -339,6 +339,11 @@ type Orchestrator struct {
 	// loop goroutine owns it.
 	once *onceState
 
+	// leftAlone holds, by issue ID, why the last poll left each issue it
+	// did not dispatch to another workflow, so each is logged once. The
+	// event loop goroutine owns it.
+	leftAlone map[string]string
+
 	workerExitCh       chan WorkerResult
 	retryTimerCh       chan string
 	agentEventCh       chan agentEventMsg
@@ -894,6 +899,9 @@ func (o *Orchestrator) Run(ctx context.Context) {
 				HostPool:               o.hostPool,
 				WorkflowFile:           o.workflowFile(),
 				ReleaseHeld:            o.once != nil,
+				Dispatches: func(issue domain.Issue) bool {
+					return dispatchesIssue(cfg.Environment, cfg.Workspace.Root, issue)
+				},
 				ConfiguredModelOf: func(selection DispatchResolution) string {
 					return o.configuredModelOf(cfg, selection)
 				},
@@ -1248,7 +1256,9 @@ func (o *Orchestrator) handleTick(ctx context.Context) {
 
 	o.pollHealth.record(time.Now(), pollOutcomeSucceeded, nil)
 
-	sorted := SortForDispatch(issues)
+	var dispatchable []domain.Issue
+	dispatchable, o.leftAlone = dispatchableIssues(cfg.Environment, cfg.Workspace.Root, issues, o.leftAlone, o.logger)
+	sorted := SortForDispatch(dispatchable)
 	clearDispatchBlocks(o.state, sorted, time.Now(), o.logger)
 	o.once.setCandidates(sorted)
 	input := o.once.dispatchInput(sorted)

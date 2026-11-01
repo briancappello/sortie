@@ -138,27 +138,90 @@ type Repository interface {
 type RepositoryFunc func(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error)
 
 // configuresRepository reports whether cfg places a repository in each
-// workspace's environment: the smolvm kind with a repository block.
+// workspace's environment: the smolvm kind with a repository block or a
+// repositories list.
 func configuresRepository(cfg config.EnvironmentConfig) bool {
-	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && cfg.Smolvm.Repository != nil
+	return normalizeEnvironmentKind(cfg.Kind) == config.EnvironmentKindSmolvm && len(cfg.Smolvm.AllRepositories()) > 0
 }
 
 // RepositoryProvider returns the SCM provider that opens the pull
 // request for each issue branch Sortie pushes under cfg, or "" when cfg
-// configures no repository or the repository names no provider.
+// configures no repository, names no default and was not set to an
+// issue's repository, or the repository names no provider.
 func RepositoryProvider(cfg config.EnvironmentConfig) string {
-	if !configuresRepository(cfg) {
+	if !configuresRepository(cfg) || cfg.Smolvm.Repository == nil {
 		return ""
 	}
 	return cfg.Smolvm.Repository.Provider
+}
+
+// leftAloneReason returns why cfg leaves the issue to another workflow,
+// wrapping [config.ErrNotDispatched], or nil when cfg dispatches it:
+// always when cfg configures no repository. An issue whose workspace
+// under workspaceRoot was already seeded keeps that repository, so it is
+// dispatched unless the repository is now closed to dispatch; any other
+// issue is decided by its labels.
+func leftAloneReason(cfg config.EnvironmentConfig, workspaceRoot string, issue domain.Issue) error {
+	if !configuresRepository(cfg) {
+		return nil
+	}
+	if path, err := workspace.ComputePath(workspaceRoot, issue.Identifier); err == nil {
+		if rec, ok, err := workspace.ReadRepositoryRecord(path.Path); err == nil && ok {
+			if repo, found := cfg.Smolvm.RepositoryNamed(rec.Name); found && repo.ClosedToDispatch {
+				return fmt.Errorf("the issue's workspace was seeded from repository %q, which is closed to dispatch: %w", rec.Name, config.ErrNotDispatched)
+			}
+			return nil
+		}
+	}
+	_, err := cfg.Smolvm.DispatchRepository(issue.Labels)
+	return err
+}
+
+// dispatchesIssue reports whether cfg dispatches the issue; see
+// [leftAloneReason].
+func dispatchesIssue(cfg config.EnvironmentConfig, workspaceRoot string, issue domain.Issue) bool {
+	return leftAloneReason(cfg, workspaceRoot, issue) == nil
+}
+
+// dispatchableIssues returns the issues cfg dispatches, in their order,
+// leaving out every issue [leftAloneReason] refuses, so that no later
+// step of a poll claims, moves, comments on, holds or counts one. It
+// also returns the reason for each issue it left out, by issue ID. It
+// logs a left-out issue at debug level only when logged, the reasons of
+// the previous poll, holds no reason or another reason for it: once per
+// issue, again when the reason changes or after a poll that did not
+// leave the issue out.
+func dispatchableIssues(cfg config.EnvironmentConfig, workspaceRoot string, issues []domain.Issue, logged map[string]string, logger *slog.Logger) ([]domain.Issue, map[string]string) {
+	if !configuresRepository(cfg) {
+		return issues, nil
+	}
+	kept := make([]domain.Issue, 0, len(issues))
+	reasons := map[string]string{}
+	for _, issue := range issues {
+		err := leftAloneReason(cfg, workspaceRoot, issue)
+		if err == nil {
+			kept = append(kept, issue)
+			continue
+		}
+		reason := err.Error()
+		if prev, ok := logged[issue.ID]; !ok || prev != reason {
+			logger.Debug("issue left to another workflow",
+				slog.String("issue_id", issue.ID),
+				slog.String("issue_identifier", issue.Identifier),
+				slog.String("reason", reason))
+		}
+		reasons[issue.ID] = reason
+	}
+	return kept, reasons
 }
 
 // issueRepository returns cfg with its repository set to the one the
 // issue runs in, and that repository's name. A workspace already seeded
 // keeps the repository its record names; otherwise the issue's
 // repository label names it, and an issue without one runs in the
-// default. A name the workflow does not list is an error. cfg is
-// returned unchanged when it configures no repository.
+// default. The poll dispatches no issue its workflow leaves to another,
+// so the error for one reports a reload between the dispatch and the
+// attempt. cfg is returned unchanged when it configures no repository.
 func issueRepository(cfg config.EnvironmentConfig, workspacePath string, labels []string) (config.EnvironmentConfig, string, error) {
 	if !configuresRepository(cfg) {
 		return cfg, "", nil
@@ -177,16 +240,12 @@ func issueRepository(cfg config.EnvironmentConfig, workspacePath string, labels 
 			return cfg, rec.Name, nil
 		}
 	}
-	name := config.IssueRepositoryName(labels)
-	if name == "" {
-		return cfg, cfg.Smolvm.Repository.Name, nil
-	}
-	repo, found := cfg.Smolvm.RepositoryNamed(name)
-	if !found {
-		return cfg, "", fmt.Errorf("the issue names repository %q, which environment.smolvm.repositories does not list", name)
+	repo, err := cfg.Smolvm.DispatchRepository(labels)
+	if err != nil {
+		return cfg, "", err
 	}
 	cfg.Smolvm.Repository = repo
-	return cfg, name, nil
+	return cfg, repo.Name, nil
 }
 
 // PullRequestOpenerFunc returns the pull request opener of the SCM
@@ -198,7 +257,7 @@ type PullRequestOpenerFunc func(cfg config.ServiceConfig) (domain.PullRequestOpe
 // repositorySync returns the [Repository] cfg configures, with its
 // mirror under stateDir, or nil when cfg configures none.
 func repositorySync(cfg config.EnvironmentConfig, stateDir string, logger *slog.Logger) (Repository, error) {
-	if !configuresRepository(cfg) {
+	if !configuresRepository(cfg) || cfg.Smolvm.Repository == nil {
 		return nil, nil
 	}
 	syncer, err := gitsync.New(gitsync.Params{Repository: *cfg.Smolvm.Repository, StateDir: stateDir, Logger: logger})

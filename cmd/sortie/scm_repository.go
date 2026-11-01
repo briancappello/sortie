@@ -38,7 +38,7 @@ func checkRepositoryProvider(cfg config.ServiceConfig) error {
 			continue
 		}
 		field := repositoryProviderField
-		if len(cfg.Environment.Smolvm.Repositories) > 0 && cfg.Environment.Smolvm.DefaultRepository != "" {
+		if cfg.Environment.Smolvm.ListsRepositories() {
 			field = fmt.Sprintf("environment.smolvm.repositories[%d].provider", i)
 		}
 		if first == "" {
