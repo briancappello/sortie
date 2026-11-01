@@ -268,6 +268,10 @@ type CreateSpec struct {
 
 	Labels []Label
 
+	// User is the user every command in the machine runs as; "" keeps
+	// smolvm's own choice.
+	User string
+
 	// Nested exposes the host's virtualization extensions in the
 	// machine.
 	Nested bool
@@ -308,6 +312,9 @@ func createArgs(spec CreateSpec) ([]string, error) {
 	}
 	for _, label := range spec.Labels {
 		args = append(args, "--label", label.Key+"="+label.Value)
+	}
+	if spec.User != "" {
+		args = append(args, "--user", spec.User)
 	}
 	if spec.Nested {
 		args = append(args, "--nested")

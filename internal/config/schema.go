@@ -165,6 +165,7 @@ var knownFieldsRegistry = map[string]SectionSchema{
 				{Name: "nested", Type: FieldBool},
 				{Name: "net_backend", Type: FieldString},
 				{Name: "mounts", Type: FieldSequence},
+				{Name: "user", Type: FieldString},
 			}},
 			{Name: "remote", Type: FieldMap, Nested: remoteSchemaFields},
 		},

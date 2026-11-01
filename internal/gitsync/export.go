@@ -159,7 +159,9 @@ func (s *Syncer) checkExportRefs(ctx context.Context, key, branch string) error 
 
 // guestOutBundle returns the exported bundle's path inside the
 // environment.
-func (s *Syncer) guestOutBundle() string { return path.Join(s.guestDir, "out.bundle") }
+func (s *Syncer) guestOutBundle(env environment.Environment) string {
+	return path.Join(s.transferDir(env), "out.bundle")
+}
 
 // exportBundleScript bundles the issue branch ($2) in the environment,
 // leaving out the commits the mirror already holds: those of the guest's
@@ -193,12 +195,12 @@ func (s *Syncer) receiveBundle(ctx context.Context, env environment.Environment,
 		return false, fmt.Errorf("look up issue branch %q in the environment: %w", branch, err)
 	}
 
-	defer s.removeGuestFile(ctx, env, ws, s.guestOutBundle())
-	if err := s.guest(ctx, env, ws, nil, "sh", "-c", exportBundleScript, "sh", s.guestDir, "refs/heads/"+branch,
+	defer s.removeGuestFile(ctx, env, ws, s.guestOutBundle(env))
+	if err := s.guest(ctx, env, ws, nil, "sh", "-c", exportBundleScript, "sh", s.transferDir(env), "refs/heads/"+branch,
 		"refs/remotes/origin/"+s.repo.Base, "refs/remotes/origin/"+branch); err != nil {
 		return false, fmt.Errorf("bundle issue branch %q in the environment: %w", branch, err)
 	}
-	if err := s.readGuestFile(ctx, env, ws, s.guestOutBundle(), dst); err != nil {
+	if err := s.readGuestFile(ctx, env, ws, s.guestOutBundle(env), dst); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -215,7 +215,9 @@ type triageResultDocument struct {
 // The input and result files live where the command can reach them and
 // outside the workspace: in a fresh host temporary directory, or, for an
 // environment that runs elsewhere ([environment.RunsElsewhere]), in a
-// per-run directory under [triageGuestRoot] inside it, which Sortie
+// per-run directory under [triageGuestRoot] inside it, or under the
+// transfer directory the environment names ([environment.TransferDirNamer]),
+// which Sortie
 // writes, reads, and removes through the environment after resuming its
 // instance ([environment.Resumer]).
 //
@@ -399,7 +401,8 @@ const triageGuestNotFoundStatus = 3
 // guestTriageFiles is the exchange with a command that runs in an
 // environment that runs elsewhere: the files in the run's own directory
 // under [triageGuestRoot], written, read, and removed by commands the
-// environment runs.
+// environment runs. An environment that names its own transfer
+// directory gets the run's directory under it instead.
 type guestTriageFiles struct {
 	target workspace.Target
 	dir    string
@@ -411,7 +414,11 @@ type guestTriageFiles struct {
 // a random suffix, reduced to characters a path segment can hold
 // without interpretation.
 func newGuestTriageFiles(target workspace.Target, kind string, log *slog.Logger) guestTriageFiles {
-	return guestTriageFiles{target: target, dir: path.Join(triageGuestRoot, triageRunID(kind)), kind: kind, log: log}
+	root := triageGuestRoot
+	if dir := environment.GuestTransferDir(target.Environment, ""); dir != "" {
+		root = path.Join(dir, "triage")
+	}
+	return guestTriageFiles{target: target, dir: path.Join(root, triageRunID(kind)), kind: kind, log: log}
 }
 
 // triageRunID returns a fresh identifier for one triage run of kind,

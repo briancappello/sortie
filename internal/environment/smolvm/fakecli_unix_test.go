@@ -344,7 +344,7 @@ func parseFakeFlags(args []string) (fakeFlags, []string) {
 	valued := map[string]bool{
 		"--name": true, "-n": true, "--from": true, "--cpus": true, "--mem": true, "--storage": true,
 		"--label": true, "--allow-host-pattern": true, "--credential": true, "-v": true,
-		"--mount-socket": true, "--net-backend": true, "-w": true, "-e": true, "--secret-env": true, "--error-format": true,
+		"--mount-socket": true, "--net-backend": true, "--user": true, "-w": true, "-e": true, "--secret-env": true, "--error-format": true,
 	}
 	flags := fakeFlags{}
 	for i := 0; i < len(args); i++ {

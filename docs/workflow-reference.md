@@ -778,7 +778,7 @@ The command never creates the workspace directory. A workspace that does not exi
 
 Under `environment.kind: smolvm`, the command runs in the issue's VM, in `/workspace`, like a hook. When the VM is stopped, Sortie starts it for the run.
 
-**Input document.** Both paths sit in a directory created for the run and removed when it returns, outside the workspace. Under the `local` kind it is a fresh host temporary directory. Under `smolvm` it is `/run/sortie/triage/<run id>/` in the VM, on the guest's tmpfs, readable only by its owner: Sortie writes `input.json` there and reads `result.json` back through commands it runs in the VM, and whatever a run leaves there goes when the VM stops. The `workspace` member of the input names the workspace as the command sees it, `/workspace` under `smolvm`. Externally authored text, including review comment bodies, CI check names, and branch names, reaches the command only inside the input file, never through an environment variable or a shell word.
+**Input document.** Both paths sit in a directory created for the run and removed when it returns, outside the workspace. Under the `local` kind it is a fresh host temporary directory. Under `smolvm` it is `/run/sortie/triage/<run id>/` in the VM, on the guest's tmpfs, or `/tmp/sortie-transfer/triage/<run id>/` in a VM whose [machine user](#the-machines-user) is set, readable only by its owner: Sortie writes `input.json` there and reads `result.json` back through commands it runs in the VM, and whatever a run leaves under `/run/sortie` goes when the VM stops. The `workspace` member of the input names the workspace as the command sees it, `/workspace` under `smolvm`. Externally authored text, including review comment bodies, CI check names, and branch names, reaches the command only inside the input file, never through an environment variable or a shell word.
 
 ```json
 {
@@ -1876,6 +1876,7 @@ Requirements and limits:
 | `nested`      | boolean          | No       | `false`  | Creates each new VM with smolvm's nested virtualization (`--nested`), so the guest can run KVM guests of its own. The host's KVM module must allow nested guests (`kvm_intel` or `kvm_amd` `nested=1`). Off by default. See [Host inputs](#host-inputs). |
 | `net_backend` | string           | No       | _(smolvm's own)_ | The network backend of each new VM (`--net-backend`). The only accepted value is `virtio-net`. `tsi` is refused, because smolvm does not enforce an allowlist with it. Requires `allow_hosts` or `credentials`. See [Host inputs](#host-inputs). |
 | `mounts`      | list of maps     | No       | `[]`     | Host directories mounted into each new VM. See [Host inputs](#host-inputs). |
+| `user`        | string           | No       | _(root)_ | The user every command in each new VM runs as (`--user`): a user name the pack's image defines, or a numeric `uid[:gid]`, quoted. A pack does not carry its image's `USER`, so without `user` every command runs as root. See [The machine's user](#the-machines-user). |
 
 `environment.smolvm.credentials[]` fields:
 
@@ -1968,7 +1969,7 @@ The single `repository` block works as before. It is the only repository and the
 - the `pass_env` variables that are set on the host, in plain text;
 - the placeholders of the credential bindings.
 
-`SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never reach the VM: the guest cannot reach Sortie's HTTP server. No other host variable reaches the VM. `PATH`, `HOME`, and the rest of the guest's environment come from the pack.
+`SORTIE_SESSION_TOKEN` and `SORTIE_API_URL` never reach the VM: the guest cannot reach Sortie's HTTP server. No other host variable reaches the VM. `PATH`, `HOME`, and the rest of the guest's environment come from the pack; `HOME` is the home of the [machine's user](#the-machines-user).
 
 **Agent credentials.** An agent kind declares the variables its runtime reads as its credential, for example `ANTHROPIC_API_KEY` for `claude-code`. When such a variable is set in Sortie's environment and neither `credentials` nor `pass_env` lists it, the dispatch preflight fails under the check `environment.agent_credential`, naming the kind and the variable. Sortie never copies the variable into the VM, and never drops it without a word. Bind it as a credential, list it in `pass_env`, or unset it. `sortie validate` reports the same error.
 
@@ -2021,6 +2022,24 @@ Validation fails, with an error naming the entry's field, such as `environment.s
 A guest-planted link in a read-write mount is resolved in the guest, so it does not reach the host's files through the mount. Files the guest writes there are owned by Sortie's user on the host. A mount is data the agent can read, so mount no credential: bind secrets with `credentials`.
 
 **A per-workspace directory.** A `host` that holds `{workspace}` names one directory per issue: Sortie replaces `{workspace}` with the workspace key, for example `~/.local/state/sortie-recorder/ENG-42`. Sortie creates the directory, mode `0700`, before it creates the VM, and never deletes it: not when it stops, deletes, or recreates the VM, not when the VM crashes, and not when it removes the workspace. So what the guest wrote there is still on the host after the VM crashed or the workspace was removed. `GET /api/v1/state` lists each such directory under `environment.kept_dirs` for every running, retrying, or held issue. Sortie never cleans these directories up; the operator does.
+
+#### The machine's user
+
+A pack does not carry its image's `USER`. A pack built from an image whose Dockerfile ends in `USER builder` still runs every command as root. To run as another user, name it in `user`:
+
+```yaml
+environment:
+  kind: smolvm
+  smolvm:
+    pack: ~/.local/share/smol/homelab.smolmachine
+    user: builder           # or "1000", or "1000:1000"
+```
+
+With `user` set, Sortie passes `--user <value>` to `smolvm machine create`, so the VM runs every command Sortie runs in it as that user: seeding, every hook, the agent, and export. `id -un` in `after_create` and in the agent's shell prints `builder`, and `HOME` is builder's home from the image's `/etc/passwd`. Without `user`, Sortie creates VMs with the same smolvm arguments as before the field existed, and every command runs as root.
+
+- **The value** is a user name the pack's image defines, or a numeric uid, or `uid:gid`. Quote a number, as in `user: "1000"`. Validation fails, with an error on `environment.smolvm.user`, when the value is empty or holds anything but letters, digits, `.`, `_`, `-`, and one `:` between two numbers. A name the image does not define passes validation and fails when smolvm creates or runs the VM.
+- **The user's files.** The user needs write access to `/workspace`, to its home, and to every directory its hooks write. Sortie stages repository bundles and the files of each [triage command](#triage-command-triage) in `/tmp/sortie-transfer` in such a VM, because the user cannot create a directory under `/run/sortie`; a `mounts` entry whose `guest` covers `/tmp/sortie-transfer` fails validation when `user` is set.
+- **Shared directories.** The guest sees the `.sortie` control directory, mode `0750`, and every mount as owned by Sortie's user on the host. Give the pack's user the uid Sortie runs as, or the agent cannot write `.sortie/status` and `.sortie/pr.json`.
 
 #### Credential bindings
 
@@ -2193,7 +2212,7 @@ To switch back, set `kind: local` and restore the clone in `after_create` and an
 
 `environment` reloads. A reload that fails validation, the smolvm version check, or the repository provider check keeps the previous configuration and reports the error through the workflow's last load error, as any invalid reload does.
 
-- `kind`, `smolvm.pack`, the sizing, `allow_hosts`, `credentials`, `ssh_agent`, `nested`, `net_backend`, and `mounts` apply to VMs created after the reload. A VM keeps the settings it was created with. To move an issue to a new pack or new settings, remove its workspace.
+- `kind`, `smolvm.pack`, the sizing, `allow_hosts`, `credentials`, `ssh_agent`, `nested`, `net_backend`, `mounts`, and `user` apply to VMs created after the reload. A VM keeps the settings it was created with. To move an issue to a new pack or new settings, remove its workspace.
 - `host_prefix` applies to the next session launch.
 - `pass_env` and `repository` apply to the next run.
 
@@ -6583,6 +6602,9 @@ These errors are raised during typed config construction from the parsed front m
 | `config: environment.smolvm.mounts[<j>].guest: "<g>" is already the guest path of environment.smolvm.mounts[<i>]` | Two entries share a `guest`. | Give each its own `guest`. |
 | `config: environment.smolvm.mounts[<i>].guest: "<g>" overlaps /run/sortie/control, which Sortie mounts itself` | `guest` is, lies under, or contains `/run/sortie/control` or `/run/sortie/tools.sock`. | Pick another `guest`. |
 | `config: environment.smolvm.mounts[<i>].read_only: expected boolean, got <type>` | `read_only` is not `true` or `false`. | Write `true` or `false`. |
+| `config: environment.smolvm.mounts[<i>].guest: "<g>" overlaps /tmp/sortie-transfer, where Sortie stages repository bundles in a VM whose user is set` | With `user` set, `guest` is, lies under, or contains `/tmp/sortie-transfer`, such as `/tmp`. | Pick another `guest`. |
+| `config: environment.smolvm.user: must not be an empty string; remove the key to run as root` | `user: ""`. | Name the user, or remove the key. |
+| `config: environment.smolvm.user: "<v>" is not a user name or a numeric uid[:gid]: ...` | The value holds a character other than letters, digits, `.`, `_` and `-`, or a `:` that is not between two numbers. A YAML number fails with `expected string`. | Write a user name, or a quoted `"uid"` or `"uid:gid"`. |
 | `config: environment.smolvm.binary: cannot read the version of smolvm binary "<b>" (minimum supported: 1.32.4): <err>` | The binary is missing, fails, or its `--version` output is not a version (`<err>` is then `smolvm --version printed "<line>", not a smolvm version`). Startup and reload. | Install smolvm 1.32.4 or later, or set `binary`. |
 | `config: environment.smolvm.binary: smolvm binary "<b>": smolvm version <v> is older than the minimum supported version 1.32.4` | An older smolvm release. Startup and reload. | Install smolvm 1.32.4 or later. |
 | `config: environment.smolvm.binary: smolvm binary "<b>": smolvm version "<v>" is not a version; minimum supported: 1.32.4` | `--version` names a version that is not `MAJOR.MINOR.PATCH`. Startup and reload. | Install a smolvm release. |
