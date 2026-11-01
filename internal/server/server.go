@@ -447,6 +447,11 @@ type Params struct {
 	// 503.
 	EscalateFn EscalateFunc
 
+	// AnswerFn posts a person's answer on a parked issue and releases
+	// the park. Called on POST /api/v1/{identifier}/answer. When nil,
+	// that route answers 503.
+	AnswerFn AnswerFunc
+
 	// PullBackFn and PlanCancelFn pull back and cancel a plan story by
 	// plan key. Called on POST /api/v1/plan/pull-back and
 	// /api/v1/plan/cancel. When nil, those routes answer 503.
@@ -528,6 +533,7 @@ type Server struct {
 	holdFn           HoldFunc
 	releaseFn        ReleaseFunc
 	escalateFn       EscalateFunc
+	answerFn         AnswerFunc
 	pullBackFn       PlanControlFunc
 	brokerReportFn   BrokerReportFunc
 	planStatesFn     func() domain.TrackerStates
@@ -588,6 +594,7 @@ func New(params Params) *Server {
 		planCancelFn:     params.PlanCancelFn,
 		releaseFn:        params.ReleaseFn,
 		escalateFn:       params.EscalateFn,
+		answerFn:         params.AnswerFn,
 		planProjects:     params.PlanProjects,
 		terminalStatesFn: params.TerminalStatesFn,
 		runHistory:       params.RunHistory,
@@ -651,6 +658,7 @@ func New(params Params) *Server {
 	mux.HandleFunc("/api/v1/{identifier}/hold", s.controlRoute(scopeSession, s.handleHold))
 	mux.HandleFunc("/api/v1/{identifier}/release", s.controlRoute(scopeSession, s.handleRelease))
 	mux.HandleFunc("/api/v1/{identifier}/escalate", s.controlRoute(scopeSession, s.handleEscalate))
+	mux.HandleFunc("/api/v1/{identifier}/answer", s.controlRoute(scopeOperator, s.handleAnswer))
 	mux.HandleFunc("/api/v1/{identifier}/broker", s.routeBroker)
 
 	if params.MetricsRegistry != nil {

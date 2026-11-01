@@ -299,12 +299,12 @@ func TestAttentionTexts(t *testing.T) {
 		{"agent_blocked park with the label seen, parked in a state", parkedInput(func(r *orchestrator.SnapshotParkedEntry) { r.ParkedState = "In Progress" }), nil, texts{
 			"Parked: the agent needs a person",
 			"The agent stopped because it cannot go on without a person, so Sortie parked the issue under the label `needs-human`.",
-			"Clears when a poll tick finds `needs-human` removed from the issue, or the issue moved out of In Progress.",
+			"Clears when a poll tick finds `needs-human` removed from the issue, or the issue moved out of In Progress, or when a person answers it through the API.",
 		}},
 		{"handoff_absence park with the label unseen", parkedInput(func(r *orchestrator.SnapshotParkedEntry) { r.Reason, r.LabelApplied = "handoff_absence", false }), nil, texts{
 			"Parked: no evidence of work",
 			"The issue's runs ended without evidence of work as many times in a row as `agent.max_consecutive_absences` allows, so Sortie parked it under the label `needs-human` (not yet seen on the issue).",
-			"Clears when a poll tick finds `needs-human` removed from the issue after Sortie has seen it there.",
+			"Clears when a poll tick finds `needs-human` removed from the issue after Sortie has seen it there, or when a person answers it through the API.",
 		}},
 		{"token hold with a lower-bound spend", budgetInput(func(r *orchestrator.SnapshotBudgetEntry) {
 			r.IssueID, r.Reason, r.UsedTokens, r.BudgetTokens = "id-651", "token_budget", new(int64(2_020_000)), 2_000_000

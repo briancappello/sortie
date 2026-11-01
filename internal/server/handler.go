@@ -364,6 +364,7 @@ type parkedEntryResponse struct {
 	Label             string     `json:"label"`
 	LabelApplied      bool       `json:"label_applied"`
 	ParkedAt          time.Time  `json:"parked_at"`
+	Statement         string     `json:"statement"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
 	StagePosition   *stagePositionResponse `json:"stage_position"`
@@ -997,6 +998,7 @@ func toParkedEntryResponse(e orchestrator.SnapshotParkedEntry) parkedEntryRespon
 		Label:             e.Label,
 		LabelApplied:      e.LabelApplied,
 		ParkedAt:          e.ParkedAt.UTC(),
+		Statement:         e.Statement,
 
 		RuleName:        e.RuleName,
 		StagePosition:   toStagePositionResponse(e.StagePosition),

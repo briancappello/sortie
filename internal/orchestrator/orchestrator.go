@@ -2842,6 +2842,12 @@ func (o *Orchestrator) handleControl(ctx context.Context, req controlRequest) Co
 		reply = applyBrokerReport(o.state, req.Identifier, req.Broker, o.logger)
 	case controlBrokerRead:
 		reply = readBroker(o.state, req.Identifier)
+	case controlAnswer:
+		reply = applyAnswer(ctx, o.state, req.Identifier, req.Answer, parkAnswerParams{
+			Tracker: o.trackerAdapter,
+			Store:   o.store,
+			Log:     o.logger,
+		})
 	case controlPullBack, controlCancel:
 		cfg := o.workflowManager.Config()
 		p := planControlParams{

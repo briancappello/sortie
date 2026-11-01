@@ -1129,7 +1129,7 @@ type ParkedEntry struct {
 	// ReleasedAt and ReleaseGesture record a person's release; both are
 	// zero while the park holds.
 	ReleasedAt     time.Time
-	ReleaseGesture string // "label_removed" or "state_changed"
+	ReleaseGesture string // "label_removed", "state_changed", or "answered"
 }
 
 // IssueIdentity names an issue to a person beside its key: the tracker's
@@ -1959,6 +1959,7 @@ type SnapshotParkedEntry struct {
 	Label        string    `json:"label"`
 	LabelApplied bool      `json:"label_applied"`
 	ParkedAt     time.Time `json:"parked_at"`
+	Statement    string    `json:"statement"`
 	ChainID      string    `json:"-"`
 
 	RuleName        string                 `json:"rule_name,omitempty"`
@@ -2492,6 +2493,7 @@ func RuntimeSnapshot(state *State, now time.Time) RuntimeSnapshotResult {
 			Label:        entry.Label,
 			LabelApplied: entry.LabelApplied,
 			ParkedAt:     entry.ParkedAt,
+			Statement:    entry.Statement,
 			ChainID:      entry.StageLineage.ChainID,
 
 			RuleName:        entry.RuleName,

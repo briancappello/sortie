@@ -2464,6 +2464,7 @@ A reverse proxy in front of Sortie must pass on the `Host` header the browser se
 | POST   | `/api/v1/{identifier}/hold`    | Hold the issue's running worker: pause its stall and turn clocks while a person works in its session. Optional body `{"reason": "...", "holder": "..."}`. 200 with the held state, 409 when the issue has no running worker, 404 when the identifier is unknown. Holding a held run keeps its original start. Control token or the issue's own session token. |
 | POST   | `/api/v1/{identifier}/release` | End the issue's hold. 200 with the hold state, also when the run was not held (nothing changes); 409 and 404 as for hold. Control token or the issue's own session token. |
 | POST   | `/api/v1/{identifier}/escalate` | Escalate the running issue to people through the `session.escalated` notification event. Body `{"message": "...", "kind": "question|permission|other", "url": "..."}`. 202 accepted (also when no destination lists the event), 400 for an empty message or an unknown kind, 409 when the issue has no running worker, 404 when the identifier is unknown, 429 within 60 seconds of the issue's last escalation. Control token or the issue's own session token. |
+| POST   | `/api/v1/{identifier}/answer` | Answer a parked issue. Body `{"text": "...", "author": "..."}`, both required. Posts the text on the issue as a comment attributed to the author and releases the park as a person's gesture in the tracker does, so the issue's next run resumes its session with the stop statement and the comments made since the park. 200 with the park answered, 409 `issue_not_parked` for an issue that is not parked (nothing is posted), 400 for an empty text or author, 502 `tracker_error` when the comment fails (the park stays). Control token only; a session token gets 403. See [`POST /api/v1/{identifier}/answer`](#post-apiv1identifieranswer--answer-a-parked-issue). |
 | POST   | `/api/v1/plan/sync`      | Preview (`"apply": false`) or apply (`"apply": true` with the preview's `preview_id`) a sync of a plan graph (§4.6). 400 for a malformed graph, 409 for a stale preview or an apply in progress, 422 when the tracker lacks a needed capability. Control token. |
 | GET    | `/api/v1/plan/graph`     | The project's (`tracker.project`, or `?project=`) plan-keyed issues, parents, and blocking relations, with each issue's runtime state; `include_unkeyed=true` adds the other issues. A tracker failure returns its error kind and no nodes. Control token. Under plan control each story node also carries `review` (`human`/`criteria`), `approved_by` (`{name, id}`) and `approved_at`, `satisfaction` (`merged`, `no_change_confirmed`, `unverified_no_change`, or null) with `unverified_reason`, `merge_commit` and `pull_request` (`owner/repo#number`) once merged, `waiting_on` (each unsatisfied blocker's `blocker_id` and `reason`), and `proposed_supersede` (the plan key a no-change claim cited). The response also carries `plan_states` (`release`, `backlog`, `cancel`, `done`), so a client can tell a story that waits from one that started. Every field is present, null when it does not apply. |
 | POST   | `/api/v1/{identifier}/broker` | The running issue's broker reports its HTTP viewer address. Body `{"http_url": "...", "viewer_token": "..."}`. Sortie keeps both in memory with the run, masks the token, and forgets both when the run ends. 200, 404 when the issue has no running worker, 400 for a malformed report. The issue's own session token, or the control token. |
@@ -2713,6 +2714,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "label": "needs-human",
       "label_applied": true,
       "parked_at": "2026-02-24T20:05:00Z",
+      "statement": "Which signing service holds the new keys?",
       "rule_name": "default",
       "stage_position": null,
       "agent_kind": "claude-code",
@@ -2990,7 +2992,7 @@ Returns the system-wide runtime state including running sessions, retry queue, b
       "issue_url": "https://tracker.example.com/browse/MT-652",
       "reason_text": "Parked: the agent needs a person",
       "why_text": "The agent stopped because it cannot go on without a person, so Sortie parked the issue under the label `needs-human`.",
-      "clears_text": "Clears when a poll tick finds `needs-human` removed from the issue, or the issue moved out of In Progress.",
+      "clears_text": "Clears when a poll tick finds `needs-human` removed from the issue, or the issue moved out of In Progress, or when a person answers it through the API.",
       "action": {"kind": "open_issue", "url": "https://tracker.example.com/browse/MT-652"},
       "evidence": {
         "reason": "agent_blocked",
@@ -3266,6 +3268,7 @@ Each record of `parked`, and the `parked` object of the per-issue response, carr
 | `label`              | string            | The parking label Sortie applied. |
 | `label_applied`      | boolean           | `true` once a read showed the label on the issue. |
 | `parked_at`          | string            | When the park was recorded, as an RFC 3339 timestamp in UTC. |
+| `statement`          | string            | The stop statement of the run the park follows, in full as Sortie stored it: the reason after `blocked` for `agent_blocked`, and for `handoff_absence` the statement of the declaration whose handoff Sortie withheld. Masked. `""` when that run declared none or the park records no run. Always present. |
 | `rule_name`          | string or absent  | The dispatch rule of the run the park follows, `default` for `dispatch.default`. Omitted when the workflow-wide fallback routed the run and while the park records no run. |
 | `stage_position`     | object or `null`  | Always present. Where that rule stands on its stage chain, under the rules of a running row's `stage_position`, choosing the chain with the previous rule of the run's stage lineage. `null` while the park records no run. |
 | `agent_kind`         | string or absent  | The agent kind of the run the park follows. Omitted while the park records no run. |
@@ -4827,6 +4830,30 @@ HTTP/1.1 202 Accepted
 
 `message` is required; `kind` defaults to `other`; `url` is optional. Sortie masks registered secrets in the message and the URL before routing. It delivers at most one escalation per issue per 60 seconds and answers later requests in that window with `429` (`rate_limited`), delivering nothing for them. An escalation no destination subscribes to is accepted and delivered nowhere, and Sortie logs one `session escalation had no destination` record for it. Error responses use the standard envelope with codes `issue_not_found` (404), `issue_not_running` (409), `invalid_request` (400, a malformed body), and `orchestrator_unavailable` (503, during shutdown).
 
+#### `POST /api/v1/{identifier}/answer` — Answer a Parked Issue
+
+Answers the question a parked issue stopped on, from a client that is not the tracker: a chat bot, a dashboard, or a script. Sortie posts the answer on the issue as a comment and releases the park, so the person does not also have to remove the parking label or move the issue. The route takes the control token only.
+
+```http
+POST /api/v1/ONS-25/answer
+Authorization: Bearer <token>
+
+{"text": "agentic-orchestration", "author": "Serghei"}
+
+HTTP/1.1 200 OK
+{"issue_identifier": "ONS-25", "issue_id": "10025", "author": "Serghei", "reason": "agent_blocked", "statement": "Which repository should the daemon live in?", "parked_at": "2026-10-31T09:00:00Z", "released_at": "2026-10-31T10:12:04Z", "gesture": "answered"}
+```
+
+For an issue that is parked, Sortie:
+
+1. Posts one comment on the issue with its own tracker credentials. The comment's first line names the author, `Serghei answered through Sortie:`, and the text follows after a blank line. Sortie trims both fields, writes the author on one line, and masks registered secrets in both before it posts.
+2. Releases the park the way removing the parking label or moving the issue does: the release is recorded with the gesture `answered`, the consecutive-absence count and the stage hop count reset, and the release survives a restart until the issue's next run consumes it. The parking label stays on the issue, as it does after a state change.
+3. Queues a poll, so the issue's next run starts without waiting for `polling.interval_ms`. That run resumes the session of the run the park follows where it can, and its first prompt renders [`park`](#park-park-hand-over-context) with `gesture` `answered`, the stop statement, and the comments made since the park, the answer among them.
+
+The response carries the park it answered: `reason`, `statement` in full, `parked_at`, and `released_at`.
+
+An issue that is not parked, because it is running, waiting to retry, already released and waiting for its next run, or unknown to Sortie, gets `409` with the code `issue_not_parked`, and Sortie posts nothing and changes nothing. An empty `text` or `author`, or a malformed body, gets `400` (`invalid_request`). When the comment write fails, Sortie answers `502` (`tracker_error`) and the issue stays parked, so the request can be repeated. `503` (`orchestrator_unavailable`) during shutdown.
+
 **Kubernetes probe configuration.** Sortie's graceful shutdown cancels running agents before closing the HTTP listener. Configure `terminationGracePeriodSeconds` and liveness probe tolerance to exceed the expected drain duration (default: 30 seconds):
 
 ```yaml
@@ -5646,7 +5673,7 @@ A retry or reaction continuation that keeps its rule renders the `previous` pair
 
 #### `park`: Park Hand-Over Context
 
-Present as a key on every render, so `{{ .park }}` and `{{ if .park }}` render under `missingkey=error` in every template. It is non-nil only on turn 1 of the first run after a person releases a park, by removing the parking label or moving the issue to another tracker state. It is `nil` on every other render: later turns of that run, later runs, retry fires, reaction runs, and a run after a release that observed work (`evidence_observed`).
+Present as a key on every render, so `{{ .park }}` and `{{ if .park }}` render under `missingkey=error` in every template. It is non-nil only on turn 1 of the first run after a person releases a park, by removing the parking label, moving the issue to another tracker state, or answering it through [`POST /api/v1/{identifier}/answer`](#post-apiv1identifieranswer--answer-a-parked-issue). It is `nil` on every other render: later turns of that run, later runs, retry fires, reaction runs, and a run after a release that observed work (`evidence_observed`).
 
 | Field                | Type   | Description                                                                                                                                                                                                                  |
 | -------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -5654,7 +5681,7 @@ Present as a key on every render, so `{{ .park }}` and `{{ if .park }}` render u
 | `.park.statement`    | string | The stop statement of the run the park follows: the reason after `blocked` for `agent_blocked`, and for `handoff_absence` the statement of the declaration whose handoff Sortie withheld. Empty when that run declared none or the park recorded no run. |
 | `.park.parked_at`    | string | Park time, RFC 3339 in UTC, whole seconds. Empty when the stored park time cannot be read.                                                                                                                                   |
 | `.park.released_at`  | string | Release time in the same form.                                                                                                                                                                                               |
-| `.park.gesture`      | string | `label_removed` or `state_changed`.                                                                                                                                                                                          |
+| `.park.gesture`      | string | `label_removed`, `state_changed`, or `answered` when a person answered through [`POST /api/v1/{identifier}/answer`](#post-apiv1identifieranswer--answer-a-parked-issue).                                                    |
 | `.park.comments`     | list   | The comments created since the park, in tracker order, oldest first. Never `nil`; empty when nobody commented since the park. Each element has the shape of an `.issue.comments` element: `id`, `author`, `body`, `created_at`. |
 
 A comment is in `.park.comments` when its creation time is at or after the park time truncated to the whole second. A comment whose creation time cannot be read is included, and when the park time cannot be read every comment is. `.issue.comments` carries every comment of the issue, on every turn of that run.
